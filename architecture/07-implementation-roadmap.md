@@ -1,0 +1,124 @@
+# Implementation Roadmap
+
+The roadmap validates architecture in vertical slices. Each milestone ends with
+an executable or inspectable artifact rather than a large isolated subsystem.
+
+## Milestone 0 — Decisions and skeleton
+
+- implement the accepted Rust 2024 virtual Cargo workspace and crate boundaries
+  from ADR 0018;
+- define source spans, IDs, diagnostics, and deterministic test conventions;
+- derive and document a minimal Luau-first syntax subset;
+- encode the accepted numeric, error, inheritance, generic, naming, Bubble, and
+  GC decisions as compiler contracts/tests;
+- define a small target-independent `TargetSpec`.
+- define the diagnostic catalog/code ranges and typed diagnostic constructors;
+- define bootstrap schemas for `Pop.Internal` primitive/intrinsic declarations.
+- define documentation token attachment, safe XML subset, and initial catalog
+  diagnostics.
+
+Exit criterion: one source file can be tokenized and parsed with snapshot-tested
+diagnostics.
+
+## Milestone 1 — Front end and typed HIR
+
+- lossless syntax tree and parser recovery;
+- namespaces, using directives, explicit declaration visibility, Bubble
+  reference metadata, and symbol
+  resolution;
+- primitive types, functions, locals, branches, loops, tuples, immutable records,
+  tagged unions, and typed `with` updates;
+- constraint-based local inference with no dynamic fallback;
+- typed UDA declarations, attachment, constant arguments, and query API;
+- deterministic compile-time constant/function evaluation with budgets;
+- typed HIR construction and deterministic `pop check <source.pop> --dump hir`
+  bootstrap inspection;
+- structured type/resolution diagnostics with initial safe quick fixes;
+- parser/resolver tests for mandatory namespace visibility, same-Bubble
+  `internal`, file-scoped `private`, and rejected `export` syntax;
+- compile/load verified `Pop.Internal` reference metadata;
+- bootstrap the `Pop.Standard` prelude and core protocols.
+- parse `bubble.toml`, discover conventional Bubbles, and emit deterministic
+  Workspace/Package/Bubble metadata.
+- checked `<summary>`/parameter/return/`cref` documentation plus LSP hover.
+
+Exit criterion: multi-module programs type-check; UDA/compile-time tests are
+reproducible; HIR contains no unresolved names, dynamic operations, or implicit
+conversions.
+
+## Milestone 2 — MIR and interpreter
+
+- CFG/block-argument MIR;
+- HIR lowering with explicit evaluation order;
+- MIR parser, printer, verifier, and deterministic `pop check <source.pop>
+  --dump mir` bootstrap inspection;
+- portable constant folding and dead-code elimination;
+- a simple MIR interpreter and minimal runtime adapter.
+- warning-wave policy, scoped suppression, LSP/JSON output, and fix-all engine.
+- `.poplib` `documentation.xml`, `pop documentation`, and compiled documentation examples.
+
+Exit criterion: core language tests execute through MIR without LLVM.
+
+## Milestone 3 — Native classes and collections
+
+- native class fields, constructors, and direct methods;
+- nominal interfaces and explicit implementation;
+- optimized record layout, arrays, and statically typed tables;
+- exhaustive tagged-union matching and missing-case quick fixes;
+- closure conversion and captured variables;
+- allocation, precise stack/object maps, and bootstrap stop-the-world GC.
+- initial `Pop.Standard` collections, text, result, and iteration conformance.
+
+Exit criterion: tests prove that normal class fields use resolved member access,
+not table or runtime-name lookup.
+
+## Milestone 4 — LLVM native backend
+
+- target layout and LLVM lowering;
+- PLRI native ABI and runtime library;
+- `.poplib` Bubble manifests/reference metadata, object emission, and platform linking;
+- `BubbleContext` default loading and initialization;
+- moving nursery, card barriers, and GC stress tests;
+- `Pop.Standard` I/O, time, tasks, and platform adapters;
+- debug locations and stack traces;
+- differential tests against the MIR interpreter.
+
+Exit criterion: representative multi-module programs produce native executables
+whose behavior matches the interpreter.
+
+## Milestone 5 — Language depth
+
+- generics and specialization strategy;
+- error handling;
+- coroutines/async model;
+- FFI;
+- opt-in retained metadata and generated typed adapters where justified;
+- concurrent mature GC, pacing, latency telemetry, and benchmark gates;
+- networking, serialization, locale, debug, crypto, and interop standard
+  namespaces according to target profile;
+- optimization based on profiling and benchmarks.
+
+Exit criterion: semantics and performance are stable enough for an initial
+language release.
+
+## Cross-cutting requirements
+
+Every milestone includes:
+
+- deterministic unit and snapshot tests;
+- negative diagnostics tests;
+- fuzzing for parsers and IR verifiers when they exist;
+- compile-time interpreter determinism, cycle, visibility, and resource-limit
+  tests;
+- negative tests proving source-string injection and unrestricted reflection are
+  unavailable;
+- textual IR fixtures;
+- performance baselines, not only peak benchmarks;
+- documentation updates for architectural changes;
+- CLI/manifest/lockfile and monorepo conformance tests;
+- traceability from semantic features to accepted ADR/architecture sections;
+- permanent negative tests for Lua regressions and architecture boundary leaks;
+- architecture-gap review before any new public behavior is declared stable;
+- naming baselines that reject `Iter`/`iter.map` and preserve
+  `Iterable`/`Iterator`/`Sequence`;
+- documentation conformance tests for every public standard API.

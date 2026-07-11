@@ -1,0 +1,710 @@
+use std::error::Error;
+use std::fmt;
+
+use pop_foundation::{AttributeId, BuiltinTypeId};
+
+use crate::PrimitiveType;
+
+const PRIMITIVES: &str = include_str!("../../../../libraries/internal/bootstrap/primitives.tsv");
+const INTRINSICS: &str = include_str!("../../../../libraries/internal/bootstrap/intrinsics.tsv");
+const INTERNAL_TYPES: &str = include_str!("../../../../libraries/internal/bootstrap/types.tsv");
+const STANDARD_TYPES: &str =
+    include_str!("../../../../libraries/standard/bootstrap/prelude-types.tsv");
+const STANDARD_COMPILER_ATTRIBUTES: &str =
+    include_str!("../../../../libraries/standard/bootstrap/compiler-attributes.tsv");
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompilerAttributeId(u32);
+
+impl CompilerAttributeId {
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum AttributeIdentity {
+    Compiler(CompilerAttributeId),
+    User(AttributeId),
+}
+
+impl From<AttributeId> for AttributeIdentity {
+    fn from(attribute: AttributeId) -> Self {
+        Self::User(attribute)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompilerAttributeRole {
+    CompileTime,
+    AttributeUsage,
+    AttributeValidator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompilerAttributeTarget {
+    Function,
+    Attribute,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapCompilerAttributeEntry {
+    id: CompilerAttributeId,
+    source_name: &'static str,
+    owner_bubble: &'static str,
+    argument_count: u16,
+    target: CompilerAttributeTarget,
+    role: CompilerAttributeRole,
+    prelude: bool,
+}
+
+impl BootstrapCompilerAttributeEntry {
+    #[must_use]
+    pub const fn id(self) -> CompilerAttributeId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn identity(self) -> AttributeIdentity {
+        AttributeIdentity::Compiler(self.id)
+    }
+
+    #[must_use]
+    pub const fn source_name(self) -> &'static str {
+        self.source_name
+    }
+
+    #[must_use]
+    pub const fn owner_bubble(self) -> &'static str {
+        self.owner_bubble
+    }
+
+    #[must_use]
+    pub const fn argument_count(self) -> u16 {
+        self.argument_count
+    }
+
+    #[must_use]
+    pub const fn target(self) -> CompilerAttributeTarget {
+        self.target
+    }
+
+    #[must_use]
+    pub const fn role(self) -> CompilerAttributeRole {
+        self.role
+    }
+
+    #[must_use]
+    pub const fn is_in_prelude(self) -> bool {
+        self.prelude
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapPrimitiveEntry {
+    source_name: &'static str,
+    canonical_name: &'static str,
+    runtime_role: &'static str,
+}
+
+impl BootstrapPrimitiveEntry {
+    #[must_use]
+    pub const fn source_name(self) -> &'static str {
+        self.source_name
+    }
+
+    #[must_use]
+    pub const fn canonical_name(self) -> &'static str {
+        self.canonical_name
+    }
+
+    #[must_use]
+    pub const fn runtime_role(self) -> &'static str {
+        self.runtime_role
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapIntrinsicEntry {
+    intrinsic_id: &'static str,
+    owner: &'static str,
+    signature: &'static str,
+    lowering_kind: &'static str,
+    required_capabilities: Vec<&'static str>,
+}
+
+impl BootstrapIntrinsicEntry {
+    #[must_use]
+    pub const fn intrinsic_id(&self) -> &'static str {
+        self.intrinsic_id
+    }
+
+    #[must_use]
+    pub const fn owner(&self) -> &'static str {
+        self.owner
+    }
+
+    #[must_use]
+    pub const fn signature(&self) -> &'static str {
+        self.signature
+    }
+
+    #[must_use]
+    pub const fn lowering_kind(&self) -> &'static str {
+        self.lowering_kind
+    }
+
+    #[must_use]
+    pub fn required_capabilities(&self) -> &[&'static str] {
+        &self.required_capabilities
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapTypeEntry {
+    id: BuiltinTypeId,
+    source_name: &'static str,
+    owner_bubble: &'static str,
+    arity: u16,
+    role: BootstrapTypeRole,
+    prelude: bool,
+}
+
+impl BootstrapTypeEntry {
+    #[must_use]
+    pub const fn id(self) -> BuiltinTypeId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn source_name(self) -> &'static str {
+        self.source_name
+    }
+
+    #[must_use]
+    pub const fn owner_bubble(self) -> &'static str {
+        self.owner_bubble
+    }
+
+    #[must_use]
+    pub const fn arity(self) -> u16 {
+        self.arity
+    }
+
+    #[must_use]
+    pub const fn role(self) -> BootstrapTypeRole {
+        self.role
+    }
+
+    #[must_use]
+    pub const fn is_in_prelude(self) -> bool {
+        self.prelude
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootstrapTypeRole {
+    Array,
+    Table,
+    Nominal,
+    Interface,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapSchema {
+    version: u32,
+    primitives: Vec<BootstrapPrimitiveEntry>,
+    types: Vec<BootstrapTypeEntry>,
+    intrinsics: Vec<BootstrapIntrinsicEntry>,
+    compiler_attributes: Vec<BootstrapCompilerAttributeEntry>,
+}
+
+impl BootstrapSchema {
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    #[must_use]
+    pub fn primitives(&self) -> &[BootstrapPrimitiveEntry] {
+        &self.primitives
+    }
+
+    #[must_use]
+    pub fn types(&self) -> &[BootstrapTypeEntry] {
+        &self.types
+    }
+
+    #[must_use]
+    pub fn type_by_source_name(&self, name: &str) -> Option<&BootstrapTypeEntry> {
+        self.types.iter().find(|entry| entry.source_name == name)
+    }
+
+    #[must_use]
+    pub fn intrinsics(&self) -> &[BootstrapIntrinsicEntry] {
+        &self.intrinsics
+    }
+
+    #[must_use]
+    pub fn compiler_attributes(&self) -> &[BootstrapCompilerAttributeEntry] {
+        &self.compiler_attributes
+    }
+
+    /// Finds a trusted prelude compiler-attribute candidate by source name.
+    ///
+    /// The returned entry carries a compiler identity distinct from every user
+    /// [`AttributeId`]. Callers must still apply ordinary declaration/prelude
+    /// resolution priority before selecting this fallback candidate.
+    #[must_use]
+    pub fn compiler_attribute_by_source_name(
+        &self,
+        name: &str,
+    ) -> Option<&BootstrapCompilerAttributeEntry> {
+        self.compiler_attributes
+            .iter()
+            .find(|entry| entry.source_name == name)
+    }
+
+    #[must_use]
+    pub fn compiler_attribute_by_role(
+        &self,
+        role: CompilerAttributeRole,
+    ) -> Option<&BootstrapCompilerAttributeEntry> {
+        self.compiler_attributes
+            .iter()
+            .find(|entry| entry.role == role)
+    }
+
+    #[must_use]
+    pub fn compiler_attribute(
+        &self,
+        identity: AttributeIdentity,
+    ) -> Option<&BootstrapCompilerAttributeEntry> {
+        let AttributeIdentity::Compiler(id) = identity else {
+            return None;
+        };
+        self.compiler_attributes.iter().find(|entry| entry.id == id)
+    }
+
+    #[must_use]
+    pub fn compiler_attribute_role(
+        &self,
+        identity: AttributeIdentity,
+    ) -> Option<CompilerAttributeRole> {
+        self.compiler_attribute(identity).map(|entry| entry.role)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapSchemaError {
+    document: &'static str,
+    line: usize,
+    reason: &'static str,
+}
+
+impl fmt::Display for BootstrapSchemaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid {} bootstrap schema at line {}: {}",
+            self.document, self.line, self.reason
+        )
+    }
+}
+
+impl Error for BootstrapSchemaError {}
+
+/// Loads and cross-validates the embedded `Pop.Internal` bootstrap schemas.
+///
+/// # Errors
+///
+/// Returns [`BootstrapSchemaError`] if either schema is malformed, versions
+/// disagree, identifiers repeat, or primitive metadata diverges from the
+/// semantic type contract.
+pub fn embedded_bootstrap_schema() -> Result<BootstrapSchema, BootstrapSchemaError> {
+    let (primitive_version, primitives) = parse_primitives()?;
+    let (intrinsic_version, intrinsics) = parse_intrinsics()?;
+    let (internal_type_version, mut types) = parse_types("internal type", INTERNAL_TYPES)?;
+    let (standard_type_version, standard_types) = parse_types("standard type", STANDARD_TYPES)?;
+    let (compiler_attribute_version, compiler_attributes) = parse_compiler_attributes()?;
+    types.extend(standard_types);
+    if [
+        intrinsic_version,
+        internal_type_version,
+        standard_type_version,
+        compiler_attribute_version,
+    ]
+    .into_iter()
+    .any(|version| version != primitive_version)
+    {
+        return Err(error("combined", 1, "schema versions disagree"));
+    }
+    validate_primitives(&primitives)?;
+    validate_types(&types)?;
+    validate_intrinsics(&intrinsics)?;
+    validate_compiler_attributes(&compiler_attributes)?;
+    Ok(BootstrapSchema {
+        version: primitive_version,
+        primitives,
+        types,
+        intrinsics,
+        compiler_attributes,
+    })
+}
+
+fn parse_types(
+    document: &'static str,
+    text: &'static str,
+) -> Result<(u32, Vec<BootstrapTypeEntry>), BootstrapSchemaError> {
+    let mut lines = text.lines();
+    let version = parse_version(document, lines.next())?;
+    if lines.next() != Some("typeId\tsourceName\townerBubble\tarity\trole\tprelude") {
+        return Err(error(document, 2, "unexpected header"));
+    }
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 6 {
+            return Err(error(document, index + 3, "expected six fields"));
+        }
+        let id = fields[0]
+            .parse()
+            .map(BuiltinTypeId::from_raw)
+            .map_err(|_| error(document, index + 3, "invalid type ID"))?;
+        let arity = fields[3]
+            .parse()
+            .map_err(|_| error(document, index + 3, "invalid type arity"))?;
+        let role = match fields[4] {
+            "Array" => BootstrapTypeRole::Array,
+            "Table" => BootstrapTypeRole::Table,
+            "Nominal" => BootstrapTypeRole::Nominal,
+            "Interface" => BootstrapTypeRole::Interface,
+            _ => return Err(error(document, index + 3, "invalid type role")),
+        };
+        let prelude = match fields[5] {
+            "true" => true,
+            "false" => false,
+            _ => return Err(error(document, index + 3, "invalid prelude flag")),
+        };
+        entries.push(BootstrapTypeEntry {
+            id,
+            source_name: fields[1],
+            owner_bubble: fields[2],
+            arity,
+            role,
+            prelude,
+        });
+    }
+    Ok((version, entries))
+}
+
+fn parse_compiler_attributes()
+-> Result<(u32, Vec<BootstrapCompilerAttributeEntry>), BootstrapSchemaError> {
+    let mut lines = STANDARD_COMPILER_ATTRIBUTES.lines();
+    let version = parse_version("standard compiler attribute", lines.next())?;
+    if lines.next()
+        != Some(
+            "attributeId\tsourceName\townerBubble\targumentCount\ttarget\tsemanticRole\tprelude",
+        )
+    {
+        return Err(error("standard compiler attribute", 2, "unexpected header"));
+    }
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 7 {
+            return Err(error(
+                "standard compiler attribute",
+                index + 3,
+                "expected seven fields",
+            ));
+        }
+        let id = fields[0].parse().map(CompilerAttributeId).map_err(|_| {
+            error(
+                "standard compiler attribute",
+                index + 3,
+                "invalid attribute ID",
+            )
+        })?;
+        let argument_count = fields[3].parse().map_err(|_| {
+            error(
+                "standard compiler attribute",
+                index + 3,
+                "invalid argument count",
+            )
+        })?;
+        let target = match fields[4] {
+            "Function" => CompilerAttributeTarget::Function,
+            "Attribute" => CompilerAttributeTarget::Attribute,
+            _ => {
+                return Err(error(
+                    "standard compiler attribute",
+                    index + 3,
+                    "invalid attachment target",
+                ));
+            }
+        };
+        let role = match fields[5] {
+            "CompileTime" => CompilerAttributeRole::CompileTime,
+            "AttributeUsage" => CompilerAttributeRole::AttributeUsage,
+            "AttributeValidator" => CompilerAttributeRole::AttributeValidator,
+            _ => {
+                return Err(error(
+                    "standard compiler attribute",
+                    index + 3,
+                    "invalid semantic role",
+                ));
+            }
+        };
+        let prelude = match fields[6] {
+            "true" => true,
+            "false" => false,
+            _ => {
+                return Err(error(
+                    "standard compiler attribute",
+                    index + 3,
+                    "invalid prelude flag",
+                ));
+            }
+        };
+        entries.push(BootstrapCompilerAttributeEntry {
+            id,
+            source_name: fields[1],
+            owner_bubble: fields[2],
+            argument_count,
+            target,
+            role,
+            prelude,
+        });
+    }
+    Ok((version, entries))
+}
+
+fn parse_primitives() -> Result<(u32, Vec<BootstrapPrimitiveEntry>), BootstrapSchemaError> {
+    let mut lines = PRIMITIVES.lines();
+    let version = parse_version("primitive", lines.next())?;
+    if lines.next() != Some("sourceName\tcanonicalName\truntimeRole") {
+        return Err(error("primitive", 2, "unexpected header"));
+    }
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 3 {
+            return Err(error("primitive", index + 3, "expected three fields"));
+        }
+        entries.push(BootstrapPrimitiveEntry {
+            source_name: fields[0],
+            canonical_name: fields[1],
+            runtime_role: fields[2],
+        });
+    }
+    Ok((version, entries))
+}
+
+fn parse_intrinsics() -> Result<(u32, Vec<BootstrapIntrinsicEntry>), BootstrapSchemaError> {
+    let mut lines = INTRINSICS.lines();
+    let version = parse_version("intrinsic", lines.next())?;
+    if lines.next() != Some("intrinsicId\towner\tsignature\tloweringKind\trequiredCapabilities") {
+        return Err(error("intrinsic", 2, "unexpected header"));
+    }
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 5 {
+            return Err(error("intrinsic", index + 3, "expected five fields"));
+        }
+        let required_capabilities = if fields[4] == "-" {
+            Vec::new()
+        } else {
+            fields[4].split(',').collect()
+        };
+        entries.push(BootstrapIntrinsicEntry {
+            intrinsic_id: fields[0],
+            owner: fields[1],
+            signature: fields[2],
+            lowering_kind: fields[3],
+            required_capabilities,
+        });
+    }
+    Ok((version, entries))
+}
+
+fn parse_version(
+    document: &'static str,
+    line: Option<&'static str>,
+) -> Result<u32, BootstrapSchemaError> {
+    let Some((key, value)) = line.and_then(|line| line.split_once('\t')) else {
+        return Err(error(document, 1, "missing schema version"));
+    };
+    if key != "schemaVersion" {
+        return Err(error(document, 1, "unexpected version key"));
+    }
+    value
+        .parse()
+        .map_err(|_| error(document, 1, "invalid schema version"))
+}
+
+fn validate_primitives(entries: &[BootstrapPrimitiveEntry]) -> Result<(), BootstrapSchemaError> {
+    let semantic = PrimitiveType::source_schema();
+    if entries.len() != semantic.len() {
+        return Err(error("primitive", 2, "semantic entry count differs"));
+    }
+    for (index, (metadata, semantic)) in entries.iter().zip(semantic).enumerate() {
+        if metadata.source_name != semantic.source_name()
+            || metadata.canonical_name != semantic.canonical_name()
+        {
+            return Err(error(
+                "primitive",
+                index + 3,
+                "semantic primitive identity differs",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_intrinsics(entries: &[BootstrapIntrinsicEntry]) -> Result<(), BootstrapSchemaError> {
+    let mut identifiers: Vec<_> = entries.iter().map(|entry| entry.intrinsic_id).collect();
+    identifiers.sort_unstable();
+    if identifiers.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error("intrinsic", 2, "duplicate intrinsic ID"));
+    }
+    if entries.iter().any(|entry| {
+        entry.owner.is_empty()
+            || entry.signature.is_empty()
+            || entry.lowering_kind.is_empty()
+            || !entry.owner.starts_with("Pop.Internal.")
+    }) {
+        return Err(error("intrinsic", 2, "invalid intrinsic contract"));
+    }
+    Ok(())
+}
+
+fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaError> {
+    let mut ids: Vec<_> = entries.iter().map(|entry| entry.id).collect();
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error("type", 2, "duplicate type ID"));
+    }
+    let mut names: Vec<_> = entries.iter().map(|entry| entry.source_name).collect();
+    names.sort_unstable();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error("type", 2, "duplicate source type name"));
+    }
+    if entries.iter().any(|entry| {
+        !matches!(entry.owner_bubble, "Pop.Internal" | "Pop.Standard")
+            || entry.source_name.is_empty()
+    }) {
+        return Err(error("type", 2, "invalid foundational type contract"));
+    }
+    Ok(())
+}
+
+fn validate_compiler_attributes(
+    entries: &[BootstrapCompilerAttributeEntry],
+) -> Result<(), BootstrapSchemaError> {
+    let mut ids: Vec<_> = entries.iter().map(|entry| entry.id).collect();
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error(
+            "standard compiler attribute",
+            2,
+            "duplicate compiler attribute ID",
+        ));
+    }
+    let mut names: Vec<_> = entries.iter().map(|entry| entry.source_name).collect();
+    names.sort_unstable();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error(
+            "standard compiler attribute",
+            2,
+            "duplicate compiler attribute name",
+        ));
+    }
+    let mut roles: Vec<_> = entries.iter().map(|entry| entry.role).collect();
+    roles.sort_unstable();
+    if roles.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error(
+            "standard compiler attribute",
+            2,
+            "duplicate compiler attribute role",
+        ));
+    }
+    validate_compiler_attribute_contract(
+        entries,
+        CompilerAttributeRole::CompileTime,
+        0,
+        "CompileTime",
+        0,
+        CompilerAttributeTarget::Function,
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        CompilerAttributeRole::AttributeUsage,
+        1,
+        "AttributeUsage",
+        2,
+        CompilerAttributeTarget::Attribute,
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        CompilerAttributeRole::AttributeValidator,
+        2,
+        "AttributeValidator",
+        1,
+        CompilerAttributeTarget::Attribute,
+    )?;
+    Ok(())
+}
+
+fn validate_compiler_attribute_contract(
+    entries: &[BootstrapCompilerAttributeEntry],
+    role: CompilerAttributeRole,
+    id: u32,
+    source_name: &'static str,
+    argument_count: u16,
+    target: CompilerAttributeTarget,
+) -> Result<(), BootstrapSchemaError> {
+    let Some(entry) = entries.iter().find(|entry| entry.role == role) else {
+        return Err(error(
+            "standard compiler attribute",
+            2,
+            "missing required compiler attribute role",
+        ));
+    };
+    if entry.id.raw() != id
+        || entry.source_name != source_name
+        || entry.owner_bubble != "Pop.Standard"
+        || entry.argument_count != argument_count
+        || entry.target != target
+        || !entry.prelude
+    {
+        return Err(error(
+            "standard compiler attribute",
+            2,
+            "invalid trusted compiler attribute contract",
+        ));
+    }
+    Ok(())
+}
+
+const fn error(document: &'static str, line: usize, reason: &'static str) -> BootstrapSchemaError {
+    BootstrapSchemaError {
+        document,
+        line,
+        reason,
+    }
+}

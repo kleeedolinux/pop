@@ -1,0 +1,447 @@
+use std::cmp::Ordering;
+use std::error::Error;
+use std::fmt;
+
+use crate::IntegerKind;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NumericError {
+    InvalidLiteral,
+    OutOfRange,
+    KindMismatch,
+    Overflow,
+    DivisionByZero,
+}
+
+impl fmt::Display for NumericError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "numeric error: {self:?}")
+    }
+}
+
+impl Error for NumericError {}
+
+/// One canonical fixed-width integer value.
+///
+/// `bits` stores the exact two's-complement/unsigned bit pattern for `kind`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IntegerValue {
+    kind: IntegerKind,
+    bits: u64,
+}
+
+impl IntegerValue {
+    /// Parses one decimal integer spelling for an exact Pop Lang integer kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NumericError::InvalidLiteral`] for malformed decimal text and
+    /// [`NumericError::OutOfRange`] when the value is not representable.
+    pub fn parse_decimal(text: &str, kind: IntegerKind) -> Result<Self, NumericError> {
+        let normalized = text.replace('_', "");
+        let (negative, magnitude) = normalized
+            .strip_prefix('-')
+            .map_or((false, normalized.as_str()), |magnitude| (true, magnitude));
+        if magnitude.is_empty() || !magnitude.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(NumericError::InvalidLiteral);
+        }
+        let magnitude = magnitude
+            .parse::<u128>()
+            .map_err(|_| NumericError::OutOfRange)?;
+        if kind.is_signed() {
+            let limit = 1_u128 << (kind.bit_width() - 1);
+            if negative {
+                if magnitude > limit {
+                    return Err(NumericError::OutOfRange);
+                }
+                let value = i128::try_from(magnitude)
+                    .map_err(|_| NumericError::OutOfRange)?
+                    .checked_neg()
+                    .ok_or(NumericError::OutOfRange)?;
+                Self::from_signed(kind, value)
+            } else {
+                if magnitude >= limit {
+                    return Err(NumericError::OutOfRange);
+                }
+                Self::from_signed(
+                    kind,
+                    i128::try_from(magnitude).map_err(|_| NumericError::OutOfRange)?,
+                )
+            }
+        } else {
+            if negative {
+                return Err(NumericError::OutOfRange);
+            }
+            Self::from_unsigned(kind, magnitude)
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> IntegerKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.bits
+    }
+
+    #[must_use]
+    pub fn signed(self) -> Option<i64> {
+        self.kind.is_signed().then(|| {
+            let shift = 64_u32 - u32::from(self.kind.bit_width());
+            i64::from_ne_bytes((self.bits << shift).to_ne_bytes()) >> shift
+        })
+    }
+
+    #[must_use]
+    pub const fn unsigned(self) -> Option<u64> {
+        if self.kind.is_signed() {
+            None
+        } else {
+            Some(self.bits)
+        }
+    }
+
+    /// Performs checked addition using this value's declared width.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch or overflow error.
+    pub fn checked_add(self, right: Self) -> Result<Self, NumericError> {
+        self.checked_binary(right, i128::checked_add, u128::checked_add)
+    }
+
+    /// Performs checked subtraction using this value's declared width.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch or overflow error.
+    pub fn checked_subtract(self, right: Self) -> Result<Self, NumericError> {
+        self.checked_binary(right, i128::checked_sub, u128::checked_sub)
+    }
+
+    /// Performs checked multiplication using this value's declared width.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch or overflow error.
+    pub fn checked_multiply(self, right: Self) -> Result<Self, NumericError> {
+        self.checked_binary(right, i128::checked_mul, u128::checked_mul)
+    }
+
+    /// Performs checked division using this value's signedness.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch, division-by-zero, or overflow error.
+    pub fn checked_divide(self, right: Self) -> Result<Self, NumericError> {
+        self.require_kind(right)?;
+        if right.bits == 0 {
+            return Err(NumericError::DivisionByZero);
+        }
+        if self.kind.is_signed() {
+            let result = self
+                .as_i128()
+                .checked_div(right.as_i128())
+                .ok_or(NumericError::Overflow)?;
+            Self::from_signed(self.kind, result).map_err(|_| NumericError::Overflow)
+        } else {
+            Self::from_unsigned(self.kind, self.as_u128() / right.as_u128())
+                .map_err(|_| NumericError::Overflow)
+        }
+    }
+
+    /// Performs checked remainder using this value's signedness.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch, division-by-zero, or overflow error.
+    pub fn checked_remainder(self, right: Self) -> Result<Self, NumericError> {
+        self.require_kind(right)?;
+        if right.bits == 0 {
+            return Err(NumericError::DivisionByZero);
+        }
+        if self.kind.is_signed() {
+            let result = self
+                .as_i128()
+                .checked_rem(right.as_i128())
+                .ok_or(NumericError::Overflow)?;
+            Self::from_signed(self.kind, result).map_err(|_| NumericError::Overflow)
+        } else {
+            Self::from_unsigned(self.kind, self.as_u128() % right.as_u128())
+                .map_err(|_| NumericError::Overflow)
+        }
+    }
+
+    /// Negates a signed integer using its exact width.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch for unsigned integers and overflow for the
+    /// signed minimum value.
+    pub fn checked_negate(self) -> Result<Self, NumericError> {
+        if !self.kind.is_signed() {
+            return Err(NumericError::KindMismatch);
+        }
+        let value = self.as_i128().checked_neg().ok_or(NumericError::Overflow)?;
+        Self::from_signed(self.kind, value).map_err(|_| NumericError::Overflow)
+    }
+
+    /// Compares two integers of the same exact kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NumericError::KindMismatch`] for different kinds.
+    pub fn compare(self, right: Self) -> Result<Ordering, NumericError> {
+        self.require_kind(right)?;
+        Ok(if self.kind.is_signed() {
+            self.as_i128().cmp(&right.as_i128())
+        } else {
+            self.as_u128().cmp(&right.as_u128())
+        })
+    }
+
+    fn checked_binary(
+        self,
+        right: Self,
+        signed: fn(i128, i128) -> Option<i128>,
+        unsigned: fn(u128, u128) -> Option<u128>,
+    ) -> Result<Self, NumericError> {
+        self.require_kind(right)?;
+        if self.kind.is_signed() {
+            let value = signed(self.as_i128(), right.as_i128()).ok_or(NumericError::Overflow)?;
+            Self::from_signed(self.kind, value).map_err(|_| NumericError::Overflow)
+        } else {
+            let value = unsigned(self.as_u128(), right.as_u128()).ok_or(NumericError::Overflow)?;
+            Self::from_unsigned(self.kind, value).map_err(|_| NumericError::Overflow)
+        }
+    }
+
+    fn require_kind(self, right: Self) -> Result<(), NumericError> {
+        if self.kind == right.kind {
+            Ok(())
+        } else {
+            Err(NumericError::KindMismatch)
+        }
+    }
+
+    fn from_signed(kind: IntegerKind, value: i128) -> Result<Self, NumericError> {
+        if !kind.is_signed() {
+            return Err(NumericError::KindMismatch);
+        }
+        let width = kind.bit_width();
+        let minimum = -(1_i128 << (width - 1));
+        let maximum = (1_i128 << (width - 1)) - 1;
+        if !(minimum..=maximum).contains(&value) {
+            return Err(NumericError::OutOfRange);
+        }
+        let encoded = u128::from_le_bytes(value.to_le_bytes()) & u128::from(bit_mask(width));
+        Ok(Self {
+            kind,
+            bits: u64::try_from(encoded).map_err(|_| NumericError::OutOfRange)?,
+        })
+    }
+
+    fn from_unsigned(kind: IntegerKind, value: u128) -> Result<Self, NumericError> {
+        if kind.is_signed() {
+            return Err(NumericError::KindMismatch);
+        }
+        let maximum = u128::from(bit_mask(kind.bit_width()));
+        if value > maximum {
+            return Err(NumericError::OutOfRange);
+        }
+        Ok(Self {
+            kind,
+            bits: u64::try_from(value).map_err(|_| NumericError::OutOfRange)?,
+        })
+    }
+
+    fn as_i128(self) -> i128 {
+        i128::from(self.signed().expect("signed kind has a signed projection"))
+    }
+
+    const fn as_u128(self) -> u128 {
+        self.bits as u128
+    }
+}
+
+impl fmt::Display for IntegerValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(value) = self.signed() {
+            write!(formatter, "{value}")
+        } else {
+            write!(formatter, "{}", self.bits)
+        }
+    }
+}
+
+const fn bit_mask(width: u16) -> u64 {
+    if width == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << width) - 1
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FloatKind {
+    Float32,
+    Float64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FloatValue {
+    Float32(u32),
+    Float64(u64),
+}
+
+impl FloatValue {
+    /// Parses a decimal spelling into one exact IEEE format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-literal or out-of-range error.
+    pub fn parse_decimal(text: &str, kind: FloatKind) -> Result<Self, NumericError> {
+        let text = text.replace('_', "");
+        match kind {
+            FloatKind::Float32 => {
+                let value = text
+                    .parse::<f32>()
+                    .map_err(|_| NumericError::InvalidLiteral)?;
+                if !value.is_finite() {
+                    return Err(NumericError::OutOfRange);
+                }
+                Ok(Self::Float32(value.to_bits()))
+            }
+            FloatKind::Float64 => {
+                let value = text
+                    .parse::<f64>()
+                    .map_err(|_| NumericError::InvalidLiteral)?;
+                if !value.is_finite() {
+                    return Err(NumericError::OutOfRange);
+                }
+                Ok(Self::Float64(value.to_bits()))
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> FloatKind {
+        match self {
+            Self::Float32(_) => FloatKind::Float32,
+            Self::Float64(_) => FloatKind::Float64,
+        }
+    }
+
+    #[must_use]
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Self::Float32(bits) => f64::from(f32::from_bits(bits)),
+            Self::Float64(bits) => f64::from_bits(bits),
+        }
+    }
+
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        match self {
+            Self::Float32(bits) => bits as u64,
+            Self::Float64(bits) => bits,
+        }
+    }
+
+    /// Adds equal-format IEEE values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch for different formats.
+    pub fn checked_add(self, right: Self) -> Result<Self, NumericError> {
+        self.binary(
+            right,
+            |left, right| left + right,
+            |left, right| left + right,
+        )
+    }
+
+    /// Subtracts equal-format IEEE values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch for different formats.
+    pub fn checked_subtract(self, right: Self) -> Result<Self, NumericError> {
+        self.binary(
+            right,
+            |left, right| left - right,
+            |left, right| left - right,
+        )
+    }
+
+    /// Multiplies equal-format IEEE values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch for different formats.
+    pub fn checked_multiply(self, right: Self) -> Result<Self, NumericError> {
+        self.binary(
+            right,
+            |left, right| left * right,
+            |left, right| left * right,
+        )
+    }
+
+    /// Divides equal-format IEEE values, including IEEE zero division.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch for different formats.
+    pub fn checked_divide(self, right: Self) -> Result<Self, NumericError> {
+        self.binary(
+            right,
+            |left, right| left / right,
+            |left, right| left / right,
+        )
+    }
+
+    /// Negates one IEEE value while preserving its exact format.
+    #[must_use]
+    pub fn negate(self) -> Self {
+        match self {
+            Self::Float32(bits) => Self::Float32((-f32::from_bits(bits)).to_bits()),
+            Self::Float64(bits) => Self::Float64((-f64::from_bits(bits)).to_bits()),
+        }
+    }
+
+    /// Partially compares two equal-format IEEE values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a kind mismatch for different formats.
+    pub fn partial_compare(self, right: Self) -> Result<Option<Ordering>, NumericError> {
+        match (self, right) {
+            (Self::Float32(left), Self::Float32(right)) => {
+                Ok(f32::from_bits(left).partial_cmp(&f32::from_bits(right)))
+            }
+            (Self::Float64(left), Self::Float64(right)) => {
+                Ok(f64::from_bits(left).partial_cmp(&f64::from_bits(right)))
+            }
+            _ => Err(NumericError::KindMismatch),
+        }
+    }
+
+    fn binary(
+        self,
+        right: Self,
+        float32: impl FnOnce(f32, f32) -> f32,
+        float64: impl FnOnce(f64, f64) -> f64,
+    ) -> Result<Self, NumericError> {
+        match (self, right) {
+            (Self::Float32(left), Self::Float32(right)) => Ok(Self::Float32(
+                float32(f32::from_bits(left), f32::from_bits(right)).to_bits(),
+            )),
+            (Self::Float64(left), Self::Float64(right)) => Ok(Self::Float64(
+                float64(f64::from_bits(left), f64::from_bits(right)).to_bits(),
+            )),
+            _ => Err(NumericError::KindMismatch),
+        }
+    }
+}

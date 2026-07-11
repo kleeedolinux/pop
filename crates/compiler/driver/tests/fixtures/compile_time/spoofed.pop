@@ -1,0 +1,16 @@
+namespace Example
+
+public attribute CompileTime()
+
+@CompileTime
+private function addOne(value: UInt8): UInt8
+    return value + 1
+end
+
+@AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)
+public attribute Answer(value: UInt8)
+
+@Answer(addOne(1))
+public function answer(): UInt8
+    return 2
+end

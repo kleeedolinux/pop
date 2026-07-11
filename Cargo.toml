@@ -1,0 +1,68 @@
+[workspace]
+members = [
+    "crates/compiler/backend-api",
+    "crates/compiler/backends/llvm",
+    "crates/compiler/backends/mir-interp",
+    "crates/compiler/backends/vm",
+    "crates/compiler/compile-time",
+    "crates/compiler/diagnostics",
+    "crates/compiler/documentation",
+    "crates/compiler/driver",
+    "crates/compiler/foundation",
+    "crates/compiler/hir",
+    "crates/compiler/mir",
+    "crates/compiler/projects",
+    "crates/compiler/query",
+    "crates/compiler/resolve",
+    "crates/compiler/source",
+    "crates/compiler/syntax",
+    "crates/compiler/target",
+    "crates/compiler/types",
+    "crates/runtime/interface",
+    "crates/runtime/native",
+    "crates/tools/architecture-tests",
+    "crates/tools/documentation-generator",
+    "crates/tools/formatter",
+    "crates/tools/language-server",
+    "crates/tools/test-runner",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+pop-foundation = { path = "crates/compiler/foundation" }
+pop-source = { path = "crates/compiler/source" }
+pop-syntax = { path = "crates/compiler/syntax" }
+pop-projects = { path = "crates/compiler/projects" }
+pop-query = { path = "crates/compiler/query" }
+pop-resolve = { path = "crates/compiler/resolve" }
+pop-types = { path = "crates/compiler/types" }
+pop-compile-time = { path = "crates/compiler/compile-time" }
+pop-hir = { path = "crates/compiler/hir" }
+pop-mir = { path = "crates/compiler/mir" }
+pop-target = { path = "crates/compiler/target" }
+pop-backend-api = { path = "crates/compiler/backend-api" }
+pop-backend-llvm = { path = "crates/compiler/backends/llvm" }
+pop-backend-mir-interp = { path = "crates/compiler/backends/mir-interp" }
+pop-backend-vm = { path = "crates/compiler/backends/vm" }
+pop-driver = { path = "crates/compiler/driver" }
+pop-diagnostics = { path = "crates/compiler/diagnostics" }
+pop-documentation = { path = "crates/compiler/documentation" }
+pop-runtime-interface = { path = "crates/runtime/interface" }
+pop-runtime-native = { path = "crates/runtime/native" }
+pop-language-server = { path = "crates/tools/language-server" }
+pop-formatter = { path = "crates/tools/formatter" }
+pop-documentation-generator = { path = "crates/tools/documentation-generator" }
+pop-test-runner = { path = "crates/tools/test-runner" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

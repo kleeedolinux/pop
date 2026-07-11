@@ -1,0 +1,5 @@
+namespace Example
+
+public function invalid(): Int
+    return missingValue
+end

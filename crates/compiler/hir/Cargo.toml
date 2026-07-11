@@ -1,0 +1,21 @@
+[package]
+name = "pop-hir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pop-foundation.workspace = true
+pop-resolve.workspace = true
+pop-types.workspace = true
+
+[dev-dependencies]
+pop-source.workspace = true
+pop-syntax.workspace = true
+
+[lints]
+workspace = true

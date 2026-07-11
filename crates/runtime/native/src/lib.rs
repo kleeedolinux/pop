@@ -1,0 +1,422 @@
+//! Native PLRI implementation boundary.
+//!
+//! This crate currently provides the architecture's Stage-1 bootstrap
+//! collector: a precise, stop-the-world mark/sweep heap backed by opaque
+//! handles. It deliberately does not claim a moving nursery, concurrent
+//! marking, or production write barriers.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use pop_runtime_interface::{
+    AllocationClass, ArrayAllocationRequest, ArrayElementMap, CollectionStatistics,
+    GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
+    PanicPayload, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
+    SafePointOutcome, WriteBarrier,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapLimits {
+    maximum_objects: usize,
+    maximum_slots: usize,
+}
+
+impl HeapLimits {
+    #[must_use]
+    pub const fn new(maximum_objects: usize, maximum_slots: usize) -> Self {
+        Self {
+            maximum_objects,
+            maximum_slots,
+        }
+    }
+
+    #[must_use]
+    pub const fn maximum_objects(self) -> usize {
+        self.maximum_objects
+    }
+
+    #[must_use]
+    pub const fn maximum_slots(self) -> usize {
+        self.maximum_slots
+    }
+}
+
+impl Default for HeapLimits {
+    fn default() -> Self {
+        Self::new(usize::MAX, usize::MAX)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SlotValue {
+    Scalar(u64),
+    Reference(Option<ManagedReference>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Allocation {
+    type_id: RuntimeTypeId,
+    class: AllocationClass,
+    object_map: ObjectMap,
+    slots: Vec<SlotValue>,
+}
+
+pub struct BootstrapRuntime {
+    objects: BTreeMap<ManagedReference, Allocation>,
+    roots: BTreeMap<RootHandle, ManagedReference>,
+    next_reference: u64,
+    next_root: u64,
+    slot_count: usize,
+    limits: HeapLimits,
+    collection_requested: bool,
+}
+
+impl BootstrapRuntime {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_limits(HeapLimits::default())
+    }
+
+    #[must_use]
+    pub fn with_limits(limits: HeapLimits) -> Self {
+        Self {
+            objects: BTreeMap::new(),
+            roots: BTreeMap::new(),
+            next_reference: 1,
+            next_root: 1,
+            slot_count: 0,
+            limits,
+            collection_requested: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn limits(&self) -> HeapLimits {
+        self.limits
+    }
+
+    #[must_use]
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
+    #[must_use]
+    pub const fn slot_count(&self) -> usize {
+        self.slot_count
+    }
+
+    #[must_use]
+    pub fn contains(&self, reference: ManagedReference) -> bool {
+        self.objects.contains_key(&reference)
+    }
+
+    #[must_use]
+    pub fn allocation_type(&self, reference: ManagedReference) -> Option<RuntimeTypeId> {
+        self.objects
+            .get(&reference)
+            .map(|allocation| allocation.type_id)
+    }
+
+    #[must_use]
+    pub fn allocation_class(&self, reference: ManagedReference) -> Option<AllocationClass> {
+        self.objects
+            .get(&reference)
+            .map(|allocation| allocation.class)
+    }
+
+    pub const fn request_collection(&mut self) {
+        self.collection_requested = true;
+    }
+
+    /// Stores a managed reference into a slot identified as a reference by the
+    /// allocation's precise object map.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable invariant panic for invalid objects, slots, or
+    /// references.
+    pub fn store_reference(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        value: Option<ManagedReference>,
+    ) -> Result<(), RuntimeFailure> {
+        if value.is_some_and(|reference| !self.contains(reference)) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        let previous = self
+            .objects
+            .get(&owner)
+            .and_then(|allocation| allocation.slots.get(slot.raw() as usize))
+            .copied();
+        let Some(SlotValue::Reference(previous)) = previous else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        self.write_barrier(WriteBarrier::new(
+            pop_runtime_interface::BarrierKind::CombinedSatbGenerational,
+            owner,
+            slot,
+            previous,
+            value,
+        ))?;
+        let allocation = self
+            .objects
+            .get_mut(&owner)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        allocation.slots[slot.raw() as usize] = SlotValue::Reference(value);
+        Ok(())
+    }
+
+    /// Stores a scalar into a slot that is absent from the precise pointer map.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable invariant panic for invalid objects, slots, or a
+    /// reference-designated slot.
+    pub fn store_scalar(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        value: u64,
+    ) -> Result<(), RuntimeFailure> {
+        let allocation = self
+            .objects
+            .get_mut(&owner)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let Some(current) = allocation.slots.get_mut(slot.raw() as usize) else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        if !matches!(current, SlotValue::Scalar(_)) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        *current = SlotValue::Scalar(value);
+        Ok(())
+    }
+
+    /// Performs a precise stop-the-world collection using registered strong
+    /// roots plus the stack roots published for this safe point.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable invariant panic if a root or traced edge names an
+    /// invalid managed reference.
+    pub fn collect(
+        &mut self,
+        stack_roots: &RootPublication,
+    ) -> Result<CollectionStatistics, RuntimeFailure> {
+        let mut roots: Vec<_> = self.roots.values().copied().collect();
+        roots.extend(stack_roots.managed_references());
+        self.collect_references(&roots)
+    }
+
+    fn allocate(
+        &mut self,
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        object_map: ObjectMap,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        let requested_slots = usize::try_from(object_map.slot_count())
+            .map_err(|_| Self::out_of_memory(1, usize::MAX))?;
+        self.ensure_capacity(requested_slots)?;
+        let reference = ManagedReference::new(self.next_reference);
+        self.next_reference = self
+            .next_reference
+            .checked_add(1)
+            .ok_or_else(|| Self::out_of_memory(1, requested_slots))?;
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(requested_slots)
+            .map_err(|_| Self::out_of_memory(1, requested_slots))?;
+        for index in 0..object_map.slot_count() {
+            slots.push(if object_map.is_reference_slot(ObjectSlot::new(index)) {
+                SlotValue::Reference(None)
+            } else {
+                SlotValue::Scalar(0)
+            });
+        }
+        self.objects.insert(
+            reference,
+            Allocation {
+                type_id,
+                class: allocation_class,
+                object_map,
+                slots,
+            },
+        );
+        self.slot_count += requested_slots;
+        Ok(reference)
+    }
+
+    fn ensure_capacity(&mut self, requested_slots: usize) -> Result<(), RuntimeFailure> {
+        if self.has_capacity(requested_slots) {
+            return Ok(());
+        }
+        let registered_roots: Vec<_> = self.roots.values().copied().collect();
+        self.collect_references(&registered_roots)?;
+        if self.has_capacity(requested_slots) {
+            Ok(())
+        } else {
+            Err(Self::out_of_memory(1, requested_slots))
+        }
+    }
+
+    fn has_capacity(&self, requested_slots: usize) -> bool {
+        self.objects.len() < self.limits.maximum_objects
+            && self
+                .slot_count
+                .checked_add(requested_slots)
+                .is_some_and(|slots| slots <= self.limits.maximum_slots)
+    }
+
+    fn collect_references(
+        &mut self,
+        roots: &[ManagedReference],
+    ) -> Result<CollectionStatistics, RuntimeFailure> {
+        let before = self.objects.len();
+        let mut marked = BTreeSet::new();
+        let mut pending = roots.to_vec();
+        while let Some(reference) = pending.pop() {
+            if !marked.insert(reference) {
+                continue;
+            }
+            let allocation = self
+                .objects
+                .get(&reference)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            for slot in allocation.object_map.reference_slots() {
+                match allocation.slots.get(slot.raw() as usize) {
+                    Some(SlotValue::Reference(Some(child))) => pending.push(*child),
+                    Some(SlotValue::Reference(None)) => {}
+                    Some(SlotValue::Scalar(_)) | None => {
+                        return Err(RuntimeFailure::runtime_invariant());
+                    }
+                }
+            }
+        }
+
+        self.objects
+            .retain(|reference, _| marked.contains(reference));
+        self.slot_count = self
+            .objects
+            .values()
+            .map(|allocation| allocation.slots.len())
+            .sum();
+        let live = self.objects.len();
+        Ok(CollectionStatistics::new(
+            portable_count(live),
+            portable_count(before - live),
+            portable_count(marked.len()),
+        ))
+    }
+
+    fn validate_reference(&self, reference: ManagedReference) -> Result<(), RuntimeFailure> {
+        if self.contains(reference) {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
+    }
+
+    fn out_of_memory(requested_objects: usize, requested_slots: usize) -> RuntimeFailure {
+        RuntimeFailure::from_panic(PanicPayload::out_of_memory(
+            portable_count(requested_objects),
+            portable_count(requested_slots),
+        ))
+    }
+}
+
+fn portable_count(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+impl Default for BootstrapRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RuntimeAdapter for BootstrapRuntime {
+    fn contract(&self) -> GarbageCollectorContract {
+        GarbageCollectorContract::bootstrap_stage1()
+    }
+
+    fn allocate_object(
+        &mut self,
+        request: &ObjectAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate(
+            request.type_id(),
+            request.allocation_class(),
+            request.object_map().clone(),
+        )
+    }
+
+    fn allocate_array(
+        &mut self,
+        request: &ArrayAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        let reference_slots = match request.element_map() {
+            ArrayElementMap::Scalar => Vec::new(),
+            ArrayElementMap::ManagedReference => {
+                let length = usize::try_from(request.length())
+                    .map_err(|_| Self::out_of_memory(1, usize::MAX))?;
+                let mut slots = Vec::new();
+                slots
+                    .try_reserve_exact(length)
+                    .map_err(|_| Self::out_of_memory(1, length))?;
+                slots.extend((0..request.length()).map(ObjectSlot::new));
+                slots
+            }
+        };
+        let object_map = ObjectMap::new(request.length(), reference_slots)
+            .map_err(|_| RuntimeFailure::runtime_invariant())?;
+        self.allocate(request.type_id(), request.allocation_class(), object_map)
+    }
+
+    fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
+        self.validate_reference(reference)?;
+        let root = RootHandle::new(self.next_root);
+        self.next_root = self
+            .next_root
+            .checked_add(1)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.roots.insert(root, reference);
+        Ok(root)
+    }
+
+    fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
+        self.roots
+            .remove(&root)
+            .map(|_| ())
+            .ok_or_else(RuntimeFailure::runtime_invariant)
+    }
+
+    fn safe_point(&mut self, roots: &RootPublication) -> Result<SafePointOutcome, RuntimeFailure> {
+        for reference in roots.managed_references() {
+            self.validate_reference(reference)?;
+        }
+        if !self.collection_requested {
+            return Ok(SafePointOutcome::no_collection());
+        }
+        self.collection_requested = false;
+        self.collect(roots).map(SafePointOutcome::collected)
+    }
+
+    fn write_barrier(&mut self, barrier: WriteBarrier) -> Result<(), RuntimeFailure> {
+        self.validate_reference(barrier.owner())?;
+        if let Some(reference) = barrier.previous() {
+            self.validate_reference(reference)?;
+        }
+        if let Some(reference) = barrier.value() {
+            self.validate_reference(reference)?;
+        }
+        let allocation = self
+            .objects
+            .get(&barrier.owner())
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let current = allocation.slots.get(barrier.slot().raw() as usize);
+        if current != Some(&SlotValue::Reference(barrier.previous())) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        Ok(())
+    }
+}

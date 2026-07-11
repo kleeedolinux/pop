@@ -1,0 +1,19 @@
+schemaVersion	1
+sourceName	canonicalName	runtimeRole
+nil	nil	NilLiteral
+Boolean	Boolean	Boolean
+Int8	Int8	SignedInteger8
+Int16	Int16	SignedInteger16
+Int32	Int32	SignedInteger32
+Int64	Int64	SignedInteger64
+UInt8	UInt8	UnsignedInteger8
+UInt16	UInt16	UnsignedInteger16
+UInt32	UInt32	UnsignedInteger32
+UInt64	UInt64	UnsignedInteger64
+Int	Int64	SignedInteger64
+Float32	Float32	Ieee754Binary32
+Float64	Float64	Ieee754Binary64
+Float	Float64	Ieee754Binary64
+Byte	UInt8	UnsignedInteger8
+String	String	Utf8String
+Never	Never	Uninhabited

@@ -1,0 +1,18 @@
+[package]
+name = "pop-backend-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pop-backend-api.workspace = true
+pop-mir.workspace = true
+pop-runtime-interface.workspace = true
+pop-target.workspace = true
+
+[lints]
+workspace = true

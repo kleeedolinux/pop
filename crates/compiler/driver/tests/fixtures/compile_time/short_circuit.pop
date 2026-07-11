@@ -1,0 +1,19 @@
+namespace Example
+
+@CompileTime
+private function failing(): Boolean
+    return 1 / 0 == 0
+end
+
+@CompileTime
+private function safe(): Boolean
+    return false and failing()
+end
+
+@AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)
+public attribute Flag(value: Boolean)
+
+@Flag(safe())
+public function value(): Boolean
+    return true
+end

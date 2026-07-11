@@ -1,0 +1,15 @@
+schemaVersion	1
+typeId	sourceName	ownerBubble	arity	role	prelude
+100	Result	Pop.Standard	2	Nominal	true
+101	List	Pop.Standard	1	Nominal	true
+102	Set	Pop.Standard	1	Nominal	true
+103	Range	Pop.Standard	1	Nominal	true
+104	Task	Pop.Standard	1	Nominal	true
+105	Guid	Pop.Standard	0	Nominal	true
+106	Iterable	Pop.Standard	1	Interface	true
+107	Iterator	Pop.Standard	1	Interface	true
+108	Equal	Pop.Standard	1	Interface	true
+109	Order	Pop.Standard	1	Interface	true
+110	Hash	Pop.Standard	1	Interface	true
+111	Close	Pop.Standard	0	Interface	true
+112	AsyncClose	Pop.Standard	0	Interface	true

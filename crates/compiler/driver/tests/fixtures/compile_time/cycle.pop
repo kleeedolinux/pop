@@ -1,0 +1,14 @@
+namespace Example
+
+@AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)
+public attribute Value(value: Int)
+
+@CompileTime
+private function recurse(value: Int): Int
+    return recurse(value)
+end
+
+@Value(recurse(1))
+public function answer(): Int
+    return 0
+end

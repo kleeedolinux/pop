@@ -1,0 +1,23 @@
+namespace Example
+
+@CompileTime
+private function addOne(value: UInt8): UInt8
+    return value + 1
+end
+
+@AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)
+public attribute Answer(value: UInt8 = addOne(1))
+
+@Answer(addOne(41))
+public function explicitAnswer(): UInt8
+    return 42
+end
+
+public record Settings
+    answer: UInt8 = addOne(1)
+end
+
+public function defaultAnswer(): UInt8
+    local settings: Settings = {}
+    return settings.answer
+end

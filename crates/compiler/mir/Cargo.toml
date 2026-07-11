@@ -1,0 +1,22 @@
+[package]
+name = "pop-mir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pop-foundation.workspace = true
+pop-hir.workspace = true
+pop-runtime-interface.workspace = true
+pop-types.workspace = true
+
+[dev-dependencies]
+pop-driver.workspace = true
+pop-source.workspace = true
+
+[lints]
+workspace = true

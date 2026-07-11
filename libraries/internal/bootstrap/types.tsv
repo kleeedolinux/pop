@@ -1,0 +1,5 @@
+schemaVersion	1
+typeId	sourceName	ownerBubble	arity	role	prelude
+0	Bytes	Pop.Internal	0	Nominal	true
+1	Array	Pop.Internal	1	Array	true
+2	Table	Pop.Internal	2	Table	true

@@ -1,0 +1,18 @@
+namespace Example
+
+private function helper(value: UInt8): UInt8
+    return value + 1
+end
+
+@CompileTime
+private function answer(value: UInt8): UInt8
+    return helper(value)
+end
+
+@AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)
+public attribute Answer(value: UInt8)
+
+@Answer(answer(1))
+public function value(): UInt8
+    return 2
+end

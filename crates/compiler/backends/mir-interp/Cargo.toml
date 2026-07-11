@@ -1,0 +1,27 @@
+[package]
+name = "pop-backend-mir-interp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pop-backend-api.workspace = true
+pop-foundation.workspace = true
+pop-mir.workspace = true
+pop-runtime-interface.workspace = true
+pop-target.workspace = true
+pop-types.workspace = true
+
+[dev-dependencies]
+pop-compile-time.workspace = true
+pop-driver.workspace = true
+pop-query.workspace = true
+pop-runtime-native.workspace = true
+pop-source.workspace = true
+
+[lints]
+workspace = true

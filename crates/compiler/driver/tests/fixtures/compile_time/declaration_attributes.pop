@@ -1,0 +1,10 @@
+namespace Example
+
+@AttributeUsage(targets = { AttributeTarget.Record }, repeatable = true)
+public attribute Label(value: String)
+
+@Label("first")
+@Label("second")
+public record User
+    name: String
+end

@@ -1,0 +1,20 @@
+[package]
+name = "pop-documentation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pop-diagnostics.workspace = true
+pop-foundation.workspace = true
+pop-resolve.workspace = true
+pop-source.workspace = true
+pop-syntax.workspace = true
+pop-types.workspace = true
+
+[lints]
+workspace = true

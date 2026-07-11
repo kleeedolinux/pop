@@ -1,0 +1,26 @@
+[package]
+name = "pop-driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pop"
+path = "src/main.rs"
+
+[dependencies]
+pop-compile-time.workspace = true
+pop-diagnostics.workspace = true
+pop-foundation.workspace = true
+pop-hir.workspace = true
+pop-mir.workspace = true
+pop-projects.workspace = true
+pop-query.workspace = true
+pop-resolve.workspace = true
+pop-source.workspace = true
+pop-syntax.workspace = true
+pop-types.workspace = true
+
+[lints]
+workspace = true

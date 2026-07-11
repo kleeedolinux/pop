@@ -1,0 +1,9 @@
+namespace Example
+
+@AttributeUsage(targets = { AttributeTarget.Record }, repeatable = false)
+public attribute RecordOnly()
+
+@RecordOnly
+public function invalid(): Int
+    return 0
+end

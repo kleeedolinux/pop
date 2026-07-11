@@ -1,0 +1,5 @@
+schemaVersion	1
+attributeId	sourceName	ownerBubble	argumentCount	target	semanticRole	prelude
+0	CompileTime	Pop.Standard	0	Function	CompileTime	true
+1	AttributeUsage	Pop.Standard	2	Attribute	AttributeUsage	true
+2	AttributeValidator	Pop.Standard	1	Attribute	AttributeValidator	true

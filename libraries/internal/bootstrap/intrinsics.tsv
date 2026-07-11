@@ -1,0 +1,11 @@
+schemaVersion	1
+intrinsicId	owner	signature	loweringKind	requiredCapabilities
+Integer.CheckedAdd	Pop.Internal.Integer	(TInteger,TInteger)->TInteger	CheckedIntegerAdd	-
+Array.Length	Pop.Internal.Collections	(Array<T>)->Int64	ArrayLength	-
+Array.Get	Pop.Internal.Collections	(Array<T>,Int64)->T	ArrayGet	-
+String.ByteAt	Pop.Internal.Text	(String,Int64)->Byte	StringByteAccess	-
+Gc.AllocateObject	Pop.Internal.Gc	(TypeInfo)->ManagedReference	AllocateObject	PreciseStackMaps,RelocatingNursery
+Gc.SafePoint	Pop.Internal.Gc	()->()	GcSafePoint	PreciseStackMaps
+Gc.SatbWriteBarrier	Pop.Internal.Gc	(ManagedReference,ManagedReference)->()	SatbWriteBarrier	ConcurrentMarking
+Gc.GenerationalWriteBarrier	Pop.Internal.Gc	(ManagedReference,ManagedReference)->()	GenerationalWriteBarrier	RelocatingNursery
+Coroutines.Suspend	Pop.Internal.Coroutines	(CoroutineFrame)->Suspension	CoroutineSuspend	Coroutines
