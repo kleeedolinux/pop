@@ -1,6 +1,121 @@
 # Pop Lang Agent Instructions
 
+## Operating model: keep the contract active
+
+Treat this file as an active operating contract, not as passive background
+context. Critical rules must remain in the agent's active working set throughout
+the task, especially while making design decisions, writing tests, editing code,
+and declaring completion.
+
+Do not assume that a rule remains operational merely because it appeared earlier
+in the context. Re-read and reactivate the relevant invariants at each decision
+checkpoint. After long tool output, a context switch, or a substantial subtask,
+restore the working set before continuing.
+
+Do not compress this file into a lossy summary. The persistent working set below
+is a navigation and reactivation layer; every detailed instruction later in this
+file remains binding.
+
+## Persistent working set
+
+Keep all of these invariants active throughout every task:
+
+1. **Architecture authorizes behavior.** The accepted architecture and latest
+   accepted ADRs are the source of truth. Do not invent contracts or let existing
+   code redefine them.
+2. **Architecture precedes tests; tests precede implementation.** Close design
+   gaps first, encode the accepted behavior in deterministic tests second, and
+   implement the smallest conforming change third.
+3. **Pop Lang remains Pop Lang.** Preserve its native, strongly and statically
+   typed, Luau-shaped identity. Prevent JavaScript/Rust/C#/D/C++ syntax drift and
+   release-blocking Lua regressions.
+4. **No operational dynamic escape hatch.** Never introduce `Any`, `Dynamic`,
+   unchecked lookup/calls, string-based resolution, implicit globals, or dynamic
+   fallback opcodes.
+5. **Semantic concepts remain distinct.** Preserve the Item → Module → Bubble →
+   Package → Workspace hierarchy and do not collapse records, classes, tables,
+   namespaces, Modules, Bubbles, or Packages into one runtime mechanism.
+6. **Backends share one semantic contract.** Keep HIR and MIR backend-neutral;
+   MIR governs LLVM, the MIR interpreter, and future VM behavior.
+7. **Compile time and reflection stay constrained.** Preserve deterministic,
+   budgeted, capability-limited compile-time execution and the absence of
+   unrestricted runtime reflection.
+8. **Preserve work and verify honestly.** Keep user changes, make focused edits,
+   run checks proportional to risk, and never claim a check passed unless it was
+   actually run.
+
+When two possible actions differ, prefer the one that preserves more of these
+invariants simultaneously. When an action would violate one, stop and resolve the
+architecture or test inconsistency instead of silently proceeding.
+
+## Mandatory task loop
+
+Use this loop for every change:
+
+1. **Orient:** identify the requested outcome, affected ownership boundaries,
+   public contracts, and likely architectural impact.
+2. **Load authority:** read the required architecture documents, directly related
+   documents, accepted ADRs, and closed decisions.
+3. **Search broadly:** use `rg`/`rg --files` to find every affected term, example,
+   decision, diagnostic, test, and cross-reference.
+4. **State the authorized behavior internally:** distinguish accepted behavior,
+   open questions, architecture gaps, and implementation details.
+5. **Reactivate the persistent working set:** verify that the intended approach
+   still preserves every applicable invariant above.
+6. **Add tests before implementation:** make the pre-feature implementation fail
+   for the intended missing behavior.
+7. **Implement minimally:** make the smallest focused change that satisfies the
+   accepted contract and tests.
+8. **Re-scan and synchronize:** remove contradictory terminology and update all
+   affected architecture, examples, decisions, diagnostics, and conformance
+   material.
+9. **Validate:** run the narrowest sufficient checks and the mandatory
+   architecture-regression checks for the change.
+10. **Report truthfully:** state what changed, what passed, what was not run, and
+    any remaining architecture gap.
+
+## Reactivation checkpoints
+
+Pause and reload the relevant detailed sections of this file:
+
+- after reading large files or long tool output;
+- after switching between architecture, tests, and implementation;
+- before changing any public language, library, runtime, artifact, diagnostic,
+  tooling, or compatibility contract;
+- before selecting syntax, naming, ownership, visibility, IR, runtime, GC,
+  reflection, or library design;
+- before modifying or accepting a test expectation;
+- before declaring the task complete.
+
+At each checkpoint, ask internally:
+
+- What accepted architecture authorizes this exact decision?
+- Which persistent invariants are active here?
+- Am I accidentally treating implementation, convenience, or an open question as
+  authority?
+- What positive, negative, regression, consistency, and cross-backend evidence is
+  required?
+- What contradictory old model must be removed or synchronized?
+
+## Stop conditions
+
+Stop implementation and resolve the issue first when:
+
+- no accepted architecture or ADR authorizes the proposed public behavior;
+- an open design question would need to be answered silently;
+- accepted architecture, tests, and implementation disagree;
+- a cross-cutting change lacks the required ADR and synchronized documentation;
+- the approach introduces dynamic typing, Lua table-centered semantics, syntax
+  drift, backend-specific HIR/MIR, unrestricted reflection, or another forbidden
+  regression;
+- the behavior cannot yet be verified deterministically;
+- completing the change would require deleting, weakening, ignoring, or rewriting
+  a valid failing test merely to make implementation pass.
+
 ## Scope
+
+**Keep active:** accepted architecture is the repository contract, and the
+canonical product/tool names are fixed.
 
 This file applies to the entire repository.
 
@@ -14,6 +129,9 @@ The product name is **Pop Lang** in English prose. Do not write `PopLang`,
 unified command is `pop`.
 
 ## Required reading before changes
+
+**Keep active:** do not edit before loading the authoritative architecture,
+related ADRs, closed decisions, and affected references.
 
 Before making a change, read:
 
@@ -32,6 +150,9 @@ Use `rg`/`rg --files` to find every affected term, example, decision, and
 cross-reference before editing.
 
 ## Authority and change policy
+
+**Keep active:** authority flows from accepted ADRs and architecture toward
+tests and implementation, never in the opposite direction.
 
 The precedence order is:
 
@@ -65,6 +186,9 @@ architecture is a release-blocking **Lua regression**.
 
 ## Architecture-to-test-to-implementation workflow
 
+**Keep active:** every feature follows Architecture → Tests → Implementation,
+with no implementation-first exception.
+
 Every feature and behavior follows this mandatory order:
 
 1. **Architecture:** identify the authorizing architecture section and accepted
@@ -90,6 +214,9 @@ the architecture/test inconsistency before continuing to code.
 
 ## Language identity
 
+**Keep active:** Pop Lang is native, strongly and statically typed, and must
+remain a natural Luau extension.
+
 Pop Lang is a native, strongly and statically typed language directly inspired
 by Luau.
 
@@ -109,6 +236,9 @@ JavaScript import/export syntax are not part of canonical Pop source.
 
 ## Strong static typing
 
+**Keep active:** every runtime operation has a compiler-proven type; no
+operational dynamic fallback is permitted.
+
 Every runtime value and operation has a compiler-proven type.
 
 Never introduce:
@@ -126,6 +256,9 @@ Use explicit unions, nominal interfaces, optional/result types, typed tables,
 checked casts, parsers/decoders, or typed unsafe FFI boundaries instead.
 
 ## Native abstractions and non-OOP default
+
+**Keep active:** semantic concepts stay distinct, and functions/data are
+preferred over unnecessary OOP structures.
 
 Classes, records, unions, tuples, arrays, tables, Modules, namespaces, Bubbles,
 and Packages are distinct semantic concepts. Do not secretly implement their
@@ -151,6 +284,9 @@ Functions may live directly in namespaces.
 
 ## Namespaces and visibility
 
+**Keep active:** one file-scoped namespace per Module, explicit namespace-scope
+visibility, and no export/re-export model.
+
 Every `.pop` Module declares one file-scoped namespace. A namespace is a static
 name scope, not a runtime value, table, Bubble, Package, or filesystem folder.
 
@@ -168,6 +304,9 @@ changes compile-time name lookup only. It never creates dependencies, loads
 code, forwards visibility, or becomes a runtime operation.
 
 ## Naming and aesthetics
+
+**Keep active:** canonical casing, complete readable names, accepted technical
+forms, and Luau-shaped aesthetics are contractual.
 
 Canonical Pop source uses:
 
@@ -197,6 +336,9 @@ filesystem conventions requested by the Package model. They do not authorize
 `Src`, `Lib`, `Bin`, or other truncated Pop identifiers.
 
 ## Units of code and tooling
+
+**Keep active:** Item → Module → Bubble → Package → Workspace defines ownership,
+visibility, compilation, and tooling terminology.
 
 The fixed ownership hierarchy is:
 
@@ -245,6 +387,9 @@ events, symbol IDs, and workspace edits. It must not scrape human CLI output.
 
 ## Compiler architecture
 
+**Keep active:** preserve the required semantic pipeline, typed stable IDs,
+verified IR stages, and backend-neutral HIR/MIR.
+
 The required semantic pipeline is:
 
 ```text
@@ -276,6 +421,9 @@ Rust surface syntax or replace Pop Lang's own Package/Bubble model.
 
 ## UDAs, compile time, and reflection
 
+**Keep active:** compile time is deterministic and capability-limited; runtime
+reflection is absent by default.
+
 User-defined attributes are nominal, typed, immutable compile-time values.
 Compile-time execution is deterministic, budgeted, capability-limited, and
 dependency-tracked.
@@ -295,6 +443,9 @@ narrow serializable projection consumed through generated typed adapters.
 
 ## Runtime, GC, and ABI
 
+**Keep active:** PLRI and the accepted precise concurrent generational GC model
+are cross-backend semantic contracts.
+
 Generated code reaches runtime services through the versioned backend-neutral
 Pop Lang Runtime Interface (PLRI).
 
@@ -308,6 +459,9 @@ Native and future VM backends must preserve the same object, initialization,
 visibility, metadata, error, and GC semantics.
 
 ## Base libraries
+
+**Keep active:** the foundational library model consists exactly of
+`Pop.Internal` and `Pop.Standard` with the prescribed dependency direction.
 
 The toolchain supplies exactly two reserved foundational library Bubbles:
 
@@ -325,6 +479,9 @@ target implementations, hashes, ABI/capability information, and exact Bubble
 dependencies. Only public declarations enter consumer metadata.
 
 ## Diagnostics and fixes
+
+**Keep active:** diagnostics are structured semantic APIs; fixes must preserve
+architecture, safety, and atomic verification.
 
 Diagnostics are structured APIs with stable `POP####` codes, typed arguments,
 spans/labels/notes/origins, intrinsic severity/category, warning waves,
@@ -346,6 +503,9 @@ object.
 
 ## XML documentation
 
+**Keep active:** documentation is checked, safe, separate from runtime
+reflection, and part of the public contract.
+
 Pop XML documentation uses Lua-shaped `---` comments and checked XML concepts
 inspired by C#.
 
@@ -360,6 +520,9 @@ inspired by C#.
 
 ## Editing rules
 
+**Keep active:** preserve unrelated work, make focused edits, synchronize
+terminology, and avoid generated or local artifacts.
+
 - Preserve user changes and unrelated work.
 - Prefer focused `apply_patch` edits; do not perform destructive resets or broad
   mechanical rewrites without justification.
@@ -373,6 +536,9 @@ inspired by C#.
   or local editor files.
 
 ## Validation before completion
+
+**Keep active:** completion requires proportional verification and explicit
+honesty about checks not run.
 
 For architecture changes, at minimum verify:
 
@@ -392,6 +558,9 @@ conformance, integration, cross-backend, and architecture-regression suites.
 Do not claim tests passed unless they were actually run.
 
 ## Definition of done
+
+**Keep active:** done means the requested outcome, architecture, terminology,
+examples, tests, and stated verification all agree.
 
 A task is complete only when:
 
