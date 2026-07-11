@@ -112,6 +112,12 @@ Stop implementation and resolve the issue first when:
 - completing the change would require deleting, weakening, ignoring, or rewriting
   a valid failing test merely to make implementation pass.
 
+# Avoid Using Python
+
+Whenever possible, do not use Python for scripting. Prefer Ruby when it is available.
+
+For scripts intended to be added to the repository, ask the host machine owner to install Ruby if it is not already installed, and provide clear installation instructions for their operating system. We don't accept python scripts on repository.
+
 ## Scope
 
 **Keep active:** accepted architecture is the repository contract, and the
