@@ -3192,8 +3192,7 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
 
 fn finalize_call_captures(call: &mut TypedCall, written: &BTreeSet<BindingId>) {
     match &mut call.dispatch {
-        TypedCallDispatch::Standard { .. } => {}
-        TypedCallDispatch::Direct { .. } => {}
+        TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {}
         TypedCallDispatch::DirectMethod { receiver, .. } => {
             if let Some(receiver) = receiver {
                 finalize_expression_captures(receiver, written);

@@ -869,8 +869,9 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::FieldSet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
         TypedStatementKind::Call(call) => match call.dispatch() {
-            TypedCallDispatch::Standard { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
-            TypedCallDispatch::Direct { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
+            TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
+                UnsupportedCompileTimeConstruct::ResultlessCall
+            }
             TypedCallDispatch::DirectMethod { .. } => UnsupportedCompileTimeConstruct::MethodCall,
             TypedCallDispatch::InterfaceMethod { .. } => {
                 UnsupportedCompileTimeConstruct::InterfaceDispatch

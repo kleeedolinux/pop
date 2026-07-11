@@ -2353,8 +2353,9 @@ fn first_unknown_interface_call(
                     Some((*interface, *method, call.span()))
                 } else {
                     let receiver = match call.dispatch() {
-                        TypedCallDispatch::Standard { .. } => None,
-                        TypedCallDispatch::Direct { .. } => None,
+                        TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
+                            None
+                        }
                         TypedCallDispatch::DirectMethod { receiver, .. } => receiver
                             .as_deref()
                             .and_then(|value| first_unknown_interface_expression(value, slots)),
@@ -2519,8 +2520,7 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
 
 fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {
     let callee = match call.dispatch() {
-        TypedCallDispatch::Standard { .. } => None,
-        TypedCallDispatch::Direct { .. } => None,
+        TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => None,
         TypedCallDispatch::DirectMethod { receiver, .. } => receiver
             .as_deref()
             .and_then(first_compile_time_only_expression),
