@@ -2480,6 +2480,7 @@ impl<'program> CompileTimeInterpreter<'program> {
             SemanticType::Function {
                 parameters,
                 results,
+                ..
             } => {
                 for type_id in parameters.into_iter().chain(results) {
                     self.record_type_dependency(type_id);

@@ -75,6 +75,7 @@ pub enum ResolvedTypeKind {
     Function {
         parameters: Vec<ResolvedType>,
         results: Vec<ResolvedType>,
+        effects: crate::EffectSummary,
     },
 }
 
@@ -139,6 +140,7 @@ pub struct ResolvedFunctionSignature {
     type_parameters: Vec<ResolvedTypeParameter>,
     parameters: Vec<ResolvedFunctionParameter>,
     results: Vec<ResolvedType>,
+    effects: crate::EffectSummary,
 }
 
 impl ResolvedFunctionSignature {
@@ -164,6 +166,7 @@ impl ResolvedFunctionSignature {
                 .into_iter()
                 .map(|(type_id, span)| ResolvedType::canonical(type_id, span))
                 .collect(),
+            effects: crate::EffectSummary::empty(),
         }
     }
 
@@ -190,6 +193,11 @@ impl ResolvedFunctionSignature {
     #[must_use]
     pub fn results(&self) -> &[ResolvedType] {
         &self.results
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> crate::EffectSummary {
+        self.effects
     }
 }
 
@@ -520,7 +528,6 @@ impl<'index> SignatureResolver<'index> {
             })
     }
 
-    #[must_use]
     pub fn interface_definitions(&self) -> impl Iterator<Item = &crate::InterfaceDefinition> {
         self.interface_definitions.values()
     }
@@ -830,6 +837,7 @@ impl<'index> SignatureResolver<'index> {
             type_parameters,
             parameters,
             results,
+            effects: crate::EffectSummary::empty(),
         });
         ResolvedSignatureResult {
             signature,
@@ -1150,6 +1158,7 @@ impl<'index> SignatureResolver<'index> {
                     .intern(SemanticType::Function {
                         parameters,
                         results,
+                        effects: crate::EffectSummary::empty(),
                     })
                     .ok()
             });
@@ -1157,6 +1166,7 @@ impl<'index> SignatureResolver<'index> {
             ResolvedTypeKind::Function {
                 parameters,
                 results,
+                effects: crate::EffectSummary::empty(),
             },
             type_id,
             syntax.span(),

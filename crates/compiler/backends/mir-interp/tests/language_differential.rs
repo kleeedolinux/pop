@@ -87,7 +87,7 @@ fn escaping_mutating_closure_uses_shared_cells_and_portable_allocation_events() 
     );
     let dump = mir.dump();
     assert!(dump.contains("closure"));
-    assert!(dump.contains("capture.cell"));
+    assert!(dump.contains("captureCell.allocate"));
     assert!(!dump.to_ascii_lowercase().contains("lookup name"));
 }
 

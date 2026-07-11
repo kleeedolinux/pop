@@ -48,8 +48,8 @@ fn closure_conversion_uses_typed_cells_environments_maps_and_safe_points() {
     assert!(dump.contains("closureEnvironment.allocate"), "{dump}");
     assert!(dump.contains("capture.load"), "{dump}");
     assert!(dump.contains("capture.store"), "{dump}");
-    assert!(dump.contains("call.indirect"), "{dump}");
-    assert!(dump.contains("objectMap[1;0]"), "{dump}");
+    assert!(dump.contains("callIndirect"), "{dump}");
+    assert!(dump.contains("map[1:0]"), "{dump}");
     assert!(dump.contains("gcSafePoint"), "{dump}");
     assert!(!dump.to_ascii_lowercase().contains("table"), "{dump}");
     assert!(!dump.to_ascii_lowercase().contains("lookup name"), "{dump}");

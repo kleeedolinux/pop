@@ -323,7 +323,7 @@ fn local_and_anonymous_closures_capture_lexical_values_with_static_function_type
     assert_eq!(closure.captures()[0].mode(), CaptureMode::Value);
     assert!(matches!(
         fixture.arena.get(initializer.type_id()),
-        Some(SemanticType::Function { parameters, results })
+        Some(SemanticType::Function { parameters, results, .. })
             if parameters.len() == 1 && results.len() == 1
     ));
 

@@ -14,11 +14,11 @@ use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
     MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
-    MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary, MirField, MirFunction,
-    MirInstruction, MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation,
-    MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod, MirNestedFunction,
-    MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm,
-    MirUnwindAction, local_instruction_effects,
+    MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary, MirField,
+    MirFunction, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
+    MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod,
+    MirNestedFunction, MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration,
+    MirUnionSwitchArm, MirUnwindAction, local_instruction_effects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -478,6 +478,47 @@ fn parse_capture_mode(text: &str, line: usize) -> Result<MirCaptureMode, MirPars
     }
 }
 
+fn parse_closure_captures(
+    text: &str,
+    line: usize,
+) -> Result<Vec<MirClosureCapture>, MirParseError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|capture| {
+            let (identity, value) = capture
+                .split_once('=')
+                .ok_or_else(|| error(line, "closure capture"))?;
+            let (capture, binding_slot) = identity
+                .split_once(':')
+                .ok_or_else(|| error(line, "closure capture identity"))?;
+            let (binding, slot) = binding_slot
+                .split_once('@')
+                .ok_or_else(|| error(line, "closure capture slot"))?;
+            let parts: Vec<_> = value.split(':').collect();
+            if parts.len() != 3 {
+                return Err(error(line, "closure capture value"));
+            }
+            let self_reference = parts[0] == "self";
+            let value = if self_reference {
+                ValueId::from_raw(u32::MAX)
+            } else {
+                ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?)
+            };
+            Ok(MirClosureCapture {
+                capture: CaptureId::from_raw(parse_named_prefix(capture, "cap", line)?),
+                binding: BindingId::from_raw(parse_named_prefix(binding, "bind", line)?),
+                slot: parse_u32(slot, line)?,
+                value,
+                self_reference,
+                type_id: TypeId::from_raw(parse_prefixed(parts[1], 't', line)?),
+                mode: parse_capture_mode(parts[2], line)?,
+            })
+        })
+        .collect()
+}
+
 fn parse_block(lines: &[&str], start: usize) -> Result<(MirBlock, usize), MirParseError> {
     let number = start + 1;
     let header = lines[start]
@@ -545,6 +586,8 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::RetainRoot { .. }
                 | MirInstructionKind::ReleaseRoot { .. }
                 | MirInstructionKind::WriteBarrier { .. }
+                | MirInstructionKind::CaptureCellStore { .. }
+                | MirInstructionKind::CaptureStore { .. }
         ) {
             return Err(error(line, "instruction does not have effect form"));
         }
@@ -681,6 +724,82 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     }
     if let Some(rest) = text.strip_prefix("writeBarrier ") {
         return parse_write_barrier(rest, line);
+    }
+    if let Some(rest) = text.strip_prefix("captureCell.allocate ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        if parts.len() != 4 {
+            return Err(error(line, "capture cell allocation"));
+        }
+        return Ok(MirInstructionKind::CaptureCellAllocate {
+            binding: BindingId::from_raw(parse_named_prefix(parts[0], "bind", line)?),
+            initial: ValueId::from_raw(parse_prefixed(parts[1], 'v', line)?),
+            value_type: TypeId::from_raw(parse_prefixed(parts[2], 't', line)?),
+            object_map: parse_object_map(parts[3], line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("captureCell.load ") {
+        return Ok(MirInstructionKind::CaptureCellLoad {
+            cell: ValueId::from_raw(parse_prefixed(rest, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("captureCell.store ") {
+        let (cell, value) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "capture cell store"))?;
+        return Ok(MirInstructionKind::CaptureCellStore {
+            cell: ValueId::from_raw(parse_prefixed(cell, 'v', line)?),
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("closureEnvironment.allocate ") {
+        let (head, captures) = rest
+            .split_once(" captures[")
+            .and_then(|(head, captures)| {
+                captures.strip_suffix(']').map(|captures| (head, captures))
+            })
+            .ok_or_else(|| error(line, "closure environment allocation"))?;
+        let parts: Vec<_> = head.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(error(line, "closure environment header"));
+        }
+        return Ok(MirInstructionKind::ClosureEnvironmentAllocate {
+            owner: SymbolId::from_raw(parse_prefixed(parts[0], 's', line)?),
+            function: NestedFunctionId::from_raw(parse_named_prefix(parts[1], "nf", line)?),
+            object_map: parse_object_map(parts[2], line)?,
+            captures: parse_closure_captures(captures, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("capture.load ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(error(line, "capture load"));
+        }
+        return Ok(MirInstructionKind::CaptureLoad {
+            capture: CaptureId::from_raw(parse_named_prefix(parts[0], "cap", line)?),
+            slot: parse_hash(parts[1], "slot#", line)?,
+            mode: parse_capture_mode(parts[2], line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("capture.cell ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        if parts.len() != 2 {
+            return Err(error(line, "capture cell reference"));
+        }
+        return Ok(MirInstructionKind::CaptureCellReference {
+            capture: CaptureId::from_raw(parse_named_prefix(parts[0], "cap", line)?),
+            slot: parse_hash(parts[1], "slot#", line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("capture.store ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(error(line, "capture store"));
+        }
+        return Ok(MirInstructionKind::CaptureStore {
+            capture: CaptureId::from_raw(parse_named_prefix(parts[0], "cap", line)?),
+            slot: parse_hash(parts[1], "slot#", line)?,
+            value: ValueId::from_raw(parse_prefixed(parts[2], 'v', line)?),
+        });
     }
     if let Some(rest) = text.strip_prefix("fieldGet ") {
         let mut parts = rest.split_whitespace();

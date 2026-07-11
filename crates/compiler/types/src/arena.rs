@@ -164,6 +164,7 @@ fn referenced_types(semantic: &SemanticType) -> Vec<TypeId> {
         SemanticType::Function {
             parameters,
             results,
+            ..
         } => parameters.iter().chain(results).copied().collect(),
         SemanticType::Record(fields) => fields.iter().map(|(_, field_type)| *field_type).collect(),
         SemanticType::Array(element) | SemanticType::Optional(element) => vec![*element],

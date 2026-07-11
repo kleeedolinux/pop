@@ -1010,6 +1010,7 @@ pub struct HirFunction {
     results: Vec<TypeId>,
     body: Vec<HirStatement>,
     attributes: Vec<HirAttribute>,
+    effects: pop_types::EffectSummary,
 }
 
 impl HirFunction {
@@ -1056,6 +1057,11 @@ impl HirFunction {
     #[must_use]
     pub fn body(&self) -> &[HirStatement] {
         &self.body
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> pop_types::EffectSummary {
+        self.effects
     }
 
     #[must_use]
@@ -1419,6 +1425,7 @@ pub struct HirClosure {
     captures: Vec<HirCapture>,
     body: Vec<HirStatement>,
     span: SourceSpan,
+    effects: pop_types::EffectSummary,
 }
 
 impl HirClosure {
@@ -1450,6 +1457,11 @@ impl HirClosure {
     #[must_use]
     pub const fn span(&self) -> SourceSpan {
         self.span
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> pop_types::EffectSummary {
+        self.effects
     }
 }
 
@@ -1789,6 +1801,7 @@ pub fn build_hir_function_with_known_callables_and_attributes(
             .map(|statement| lower_statement(statement, &interface_slots))
             .collect(),
         attributes: attributes.iter().map(lower_attribute).collect(),
+        effects: pop_types::EffectSummary::empty(),
     };
     verify_hir_callable(&function, arena, known.functions, known.methods)?;
     Ok(function)
@@ -2198,6 +2211,7 @@ fn lower_closure(closure: &TypedClosure, interface_slots: &HirInterfaceSlotMap) 
             .map(|statement| lower_statement(statement, interface_slots))
             .collect(),
         span: closure.span(),
+        effects: pop_types::EffectSummary::empty(),
     }
 }
 
@@ -3843,6 +3857,7 @@ impl Verifier<'_> {
                 .map(HirClosureParameter::type_id)
                 .collect(),
             results: closure.results.clone(),
+            effects: pop_types::EffectSummary::empty(),
         };
         if self.arena.get(expression.type_id()) != Some(&expected_function) {
             self.errors.push(HirVerificationError::InvalidCallableType {
@@ -4401,6 +4416,7 @@ impl Verifier<'_> {
                 if let Some(SemanticType::Function {
                     parameters,
                     results,
+                    ..
                 }) = self.arena.get(callee.type_id()).cloned()
                 {
                     Some(HirCallableSignature {
@@ -4480,6 +4496,7 @@ impl Verifier<'_> {
         let expected = SemanticType::Function {
             parameters: signature.parameters,
             results: signature.results,
+            effects: pop_types::EffectSummary::empty(),
         };
         if self.arena.get(expression.type_id()) != Some(&expected) {
             self.errors
@@ -5872,6 +5889,7 @@ mod tests {
                 span,
             }],
             attributes: Vec::new(),
+            effects: pop_types::EffectSummary::empty(),
         };
 
         assert_eq!(
@@ -5923,6 +5941,7 @@ mod tests {
                 span,
             }],
             attributes: Vec::new(),
+            effects: pop_types::EffectSummary::empty(),
         };
 
         assert_eq!(
@@ -6289,6 +6308,7 @@ mod tests {
             .intern(SemanticType::Function {
                 parameters: vec![integer],
                 results: vec![integer],
+                effects: pop_types::EffectSummary::empty(),
             })
             .expect("function type");
         let span = test_span();
@@ -6710,6 +6730,7 @@ mod tests {
             .intern(SemanticType::Function {
                 parameters: Vec::new(),
                 results: Vec::new(),
+                effects: pop_types::EffectSummary::empty(),
             })
             .expect("closure type");
         let span = test_span();
@@ -6748,6 +6769,7 @@ mod tests {
                             span,
                         }],
                         span,
+                        effects: pop_types::EffectSummary::empty(),
                     }),
                     type_id: closure_type,
                     span,
@@ -7077,6 +7099,7 @@ mod tests {
             results,
             body,
             attributes: Vec::new(),
+            effects: pop_types::EffectSummary::empty(),
         }
     }
 
@@ -7160,6 +7183,7 @@ mod tests {
                 span,
             }],
             attributes: Vec::new(),
+            effects: pop_types::EffectSummary::empty(),
         };
         verify_hir_function(&function, arena, &BTreeSet::new())
     }

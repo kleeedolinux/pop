@@ -1051,6 +1051,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .intern(SemanticType::Function {
                 parameters: parameters.iter().map(|(_, type_id, _)| *type_id).collect(),
                 results: results.iter().map(|(type_id, _)| *type_id).collect(),
+                effects: crate::EffectSummary::empty(),
             })
             .ok()?;
         Some(ResolvedClosureShape {
@@ -1182,6 +1183,14 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && let Some(binding) = self.binding_by_name(&path[0])
         {
             let target_kind = self.binding_reference_kind(binding)?;
+            if matches!(target_kind, TypedExpressionKind::Parameter(_)) {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "assignment",
+                    "immutable parameter",
+                ));
+                return None;
+            }
             let value = self.check_expression_expected(
                 value,
                 Some(ExpectedExpressionType::plain(binding.type_id)),
@@ -1766,6 +1775,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .intern(SemanticType::Function {
                 parameters: parameters?,
                 results: results?,
+                effects: crate::EffectSummary::empty(),
             })
             .ok()?;
         Some(TypedExpression {
@@ -1928,6 +1938,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let Some(SemanticType::Function {
             parameters,
             results,
+            ..
         }) = self.resolver.arena().get(callee.type_id()).cloned()
         else {
             self.diagnostics.push(type_diagnostics::invalid_operator(

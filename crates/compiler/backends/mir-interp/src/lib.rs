@@ -6,9 +6,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use pop_foundation::{ClassId, FieldId, NestedFunctionId, SymbolId, UnionCaseId, ValueId};
+use pop_foundation::{ClassId, FieldId, NestedFunctionId, SymbolId, TypeId, UnionCaseId, ValueId};
 use pop_mir::{
-    MirBubble, MirFunction, MirInstruction, MirInstructionKind, MirTerminator, MirUnwindAction,
+    MirBubble, MirInstruction, MirInstructionKind, MirTerminator, MirUnwindAction,
     MirVerificationError, verify_mir_bubble,
 };
 use pop_runtime_interface::{
@@ -442,14 +442,14 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
 
     fn execute(
         &mut self,
-        parameters: &[pop_types::TypeId],
-        results: &[pop_types::TypeId],
+        parameters: &[TypeId],
+        results: &[TypeId],
         blocks: &[pop_mir::MirBlock],
         arguments: &[RuntimeValue],
         captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
     ) -> Result<Vec<RuntimeValue>, ExecutionError> {
         require_runtime_numeric_types(self.arena, parameters, arguments)?;
-        let previous_captures = self.active_captures.replace(captures);
+        let previous_captures = std::mem::replace(&mut self.active_captures, captures);
         let result = self.execute_blocks(results, blocks, arguments);
         self.active_captures = previous_captures;
         result
@@ -457,7 +457,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
 
     fn execute_blocks(
         &mut self,
-        results: &[pop_types::TypeId],
+        results: &[TypeId],
         blocks: &[pop_mir::MirBlock],
         arguments: &[RuntimeValue],
     ) -> Result<Vec<RuntimeValue>, ExecutionError> {
@@ -469,7 +469,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         let mut block_index = 0_usize;
         loop {
             self.step()?;
-            let block = blocks.get(block_index).ok_or(ExecutionError::InvalidControlFlow)?;
+            let block = blocks
+                .get(block_index)
+                .ok_or(ExecutionError::InvalidControlFlow)?;
             let mut unwound_to_cleanup = None;
             for instruction in block.instructions() {
                 self.step()?;
@@ -760,6 +762,65 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             MirInstructionKind::CallIndirect {
                 callee, arguments, ..
             } => self.execute_indirect_call(*callee, arguments, values)?,
+            MirInstructionKind::CallInterface {
+                method, arguments, ..
+            } => {
+                let receiver = arguments.first().ok_or(ExecutionError::WrongArity)?;
+                let MirValue::Class(class) = &value(values, *receiver)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let implementation = self
+                    .mir
+                    .declarations()
+                    .iter()
+                    .find_map(|declaration| match declaration.kind() {
+                        pop_mir::MirDeclarationKind::Class(class_declaration)
+                            if class_declaration.class() == class.class() =>
+                        {
+                            class_declaration
+                                .interfaces()
+                                .iter()
+                                .flat_map(pop_mir::MirInterfaceImplementation::methods)
+                                .find(|candidate| candidate.interface_method() == *method)
+                                .map(|candidate| candidate.class_method())
+                        }
+                        _ => None,
+                    })
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.execute_method_call(implementation, arguments, values)?
+            }
+            MirInstructionKind::CaptureCellStore {
+                cell,
+                value: stored,
+            } => {
+                let MirValue::Function(symbol) = value(values, *cell)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let Some(PrivateValue::Cell(cell)) = self.private_values.get(&symbol) else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                *cell.borrow_mut() = value(values, *stored)?.clone();
+                return Ok(());
+            }
+            MirInstructionKind::CaptureStore {
+                capture,
+                value: stored,
+                ..
+            } => {
+                let environment = self
+                    .active_captures
+                    .as_ref()
+                    .ok_or(ExecutionError::InvalidControlFlow)?
+                    .clone();
+                let slot = capture.raw() as usize;
+                let stored = value(values, *stored)?.clone();
+                let mut captures = environment.borrow_mut();
+                let target = captures
+                    .get_mut(slot)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                *target = stored;
+                return Ok(());
+            }
             MirInstructionKind::GcSafePoint {
                 roots, stack_map, ..
             } => {
@@ -883,6 +944,107 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .ok_or(ExecutionError::InvalidControlFlow)?;
                 single_result(self.execute_method_call(implementation, arguments, values)?)
             }
+            MirInstructionKind::CaptureCellAllocate {
+                initial,
+                object_map,
+                ..
+            } => {
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map.clone(),
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                let cell = Rc::new(RefCell::new(value(values, *initial)?.clone()));
+                let symbol = self.fresh_private_symbol();
+                self.private_values.insert(symbol, PrivateValue::Cell(cell));
+                Ok(RuntimeValue::managed(MirValue::Function(symbol), reference))
+            }
+            MirInstructionKind::CaptureCellLoad { cell } => {
+                let MirValue::Function(symbol) = value(values, *cell)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let Some(PrivateValue::Cell(cell)) = self.private_values.get(&symbol) else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                Ok(cell.borrow().clone())
+            }
+            MirInstructionKind::CaptureLoad { capture, .. } => {
+                let environment = self
+                    .active_captures
+                    .as_ref()
+                    .ok_or(ExecutionError::InvalidControlFlow)?
+                    .borrow();
+                let captured = environment
+                    .get(capture.raw() as usize)
+                    .ok_or(ExecutionError::InvalidControlFlow)?
+                    .clone();
+                let MirValue::Function(symbol) = captured.visible else {
+                    return Ok(Some(captured));
+                };
+                match self.private_values.get(&symbol) {
+                    Some(PrivateValue::Cell(cell)) => Ok(cell.borrow().clone()),
+                    Some(PrivateValue::Closure { .. }) => Ok(captured),
+                    None => Err(ExecutionError::TypeMismatch),
+                }
+            }
+            MirInstructionKind::CaptureCellReference { capture, .. } => {
+                let captures = self
+                    .active_captures
+                    .as_ref()
+                    .ok_or(ExecutionError::InvalidControlFlow)?
+                    .borrow();
+                captures
+                    .get(capture.raw() as usize)
+                    .cloned()
+                    .ok_or(ExecutionError::InvalidControlFlow)
+            }
+            MirInstructionKind::ClosureEnvironmentAllocate {
+                function,
+                captures,
+                object_map,
+                ..
+            } => {
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map.clone(),
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                let self_slots: Vec<_> = captures
+                    .iter()
+                    .filter(|capture| capture.self_reference())
+                    .map(|capture| capture.slot() as usize)
+                    .collect();
+                let environment_values = captures
+                    .iter()
+                    .map(|capture| {
+                        if capture.self_reference() {
+                            Ok(RuntimeValue::visible(MirValue::Nil))
+                        } else {
+                            value(values, capture.value()).cloned()
+                        }
+                    })
+                    .collect::<Result<Vec<_>, ExecutionError>>()?;
+                let symbol = self.fresh_private_symbol();
+                let environment = Rc::new(RefCell::new(environment_values));
+                self.private_values.insert(
+                    symbol,
+                    PrivateValue::Closure {
+                        function: *function,
+                        captures: environment.clone(),
+                    },
+                );
+                let closure = RuntimeValue::managed(MirValue::Function(symbol), reference);
+                for slot in self_slots {
+                    environment.borrow_mut()[slot] = closure.clone();
+                }
+                Ok(closure)
+            }
             MirInstructionKind::RecordMake { record, fields } => {
                 Ok(RuntimeValue::visible(MirValue::Record {
                     record: *record,
@@ -998,7 +1160,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         };
         let arguments = evaluated_arguments(arguments, values)?;
         let closure = match self.private_values.get(function) {
-            Some(PrivateValue::Closure { function, captures }) => Some((*function, captures.clone())),
+            Some(PrivateValue::Closure { function, captures }) => {
+                Some((*function, captures.clone()))
+            }
             _ => None,
         };
         if let Some((function, captures)) = closure {

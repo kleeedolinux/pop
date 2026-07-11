@@ -906,6 +906,7 @@ pub struct MirClosureCapture {
     binding: BindingId,
     slot: u32,
     value: ValueId,
+    self_reference: bool,
     type_id: TypeId,
     mode: MirCaptureMode,
 }
@@ -926,6 +927,10 @@ impl MirClosureCapture {
     #[must_use]
     pub const fn value(self) -> ValueId {
         self.value
+    }
+    #[must_use]
+    pub const fn self_reference(self) -> bool {
+        self.self_reference
     }
     #[must_use]
     pub const fn type_id(self) -> TypeId {
@@ -2125,17 +2130,27 @@ impl<'hir> FunctionBuilder<'hir> {
             .iter()
             .enumerate()
             .map(|(slot, capture)| {
-                let value = self.lower_capture_source(
-                    capture.source(),
-                    capture.mode(),
-                    capture.type_id(),
-                    closure.span(),
+                let self_reference = matches!(
+                    (capture.source(), capture.mode()),
+                    (HirCaptureSource::Local(local), HirCaptureMode::Cell)
+                        if !self.local_cells.contains_key(&local)
                 );
+                let value = if self_reference {
+                    ValueId::from_raw(u32::MAX)
+                } else {
+                    self.lower_capture_source(
+                        capture.source(),
+                        capture.mode(),
+                        capture.type_id(),
+                        closure.span(),
+                    )
+                };
                 MirClosureCapture {
                     capture: capture.capture(),
                     binding: capture.binding(),
                     slot: u32::try_from(slot).unwrap_or(u32::MAX),
                     value,
+                    self_reference,
                     type_id: capture.type_id(),
                     mode: match capture.mode() {
                         HirCaptureMode::Value => MirCaptureMode::Value,
@@ -4723,6 +4738,7 @@ fn verify_callable_instruction(
                     != Some(&SemanticType::Function {
                         parameters: parameters.clone(),
                         results: results.clone(),
+                        effects: pop_types::EffectSummary::empty(),
                     })
             {
                 errors.push(MirVerificationError::InvalidInstructionType {
@@ -4771,6 +4787,7 @@ fn verify_indirect_call(
     let Some(SemanticType::Function {
         parameters,
         results,
+        ..
     }) = arena.get(callee_type).cloned()
     else {
         errors.push(MirVerificationError::InvalidCallableOperand {
@@ -5116,9 +5133,11 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CaptureCellLoad { cell: base } => vec![*base],
         MirInstructionKind::CaptureCellAllocate { initial, .. } => vec![*initial],
         MirInstructionKind::CaptureCellStore { cell, value } => vec![*cell, *value],
-        MirInstructionKind::ClosureEnvironmentAllocate { captures, .. } => {
-            captures.iter().map(|capture| capture.value).collect()
-        }
+        MirInstructionKind::ClosureEnvironmentAllocate { captures, .. } => captures
+            .iter()
+            .filter(|capture| !capture.self_reference)
+            .map(|capture| capture.value)
+            .collect(),
         MirInstructionKind::CaptureStore { value, .. } => vec![*value],
         MirInstructionKind::CaptureLoad { .. }
         | MirInstructionKind::CaptureCellReference { .. } => Vec::new(),
@@ -5711,15 +5730,26 @@ fn dump_callable_or_schema_instruction(
                     MirCaptureMode::Value => "value",
                     MirCaptureMode::Cell => "cell",
                 };
-                let _ = write!(
-                    output,
-                    "cap{}:bind{}@{}=v{}:t{}:{mode}",
-                    capture.capture.raw(),
-                    capture.binding.raw(),
-                    capture.slot,
-                    capture.value.raw(),
-                    capture.type_id.raw()
-                );
+                if capture.self_reference {
+                    let _ = write!(
+                        output,
+                        "cap{}:bind{}@{}=self:t{}:{mode}",
+                        capture.capture.raw(),
+                        capture.binding.raw(),
+                        capture.slot,
+                        capture.type_id.raw()
+                    );
+                } else {
+                    let _ = write!(
+                        output,
+                        "cap{}:bind{}@{}=v{}:t{}:{mode}",
+                        capture.capture.raw(),
+                        capture.binding.raw(),
+                        capture.slot,
+                        capture.value.raw(),
+                        capture.type_id.raw()
+                    );
+                }
             }
             output.push(']');
         }

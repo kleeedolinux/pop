@@ -211,6 +211,7 @@ pub enum SemanticType {
     Function {
         parameters: Vec<TypeId>,
         results: Vec<TypeId>,
+        effects: EffectSummary,
     },
     Record(Vec<(String, TypeId)>),
     TaggedUnion {
@@ -243,6 +244,53 @@ pub enum SemanticType {
     TypeParameter(ParameterId),
     Opaque(OpaqueId),
     Error,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EffectSummary(u16);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Effect {
+    Allocates,
+    WritesManagedReference,
+    MayTrap,
+    MayUnwind,
+    Suspends,
+    UnsafeMemory,
+    ForeignFunction,
+    AmbientIo,
+    CompilerQuery,
+    GcSafePoint,
+    Roots,
+}
+
+impl Effect {
+    const fn bit(self) -> u16 {
+        1_u16 << self as u16
+    }
+}
+
+impl EffectSummary {
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+    #[must_use]
+    pub const fn with(self, effect: Effect) -> Self {
+        Self(self.0 | effect.bit())
+    }
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+    #[must_use]
+    pub const fn is_subset_of(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+    #[must_use]
+    pub const fn contains(self, effect: Effect) -> bool {
+        self.0 & effect.bit() != 0
+    }
 }
 
 impl SemanticType {

@@ -329,7 +329,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut diagnostics,
     );
     declarations = refresh_declarations(declarations, &resolver);
-    let (hir_functions, hir_methods) = build_runtime_hir(
+    let (hir_functions, hir_methods, hir_build_failed) = build_runtime_hir(
         input.bubble,
         &mut functions,
         &methods,
@@ -338,7 +338,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut diagnostics,
     );
     sort_diagnostics(&mut diagnostics);
-    let hir = if diagnostics.is_empty() {
+    let hir = if diagnostics.is_empty() && !hir_build_failed {
         HirBubble::new_with_declarations_and_methods(
             input.bubble,
             input.namespace,
@@ -472,7 +472,7 @@ fn build_runtime_hir(
     signatures: &BTreeMap<SymbolId, ResolvedFunctionSignature>,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (Vec<HirFunction>, Vec<HirMethod>) {
+) -> (Vec<HirFunction>, Vec<HirMethod>, bool) {
     let known_functions: BTreeSet<_> = functions
         .iter()
         .filter(|function| !function.is_compile_time)
@@ -482,6 +482,7 @@ fn build_runtime_hir(
         methods.iter().map(|work| work.method.method()).collect();
     let interfaces: Vec<_> = resolver.interface_definitions().cloned().collect();
     let mut hir_functions = Vec::new();
+    let mut hir_build_failed = false;
     for function in functions {
         if function.is_compile_time {
             continue;
@@ -492,7 +493,7 @@ fn build_runtime_hir(
         let Some(body) = typed.body() else {
             continue;
         };
-        if let Ok(function) = build_hir_function_with_known_callables_and_attributes(
+        match build_hir_function_with_known_callables_and_attributes(
             HirFunctionContext::new(function.module, bubble, function.visibility),
             &function.signature,
             body,
@@ -500,7 +501,8 @@ fn build_runtime_hir(
             HirKnownCallables::new(&known_functions, &known_methods).with_interfaces(&interfaces),
             &function.attributes,
         ) {
-            hir_functions.push(function);
+            Ok(function) => hir_functions.push(function),
+            Err(_) => hir_build_failed = true,
         }
     }
     let mut hir_methods = Vec::new();
@@ -514,7 +516,7 @@ fn build_runtime_hir(
         let definition = resolver
             .class_definition(method.definition.symbol())
             .unwrap_or(&method.definition);
-        if let Ok(lowered) = build_hir_method(
+        match build_hir_method(
             HirFunctionContext::new(method.module, bubble, method.method.visibility()),
             definition,
             &method.method,
@@ -523,10 +525,11 @@ fn build_runtime_hir(
             resolver.arena(),
             HirKnownCallables::new(&known_functions, &known_methods).with_interfaces(&interfaces),
         ) {
-            hir_methods.push(lowered);
+            Ok(lowered) => hir_methods.push(lowered),
+            Err(_) => hir_build_failed = true,
         }
     }
-    (hir_functions, hir_methods)
+    (hir_functions, hir_methods, hir_build_failed)
 }
 
 fn define_declarations(
