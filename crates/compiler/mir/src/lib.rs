@@ -10,8 +10,9 @@ use std::fmt::Write;
 
 use pop_foundation::{
     BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
-    InterfaceMethodId, LocalId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, SymbolId,
-    StandardFunctionId, TextRange, TextSize, TypeId, UnionCaseId, ValueId, ValueParameterId,
+    InterfaceMethodId, LocalId, MethodId, NamespaceId, NestedFunctionId, SourceSpan,
+    StandardFunctionId, SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    ValueParameterId,
 };
 use pop_hir::{
     HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure, HirDeclaration,
@@ -4780,14 +4781,7 @@ fn verify_callable_instruction(
         } => {
             if function.raw() == 0 {
                 if let Some(int) = arena.source_type("Int") {
-                    verify_call_signature(
-                        instruction,
-                        arguments,
-                        &[int],
-                        &[],
-                        values,
-                        errors,
-                    );
+                    verify_call_signature(instruction, arguments, &[int], &[], values, errors);
                 }
             } else {
                 errors.push(MirVerificationError::UnknownStandardFunction(*function));

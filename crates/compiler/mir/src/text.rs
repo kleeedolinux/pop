@@ -3,8 +3,8 @@ use std::fmt;
 
 use pop_foundation::{
     BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
-    InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, SymbolId, TextRange,
-    StandardFunctionId, TextSize, TypeId, UnionCaseId, ValueId,
+    InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
+    SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -578,7 +578,8 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
         let kind = parse_operation(operation, line)?;
         if !matches!(
             kind,
-            MirInstructionKind::CallDirect { .. }
+            MirInstructionKind::CallStandard { .. }
+                | MirInstructionKind::CallDirect { .. }
                 | MirInstructionKind::CallDirectMethod { .. }
                 | MirInstructionKind::CallInterface { .. }
                 | MirInstructionKind::CallIndirect { .. }

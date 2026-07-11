@@ -4377,10 +4377,12 @@ impl Verifier<'_> {
         let signature = match dispatch {
             HirCallDispatch::Standard { function } => {
                 if function.raw() == 0 {
-                    self.arena.source_type("Int").map(|int| HirCallableSignature {
-                        parameters: vec![int],
-                        results: Vec::new(),
-                    })
+                    self.arena
+                        .source_type("Int")
+                        .map(|int| HirCallableSignature {
+                            parameters: vec![int],
+                            results: Vec::new(),
+                        })
                 } else {
                     None
                 }

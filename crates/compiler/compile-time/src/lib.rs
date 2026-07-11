@@ -923,9 +923,7 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::InterfaceConversion
         }
         TypedExpressionKind::IndirectCall { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
-        TypedExpressionKind::StandardCall { .. } => {
-            UnsupportedCompileTimeConstruct::ResultlessCall
-        }
+        TypedExpressionKind::StandardCall { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::AttributeQuery { .. }
         | TypedExpressionKind::HasAttributeQuery { .. }

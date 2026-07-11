@@ -42,7 +42,6 @@ impl LlvmLoweringOptions {
         self.entry_point = Some(symbol);
         self
     }
-
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

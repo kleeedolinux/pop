@@ -60,6 +60,25 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
 }
 
 #[test]
+fn standard_print_executes_by_trusted_identity_and_returns_no_value() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function run(): Int\n\
+             print(42)\n\
+             return 0\n\
+         end\n",
+    );
+    assert!(mir.dump().contains("callStandard sf0"));
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified MIR")
+            .call(mir.functions()[0].symbol(), &[])
+            .expect("standard print call"),
+        vec![int(0)]
+    );
+}
+
+#[test]
 fn declared_functions_flow_through_typed_values_and_indirect_calls() {
     let (mir, types) = executable_source(
         "namespace Main\n\

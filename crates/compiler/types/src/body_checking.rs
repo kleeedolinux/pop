@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
 use pop_foundation::{
     AttributeId, BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId,
-    InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan, SymbolId,
-    StandardFunctionId, TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
+    InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan,
+    StandardFunctionId, SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -2055,16 +2055,15 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .iter()
             .map(|name| self.resolver.arena().source_type(name))
             .collect::<Option<Vec<_>>>()?;
-        let typed_arguments = arguments
-            .iter()
-            .zip(parameter_types)
-            .map(|(argument, expected)| {
-                self.check_expression_expected(
-                    argument,
-                    Some(ExpectedExpressionType::plain(expected)),
-                )
-            })
-            .collect::<Option<Vec<_>>>()?;
+        let mut typed_arguments = Vec::with_capacity(arguments.len());
+        for (argument, expected) in arguments.iter().zip(parameter_types) {
+            let typed = self.check_expression_expected(
+                argument,
+                Some(ExpectedExpressionType::plain(expected)),
+            )?;
+            self.require_same_type(expected, typed.type_id(), typed.span(), span);
+            typed_arguments.push(typed);
+        }
         Some(CheckedCall {
             call: TypedCall {
                 dispatch: TypedCallDispatch::Standard { function },

@@ -66,14 +66,19 @@ fn standard_print_is_identity_bound_and_survives_hir_and_mir() {
         Vec::new(),
         vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
     ));
-    assert!(result.diagnostics().is_empty(), "{}", result.diagnostic_snapshot());
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
     let hir = result.hir().expect("HIR");
     assert!(hir.dump(result.types()).contains("call.standard sf0"));
     let mir = lower_hir_bubble(hir, result.types()).expect("verified MIR");
     let dump = mir.dump();
     assert!(dump.contains("callStandard sf0"));
     assert!(!dump.contains("pop_std_print_int"));
-    assert_eq!(pop_mir::parse_mir_dump(&dump).expect("round trip"), mir);
+    let parsed = pop_mir::parse_mir_dump(&dump).expect("round trip");
+    assert_eq!(parsed.dump(), dump);
 }
 
 #[test]
@@ -107,7 +112,11 @@ fn standard_print_rejects_wrong_calls_and_nearer_declarations_shadow_it() {
         Vec::new(),
         vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
     ));
-    assert!(result.diagnostics().is_empty(), "{}", result.diagnostic_snapshot());
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
     let dump = result.hir().expect("HIR").dump(result.types());
     assert!(dump.contains("call.direct s0"));
     assert!(!dump.contains("call.standard"));

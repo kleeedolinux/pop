@@ -113,7 +113,8 @@ Values:        const, tupleMake, tupleGet, recordMake, fieldGet, fieldSet
 Arithmetic:    checkedAdd, wrappingAdd, floatAdd, compare, convert
 Memory:        allocateObject, allocateClosureEnvironment, allocateArray,
                load, store, captureLoad, captureStore, retainRoot, releaseRoot
-Calls:         callDirect, callVirtual, callInterface, callIndirect
+Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
+               callInterface, callIndirect
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
 Collections:   arrayGet, arraySet, tableGet, tableSet
 Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume

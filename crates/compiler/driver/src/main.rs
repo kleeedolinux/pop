@@ -277,8 +277,7 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
         &mir,
         &types,
         &target,
-        LlvmLoweringOptions::default()
-            .with_entry_point(entry.symbol()),
+        LlvmLoweringOptions::default().with_entry_point(entry.symbol()),
     ) {
         Ok(module) => module,
         Err(error) => {

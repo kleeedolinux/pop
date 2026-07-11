@@ -441,7 +441,11 @@ fn parse_standard_functions()
         }
         let fields: Vec<_> = line.split('\t').collect();
         if fields.len() != 7 {
-            return Err(error("standard function", index + 3, "expected seven fields"));
+            return Err(error(
+                "standard function",
+                index + 3,
+                "expected seven fields",
+            ));
         }
         let id = fields[0]
             .parse()
@@ -457,7 +461,13 @@ fn parse_standard_functions()
             prelude: match fields[6] {
                 "true" => true,
                 "false" => false,
-                _ => return Err(error("standard function", index + 3, "invalid prelude flag")),
+                _ => {
+                    return Err(error(
+                        "standard function",
+                        index + 3,
+                        "invalid prelude flag",
+                    ));
+                }
             },
         });
     }
