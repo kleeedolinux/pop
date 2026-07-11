@@ -24,6 +24,8 @@ convenience does not override it. A cross-cutting semantic change requires an
 accepted Architecture Decision Record, synchronized documentation, and
 conformance tests.
 
+Pop Lang is released under the [MIT License](LICENSE).
+
 ## A small example
 
 Pop Lang preserves a familiar Luau shape while making data and visibility
