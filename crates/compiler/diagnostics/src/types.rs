@@ -285,10 +285,7 @@ pub fn empty_interface(span: SourceSpan, name: impl Into<String>) -> Diagnostic 
 }
 
 #[must_use]
-pub fn invalid_interface_implementation(
-    span: SourceSpan,
-    target: impl Into<String>,
-) -> Diagnostic {
+pub fn invalid_interface_implementation(span: SourceSpan, target: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::new("POP2017"),
         DiagnosticSeverity::Error,
@@ -346,7 +343,7 @@ pub fn incompatible_interface_method(
 #[must_use]
 pub fn missing_match_cases(
     span: SourceSpan,
-    cases: Vec<&str>,
+    cases: &[&str],
     insertion: SourceSpan,
     replacement: impl Into<String>,
 ) -> Diagnostic {

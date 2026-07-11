@@ -29,11 +29,18 @@ public attribute Serializable(version: UInt32 = 1)
 `AttributeTarget` is a closed compiler-owned enum covering each supported Item
 kind. Omitted `@AttributeUsage` means one occurrence on namespace declarations
 only; it never silently means unrestricted attachment. A validator is an
-already-resolved `@CompileTime` function reference with a compiler-defined typed
-signature. Runtime retention remains an explicit trusted `@RetainMetadata`
-capability and is never implied by usage.
+already-resolved `@CompileTime` function reference. Its parameters must exactly
+match the attribute constructor parameters in declaration order and it must
+return exactly one `Boolean`. The compiler invokes it with the attachment's
+canonical arguments after defaults and named arguments have been normalized;
+`false` rejects that attachment. Version one passes no target context or
+enumeration handle to a validator. Runtime retention remains an explicit
+trusted `@RetainMetadata` capability and is never implied by usage.
 
 Attachments may precede declarations and class/record/union/interface members.
+Because the namespace is the file-scoped header, namespace-targeted attachments
+precede the `namespace` line (and follow any documentation for that namespace);
+attachments after the namespace line attach to the following Item as usual.
 They preserve source order. A non-repeatable duplicate, wrong target,
 inaccessible attribute, invalid argument, or failed validator is an error.
 Unrecognized attachments are never silently discarded.
@@ -88,6 +95,10 @@ Rejected by ADR 0004 and the no-string-mixin/reflection boundary.
 
 - every target kind, repeatability, source order, validation, visibility, and
   retention boundary;
+- namespace attachments before the file header and declaration attachments
+  after it, including an ambiguity regression;
+- validator signature mismatch, normalized-argument invocation, `false`
+  rejection, failed evaluation, and unmarked-validator negatives;
 - record/array/enum/union/reference value canonicalization and structural
   verifier negatives;
 - non-repeatable/repeatable typed query results and inaccessible-query errors;

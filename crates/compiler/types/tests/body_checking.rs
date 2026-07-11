@@ -402,14 +402,22 @@ fn recursive_local_function_and_nested_capture_propagation_are_resolved_by_ident
     let TypedExpressionKind::Closure(outer) = initializer.kind() else {
         panic!("outer closure");
     };
-    assert!(outer.captures().iter().any(|capture| capture.mode() == CaptureMode::Cell));
+    assert!(
+        outer
+            .captures()
+            .iter()
+            .any(|capture| capture.mode() == CaptureMode::Cell)
+    );
     let TypedStatementKind::Local { initializer, .. } = outer.body().statements()[0].kind() else {
         panic!("inner closure");
     };
     let TypedExpressionKind::Closure(inner) = initializer.kind() else {
         panic!("inner closure");
     };
-    assert!(inner.captures().len() >= 2, "recursive function and seed propagate");
+    assert!(
+        inner.captures().len() >= 2,
+        "recursive function and seed propagate"
+    );
 }
 
 #[test]

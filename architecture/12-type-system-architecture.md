@@ -214,6 +214,13 @@ The user-facing notation can remain minimal. The compiler may infer effect
 summaries for ordinary functions, while explicit attributes state stronger
 contracts such as required compile-time eligibility.
 
+The bootstrap compiler uses no source effect punctuation. It infers the least
+fixed point over typed local operations and resolved direct-call edges,
+including recursive strongly connected components. Calls through function
+values consume the closed summary stored in the function type; they never
+substitute an unknown or all-effects fallback. Interface implementations cannot
+widen the exact member summary they implement.
+
 The canonical initial summary is closed and records allocation, managed
 mutation, trap, panic/unwind, suspension, unsafe memory, FFI, ambient I/O, and
 compiler-query capabilities. There is no unknown/dynamic effect. At each call,

@@ -188,46 +188,78 @@ pub fn parse_attribute_use(
     if node.kind() != NodeKind::AttributeUse {
         return Err(parser.error("attribute use"));
     }
-    parser.expect(TokenKind::At, "`@`")?;
-    let first = parser.expect(TokenKind::Identifier, "attribute name")?;
-    let mut path = vec![first.text(source).to_owned()];
-    while parser.consume(TokenKind::Dot).is_some() {
-        let component = parser.expect(TokenKind::Identifier, "qualified attribute name")?;
-        path.push(component.text(source).to_owned());
-    }
-    let mut arguments = Vec::new();
-    if parser.consume(TokenKind::LeftParenthesis).is_some() {
-        while parser.current_kind() != Some(TokenKind::RightParenthesis) {
-            let start = parser.current_range().start();
-            let name = if parser.current_kind() == Some(TokenKind::Identifier)
-                && parser.peek_kind() == Some(TokenKind::Equal)
-            {
-                let name = parser.expect(TokenKind::Identifier, "argument name")?;
-                parser.expect(TokenKind::Equal, "`=`")?;
-                Some(name.text(source).to_owned())
-            } else {
-                None
-            };
-            let value = parser.parse_expression()?;
-            arguments.push(AttributeArgumentSyntax {
-                name,
-                span: SourceSpan::new(
-                    source.id(),
-                    ordered_range(start, value.span().range().end()),
-                ),
-                value,
-            });
-            if parser.consume(TokenKind::Comma).is_none() {
-                break;
-            }
+    parser.parse_use()
+}
+
+pub(crate) fn parse_attribute_use_prefix(
+    source: &SourceFile,
+    node: &SyntaxNode,
+    tokens: &[Token],
+    position: &mut usize,
+) -> Result<AttributeUseSyntax, AttributeSyntaxError> {
+    let mut parser = AttributeParser {
+        source,
+        file: source.id(),
+        node,
+        tokens: tokens.to_vec(),
+        position: *position,
+    };
+    let parsed = parser.parse_use()?;
+    *position = parser.position;
+    Ok(parsed)
+}
+
+impl AttributeParser<'_> {
+    fn parse_use(&mut self) -> Result<AttributeUseSyntax, AttributeSyntaxError> {
+        let start = self.expect(TokenKind::At, "`@`")?.range().start();
+        let first = self.expect(TokenKind::Identifier, "attribute name")?;
+        let mut path = vec![first.text(self.source).to_owned()];
+        while self.consume(TokenKind::Dot).is_some() {
+            let component = self.expect(TokenKind::Identifier, "qualified attribute name")?;
+            path.push(component.text(self.source).to_owned());
         }
-        parser.expect(TokenKind::RightParenthesis, "`)`")?;
+        let mut arguments = Vec::new();
+        if self.consume(TokenKind::LeftParenthesis).is_some() {
+            while self.current_kind() != Some(TokenKind::RightParenthesis) {
+                let start = self.current_range().start();
+                let name = if self.current_kind() == Some(TokenKind::Identifier)
+                    && self.peek_kind() == Some(TokenKind::Equal)
+                {
+                    let name = self.expect(TokenKind::Identifier, "argument name")?;
+                    self.expect(TokenKind::Equal, "`=`")?;
+                    Some(name.text(self.source).to_owned())
+                } else {
+                    None
+                };
+                let value = self.parse_expression()?;
+                arguments.push(AttributeArgumentSyntax {
+                    name,
+                    span: SourceSpan::new(
+                        self.source.id(),
+                        ordered_range(start, value.span().range().end()),
+                    ),
+                    value,
+                });
+                if self.consume(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RightParenthesis, "`)`")?;
+        }
+        let end = self
+            .tokens
+            .get(self.position.saturating_sub(1))
+            .map_or(start, |token| token.range().end());
+        let parsed = AttributeUseSyntax {
+            path,
+            arguments,
+            span: SourceSpan::new(self.source.id(), ordered_range(start, end)),
+        };
+        if self.current_kind() == Some(TokenKind::Newline) {
+            self.position += 1;
+        }
+        Ok(parsed)
     }
-    Ok(AttributeUseSyntax {
-        path,
-        arguments,
-        span: SourceSpan::new(source.id(), node.range()),
-    })
 }
 
 struct AttributeParser<'source> {

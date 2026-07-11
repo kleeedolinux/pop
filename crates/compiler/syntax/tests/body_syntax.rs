@@ -10,7 +10,8 @@ fn parse_body(text: &str) -> pop_syntax::FunctionBodySyntax {
     let syntax = parse_file(&source);
     assert!(
         syntax.diagnostics().is_empty(),
-        "structural syntax diagnostics"
+        "structural syntax diagnostics: {}",
+        syntax.diagnostic_snapshot()
     );
     let function = syntax
         .root()
@@ -173,6 +174,38 @@ fn calls_respect_arithmetic_precedence() {
             ..
         }
     ));
+}
+
+#[test]
+fn parses_typed_attribute_queries_without_string_names() {
+    let body = parse_body(
+        "namespace Example\n\
+         public function inspect(): Boolean\n\
+             local present = hasAttribute<<Serializable>>(User)\n\
+             local value = attribute<<Serializable>>(User)\n\
+             return present and value ~= nil\n\
+         end\n",
+    );
+
+    for statement in &body.statements()[..2] {
+        let StatementSyntaxKind::Local { initializer, .. } = statement.kind() else {
+            panic!("query local");
+        };
+        let ExpressionSyntaxKind::GenericCall {
+            callee,
+            type_arguments,
+            arguments,
+        } = initializer.kind()
+        else {
+            panic!("typed generic call");
+        };
+        assert!(matches!(callee.kind(), ExpressionSyntaxKind::Name(path) if path.len() == 1));
+        assert_eq!(type_arguments.len(), 1);
+        assert_eq!(arguments.len(), 1);
+        assert!(
+            matches!(arguments[0].kind(), ExpressionSyntaxKind::Name(path) if path == &["User"])
+        );
+    }
 }
 
 #[test]

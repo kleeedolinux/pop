@@ -4,14 +4,16 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    AttributeId, FieldId, FileId, FunctionId, LocalId, SourceSpan, SymbolId, TextRange, TextSize,
-    TypeId, UnionCaseId,
+    AttributeId, FieldId, FileId, FunctionId, LocalId, ModuleId, SourceSpan, SymbolId, TextRange,
+    TextSize, TypeId, UnionCaseId,
 };
 use pop_query::{BudgetError, BudgetTracker, QueryBudget};
 use pop_types::{
-    FloatKind, FloatValue, IntegerValue, NumericError, PrimitiveType, ResolvedFunctionSignature,
-    SemanticType, TypeArena, TypedBinaryOperator, TypedBody, TypedCallDispatch, TypedExpression,
-    TypedExpressionKind, TypedStatement, TypedStatementKind, TypedUnaryOperator,
+    AttributeConstant, AttributeQueryIndex, AttributeQuerySubject, AttributeQueryValue, FloatKind,
+    FloatValue, IntegerValue, NumericError, PrimitiveType, ResolvedAttribute,
+    ResolvedFunctionSignature, SemanticType, TypeArena, TypedBinaryOperator, TypedBody,
+    TypedCallDispatch, TypedExpression, TypedExpressionKind, TypedStatement, TypedStatementKind,
+    TypedUnaryOperator,
 };
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -23,6 +25,10 @@ pub enum CompileTimeValue {
     String(String),
     Tuple(Vec<Self>),
     Array(Vec<Self>),
+    Attribute {
+        attribute: AttributeId,
+        arguments: Vec<Self>,
+    },
     Record(Vec<(FieldId, Self)>),
     Union {
         union: SymbolId,
@@ -312,6 +318,27 @@ impl CompileTimeExpression {
     }
 
     #[must_use]
+    pub fn attribute_query(
+        module: ModuleId,
+        attribute: AttributeId,
+        subject: AttributeQuerySubject,
+        has_only: bool,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            kind: CompileTimeExpressionKind::AttributeQuery {
+                module,
+                attribute,
+                subject,
+                has_only,
+            },
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
     pub const fn kind(&self) -> &CompileTimeExpressionKind {
         &self.kind
     }
@@ -356,6 +383,12 @@ pub enum CompileTimeExpressionKind {
     Call {
         function: FunctionId,
         arguments: Vec<CompileTimeExpression>,
+    },
+    AttributeQuery {
+        module: ModuleId,
+        attribute: AttributeId,
+        subject: AttributeQuerySubject,
+        has_only: bool,
     },
 }
 
@@ -416,6 +449,9 @@ pub enum UnsupportedCompileTimeConstruct {
     Mutation,
     ResultlessCall,
     MethodCall,
+    InterfaceDispatch,
+    InterfaceConversion,
+    AttributeQuery,
     IndirectCall,
     FunctionReference,
     FieldAccess,
@@ -692,6 +728,20 @@ impl TypedCompileTimeLowerer<'_> {
             TypedExpressionKind::Local(local) => {
                 Ok(CompileTimeExpression::local(*local, type_id, span))
             }
+            TypedExpressionKind::AttributeQuery {
+                module,
+                attribute,
+                subject,
+            } => Ok(CompileTimeExpression::attribute_query(
+                *module, *attribute, *subject, false, type_id, span,
+            )),
+            TypedExpressionKind::HasAttributeQuery {
+                module,
+                attribute,
+                subject,
+            } => Ok(CompileTimeExpression::attribute_query(
+                *module, *attribute, *subject, true, type_id, span,
+            )),
             unsupported => Err(unsupported_expression(
                 expression,
                 unsupported_compile_time_construct(unsupported),
@@ -821,6 +871,9 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Direct { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
             TypedCallDispatch::DirectMethod { .. } => UnsupportedCompileTimeConstruct::MethodCall,
+            TypedCallDispatch::InterfaceMethod { .. } => {
+                UnsupportedCompileTimeConstruct::InterfaceDispatch
+            }
             TypedCallDispatch::Indirect { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
         },
         TypedStatementKind::Local { .. }
@@ -862,8 +915,16 @@ fn unsupported_compile_time_construct(
         TypedExpressionKind::Table(_) => UnsupportedCompileTimeConstruct::Table,
         TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
+        TypedExpressionKind::InterfaceMethodCall { .. } => {
+            UnsupportedCompileTimeConstruct::InterfaceDispatch
+        }
+        TypedExpressionKind::InterfaceUpcast { .. } => {
+            UnsupportedCompileTimeConstruct::InterfaceConversion
+        }
         TypedExpressionKind::IndirectCall { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
         TypedExpressionKind::Integer(_)
+        | TypedExpressionKind::AttributeQuery { .. }
+        | TypedExpressionKind::HasAttributeQuery { .. }
         | TypedExpressionKind::Float(_)
         | TypedExpressionKind::String(_)
         | TypedExpressionKind::Boolean(_)
@@ -891,6 +952,7 @@ pub struct CompileTimeProgram {
     functions: Vec<CompileTimeFunction>,
     types: TypeArena,
     metadata: CompileTimeTypeMetadata,
+    attribute_queries: Option<AttributeQueryIndex>,
 }
 
 impl CompileTimeProgram {
@@ -942,7 +1004,7 @@ impl CompileTimeProgram {
                 .copied()
                 .chain(std::iter::once(function.result()))
             {
-                if !types.is_valid_hir_type(type_id) {
+                if !types.is_valid_compile_time_type(type_id) {
                     return Err(ProgramError::InvalidType(type_id));
                 }
             }
@@ -964,7 +1026,14 @@ impl CompileTimeProgram {
             functions,
             types: types.clone(),
             metadata,
+            attribute_queries: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_attribute_queries(mut self, queries: AttributeQueryIndex) -> Self {
+        self.attribute_queries = Some(queries);
+        self
     }
 
     #[must_use]
@@ -987,6 +1056,10 @@ impl CompileTimeProgram {
             .binary_search_by_key(&id, CompileTimeFunction::function)
             .ok()
             .map(|index| &self.functions[index])
+    }
+
+    const fn attribute_queries(&self) -> Option<&AttributeQueryIndex> {
+        self.attribute_queries.as_ref()
     }
 }
 
@@ -1107,6 +1180,19 @@ impl ExpressionVerifier<'_> {
                 function,
                 arguments,
             } => self.verify_call(*function, arguments, expression.type_id(), locals)?,
+            CompileTimeExpressionKind::AttributeQuery {
+                attribute,
+                has_only,
+                ..
+            } => {
+                if *has_only {
+                    require_type(boolean_type(self.types)?, expression.type_id())?;
+                } else if !type_contains_attribute(self.types, expression.type_id(), *attribute) {
+                    return Err(ProgramError::ValueTypeMismatch {
+                        expected: expression.type_id(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -1238,6 +1324,22 @@ fn value_matches_type(
         (CompileTimeValue::Array(values), Some(SemanticType::Array(element_type))) => values
             .iter()
             .all(|value| value_matches_type(value, *element_type, types, metadata)),
+        (
+            CompileTimeValue::Attribute {
+                attribute: value_attribute,
+                arguments,
+            },
+            Some(SemanticType::Attribute {
+                attribute,
+                parameters,
+            }),
+        ) => {
+            value_attribute == attribute
+                && arguments.len() == parameters.len()
+                && arguments.iter().zip(parameters).all(|(value, parameter)| {
+                    value_matches_type(value, *parameter, types, metadata)
+                })
+        }
         (CompileTimeValue::Record(values), Some(SemanticType::Record(semantic_fields))) => {
             let Some(fields) = metadata.record(type_id) else {
                 return false;
@@ -1291,6 +1393,45 @@ fn value_matches_type(
             .iter()
             .any(|member| value_matches_type(value, *member, types, metadata)),
         _ => false,
+    }
+}
+
+fn type_contains_attribute(types: &TypeArena, type_id: TypeId, attribute: AttributeId) -> bool {
+    match types.get(type_id) {
+        Some(SemanticType::Attribute {
+            attribute: found, ..
+        }) => *found == attribute,
+        Some(SemanticType::Array(element) | SemanticType::Optional(element)) => {
+            type_contains_attribute(types, *element, attribute)
+        }
+        Some(SemanticType::Union(members)) => members
+            .iter()
+            .any(|member| type_contains_attribute(types, *member, attribute)),
+        _ => false,
+    }
+}
+
+fn resolved_attribute_value(attribute: &ResolvedAttribute) -> CompileTimeValue {
+    CompileTimeValue::Attribute {
+        attribute: attribute.attribute(),
+        arguments: attribute
+            .arguments()
+            .iter()
+            .map(|argument| attribute_constant_value(argument.value()))
+            .collect(),
+    }
+}
+
+fn attribute_constant_value(value: &AttributeConstant) -> CompileTimeValue {
+    match value {
+        AttributeConstant::Nil => CompileTimeValue::Nil,
+        AttributeConstant::Boolean(value) => CompileTimeValue::Boolean(*value),
+        AttributeConstant::Integer(value) => CompileTimeValue::Integer(*value),
+        AttributeConstant::Float(value) => CompileTimeValue::Float(*value),
+        AttributeConstant::String(value) => CompileTimeValue::String(value.clone()),
+        AttributeConstant::Tuple(values) => {
+            CompileTimeValue::Tuple(values.iter().map(attribute_constant_value).collect())
+        }
     }
 }
 
@@ -2080,9 +2221,70 @@ impl<'program> CompileTimeInterpreter<'program> {
                 }
                 self.evaluate_call(*function, &values, expression.span())
             }
+            CompileTimeExpressionKind::AttributeQuery {
+                module,
+                attribute,
+                subject,
+                has_only,
+            } => self.evaluate_attribute_query(
+                *module,
+                *attribute,
+                *subject,
+                *has_only,
+                expression.span(),
+            ),
         }?;
         self.observe_live_value(&value, locals, expression.span())?;
         Ok(value)
+    }
+
+    fn evaluate_attribute_query(
+        &mut self,
+        module: ModuleId,
+        attribute: AttributeId,
+        subject: AttributeQuerySubject,
+        has_only: bool,
+        span: SourceSpan,
+    ) -> Result<CompileTimeValue, EvaluationFailure> {
+        self.dependencies
+            .insert(CompileTimeDependency::Attribute(attribute));
+        match subject {
+            AttributeQuerySubject::Symbol(symbol) => {
+                self.dependencies
+                    .insert(CompileTimeDependency::Symbol(symbol));
+            }
+            AttributeQuerySubject::Type(type_id) => self.record_type_dependency(type_id),
+        }
+        let Some(queries) = self.program.attribute_queries() else {
+            return Err(self.failure(
+                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                span,
+            ));
+        };
+        if has_only {
+            return queries
+                .has_attribute(module, subject, attribute)
+                .map(CompileTimeValue::Boolean)
+                .map_err(|_| {
+                    self.failure(
+                        EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                        span,
+                    )
+                });
+        }
+        let value = queries.attribute(module, subject, attribute).map_err(|_| {
+            self.failure(
+                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                span,
+            )
+        })?;
+        Ok(match value {
+            AttributeQueryValue::Optional(None) => CompileTimeValue::Nil,
+            AttributeQueryValue::Optional(Some(value)) => resolved_attribute_value(value),
+            AttributeQueryValue::ImmutableSequence(values) => {
+                CompileTimeValue::Array(values.iter().map(resolved_attribute_value).collect())
+            }
+        })
     }
 
     fn evaluate_constant(
@@ -2292,6 +2494,16 @@ impl<'program> CompileTimeInterpreter<'program> {
                 self.dependencies
                     .insert(CompileTimeDependency::Symbol(definition));
             }
+            SemanticType::Attribute {
+                attribute,
+                parameters,
+            } => {
+                self.dependencies
+                    .insert(CompileTimeDependency::Attribute(attribute));
+                for parameter in parameters {
+                    self.record_type_dependency(parameter);
+                }
+            }
             SemanticType::Array(element) | SemanticType::Optional(element) => {
                 self.record_type_dependency(element);
             }
@@ -2325,6 +2537,16 @@ impl<'program> CompileTimeInterpreter<'program> {
                     self.dependencies
                         .insert(CompileTimeDependency::Field(*field));
                     self.record_value_dependencies(value);
+                }
+            }
+            CompileTimeValue::Attribute {
+                attribute,
+                arguments,
+            } => {
+                self.dependencies
+                    .insert(CompileTimeDependency::Attribute(*attribute));
+                for argument in arguments {
+                    self.record_value_dependencies(argument);
                 }
             }
             CompileTimeValue::Union {
@@ -2566,7 +2788,8 @@ fn value_size(value: &CompileTimeValue) -> u64 {
             .iter()
             .map(|(_, value)| 4_u64.saturating_add(value_size(value)))
             .fold(0_u64, u64::saturating_add),
-        CompileTimeValue::Union { arguments, .. } => arguments
+        CompileTimeValue::Attribute { arguments, .. }
+        | CompileTimeValue::Union { arguments, .. } => arguments
             .iter()
             .map(value_size)
             .fold(8_u64, u64::saturating_add),
@@ -2583,7 +2806,8 @@ fn value_count(value: &CompileTimeValue) -> u64 {
             .iter()
             .map(|(_, value)| value_count(value))
             .fold(1_u64, u64::saturating_add),
-        CompileTimeValue::Union { arguments, .. } => arguments
+        CompileTimeValue::Attribute { arguments, .. }
+        | CompileTimeValue::Union { arguments, .. } => arguments
             .iter()
             .map(value_count)
             .fold(1_u64, u64::saturating_add),

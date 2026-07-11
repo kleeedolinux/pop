@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
 use pop_foundation::{
-    BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId, InterfaceMethodId, LocalId,
-    MethodId, ModuleId, NestedFunctionId, SourceSpan, SymbolId, TextRange, TextSize, TypeId,
-    UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId,
+    InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan, SymbolId,
+    TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -14,8 +14,8 @@ use pop_syntax::{
 };
 
 use crate::{
-    FloatKind, FloatValue, IntegerKind, IntegerValue, PrimitiveType, ResolvedFunctionSignature,
-    SemanticType, SignatureResolver,
+    AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, PrimitiveType,
+    ResolvedFunctionSignature, SemanticType, SignatureResolver,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +169,16 @@ pub enum TypedExpressionKind {
     String(String),
     Boolean(bool),
     Nil,
+    AttributeQuery {
+        module: ModuleId,
+        attribute: AttributeId,
+        subject: AttributeQuerySubject,
+    },
+    HasAttributeQuery {
+        module: ModuleId,
+        attribute: AttributeId,
+        subject: AttributeQuerySubject,
+    },
     Closure(TypedClosure),
     Local(LocalId),
     Parameter(ValueParameterId),
@@ -774,6 +784,25 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
     }
 
+    /// Type-checks a namespace constant initializer, inferring its type when
+    /// no explicit annotation was supplied.
+    #[must_use]
+    pub fn check_constant_expression(
+        mut self,
+        expression: &ExpressionSyntax,
+        expected: Option<TypeId>,
+    ) -> TypedExpressionResult {
+        let typed =
+            self.check_expression_expected(expression, expected.map(ExpectedExpressionType::plain));
+        if let (Some(expected), Some(typed)) = (expected, &typed) {
+            self.require_same_type(expected, typed.type_id(), typed.span(), expression.span());
+        }
+        TypedExpressionResult {
+            expression: self.diagnostics.is_empty().then_some(typed).flatten(),
+            diagnostics: self.diagnostics,
+        }
+    }
+
     fn check_statement(
         &mut self,
         signature: &ResolvedFunctionSignature,
@@ -1031,6 +1060,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         })
     }
 
+    #[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
     fn check_resolved_closure(
         &mut self,
         outer: &ResolvedFunctionSignature,
@@ -1219,6 +1249,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         typed
     }
 
+    #[allow(clippy::single_match_else, clippy::too_many_lines)]
     fn check_match(
         &mut self,
         signature: &ResolvedFunctionSignature,
@@ -1352,9 +1383,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 span.file(),
                 TextRange::empty(TextSize::from_u32(insert_offset)),
             );
+            let missing_names: Vec<_> = missing.iter().map(|case| case.name()).collect();
             self.diagnostics.push(type_diagnostics::missing_match_cases(
                 span,
-                missing.iter().map(|case| case.name()).collect::<Vec<_>>(),
+                &missing_names,
                 insertion,
                 replacement,
             ));
@@ -1491,7 +1523,136 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             ExpressionSyntaxKind::Call { callee, arguments } => {
                 self.check_call(callee, arguments, span)
             }
+            ExpressionSyntaxKind::GenericCall {
+                callee,
+                type_arguments,
+                arguments,
+            } => self.check_generic_call(callee, type_arguments, arguments, span),
         }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn check_generic_call(
+        &mut self,
+        callee: &ExpressionSyntax,
+        type_arguments: &[pop_syntax::TypeSyntax],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let ExpressionSyntaxKind::Name(path) = callee.kind() else {
+            self.diagnostics.push(resolution_diagnostics::unknown_name(
+                callee.span(),
+                "generic call target",
+            ));
+            return None;
+        };
+        let [query] = path.as_slice() else {
+            self.diagnostics.push(resolution_diagnostics::unknown_name(
+                callee.span(),
+                path.join("."),
+            ));
+            return None;
+        };
+        if !matches!(query.as_str(), "attribute" | "hasAttribute")
+            || type_arguments.len() != 1
+            || arguments.len() != 1
+        {
+            self.diagnostics
+                .push(resolution_diagnostics::unknown_name(callee.span(), query));
+            return None;
+        }
+        let pop_syntax::TypeSyntaxKind::Named {
+            path: attribute_path,
+            arguments: attribute_arguments,
+        } = type_arguments[0].kind()
+        else {
+            self.diagnostics.push(resolution_diagnostics::unknown_name(
+                type_arguments[0].span(),
+                "attribute type",
+            ));
+            return None;
+        };
+        if !attribute_arguments.is_empty() {
+            self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                type_arguments[0].span(),
+                attribute_path.join("."),
+                0,
+                attribute_arguments.len(),
+            ));
+            return None;
+        }
+        let attribute_symbol = self.resolver.database().resolve(
+            self.module,
+            &attribute_path.join("."),
+            SymbolSpace::Type,
+            type_arguments[0].span(),
+        );
+        self.diagnostics
+            .extend(attribute_symbol.diagnostics().iter().cloned());
+        let definition = attribute_symbol
+            .symbol()
+            .and_then(|symbol| self.resolver.attribute_definition(symbol))?
+            .clone();
+        let ExpressionSyntaxKind::Name(subject_path) = arguments[0].kind() else {
+            self.diagnostics.push(resolution_diagnostics::unknown_name(
+                arguments[0].span(),
+                "resolved attribute query subject",
+            ));
+            return None;
+        };
+        let subject_name = subject_path.join(".");
+        let type_resolution = self.resolver.database().resolve(
+            self.module,
+            &subject_name,
+            SymbolSpace::Type,
+            arguments[0].span(),
+        );
+        let subject = if let Some(symbol) = type_resolution.symbol() {
+            let type_id = self.resolver.declaration_type(symbol)?;
+            AttributeQuerySubject::Type(type_id)
+        } else {
+            let value_resolution = self.resolver.database().resolve(
+                self.module,
+                &subject_name,
+                SymbolSpace::Value,
+                arguments[0].span(),
+            );
+            self.diagnostics
+                .extend(value_resolution.diagnostics().iter().cloned());
+            AttributeQuerySubject::Symbol(value_resolution.symbol()?)
+        };
+        let boolean = self.resolver.arena().source_type("Boolean")?;
+        if query == "hasAttribute" {
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::HasAttributeQuery {
+                    module: self.module,
+                    attribute: definition.attribute(),
+                    subject,
+                },
+                type_id: boolean,
+                span,
+            });
+        }
+        let type_id = if definition.usage().is_repeatable() {
+            self.resolver
+                .arena_mut()
+                .intern(SemanticType::Array(definition.type_id()))
+                .ok()?
+        } else {
+            self.resolver
+                .arena_mut()
+                .optional(definition.type_id())
+                .ok()?
+        };
+        Some(TypedExpression {
+            kind: TypedExpressionKind::AttributeQuery {
+                module: self.module,
+                attribute: definition.attribute(),
+                subject,
+            },
+            type_id,
+            span,
+        })
     }
 
     fn numeric_literal_expression(
@@ -1906,13 +2067,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .push(type_diagnostics::unknown_record_field(span, method_name));
                 return None;
             };
-            return self.check_interface_method_invocation(
-                &interface,
-                &method,
-                receiver,
-                arguments,
-                span,
-            );
+            return self
+                .check_interface_method_invocation(&interface, &method, receiver, arguments, span);
         }
         let Some(definition) = self
             .resolver
@@ -2956,6 +3112,9 @@ fn finalize_call_captures(call: &mut TypedCall, written: &BTreeSet<BindingId>) {
                 finalize_expression_captures(receiver, written);
             }
         }
+        TypedCallDispatch::InterfaceMethod { receiver, .. } => {
+            finalize_expression_captures(receiver, written);
+        }
         TypedCallDispatch::Indirect { callee } => finalize_expression_captures(callee, written),
     }
     for argument in &mut call.arguments {
@@ -2970,6 +3129,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::String(_)
         | TypedExpressionKind::Boolean(_)
         | TypedExpressionKind::Nil
+        | TypedExpressionKind::AttributeQuery { .. }
+        | TypedExpressionKind::HasAttributeQuery { .. }
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
@@ -3012,7 +3173,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
                 finalize_expression_captures(&mut entry.value, written);
             }
         }
-        TypedExpressionKind::UnionCase { arguments, .. } => {
+        TypedExpressionKind::UnionCase { arguments, .. }
+        | TypedExpressionKind::DirectCall { arguments, .. } => {
             for argument in arguments {
                 finalize_expression_captures(argument, written);
             }
@@ -3023,11 +3185,6 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::Binary { left, right, .. } => {
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
-        }
-        TypedExpressionKind::DirectCall { arguments, .. } => {
-            for argument in arguments {
-                finalize_expression_captures(argument, written);
-            }
         }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             finalize_expression_captures(callee, written);
@@ -3046,6 +3203,19 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             for argument in arguments {
                 finalize_expression_captures(argument, written);
             }
+        }
+        TypedExpressionKind::InterfaceMethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            finalize_expression_captures(receiver, written);
+            for argument in arguments {
+                finalize_expression_captures(argument, written);
+            }
+        }
+        TypedExpressionKind::InterfaceUpcast { value, .. } => {
+            finalize_expression_captures(value, written);
         }
     }
 }

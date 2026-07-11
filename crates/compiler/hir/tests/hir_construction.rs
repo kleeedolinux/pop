@@ -1,17 +1,22 @@
+#![allow(clippy::too_many_lines)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_hir::{
-    HirBubble, HirCallDispatch, HirExpressionKind, HirFunctionContext, HirStatementKind,
-    build_hir_function, build_hir_function_with_attributes, verify_hir_function,
+    HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirDeclaration,
+    HirExpressionKind, HirFunctionContext, HirKnownCallables, HirStatementKind,
+    HirVerificationError, build_hir_function, build_hir_function_with_attributes,
+    build_hir_function_with_known_callables_and_attributes, build_hir_method, verify_hir_function,
 };
 use pop_resolve::{
     ModuleInput, ResolutionDatabase, SymbolSpace, Visibility, build_declaration_index,
 };
 use pop_source::SourceFile;
 use pop_syntax::{
-    NodeKind, parse_attribute_declaration, parse_attribute_use, parse_file, parse_function_body,
-    parse_function_signature, parse_record_declaration, parse_union_declaration,
+    NodeKind, parse_attribute_declaration, parse_attribute_use, parse_class_declaration,
+    parse_class_method_body, parse_file, parse_function_body, parse_function_signature,
+    parse_interface_declaration, parse_record_declaration, parse_union_declaration,
 };
 use pop_types::{
     BodyChecker, ResolvedFunctionSignature, SignatureResolver, TypeArena, TypedBody,
@@ -473,4 +478,441 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
                 && matches!(index.kind(), HirExpressionKind::Integer(value) if value.to_string() == "1")
     ));
     assert!(verify_hir_function(&hir, resolver.arena(), &known).is_ok());
+}
+
+#[test]
+fn closures_retain_binding_identity_capture_mode_and_nested_typed_body() {
+    let module = ModuleId::from_raw(0);
+    let bubble = BubbleId::from_raw(0);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/closures.pop",
+        "namespace Example\n\
+         public function make(): function(delta: Int): Int\n\
+             local total = 0\n\
+             local function add(delta: Int): Int\n\
+                 total = total + delta\n\
+                 return total\n\
+             end\n\
+             return add\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let function_node = node(&syntax, NodeKind::FunctionDeclaration);
+    let function_syntax =
+        parse_function_signature(&source, &syntax, function_node).expect("signature");
+    let body_syntax =
+        parse_function_body(&source, &syntax, function_node, &function_syntax).expect("body");
+    let indexed = build_declaration_index(&[ModuleInput::new(module, bubble, &source, &syntax)]);
+    let function_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.make", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let signature = resolver
+        .resolve(module, function_symbol, &function_syntax)
+        .signature()
+        .expect("signature")
+        .clone();
+    let signatures = BTreeMap::from([(function_symbol, signature.clone())]);
+    let typed =
+        BodyChecker::new(module, &mut resolver, &signatures).check(&signature, &body_syntax);
+    assert!(
+        typed.diagnostics().is_empty(),
+        "{}",
+        typed.diagnostic_snapshot()
+    );
+    let known = BTreeSet::from([function_symbol]);
+    let hir = build_hir_function(
+        module,
+        bubble,
+        Visibility::Public,
+        &signature,
+        typed.body().expect("typed body"),
+        resolver.arena(),
+        &known,
+    )
+    .expect("closure HIR");
+
+    let HirStatementKind::Local {
+        binding: total_binding,
+        ..
+    } = hir.body()[0].kind()
+    else {
+        panic!("captured local");
+    };
+    let HirStatementKind::Local { initializer, .. } = hir.body()[1].kind() else {
+        panic!("local closure");
+    };
+    let HirExpressionKind::Closure(closure) = initializer.kind() else {
+        panic!("closure expression");
+    };
+    assert_eq!(closure.captures().len(), 1);
+    let capture = &closure.captures()[0];
+    assert_eq!(capture.binding(), *total_binding);
+    assert_eq!(capture.mode(), HirCaptureMode::Cell);
+    assert!(matches!(capture.source(), HirCaptureSource::Local(_)));
+    assert!(matches!(
+        closure.body()[0].kind(),
+        HirStatementKind::CaptureSet { capture: found, .. } if *found == capture.capture()
+    ));
+
+    let bubble_hir =
+        HirBubble::new(bubble, NamespaceId::from_raw(0), Vec::new(), vec![hir]).expect("Bubble");
+    assert!(bubble_hir.verify(resolver.arena()).is_ok());
+    let dump = bubble_hir.dump(resolver.arena());
+    assert!(dump.contains("closure nested#0"));
+    assert!(dump.contains("capture.cell"));
+    assert!(!dump.to_ascii_lowercase().contains("table environment"));
+}
+
+#[test]
+fn exhaustive_matches_retain_resolved_case_ids_and_typed_payload_bindings() {
+    let module = ModuleId::from_raw(0);
+    let bubble = BubbleId::from_raw(0);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/match.pop",
+        "namespace Example\n\
+         public union ResultValue\n\
+             Ok(value: Int)\n\
+             Error(message: String)\n\
+         end\n\
+         public function consume(result: ResultValue): Int\n\
+             match result\n\
+             when ResultValue.Ok(value) then\n\
+                 return value\n\
+             when ResultValue.Error(_) then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let union_node = node(&syntax, NodeKind::UnionDeclaration);
+    let function_node = node(&syntax, NodeKind::FunctionDeclaration);
+    let union_syntax = parse_union_declaration(&source, &syntax, union_node).expect("union");
+    let function_syntax =
+        parse_function_signature(&source, &syntax, function_node).expect("signature");
+    let body_syntax =
+        parse_function_body(&source, &syntax, function_node, &function_syntax).expect("body");
+    let indexed = build_declaration_index(&[ModuleInput::new(module, bubble, &source, &syntax)]);
+    let union_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.ResultValue", SymbolSpace::Type)[0]
+        .symbol();
+    let function_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.consume", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let union = resolver
+        .define_union(module, union_symbol, &union_syntax)
+        .definition()
+        .expect("union definition")
+        .clone();
+    let signature = resolver
+        .resolve(module, function_symbol, &function_syntax)
+        .signature()
+        .expect("signature")
+        .clone();
+    let signatures = BTreeMap::from([(function_symbol, signature.clone())]);
+    let typed =
+        BodyChecker::new(module, &mut resolver, &signatures).check(&signature, &body_syntax);
+    assert!(
+        typed.diagnostics().is_empty(),
+        "{}",
+        typed.diagnostic_snapshot()
+    );
+    let known = BTreeSet::from([function_symbol]);
+    let hir = build_hir_function(
+        module,
+        bubble,
+        Visibility::Public,
+        &signature,
+        typed.body().expect("typed body"),
+        resolver.arena(),
+        &known,
+    )
+    .expect("match HIR");
+
+    let HirStatementKind::Match {
+        union: found_union,
+        arms,
+        ..
+    } = hir.body()[0].kind()
+    else {
+        panic!("HIR match");
+    };
+    assert_eq!(*found_union, union_symbol);
+    assert_eq!(arms.len(), union.cases().len());
+    assert_eq!(arms[0].case(), union.cases()[0].case());
+    assert_eq!(arms[1].case(), union.cases()[1].case());
+    assert!(arms[0].bindings()[0].local().is_some());
+    assert!(arms[1].bindings()[0].is_ignored());
+
+    let declaration =
+        HirDeclaration::tagged_union(module, bubble, Visibility::Public, "ResultValue", &union);
+    let bubble_hir = HirBubble::new_with_declarations_and_methods(
+        bubble,
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![declaration],
+        vec![hir],
+        Vec::new(),
+    )
+    .expect("Bubble");
+    assert!(bubble_hir.verify(resolver.arena()).is_ok());
+    let dump = bubble_hir.dump(resolver.arena());
+    assert!(dump.contains("match s"));
+    assert!(dump.contains("when case#"));
+}
+
+#[test]
+fn nominal_interfaces_retain_declarations_slot_maps_upcasts_and_dispatch() {
+    let module = ModuleId::from_raw(0);
+    let bubble = BubbleId::from_raw(0);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/interfaces.pop",
+        "namespace Example\n\
+         public interface Closeable\n\
+             function close()\n\
+         end\n\
+         public interface Reader\n\
+             function read(count: Int): String\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(count: Int): String\n\
+                 return \"value\"\n\
+             end\n\
+         end\n\
+         public function read(reader: FileReader): String\n\
+             local contract: Reader = reader\n\
+             return contract:read(1)\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let interface_nodes: Vec<_> = syntax
+        .root()
+        .children()
+        .iter()
+        .filter(|node| node.kind() == NodeKind::InterfaceDeclaration)
+        .collect();
+    let class_node = node(&syntax, NodeKind::ClassDeclaration);
+    let function_node = node(&syntax, NodeKind::FunctionDeclaration);
+    let interface_syntax =
+        parse_interface_declaration(&source, &syntax, interface_nodes[1]).expect("interface");
+    let closeable_syntax =
+        parse_interface_declaration(&source, &syntax, interface_nodes[0]).expect("interface");
+    let class_syntax = parse_class_declaration(&source, &syntax, class_node).expect("class");
+    let function_syntax =
+        parse_function_signature(&source, &syntax, function_node).expect("signature");
+    let function_body =
+        parse_function_body(&source, &syntax, function_node, &function_syntax).expect("body");
+    let indexed = build_declaration_index(&[ModuleInput::new(module, bubble, &source, &syntax)]);
+    let interface_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.Reader", SymbolSpace::Type)[0]
+        .symbol();
+    let closeable_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.Closeable", SymbolSpace::Type)[0]
+        .symbol();
+    let class_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.FileReader", SymbolSpace::Type)[0]
+        .symbol();
+    let function_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.read", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let closeable = resolver
+        .define_interface(module, closeable_symbol, &closeable_syntax)
+        .definition()
+        .expect("interface definition")
+        .clone();
+    let interface = resolver
+        .define_interface(module, interface_symbol, &interface_syntax)
+        .definition()
+        .expect("interface definition")
+        .clone();
+    let class = resolver
+        .define_class(module, class_symbol, &class_syntax)
+        .definition()
+        .expect("class definition")
+        .clone();
+    let function_signature = resolver
+        .resolve(module, function_symbol, &function_syntax)
+        .signature()
+        .expect("function signature")
+        .clone();
+    let function_signatures = BTreeMap::from([(function_symbol, function_signature.clone())]);
+    let typed_function = BodyChecker::new(module, &mut resolver, &function_signatures)
+        .check(&function_signature, &function_body);
+    assert!(
+        typed_function.diagnostics().is_empty(),
+        "{}",
+        typed_function.diagnostic_snapshot()
+    );
+    let method = &class.methods()[0];
+    let method_signature = resolver.method_signature(&class, method);
+    let method_body =
+        parse_class_method_body(&source, &syntax, class_node, &class_syntax.methods()[0])
+            .expect("method body");
+    let typed_method = BodyChecker::new(module, &mut resolver, &BTreeMap::new())
+        .check(&method_signature, &method_body);
+    assert!(
+        typed_method.diagnostics().is_empty(),
+        "{}",
+        typed_method.diagnostic_snapshot()
+    );
+    let known_functions = BTreeSet::from([function_symbol]);
+    let known_methods = BTreeSet::from([method.method()]);
+    let interface_definitions = vec![closeable.clone(), interface.clone()];
+    let known = HirKnownCallables::new(&known_functions, &known_methods)
+        .with_interfaces(&interface_definitions);
+    let hir_function = build_hir_function_with_known_callables_and_attributes(
+        HirFunctionContext::new(module, bubble, Visibility::Public),
+        &function_signature,
+        typed_function.body().expect("typed function"),
+        resolver.arena(),
+        known,
+        &[],
+    )
+    .expect("function HIR");
+    let hir_method = build_hir_method(
+        HirFunctionContext::new(module, bubble, Visibility::Public),
+        &class,
+        method,
+        &method_signature,
+        typed_method.body().expect("typed method"),
+        resolver.arena(),
+        known,
+    )
+    .expect("method HIR");
+    let declarations = vec![
+        HirDeclaration::interface(module, bubble, Visibility::Public, "Closeable", &closeable),
+        HirDeclaration::interface(module, bubble, Visibility::Public, "Reader", &interface),
+        HirDeclaration::class(module, bubble, Visibility::Public, "FileReader", &class),
+    ];
+    let bubble_hir = HirBubble::new_with_declarations_and_methods(
+        bubble,
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        declarations,
+        vec![hir_function],
+        vec![hir_method],
+    )
+    .expect("Bubble");
+
+    let interface_hir = bubble_hir.declarations()[1]
+        .as_interface()
+        .expect("interface HIR");
+    assert_eq!(interface_hir.interface(), interface.interface());
+    assert_eq!(interface_hir.methods()[0].slot(), 0);
+    let class_hir = bubble_hir.declarations()[2].as_class().expect("class HIR");
+    assert_eq!(class_hir.interfaces().len(), 1);
+    assert_eq!(class_hir.interfaces()[0].methods()[0].slot(), 0);
+    assert!(bubble_hir.verify(resolver.arena()).is_ok());
+    let dump = bubble_hir.dump(resolver.arena());
+    assert!(dump.contains("interface Reader"));
+    assert!(dump.contains("call.interface"));
+    assert!(dump.contains("call.interface i1 im1 slot0"));
+    assert!(dump.contains("convert.interface"));
+    assert!(!dump.to_ascii_lowercase().contains("lookup name"));
+}
+
+#[test]
+fn compile_time_attribute_queries_cannot_escape_into_runtime_hir() {
+    let module = ModuleId::from_raw(0);
+    let bubble = BubbleId::from_raw(0);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/query.pop",
+        "namespace Example\n\
+         public attribute Serializable()\n\
+         public record User\n\
+             name: String\n\
+         end\n\
+         public function inspect(): Boolean\n\
+             return hasAttribute<<Serializable>>(User)\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let attribute_node = node(&syntax, NodeKind::AttributeDeclaration);
+    let record_node = node(&syntax, NodeKind::RecordDeclaration);
+    let function_node = node(&syntax, NodeKind::FunctionDeclaration);
+    let attribute_syntax =
+        parse_attribute_declaration(&source, &syntax, attribute_node).expect("attribute");
+    let record_syntax = parse_record_declaration(&source, &syntax, record_node).expect("record");
+    let function_syntax =
+        parse_function_signature(&source, &syntax, function_node).expect("function");
+    let body_syntax =
+        parse_function_body(&source, &syntax, function_node, &function_syntax).expect("body");
+    let indexed = build_declaration_index(&[ModuleInput::new(module, bubble, &source, &syntax)]);
+    let attribute_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.Serializable", SymbolSpace::Type)[0]
+        .symbol();
+    let record_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.User", SymbolSpace::Type)[0]
+        .symbol();
+    let function_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.inspect", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    assert!(
+        resolver
+            .define_attribute(module, attribute_symbol, &attribute_syntax)
+            .diagnostics()
+            .is_empty()
+    );
+    assert!(
+        resolver
+            .define_record(module, record_symbol, &record_syntax)
+            .diagnostics()
+            .is_empty()
+    );
+    let signature = resolver
+        .resolve(module, function_symbol, &function_syntax)
+        .signature()
+        .expect("signature")
+        .clone();
+    let signatures = BTreeMap::from([(function_symbol, signature.clone())]);
+    let typed =
+        BodyChecker::new(module, &mut resolver, &signatures).check(&signature, &body_syntax);
+    assert!(
+        typed.diagnostics().is_empty(),
+        "{}",
+        typed.diagnostic_snapshot()
+    );
+    let error = build_hir_function(
+        module,
+        bubble,
+        Visibility::Public,
+        &signature,
+        typed.body().expect("typed query body"),
+        resolver.arena(),
+        &BTreeSet::from([function_symbol]),
+    )
+    .expect_err("compile-time compiler handles cannot enter runtime HIR");
+    assert!(matches!(
+        error.as_slice(),
+        [HirVerificationError::CompileTimeOnlyExpression { .. }]
+    ));
 }

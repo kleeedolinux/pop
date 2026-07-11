@@ -1,9 +1,13 @@
 use pop_foundation::{FileId, SourceSpan, TextRange};
 use pop_source::SourceFile;
 
+use crate::attribute::parse_attribute_use_prefix;
 use crate::body::parse_expression_prefix;
 use crate::signature::parse_type_prefix;
-use crate::{ExpressionSyntax, NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind, TypeSyntax};
+use crate::{
+    AttributeUseSyntax, ExpressionSyntax, NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind,
+    TypeSyntax,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordDeclarationSyntax {
@@ -31,6 +35,7 @@ impl RecordDeclarationSyntax {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordFieldSyntax {
+    attributes: Vec<AttributeUseSyntax>,
     name: String,
     field_type: TypeSyntax,
     default_value: Option<ExpressionSyntax>,
@@ -38,6 +43,10 @@ pub struct RecordFieldSyntax {
 }
 
 impl RecordFieldSyntax {
+    #[must_use]
+    pub fn attributes(&self) -> &[AttributeUseSyntax] {
+        &self.attributes
+    }
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -85,12 +94,17 @@ impl UnionDeclarationSyntax {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnionCaseSyntax {
+    attributes: Vec<AttributeUseSyntax>,
     name: String,
     payload: Vec<UnionCaseParameterSyntax>,
     span: SourceSpan,
 }
 
 impl UnionCaseSyntax {
+    #[must_use]
+    pub fn attributes(&self) -> &[AttributeUseSyntax] {
+        &self.attributes
+    }
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -170,7 +184,11 @@ pub fn parse_record_declaration(
     let mut fields = Vec::new();
     loop {
         parser.skip_newlines();
+        let attributes = parser.parse_member_attributes()?;
         if parser.consume(TokenKind::End).is_some() {
+            if !attributes.is_empty() {
+                return Err(parser.error("member after attribute"));
+            }
             break;
         }
         let field_name = parser.expect(TokenKind::Identifier, "field name")?;
@@ -187,6 +205,7 @@ pub fn parse_record_declaration(
             |value| value.span().range().end(),
         );
         fields.push(RecordFieldSyntax {
+            attributes,
             name: field_name.text(source).to_owned(),
             field_type,
             default_value,
@@ -222,7 +241,11 @@ pub fn parse_union_declaration(
     let mut cases = Vec::new();
     loop {
         parser.skip_newlines();
+        let attributes = parser.parse_member_attributes()?;
         if parser.consume(TokenKind::End).is_some() {
+            if !attributes.is_empty() {
+                return Err(parser.error("member after attribute"));
+            }
             break;
         }
         let case_name = parser.expect(TokenKind::Identifier, "union case name")?;
@@ -249,6 +272,7 @@ pub fn parse_union_declaration(
                 .end();
         }
         cases.push(UnionCaseSyntax {
+            attributes,
             name: case_name.text(source).to_owned(),
             payload,
             span: SourceSpan::new(source.id(), ordered_range(start, end)),
@@ -311,6 +335,26 @@ impl<'source> DataParser<'source> {
                 expectation: error.expectation(),
             },
         )
+    }
+
+    fn parse_member_attributes(&mut self) -> Result<Vec<AttributeUseSyntax>, DataDeclarationError> {
+        let mut attributes = Vec::new();
+        while self.current_kind() == Some(TokenKind::At) {
+            attributes.push(
+                parse_attribute_use_prefix(
+                    self.source,
+                    self.node,
+                    &self.tokens,
+                    &mut self.position,
+                )
+                .map_err(|error| DataDeclarationError {
+                    span: error.span(),
+                    expectation: error.expectation(),
+                })?,
+            );
+            self.skip_newlines();
+        }
+        Ok(attributes)
     }
 
     fn seek(&mut self, kind: TokenKind) -> Result<(), DataDeclarationError> {

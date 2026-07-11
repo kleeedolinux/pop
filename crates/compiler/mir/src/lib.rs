@@ -1,15 +1,22 @@
 //! Canonical backend-neutral control-flow IR and portable verification.
+#![allow(
+    clippy::match_same_arms,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines
+)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use pop_foundation::{
-    BlockId, BubbleId, ClassId, FieldId, FileId, FunctionId, LocalId, MethodId, NamespaceId,
-    SourceSpan, SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueId, ValueParameterId,
+    BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
+    InterfaceMethodId, LocalId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, SymbolId,
+    TextRange, TextSize, TypeId, UnionCaseId, ValueId, ValueParameterId,
 };
 use pop_hir::{
-    HirBubble, HirCallDispatch, HirDeclaration, HirDeclarationKind, HirExpression,
-    HirExpressionKind, HirFieldValue, HirFunction, HirStatement, HirStatementKind, HirTableEntry,
+    HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure, HirDeclaration,
+    HirDeclarationKind, HirExpression, HirExpressionKind, HirFieldValue, HirFunction, HirMatchArm,
+    HirStatement, HirStatementKind, HirTableEntry,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicPayload, RootSlot, SafePointId, StackMap, Trap,
@@ -122,6 +129,7 @@ pub struct MirBubble {
     declarations: Vec<MirDeclaration>,
     functions: Vec<MirFunction>,
     methods: Vec<MirMethod>,
+    nested_functions: Vec<MirNestedFunction>,
 }
 
 impl MirBubble {
@@ -143,6 +151,11 @@ impl MirBubble {
     #[must_use]
     pub fn methods(&self) -> &[MirMethod] {
         &self.methods
+    }
+
+    #[must_use]
+    pub fn nested_functions(&self) -> &[MirNestedFunction] {
+        &self.nested_functions
     }
 
     #[must_use]
@@ -172,6 +185,9 @@ impl MirBubble {
             );
             dump_function(&mut output, &method.function);
         }
+        for function in &self.nested_functions {
+            dump_nested_function(&mut output, function);
+        }
         output
     }
 }
@@ -199,6 +215,7 @@ pub enum MirDeclarationKind {
     Record(MirRecordDeclaration),
     Union(MirUnionDeclaration),
     Class(MirClassDeclaration),
+    Interface(MirInterfaceDeclaration),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -243,6 +260,7 @@ pub struct MirClassDeclaration {
     type_id: TypeId,
     fields: Vec<MirField>,
     methods: Vec<MethodId>,
+    interfaces: Vec<MirInterfaceImplementation>,
 }
 
 impl MirClassDeclaration {
@@ -264,6 +282,106 @@ impl MirClassDeclaration {
     #[must_use]
     pub fn methods(&self) -> &[MethodId] {
         &self.methods
+    }
+
+    #[must_use]
+    pub fn interfaces(&self) -> &[MirInterfaceImplementation] {
+        &self.interfaces
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirInterfaceDeclaration {
+    interface: InterfaceId,
+    type_id: TypeId,
+    methods: Vec<MirInterfaceMethod>,
+}
+
+impl MirInterfaceDeclaration {
+    #[must_use]
+    pub const fn interface(&self) -> InterfaceId {
+        self.interface
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[MirInterfaceMethod] {
+        &self.methods
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirInterfaceMethod {
+    method: InterfaceMethodId,
+    slot: u32,
+    parameters: Vec<TypeId>,
+    results: Vec<TypeId>,
+}
+
+impl MirInterfaceMethod {
+    #[must_use]
+    pub const fn method(&self) -> InterfaceMethodId {
+        self.method
+    }
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirInterfaceImplementation {
+    interface: InterfaceId,
+    interface_type: TypeId,
+    methods: Vec<MirInterfaceMethodImplementation>,
+}
+
+impl MirInterfaceImplementation {
+    #[must_use]
+    pub const fn interface(&self) -> InterfaceId {
+        self.interface
+    }
+    #[must_use]
+    pub const fn interface_type(&self) -> TypeId {
+        self.interface_type
+    }
+    #[must_use]
+    pub fn methods(&self) -> &[MirInterfaceMethodImplementation] {
+        &self.methods
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirInterfaceMethodImplementation {
+    interface_method: InterfaceMethodId,
+    slot: u32,
+    class_method: MethodId,
+}
+
+impl MirInterfaceMethodImplementation {
+    #[must_use]
+    pub const fn interface_method(self) -> InterfaceMethodId {
+        self.interface_method
+    }
+    #[must_use]
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+    #[must_use]
+    pub const fn class_method(self) -> MethodId {
+        self.class_method
     }
 }
 
@@ -308,6 +426,87 @@ pub struct MirMethod {
     method: MethodId,
     class: ClassId,
     function: MirFunction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirNestedFunction {
+    owner: SymbolId,
+    function: NestedFunctionId,
+    captures: Vec<MirCapture>,
+    parameters: Vec<TypeId>,
+    results: Vec<TypeId>,
+    effects: MirEffectSummary,
+    effects_explicit: bool,
+    blocks: Vec<MirBlock>,
+}
+
+impl MirNestedFunction {
+    #[must_use]
+    pub const fn owner(&self) -> SymbolId {
+        self.owner
+    }
+    #[must_use]
+    pub const fn function(&self) -> NestedFunctionId {
+        self.function
+    }
+    #[must_use]
+    pub fn captures(&self) -> &[MirCapture] {
+        &self.captures
+    }
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+    #[must_use]
+    pub const fn effects(&self) -> MirEffectSummary {
+        self.effects
+    }
+    #[must_use]
+    pub fn blocks(&self) -> &[MirBlock] {
+        &self.blocks
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirCapture {
+    capture: CaptureId,
+    binding: BindingId,
+    slot: u32,
+    type_id: TypeId,
+    mode: MirCaptureMode,
+}
+
+impl MirCapture {
+    #[must_use]
+    pub const fn capture(self) -> CaptureId {
+        self.capture
+    }
+    #[must_use]
+    pub const fn binding(self) -> BindingId {
+        self.binding
+    }
+    #[must_use]
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+    #[must_use]
+    pub const fn type_id(self) -> TypeId {
+        self.type_id
+    }
+    #[must_use]
+    pub const fn mode(self) -> MirCaptureMode {
+        self.mode
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirCaptureMode {
+    Value,
+    Cell,
 }
 
 impl MirMethod {
@@ -603,6 +802,14 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
+    CallInterface {
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+        slot: u32,
+        arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
     CallIndirect {
         callee: ValueId,
         arguments: Vec<ValueId>,
@@ -637,6 +844,43 @@ pub enum MirInstructionKind {
         case: UnionCaseId,
         arguments: Vec<ValueId>,
     },
+    InterfaceUpcast {
+        value: ValueId,
+        interface: InterfaceId,
+    },
+    CaptureCellAllocate {
+        binding: BindingId,
+        initial: ValueId,
+        value_type: TypeId,
+        object_map: ObjectMap,
+    },
+    CaptureCellLoad {
+        cell: ValueId,
+    },
+    CaptureCellStore {
+        cell: ValueId,
+        value: ValueId,
+    },
+    ClosureEnvironmentAllocate {
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: Vec<MirClosureCapture>,
+        object_map: ObjectMap,
+    },
+    CaptureLoad {
+        capture: CaptureId,
+        slot: u32,
+        mode: MirCaptureMode,
+    },
+    CaptureCellReference {
+        capture: CaptureId,
+        slot: u32,
+    },
+    CaptureStore {
+        capture: CaptureId,
+        slot: u32,
+        value: ValueId,
+    },
     GcSafePoint {
         safe_point: SafePointId,
         roots: Vec<ValueId>,
@@ -654,6 +898,43 @@ pub enum MirInstructionKind {
         previous: Option<ValueId>,
         value: Option<ValueId>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirClosureCapture {
+    capture: CaptureId,
+    binding: BindingId,
+    slot: u32,
+    value: ValueId,
+    type_id: TypeId,
+    mode: MirCaptureMode,
+}
+
+impl MirClosureCapture {
+    #[must_use]
+    pub const fn capture(self) -> CaptureId {
+        self.capture
+    }
+    #[must_use]
+    pub const fn binding(self) -> BindingId {
+        self.binding
+    }
+    #[must_use]
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+    #[must_use]
+    pub const fn value(self) -> ValueId {
+        self.value
+    }
+    #[must_use]
+    pub const fn type_id(self) -> TypeId {
+        self.type_id
+    }
+    #[must_use]
+    pub const fn mode(self) -> MirCaptureMode {
+        self.mode
+    }
 }
 
 impl MirInstructionKind {
@@ -685,6 +966,11 @@ pub enum MirTerminator {
         when_true: BlockId,
         when_false: BlockId,
     },
+    UnionSwitch {
+        scrutinee: ValueId,
+        union: SymbolId,
+        arms: Vec<MirUnionSwitchArm>,
+    },
     Return {
         values: Vec<ValueId>,
     },
@@ -692,6 +978,23 @@ pub enum MirTerminator {
     Panic(PanicPayload),
     ContinueUnwind(UnwindReason),
     Unreachable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirUnionSwitchArm {
+    case: UnionCaseId,
+    target: BlockId,
+}
+
+impl MirUnionSwitchArm {
+    #[must_use]
+    pub const fn case(self) -> UnionCaseId {
+        self.case
+    }
+    #[must_use]
+    pub const fn target(self) -> BlockId {
+        self.target
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -808,6 +1111,16 @@ pub enum MirVerificationError {
         union: SymbolId,
         case: UnionCaseId,
     },
+    InvalidUnionSwitch {
+        union: SymbolId,
+    },
+    UnknownInterface(InterfaceId),
+    UnknownInterfaceMethod(InterfaceMethodId),
+    WrongInterfaceMethodSlot {
+        method: InterfaceMethodId,
+        expected: u32,
+        found: u32,
+    },
     MissingDeclaredField {
         instruction: ValueId,
         field: FieldId,
@@ -888,21 +1201,31 @@ pub fn lower_hir_bubble(
         .filter_map(lower_declaration)
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
+    let mut nested_functions = Vec::new();
     let mut functions: Vec<_> = hir
         .functions()
         .iter()
-        .map(|function| lower_function(function, arena, &gc_schema))
+        .map(|function| {
+            let (function, mut nested) = lower_function(function, arena, &gc_schema);
+            nested_functions.append(&mut nested);
+            function
+        })
         .collect();
     functions.sort_by_key(MirFunction::symbol);
     let methods = hir
         .methods()
         .iter()
-        .map(|method| MirMethod {
-            method: method.method(),
-            class: method.class(),
-            function: lower_function(method.function(), arena, &gc_schema),
+        .map(|method| {
+            let (function, mut nested) = lower_function(method.function(), arena, &gc_schema);
+            nested_functions.append(&mut nested);
+            MirMethod {
+                method: method.method(),
+                class: method.class(),
+                function,
+            }
         })
         .collect();
+    nested_functions.sort_by_key(|function| (function.owner(), function.function()));
     let mut mir = MirBubble {
         bubble: hir.bubble(),
         namespace: hir.namespace(),
@@ -910,6 +1233,7 @@ pub fn lower_hir_bubble(
         declarations,
         functions,
         methods,
+        nested_functions,
     };
     recompute_effects(&mut mir);
     insert_gc_safe_points(&mut mir, arena);
@@ -925,6 +1249,18 @@ fn seal_effects(bubble: &mut MirBubble) {
     }
     for method in &mut bubble.methods {
         seal_function_effects(&mut method.function);
+    }
+    for function in &mut bubble.nested_functions {
+        seal_nested_effects(function);
+    }
+}
+
+fn seal_nested_effects(function: &mut MirNestedFunction) {
+    function.effects_explicit = true;
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            instruction.effects_explicit = true;
+        }
     }
 }
 
@@ -981,7 +1317,44 @@ fn lower_declaration(declaration: &HirDeclaration) -> Option<MirDeclaration> {
                 .iter()
                 .map(pop_hir::HirClassMethod::method)
                 .collect(),
+            interfaces: class
+                .interfaces()
+                .iter()
+                .map(|implementation| MirInterfaceImplementation {
+                    interface: implementation.interface(),
+                    interface_type: implementation.interface_type(),
+                    methods: implementation
+                        .methods()
+                        .iter()
+                        .map(|method| MirInterfaceMethodImplementation {
+                            interface_method: method.interface_method(),
+                            slot: method.slot(),
+                            class_method: method.class_method(),
+                        })
+                        .collect(),
+                })
+                .collect(),
         }),
+        HirDeclarationKind::Interface(interface) => {
+            MirDeclarationKind::Interface(MirInterfaceDeclaration {
+                interface: interface.interface(),
+                type_id: interface.type_id(),
+                methods: interface
+                    .methods()
+                    .iter()
+                    .map(|method| MirInterfaceMethod {
+                        method: method.method(),
+                        slot: method.slot(),
+                        parameters: method
+                            .parameters()
+                            .iter()
+                            .map(pop_hir::HirNamedType::type_id)
+                            .collect(),
+                        results: method.results().to_vec(),
+                    })
+                    .collect(),
+            })
+        }
         HirDeclarationKind::Attribute(_) => return None,
     };
     Some(MirDeclaration {
@@ -994,8 +1367,10 @@ fn lower_function(
     function: &HirFunction,
     arena: &TypeArena,
     gc_schema: &LoweringGcSchema,
-) -> MirFunction {
-    FunctionBuilder::new(function, arena, gc_schema).lower()
+) -> (MirFunction, Vec<MirNestedFunction>) {
+    let (mut lowered, nested) = FunctionBuilder::new(function, arena, gc_schema).lower();
+    lowered.function = function.function();
+    (lowered, nested)
 }
 
 struct LoweringGcSchema {
@@ -1035,7 +1410,11 @@ struct BuildingBlock {
 }
 
 struct FunctionBuilder<'hir> {
-    hir: &'hir HirFunction,
+    owner: SymbolId,
+    parameters_schema: Vec<TypeId>,
+    results: Vec<TypeId>,
+    body: &'hir [HirStatement],
+    capture_schema: BTreeMap<CaptureId, MirCapture>,
     arena: &'hir TypeArena,
     gc_schema: &'hir LoweringGcSchema,
     blocks: Vec<BuildingBlock>,
@@ -1043,6 +1422,163 @@ struct FunctionBuilder<'hir> {
     next_value: u32,
     parameters: BTreeMap<ValueParameterId, ValueId>,
     locals: BTreeMap<LocalId, ValueId>,
+    parameter_cells: BTreeMap<ValueParameterId, ValueId>,
+    local_cells: BTreeMap<LocalId, ValueId>,
+    cell_parameters: BTreeSet<ValueParameterId>,
+    cell_locals: BTreeSet<LocalId>,
+    nested_functions: Vec<MirNestedFunction>,
+}
+
+fn collect_cell_sources(
+    statements: &[HirStatement],
+) -> (BTreeSet<ValueParameterId>, BTreeSet<LocalId>) {
+    let mut parameters = BTreeSet::new();
+    let mut locals = BTreeSet::new();
+    for statement in statements {
+        visit_statement_closures(statement, &mut parameters, &mut locals);
+    }
+    (parameters, locals)
+}
+
+fn visit_statement_closures(
+    statement: &HirStatement,
+    parameters: &mut BTreeSet<ValueParameterId>,
+    locals: &mut BTreeSet<LocalId>,
+) {
+    match statement.kind() {
+        HirStatementKind::Local { initializer, .. } => {
+            visit_expression_closures(initializer, parameters, locals);
+        }
+        HirStatementKind::LocalSet { value, .. }
+        | HirStatementKind::ParameterSet { value, .. }
+        | HirStatementKind::CaptureSet { value, .. }
+        | HirStatementKind::Expression(value) => {
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirStatementKind::Return { values } => {
+            for value in values {
+                visit_expression_closures(value, parameters, locals);
+            }
+        }
+        HirStatementKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            visit_expression_closures(condition, parameters, locals);
+            for nested in then_body.iter().chain(else_body) {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
+        HirStatementKind::While { condition, body } => {
+            visit_expression_closures(condition, parameters, locals);
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
+        HirStatementKind::Match {
+            scrutinee, arms, ..
+        } => {
+            visit_expression_closures(scrutinee, parameters, locals);
+            for arm in arms {
+                for nested in arm.body() {
+                    visit_statement_closures(nested, parameters, locals);
+                }
+            }
+        }
+        HirStatementKind::FieldSet { base, value, .. } => {
+            visit_expression_closures(base, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirStatementKind::Call(call) => {
+            for argument in call.arguments() {
+                visit_expression_closures(argument, parameters, locals);
+            }
+        }
+    }
+}
+
+fn visit_expression_closures(
+    expression: &HirExpression,
+    parameters: &mut BTreeSet<ValueParameterId>,
+    locals: &mut BTreeSet<LocalId>,
+) {
+    match expression.kind() {
+        HirExpressionKind::Closure(closure) => {
+            for capture in closure.captures() {
+                if capture.mode() != HirCaptureMode::Cell {
+                    continue;
+                }
+                match capture.source() {
+                    HirCaptureSource::Local(local) => {
+                        locals.insert(local);
+                    }
+                    HirCaptureSource::Parameter(parameter) => {
+                        parameters.insert(parameter);
+                    }
+                    HirCaptureSource::Capture(_) => {}
+                }
+            }
+        }
+        HirExpressionKind::Field { base, .. }
+        | HirExpressionKind::InterfaceUpcast { value: base, .. } => {
+            visit_expression_closures(base, parameters, locals);
+        }
+        HirExpressionKind::ArrayGet { array, index }
+        | HirExpressionKind::Binary {
+            left: array,
+            right: index,
+            ..
+        } => {
+            visit_expression_closures(array, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
+        }
+        HirExpressionKind::Record { fields, .. }
+        | HirExpressionKind::ClassConstruct { fields, .. } => {
+            for field in fields {
+                visit_expression_closures(field.value(), parameters, locals);
+            }
+        }
+        HirExpressionKind::RecordUpdate { base, fields, .. } => {
+            visit_expression_closures(base, parameters, locals);
+            for field in fields {
+                visit_expression_closures(field.value(), parameters, locals);
+            }
+        }
+        HirExpressionKind::Array(elements)
+        | HirExpressionKind::Tuple(elements)
+        | HirExpressionKind::UnionCase {
+            arguments: elements,
+            ..
+        } => {
+            for element in elements {
+                visit_expression_closures(element, parameters, locals);
+            }
+        }
+        HirExpressionKind::Table(entries) => {
+            for entry in entries {
+                visit_expression_closures(entry.key(), parameters, locals);
+                visit_expression_closures(entry.value(), parameters, locals);
+            }
+        }
+        HirExpressionKind::Unary { operand, .. } => {
+            visit_expression_closures(operand, parameters, locals);
+        }
+        HirExpressionKind::Call { arguments, .. } => {
+            for argument in arguments {
+                visit_expression_closures(argument, parameters, locals);
+            }
+        }
+        HirExpressionKind::Integer(_)
+        | HirExpressionKind::Float(_)
+        | HirExpressionKind::String(_)
+        | HirExpressionKind::Boolean(_)
+        | HirExpressionKind::Nil
+        | HirExpressionKind::Local(_)
+        | HirExpressionKind::Parameter(_)
+        | HirExpressionKind::Capture(_)
+        | HirExpressionKind::Function(_) => {}
+    }
 }
 
 impl<'hir> FunctionBuilder<'hir> {
@@ -1051,19 +1587,95 @@ impl<'hir> FunctionBuilder<'hir> {
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
     ) -> Self {
+        let parameter_specs: Vec<_> = hir
+            .parameters()
+            .iter()
+            .map(|parameter| (parameter.parameter(), parameter.type_id(), parameter.span()))
+            .collect();
+        Self::from_parts(
+            hir.symbol(),
+            parameter_specs,
+            hir.results().to_vec(),
+            hir.body(),
+            BTreeMap::new(),
+            arena,
+            gc_schema,
+        )
+    }
+
+    fn new_closure(
+        owner: SymbolId,
+        closure: &'hir HirClosure,
+        arena: &'hir TypeArena,
+        gc_schema: &'hir LoweringGcSchema,
+    ) -> Self {
+        let parameter_specs = closure
+            .parameters()
+            .iter()
+            .map(|parameter| (parameter.parameter(), parameter.type_id(), parameter.span()))
+            .collect();
+        let capture_schema = closure
+            .captures()
+            .iter()
+            .enumerate()
+            .map(|(slot, capture)| {
+                (
+                    capture.capture(),
+                    MirCapture {
+                        capture: capture.capture(),
+                        binding: capture.binding(),
+                        slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                        type_id: capture.type_id(),
+                        mode: match capture.mode() {
+                            HirCaptureMode::Value => MirCaptureMode::Value,
+                            HirCaptureMode::Cell => MirCaptureMode::Cell,
+                        },
+                    },
+                )
+            })
+            .collect();
+        Self::from_parts(
+            owner,
+            parameter_specs,
+            closure.results().to_vec(),
+            closure.body(),
+            capture_schema,
+            arena,
+            gc_schema,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        owner: SymbolId,
+        parameter_specs: Vec<(ValueParameterId, TypeId, SourceSpan)>,
+        results: Vec<TypeId>,
+        body: &'hir [HirStatement],
+        capture_schema: BTreeMap<CaptureId, MirCapture>,
+        arena: &'hir TypeArena,
+        gc_schema: &'hir LoweringGcSchema,
+    ) -> Self {
         let mut arguments = Vec::new();
         let mut parameters = BTreeMap::new();
-        for parameter in hir.parameters() {
-            let value = ValueId::from_raw(parameter.parameter().raw());
-            parameters.insert(parameter.parameter(), value);
+        for (parameter, type_id, span) in &parameter_specs {
+            let value = ValueId::from_raw(parameter.raw());
+            parameters.insert(*parameter, value);
             arguments.push(MirBlockArgument {
                 value,
-                type_id: parameter.type_id(),
-                span: parameter.span(),
+                type_id: *type_id,
+                span: *span,
             });
         }
+        let (cell_parameters, cell_locals) = collect_cell_sources(body);
         Self {
-            hir,
+            owner,
+            parameters_schema: parameter_specs
+                .iter()
+                .map(|(_, type_id, _)| *type_id)
+                .collect(),
+            results,
+            body,
+            capture_schema,
             arena,
             gc_schema,
             blocks: vec![BuildingBlock {
@@ -1072,17 +1684,23 @@ impl<'hir> FunctionBuilder<'hir> {
                 terminator: MirTerminator::Missing,
             }],
             current: BlockId::from_raw(0),
-            next_value: u32::try_from(hir.parameters().len()).unwrap_or(u32::MAX),
+            next_value: u32::try_from(parameter_specs.len()).unwrap_or(u32::MAX),
             parameters,
             locals: BTreeMap::new(),
+            parameter_cells: BTreeMap::new(),
+            local_cells: BTreeMap::new(),
+            cell_parameters,
+            cell_locals,
+            nested_functions: Vec::new(),
         }
     }
 
-    fn lower(mut self) -> MirFunction {
-        self.lower_statements(self.hir.body());
+    fn lower(mut self) -> (MirFunction, Vec<MirNestedFunction>) {
+        self.initialize_parameter_cells();
+        self.lower_statements(self.body);
         for block in &mut self.blocks {
             if matches!(block.terminator, MirTerminator::Missing) {
-                block.terminator = if self.hir.results().is_empty() {
+                block.terminator = if self.results.is_empty() {
                     MirTerminator::Return { values: Vec::new() }
                 } else {
                     MirTerminator::Unreachable
@@ -1100,19 +1718,34 @@ impl<'hir> FunctionBuilder<'hir> {
                 terminator: block.terminator,
             })
             .collect();
-        MirFunction {
-            function: self.hir.function(),
-            symbol: self.hir.symbol(),
-            parameters: self
-                .hir
-                .parameters()
-                .iter()
-                .map(pop_hir::HirParameter::type_id)
-                .collect(),
-            results: self.hir.results().to_vec(),
+        let function = MirFunction {
+            function: FunctionId::from_raw(0),
+            symbol: self.owner,
+            parameters: self.parameters_schema,
+            results: self.results,
             effects: MirEffectSummary::empty(),
             effects_explicit: false,
             blocks,
+        };
+        (function, self.nested_functions)
+    }
+
+    fn initialize_parameter_cells(&mut self) {
+        let parameters: Vec<_> = self.cell_parameters.iter().copied().collect();
+        for parameter in parameters {
+            let initial = self.parameters[&parameter];
+            let type_id = self.parameters_schema[parameter.raw() as usize];
+            let cell = self.emit(
+                MirInstructionKind::CaptureCellAllocate {
+                    binding: BindingId::from_raw(parameter.raw()),
+                    initial,
+                    value_type: type_id,
+                    object_map: capture_cell_object_map(self.arena, type_id),
+                },
+                type_id,
+                SourceSpan::new(FileId::from_raw(0), TextRange::empty(TextSize::from_u32(0))),
+            );
+            self.parameter_cells.insert(parameter, cell);
         }
     }
 
@@ -1123,10 +1756,62 @@ impl<'hir> FunctionBuilder<'hir> {
             }
             match statement.kind() {
                 HirStatementKind::Local {
-                    local, initializer, ..
+                    binding,
+                    local,
+                    local_type,
+                    initializer,
+                    ..
                 } => {
                     let value = self.lower_expression(initializer);
-                    self.locals.insert(*local, value);
+                    if self.cell_locals.contains(local) {
+                        let cell = self.emit(
+                            MirInstructionKind::CaptureCellAllocate {
+                                binding: *binding,
+                                initial: value,
+                                value_type: *local_type,
+                                object_map: capture_cell_object_map(self.arena, *local_type),
+                            },
+                            *local_type,
+                            statement.span(),
+                        );
+                        self.local_cells.insert(*local, cell);
+                    } else {
+                        self.locals.insert(*local, value);
+                    }
+                }
+                HirStatementKind::LocalSet { local, value } => {
+                    let value = self.lower_expression(value);
+                    if let Some(cell) = self.local_cells.get(local).copied() {
+                        self.emit_effect(
+                            MirInstructionKind::CaptureCellStore { cell, value },
+                            statement.span(),
+                        );
+                    } else {
+                        self.locals.insert(*local, value);
+                    }
+                }
+                HirStatementKind::ParameterSet { parameter, value } => {
+                    let value = self.lower_expression(value);
+                    if let Some(cell) = self.parameter_cells.get(parameter).copied() {
+                        self.emit_effect(
+                            MirInstructionKind::CaptureCellStore { cell, value },
+                            statement.span(),
+                        );
+                    } else {
+                        self.parameters.insert(*parameter, value);
+                    }
+                }
+                HirStatementKind::CaptureSet { capture, value } => {
+                    let value = self.lower_expression(value);
+                    let schema = self.capture_schema[capture];
+                    self.emit_effect(
+                        MirInstructionKind::CaptureStore {
+                            capture: *capture,
+                            slot: schema.slot(),
+                            value,
+                        },
+                        statement.span(),
+                    );
                 }
                 HirStatementKind::Return { values } => {
                     let values = values
@@ -1142,6 +1827,13 @@ impl<'hir> FunctionBuilder<'hir> {
                 } => self.lower_if(condition, then_body, else_body),
                 HirStatementKind::While { condition, body } => {
                     self.lower_while(condition, body);
+                }
+                HirStatementKind::Match {
+                    scrutinee,
+                    union,
+                    arms,
+                } => {
+                    self.lower_match(scrutinee, *union, arms);
                 }
                 HirStatementKind::FieldSet { base, field, value } => {
                     let base = self.lower_expression(base);
@@ -1190,6 +1882,43 @@ impl<'hir> FunctionBuilder<'hir> {
                 }
             }
         }
+    }
+
+    fn lower_match(&mut self, scrutinee: &HirExpression, union: SymbolId, arms: &[HirMatchArm]) {
+        let scrutinee = self.lower_expression(scrutinee);
+        let dispatch_block = self.current;
+        let join = self.new_block();
+        let outer_locals = self.locals.clone();
+        let mut switch_arms = Vec::new();
+        for arm in arms {
+            let specs: Vec<_> = arm
+                .bindings()
+                .iter()
+                .map(|binding| (binding.type_id(), binding.span()))
+                .collect();
+            let (block, arguments) = self.new_block_with_arguments(&specs);
+            switch_arms.push(MirUnionSwitchArm {
+                case: arm.case(),
+                target: block,
+            });
+            self.current = block;
+            self.locals.clone_from(&outer_locals);
+            for (binding, argument) in arm.bindings().iter().zip(arguments) {
+                if let Some(local) = binding.local() {
+                    self.locals.insert(local, argument);
+                }
+            }
+            self.lower_statements(arm.body());
+            self.branch_if_open(join);
+        }
+        self.locals = outer_locals;
+        self.current = dispatch_block;
+        self.terminate(MirTerminator::UnionSwitch {
+            scrutinee,
+            union,
+            arms: switch_arms,
+        });
+        self.current = join;
     }
 
     fn lower_if(
@@ -1247,8 +1976,41 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::String(value) => MirInstructionKind::StringConstant(unquote(value)),
             HirExpressionKind::Boolean(value) => MirInstructionKind::BooleanConstant(*value),
             HirExpressionKind::Nil => MirInstructionKind::NilConstant,
-            HirExpressionKind::Local(local) => return self.locals[local],
-            HirExpressionKind::Parameter(parameter) => return self.parameters[parameter],
+            HirExpressionKind::Closure(closure) => {
+                return self.lower_closure(closure, expression.type_id());
+            }
+            HirExpressionKind::Local(local) => {
+                if let Some(cell) = self.local_cells.get(local).copied() {
+                    return self.emit(
+                        MirInstructionKind::CaptureCellLoad { cell },
+                        expression.type_id(),
+                        expression.span(),
+                    );
+                }
+                return self.locals[local];
+            }
+            HirExpressionKind::Parameter(parameter) => {
+                if let Some(cell) = self.parameter_cells.get(parameter).copied() {
+                    return self.emit(
+                        MirInstructionKind::CaptureCellLoad { cell },
+                        expression.type_id(),
+                        expression.span(),
+                    );
+                }
+                return self.parameters[parameter];
+            }
+            HirExpressionKind::Capture(capture) => {
+                let schema = self.capture_schema[capture];
+                return self.emit(
+                    MirInstructionKind::CaptureLoad {
+                        capture: *capture,
+                        slot: schema.slot(),
+                        mode: schema.mode(),
+                    },
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
             HirExpressionKind::Function(function) => {
                 MirInstructionKind::FunctionReference(*function)
             }
@@ -1295,6 +2057,13 @@ impl<'hir> FunctionBuilder<'hir> {
                 dispatch,
                 arguments,
             } => self.lower_call(dispatch, arguments),
+            HirExpressionKind::InterfaceUpcast { value, interface } => {
+                let value = self.lower_expression(value);
+                MirInstructionKind::InterfaceUpcast {
+                    value,
+                    interface: *interface,
+                }
+            }
             HirExpressionKind::Field { base, field } => MirInstructionKind::FieldGet {
                 base: self.lower_expression(base),
                 field: *field,
@@ -1346,6 +2115,123 @@ impl<'hir> FunctionBuilder<'hir> {
             },
         };
         self.emit(kind, expression.type_id(), expression.span())
+    }
+
+    fn lower_closure(&mut self, closure: &HirClosure, closure_type: TypeId) -> ValueId {
+        let (lowered, mut nested) =
+            FunctionBuilder::new_closure(self.owner, closure, self.arena, self.gc_schema).lower();
+        let captures: Vec<_> = closure
+            .captures()
+            .iter()
+            .enumerate()
+            .map(|(slot, capture)| {
+                let value = self.lower_capture_source(
+                    capture.source(),
+                    capture.mode(),
+                    capture.type_id(),
+                    closure.span(),
+                );
+                MirClosureCapture {
+                    capture: capture.capture(),
+                    binding: capture.binding(),
+                    slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                    value,
+                    type_id: capture.type_id(),
+                    mode: match capture.mode() {
+                        HirCaptureMode::Value => MirCaptureMode::Value,
+                        HirCaptureMode::Cell => MirCaptureMode::Cell,
+                    },
+                }
+            })
+            .collect();
+        let object_map = closure_environment_object_map(self.arena, &captures);
+        self.nested_functions.push(MirNestedFunction {
+            owner: self.owner,
+            function: closure.function(),
+            captures: closure
+                .captures()
+                .iter()
+                .enumerate()
+                .map(|(slot, capture)| MirCapture {
+                    capture: capture.capture(),
+                    binding: capture.binding(),
+                    slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                    type_id: capture.type_id(),
+                    mode: match capture.mode() {
+                        HirCaptureMode::Value => MirCaptureMode::Value,
+                        HirCaptureMode::Cell => MirCaptureMode::Cell,
+                    },
+                })
+                .collect(),
+            parameters: lowered.parameters,
+            results: lowered.results,
+            effects: lowered.effects,
+            effects_explicit: lowered.effects_explicit,
+            blocks: lowered.blocks,
+        });
+        self.nested_functions.append(&mut nested);
+        self.emit(
+            MirInstructionKind::ClosureEnvironmentAllocate {
+                owner: self.owner,
+                function: closure.function(),
+                captures,
+                object_map,
+            },
+            closure_type,
+            closure.span(),
+        )
+    }
+
+    fn lower_capture_source(
+        &mut self,
+        source: HirCaptureSource,
+        mode: HirCaptureMode,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        match (source, mode) {
+            (HirCaptureSource::Local(local), HirCaptureMode::Cell) => self.local_cells[&local],
+            (HirCaptureSource::Parameter(parameter), HirCaptureMode::Cell) => {
+                self.parameter_cells[&parameter]
+            }
+            (HirCaptureSource::Capture(capture), HirCaptureMode::Cell) => {
+                let schema = self.capture_schema[&capture];
+                self.emit(
+                    MirInstructionKind::CaptureCellReference {
+                        capture,
+                        slot: schema.slot(),
+                    },
+                    type_id,
+                    span,
+                )
+            }
+            (HirCaptureSource::Local(local), HirCaptureMode::Value) => {
+                if let Some(cell) = self.local_cells.get(&local).copied() {
+                    self.emit(MirInstructionKind::CaptureCellLoad { cell }, type_id, span)
+                } else {
+                    self.locals[&local]
+                }
+            }
+            (HirCaptureSource::Parameter(parameter), HirCaptureMode::Value) => {
+                if let Some(cell) = self.parameter_cells.get(&parameter).copied() {
+                    self.emit(MirInstructionKind::CaptureCellLoad { cell }, type_id, span)
+                } else {
+                    self.parameters[&parameter]
+                }
+            }
+            (HirCaptureSource::Capture(capture), HirCaptureMode::Value) => {
+                let schema = self.capture_schema[&capture];
+                self.emit(
+                    MirInstructionKind::CaptureLoad {
+                        capture,
+                        slot: schema.slot(),
+                        mode: schema.mode(),
+                    },
+                    type_id,
+                    span,
+                )
+            }
+        }
     }
 
     fn lower_binary_expression(
@@ -1449,6 +2335,21 @@ impl<'hir> FunctionBuilder<'hir> {
                 declared_effects: MirEffectSummary::empty(),
                 unwind: MirUnwindAction::Propagate,
             },
+            HirCallDispatch::InterfaceMethod {
+                interface,
+                method,
+                slot,
+            } => MirInstructionKind::CallInterface {
+                interface: *interface,
+                method: *method,
+                slot: *slot,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.lower_expression(argument))
+                    .collect(),
+                declared_effects: conservative_indirect_effects(),
+                unwind: MirUnwindAction::Propagate,
+            },
             HirCallDispatch::Indirect { callee } => {
                 let callee = self.lower_expression(callee);
                 MirInstructionKind::CallIndirect {
@@ -1525,6 +2426,27 @@ impl<'hir> FunctionBuilder<'hir> {
                 span,
             });
         (block, value)
+    }
+
+    fn new_block_with_arguments(
+        &mut self,
+        arguments: &[(TypeId, SourceSpan)],
+    ) -> (BlockId, Vec<ValueId>) {
+        let block = self.new_block();
+        let mut values = Vec::with_capacity(arguments.len());
+        for (type_id, span) in arguments {
+            let value = ValueId::from_raw(self.next_value);
+            self.next_value = self.next_value.saturating_add(1);
+            self.blocks[block.raw() as usize]
+                .arguments
+                .push(MirBlockArgument {
+                    value,
+                    type_id: *type_id,
+                    span: *span,
+                });
+            values.push(value);
+        }
+        (block, values)
     }
 
     fn current_block(&self) -> &BuildingBlock {
@@ -1694,6 +2616,30 @@ fn table_object_map(arena: &TypeArena, type_id: TypeId, entries: usize) -> Objec
         .expect("table entries form a valid logical object map")
 }
 
+fn capture_cell_object_map(arena: &TypeArena, value_type: TypeId) -> ObjectMap {
+    let references = is_managed_reference_type_id(value_type, Some(arena))
+        .then(|| ObjectSlot::new(0))
+        .into_iter()
+        .collect();
+    ObjectMap::new(1, references).expect("one-slot capture cell map is canonical")
+}
+
+fn closure_environment_object_map(arena: &TypeArena, captures: &[MirClosureCapture]) -> ObjectMap {
+    let references = captures
+        .iter()
+        .filter(|capture| {
+            capture.mode == MirCaptureMode::Cell
+                || is_managed_reference_type_id(capture.type_id, Some(arena))
+        })
+        .map(|capture| ObjectSlot::new(capture.slot))
+        .collect();
+    ObjectMap::new(
+        u32::try_from(captures.len()).unwrap_or(u32::MAX),
+        references,
+    )
+    .expect("closure captures form a valid logical object map")
+}
+
 fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeArena>) -> bool {
     let Some(arena) = arena else {
         return false;
@@ -1723,11 +2669,15 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         }
         MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
-        | MirInstructionKind::ClassMake { .. } => MirEffectSummary::from_effects([
-            MirEffect::Allocates,
-            MirEffect::MayUnwind,
-            MirEffect::GcSafePoint,
-        ]),
+        | MirInstructionKind::ClassMake { .. }
+        | MirInstructionKind::CaptureCellAllocate { .. }
+        | MirInstructionKind::ClosureEnvironmentAllocate { .. } => {
+            MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ])
+        }
         MirInstructionKind::GcSafePoint { .. } => {
             MirEffectSummary::empty().with(MirEffect::GcSafePoint)
         }
@@ -1737,10 +2687,16 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         MirInstructionKind::WriteBarrier { .. } => {
             MirEffectSummary::empty().with(MirEffect::WritesManagedReference)
         }
+        MirInstructionKind::CaptureCellStore { .. } | MirInstructionKind::CaptureStore { .. } => {
+            MirEffectSummary::from_effects([MirEffect::WritesManagedReference])
+        }
         MirInstructionKind::CallDirect {
             declared_effects, ..
         }
         | MirInstructionKind::CallDirectMethod {
+            declared_effects, ..
+        }
+        | MirInstructionKind::CallInterface {
             declared_effects, ..
         }
         | MirInstructionKind::CallIndirect {
@@ -1773,6 +2729,10 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         | MirInstructionKind::FieldGet { .. }
         | MirInstructionKind::FieldSet { .. }
         | MirInstructionKind::UnionMake { .. } => MirEffectSummary::empty(),
+        MirInstructionKind::InterfaceUpcast { .. }
+        | MirInstructionKind::CaptureCellLoad { .. }
+        | MirInstructionKind::CaptureLoad { .. }
+        | MirInstructionKind::CaptureCellReference { .. } => MirEffectSummary::empty(),
     }
 }
 
@@ -1785,6 +2745,7 @@ fn terminator_effects(terminator: &MirTerminator) -> MirEffectSummary {
         MirTerminator::Missing
         | MirTerminator::Branch { .. }
         | MirTerminator::ConditionalBranch { .. }
+        | MirTerminator::UnionSwitch { .. }
         | MirTerminator::Return { .. }
         | MirTerminator::Unreachable => MirEffectSummary::empty(),
     }
@@ -1918,6 +2879,7 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) {
                     instruction.kind,
                     MirInstructionKind::CallDirect { .. }
                         | MirInstructionKind::CallDirectMethod { .. }
+                        | MirInstructionKind::CallInterface { .. }
                         | MirInstructionKind::CallIndirect { .. }
                 ) && instruction.effects.contains(MirEffect::GcSafePoint);
             if operation_requires_safe_point
@@ -2111,6 +3073,10 @@ fn normal_live_out(
             outgoing.extend(edge_live_values(*when_false, &[], live_in, blocks));
             outgoing
         }
+        MirTerminator::UnionSwitch { arms, .. } => arms
+            .iter()
+            .flat_map(|arm| live_in.get(&arm.target).into_iter().flatten().copied())
+            .collect(),
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
@@ -2215,6 +3181,7 @@ struct MirSchema<'mir> {
     records: BTreeMap<SymbolId, &'mir MirRecordDeclaration>,
     unions: BTreeMap<SymbolId, &'mir MirUnionDeclaration>,
     classes: BTreeMap<ClassId, &'mir MirClassDeclaration>,
+    interfaces: BTreeMap<InterfaceId, &'mir MirInterfaceDeclaration>,
     fields: BTreeMap<FieldId, DeclaredField>,
 }
 
@@ -2228,6 +3195,7 @@ impl<'mir> MirSchema<'mir> {
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
             classes: BTreeMap::new(),
+            interfaces: BTreeMap::new(),
             fields: BTreeMap::new(),
         };
         let mut symbols = BTreeSet::new();
@@ -2286,6 +3254,20 @@ impl<'mir> MirSchema<'mir> {
                         errors.push(MirVerificationError::DuplicateClass(class.class));
                     }
                     schema.collect_fields(class.type_id, &class.fields, true, errors);
+                }
+                MirDeclarationKind::Interface(interface) => {
+                    if arena.get(interface.type_id)
+                        != Some(&SemanticType::Interface {
+                            interface: interface.interface,
+                            arguments: Vec::new(),
+                        })
+                    {
+                        errors.push(MirVerificationError::InvalidDeclarationType {
+                            symbol: declaration.symbol,
+                            type_id: interface.type_id,
+                        });
+                    }
+                    schema.interfaces.insert(interface.interface, interface);
                 }
             }
         }
@@ -2412,7 +3394,7 @@ fn verify_function(
         }
         required_function_effects =
             required_function_effects.union(terminator_effects(block.terminator()));
-        verify_terminator(block, function, arena, &facts, errors);
+        verify_terminator(block, function, arena, schema, &facts, errors);
     }
     if !required_function_effects.is_subset_of(function.effects()) {
         errors.push(MirVerificationError::FunctionEffectMismatch {
@@ -3052,6 +4034,7 @@ fn terminator_targets(terminator: &MirTerminator) -> Vec<BlockId> {
             when_false,
             ..
         } => vec![*when_true, *when_false],
+        MirTerminator::UnionSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
@@ -3065,6 +4048,7 @@ fn terminator_operands(terminator: &MirTerminator) -> Vec<ValueId> {
     match terminator {
         MirTerminator::Return { values } => values.clone(),
         MirTerminator::ConditionalBranch { condition, .. } => vec![*condition],
+        MirTerminator::UnionSwitch { scrutinee, .. } => vec![*scrutinee],
         MirTerminator::Missing
         | MirTerminator::Branch { .. }
         | MirTerminator::Trap(_)
@@ -3908,6 +4892,7 @@ fn verify_terminator(
     block: &MirBlock,
     function: &MirFunction,
     arena: &TypeArena,
+    schema: &MirSchema<'_>,
     facts: &ControlFlowFacts<'_, '_>,
     errors: &mut Vec<MirVerificationError>,
 ) {
@@ -3945,6 +4930,48 @@ fn verify_terminator(
             for target in [*when_true, *when_false] {
                 verify_target(target, facts.blocks, errors);
                 verify_edge_arguments(block.block, target, &[], facts.values, facts.blocks, errors);
+            }
+        }
+        MirTerminator::UnionSwitch {
+            scrutinee,
+            union,
+            arms,
+        } => {
+            verify_value_use(*scrutinee, block.block, use_instruction, facts, errors);
+            let Some(declaration) = schema.unions.get(union) else {
+                errors.push(MirVerificationError::InvalidUnionSwitch { union: *union });
+                return;
+            };
+            if facts.values.get(scrutinee) != Some(&declaration.type_id()) {
+                errors.push(MirVerificationError::InvalidUnionSwitch { union: *union });
+            }
+            let expected: BTreeSet<_> =
+                declaration.cases().iter().map(MirUnionCase::case).collect();
+            let found: BTreeSet<_> = arms.iter().map(|arm| arm.case).collect();
+            if expected != found || found.len() != arms.len() {
+                errors.push(MirVerificationError::InvalidUnionSwitch { union: *union });
+            }
+            for arm in arms {
+                verify_target(arm.target, facts.blocks, errors);
+                let Some(case) = declaration
+                    .cases()
+                    .iter()
+                    .find(|case| case.case == arm.case)
+                else {
+                    continue;
+                };
+                let Some(target) = facts.blocks.get(&arm.target) else {
+                    continue;
+                };
+                if target.arguments.len() != case.parameters.len()
+                    || target
+                        .arguments
+                        .iter()
+                        .map(|argument| argument.type_id)
+                        .ne(case.parameters.iter().copied())
+                {
+                    errors.push(MirVerificationError::InvalidUnionSwitch { union: *union });
+                }
             }
         }
         MirTerminator::Return { values: returned } => {
@@ -4039,6 +5066,9 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CallDirectMethod {
             arguments: values, ..
         }
+        | MirInstructionKind::CallInterface {
+            arguments: values, ..
+        }
         | MirInstructionKind::UnionMake {
             arguments: values, ..
         } => values.clone(),
@@ -4082,6 +5112,16 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             .chain(fields.iter().map(|(_, value)| *value))
             .collect(),
         MirInstructionKind::FieldGet { base, .. } => vec![*base],
+        MirInstructionKind::InterfaceUpcast { value: base, .. }
+        | MirInstructionKind::CaptureCellLoad { cell: base } => vec![*base],
+        MirInstructionKind::CaptureCellAllocate { initial, .. } => vec![*initial],
+        MirInstructionKind::CaptureCellStore { cell, value } => vec![*cell, *value],
+        MirInstructionKind::ClosureEnvironmentAllocate { captures, .. } => {
+            captures.iter().map(|capture| capture.value).collect()
+        }
+        MirInstructionKind::CaptureStore { value, .. } => vec![*value],
+        MirInstructionKind::CaptureLoad { .. }
+        | MirInstructionKind::CaptureCellReference { .. } => Vec::new(),
         MirInstructionKind::FieldSet { base, value, .. } => vec![*base, *value],
         MirInstructionKind::RetainRoot { value } | MirInstructionKind::ReleaseRoot { value } => {
             vec![*value]
@@ -4129,9 +5169,81 @@ fn dump_declaration(output: &mut String, declaration: &MirDeclaration) {
             dump_declared_fields(output, &class.fields);
             output.push_str(" methods ");
             dump_method_ids(output, &class.methods);
+            output.push_str(" implements ");
+            dump_interface_implementations(output, &class.interfaces);
+        }
+        MirDeclarationKind::Interface(interface) => {
+            let _ = write!(
+                output,
+                "type.interface s{} i{} t{} methods ",
+                declaration.symbol.raw(),
+                interface.interface.raw(),
+                interface.type_id.raw()
+            );
+            dump_interface_methods(output, &interface.methods);
         }
     }
     output.push('\n');
+}
+
+fn dump_interface_methods(output: &mut String, methods: &[MirInterfaceMethod]) {
+    if methods.is_empty() {
+        output.push('-');
+        return;
+    }
+    for (index, method) in methods.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        let _ = write!(output, "im{}@{}(", method.method.raw(), method.slot);
+        dump_type_ids(output, &method.parameters);
+        output.push_str(")->(");
+        dump_type_ids(output, &method.results);
+        output.push(')');
+    }
+}
+
+fn dump_interface_implementations(
+    output: &mut String,
+    implementations: &[MirInterfaceImplementation],
+) {
+    if implementations.is_empty() {
+        output.push('-');
+        return;
+    }
+    for (index, implementation) in implementations.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        let _ = write!(
+            output,
+            "i{}:t{}[",
+            implementation.interface.raw(),
+            implementation.interface_type.raw()
+        );
+        for (method_index, method) in implementation.methods.iter().enumerate() {
+            if method_index > 0 {
+                output.push(';');
+            }
+            let _ = write!(
+                output,
+                "im{}@{}=m{}",
+                method.interface_method.raw(),
+                method.slot,
+                method.class_method.raw()
+            );
+        }
+        output.push(']');
+    }
+}
+
+fn dump_type_ids(output: &mut String, types: &[TypeId]) {
+    for (index, type_id) in types.iter().enumerate() {
+        if index > 0 {
+            output.push(';');
+        }
+        let _ = write!(output, "t{}", type_id.raw());
+    }
 }
 
 fn dump_declared_fields(output: &mut String, fields: &[MirField]) {
@@ -4208,7 +5320,49 @@ fn dump_function(output: &mut String, function: &MirFunction) {
     output.push_str(") effects[");
     dump_effects(output, function.effects);
     output.push_str("]\n");
-    for block in &function.blocks {
+    dump_blocks(output, &function.blocks);
+}
+
+fn dump_nested_function(output: &mut String, function: &MirNestedFunction) {
+    let _ = write!(
+        output,
+        "nested s{} nf{} captures ",
+        function.owner.raw(),
+        function.function.raw()
+    );
+    if function.captures.is_empty() {
+        output.push('-');
+    } else {
+        for (index, capture) in function.captures.iter().enumerate() {
+            if index > 0 {
+                output.push(',');
+            }
+            let mode = match capture.mode {
+                MirCaptureMode::Value => "value",
+                MirCaptureMode::Cell => "cell",
+            };
+            let _ = write!(
+                output,
+                "cap{}:bind{}@{}:t{}:{mode}",
+                capture.capture.raw(),
+                capture.binding.raw(),
+                capture.slot,
+                capture.type_id.raw()
+            );
+        }
+    }
+    output.push_str(" params(");
+    dump_type_ids(output, &function.parameters);
+    output.push_str(") results(");
+    dump_type_ids(output, &function.results);
+    output.push_str(") effects[");
+    dump_effects(output, function.effects);
+    output.push_str("]\n");
+    dump_blocks(output, &function.blocks);
+}
+
+fn dump_blocks(output: &mut String, blocks: &[MirBlock]) {
+    for block in blocks {
         let _ = write!(output, "  b{}(", block.block.raw());
         for (index, argument) in block.arguments.iter().enumerate() {
             if index != 0 {
@@ -4440,6 +5594,24 @@ fn dump_callable_or_schema_instruction(
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }
+        MirInstructionKind::CallInterface {
+            interface,
+            method,
+            slot,
+            arguments,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(
+                output,
+                "call.interface i{} im{} slot#{} ",
+                interface.raw(),
+                method.raw(),
+                slot
+            );
+            dump_value_list(output, arguments);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
         MirInstructionKind::CallIndirect {
             callee,
             arguments,
@@ -4488,6 +5660,101 @@ fn dump_callable_or_schema_instruction(
             let _ = write!(output, "unionMake s{} case#{} ", union.raw(), case.raw());
             dump_value_list(output, arguments);
         }
+        MirInstructionKind::InterfaceUpcast { value, interface } => {
+            let _ = write!(
+                output,
+                "interface.upcast v{} i{}",
+                value.raw(),
+                interface.raw()
+            );
+        }
+        MirInstructionKind::CaptureCellAllocate {
+            binding,
+            initial,
+            value_type,
+            object_map,
+        } => {
+            let _ = write!(
+                output,
+                "captureCell.allocate bind{} v{} t{} ",
+                binding.raw(),
+                initial.raw(),
+                value_type.raw()
+            );
+            dump_object_map(output, object_map);
+        }
+        MirInstructionKind::CaptureCellLoad { cell } => {
+            let _ = write!(output, "captureCell.load v{}", cell.raw());
+        }
+        MirInstructionKind::CaptureCellStore { cell, value } => {
+            let _ = write!(output, "captureCell.store v{} v{}", cell.raw(), value.raw());
+        }
+        MirInstructionKind::ClosureEnvironmentAllocate {
+            owner,
+            function,
+            captures,
+            object_map,
+        } => {
+            let _ = write!(
+                output,
+                "closureEnvironment.allocate s{} nf{} ",
+                owner.raw(),
+                function.raw()
+            );
+            dump_object_map(output, object_map);
+            output.push_str(" captures[");
+            for (index, capture) in captures.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                let mode = match capture.mode {
+                    MirCaptureMode::Value => "value",
+                    MirCaptureMode::Cell => "cell",
+                };
+                let _ = write!(
+                    output,
+                    "cap{}:bind{}@{}=v{}:t{}:{mode}",
+                    capture.capture.raw(),
+                    capture.binding.raw(),
+                    capture.slot,
+                    capture.value.raw(),
+                    capture.type_id.raw()
+                );
+            }
+            output.push(']');
+        }
+        MirInstructionKind::CaptureLoad {
+            capture,
+            slot,
+            mode,
+        } => {
+            let mode = match mode {
+                MirCaptureMode::Value => "value",
+                MirCaptureMode::Cell => "cell",
+            };
+            let _ = write!(
+                output,
+                "capture.load cap{} slot#{} {mode}",
+                capture.raw(),
+                slot
+            );
+        }
+        MirInstructionKind::CaptureCellReference { capture, slot } => {
+            let _ = write!(output, "capture.cell cap{} slot#{}", capture.raw(), slot);
+        }
+        MirInstructionKind::CaptureStore {
+            capture,
+            slot,
+            value,
+        } => {
+            let _ = write!(
+                output,
+                "capture.store cap{} slot#{} v{}",
+                capture.raw(),
+                slot,
+                value.raw()
+            );
+        }
         _ => return false,
     }
     true
@@ -4523,6 +5790,25 @@ fn dump_terminator(output: &mut String, terminator: &MirTerminator) {
                 when_true.raw(),
                 when_false.raw()
             );
+        }
+        MirTerminator::UnionSwitch {
+            scrutinee,
+            union,
+            arms,
+        } => {
+            let _ = write!(
+                output,
+                "union.switch v{} s{} [",
+                scrutinee.raw(),
+                union.raw()
+            );
+            for (index, arm) in arms.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                let _ = write!(output, "case#{}:b{}", arm.case.raw(), arm.target.raw());
+            }
+            output.push(']');
         }
         MirTerminator::Return { values } => dump_values(output, "return", values),
         MirTerminator::Trap(trap) => {

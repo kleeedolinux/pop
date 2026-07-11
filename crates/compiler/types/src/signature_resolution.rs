@@ -494,6 +494,38 @@ impl<'index> SignatureResolver<'index> {
     }
 
     #[must_use]
+    pub fn declaration_type(&self, symbol: SymbolId) -> Option<TypeId> {
+        self.record_definitions
+            .get(&symbol)
+            .map(RecordDefinition::type_id)
+            .or_else(|| {
+                self.union_definitions
+                    .get(&symbol)
+                    .map(UnionDefinition::type_id)
+            })
+            .or_else(|| {
+                self.class_definitions
+                    .get(&symbol)
+                    .map(crate::ClassDefinition::type_id)
+            })
+            .or_else(|| {
+                self.interface_definitions
+                    .get(&symbol)
+                    .map(crate::InterfaceDefinition::type_id)
+            })
+            .or_else(|| {
+                self.attribute_definitions
+                    .get(&symbol)
+                    .map(crate::AttributeDefinition::type_id)
+            })
+    }
+
+    #[must_use]
+    pub fn interface_definitions(&self) -> impl Iterator<Item = &crate::InterfaceDefinition> {
+        self.interface_definitions.values()
+    }
+
+    #[must_use]
     pub fn union_definition(&self, symbol: SymbolId) -> Option<&UnionDefinition> {
         self.union_definitions.get(&symbol)
     }
@@ -920,6 +952,21 @@ impl<'index> SignatureResolver<'index> {
                 diagnostics,
             ),
         }
+    }
+
+    /// Resolves one source type outside a function-generic environment.
+    #[must_use]
+    pub fn resolve_standalone_type(
+        &mut self,
+        module: ModuleId,
+        syntax: &TypeSyntax,
+    ) -> (Option<TypeId>, Vec<Diagnostic>) {
+        let mut diagnostics = Vec::new();
+        let resolved = self.resolve_type(module, syntax, &BTreeMap::new(), &mut diagnostics);
+        (
+            resolved.and_then(|resolved| resolved.type_id()),
+            diagnostics,
+        )
     }
 
     fn resolve_named(

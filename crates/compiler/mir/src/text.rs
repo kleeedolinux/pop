@@ -2,8 +2,9 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BlockId, BubbleId, ClassId, FieldId, FileId, FunctionId, MethodId, NamespaceId, SourceSpan,
-    SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
+    InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, SymbolId, TextRange,
+    TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -12,9 +13,11 @@ use pop_runtime_interface::{
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
-    MirBlock, MirBlockArgument, MirBubble, MirClassDeclaration, MirDeclaration, MirDeclarationKind,
-    MirEffect, MirEffectSummary, MirField, MirFunction, MirInstruction, MirInstructionKind,
-    MirMethod, MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration,
+    MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
+    MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary, MirField, MirFunction,
+    MirInstruction, MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation,
+    MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod, MirNestedFunction,
+    MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm,
     MirUnwindAction, local_instruction_effects,
 };
 
@@ -68,6 +71,7 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
     let mut declarations = Vec::new();
     let mut functions = Vec::new();
     let mut methods = Vec::new();
+    let mut nested_functions = Vec::new();
     while position < lines.len() {
         if lines[position].starts_with("type.") {
             declarations.push(parse_declaration(lines[position], position + 1)?);
@@ -86,6 +90,10 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
                 function,
             });
             position = next;
+        } else if lines[position].starts_with("nested ") {
+            let (function, next) = parse_nested_function(&lines, position)?;
+            nested_functions.push(function);
+            position = next;
         } else {
             let (function, next) = parse_function(&lines, position)?;
             functions.push(function);
@@ -99,6 +107,7 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
         declarations,
         functions,
         methods,
+        nested_functions,
     })
 }
 
@@ -128,6 +137,8 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             fields,
             "methods",
             methods,
+            "implements",
+            implementations,
         ] => Ok(MirDeclaration {
             symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
             kind: MirDeclarationKind::Class(MirClassDeclaration {
@@ -135,10 +146,119 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
                 type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
                 fields: parse_declared_fields(fields, number)?,
                 methods: parse_method_ids(methods, number)?,
+                interfaces: parse_interface_implementations(implementations, number)?,
+            }),
+        }),
+        [
+            "type.interface",
+            symbol,
+            interface,
+            type_id,
+            "methods",
+            methods,
+        ] => Ok(MirDeclaration {
+            symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
+            kind: MirDeclarationKind::Interface(MirInterfaceDeclaration {
+                interface: InterfaceId::from_raw(parse_prefixed(interface, 'i', number)?),
+                type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                methods: parse_interface_methods(methods, number)?,
             }),
         }),
         _ => Err(error(number, "malformed type declaration")),
     }
+}
+
+fn parse_interface_methods(
+    text: &str,
+    line: usize,
+) -> Result<Vec<MirInterfaceMethod>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|method| {
+            let (identity, signature) = method
+                .split_once('(')
+                .ok_or_else(|| error(line, "interface method"))?;
+            let (method, slot) = identity
+                .split_once('@')
+                .ok_or_else(|| error(line, "interface method identity"))?;
+            let (parameters, results) = signature
+                .split_once(")->(")
+                .ok_or_else(|| error(line, "interface method signature"))?;
+            let results = results
+                .strip_suffix(')')
+                .ok_or_else(|| error(line, "interface method results"))?;
+            Ok(MirInterfaceMethod {
+                method: InterfaceMethodId::from_raw(parse_named_prefix(method, "im", line)?),
+                slot: parse_u32(slot, line)?,
+                parameters: parse_semicolon_types(parameters, line)?,
+                results: parse_semicolon_types(results, line)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_interface_implementations(
+    text: &str,
+    line: usize,
+) -> Result<Vec<MirInterfaceImplementation>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|implementation| {
+            let (head, methods) = implementation
+                .split_once('[')
+                .ok_or_else(|| error(line, "interface implementation"))?;
+            let methods = methods
+                .strip_suffix(']')
+                .ok_or_else(|| error(line, "interface implementation"))?;
+            let (interface, type_id) = head
+                .split_once(':')
+                .ok_or_else(|| error(line, "interface implementation type"))?;
+            let methods = if methods.is_empty() {
+                Vec::new()
+            } else {
+                methods
+                    .split(';')
+                    .map(|mapping| {
+                        let (identity, class_method) = mapping
+                            .split_once('=')
+                            .ok_or_else(|| error(line, "interface method mapping"))?;
+                        let (method, slot) = identity
+                            .split_once('@')
+                            .ok_or_else(|| error(line, "interface method slot"))?;
+                        Ok(MirInterfaceMethodImplementation {
+                            interface_method: InterfaceMethodId::from_raw(parse_named_prefix(
+                                method, "im", line,
+                            )?),
+                            slot: parse_u32(slot, line)?,
+                            class_method: MethodId::from_raw(parse_prefixed(
+                                class_method,
+                                'm',
+                                line,
+                            )?),
+                        })
+                    })
+                    .collect::<Result<_, _>>()?
+            };
+            Ok(MirInterfaceImplementation {
+                interface: InterfaceId::from_raw(parse_prefixed(interface, 'i', line)?),
+                interface_type: TypeId::from_raw(parse_prefixed(type_id, 't', line)?),
+                methods,
+            })
+        })
+        .collect()
+}
+
+fn parse_semicolon_types(text: &str, line: usize) -> Result<Vec<TypeId>, MirParseError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(';')
+        .map(|type_id| parse_prefixed(type_id, 't', line).map(TypeId::from_raw))
+        .collect()
 }
 
 fn parse_declared_fields(text: &str, line: usize) -> Result<Vec<MirField>, MirParseError> {
@@ -270,6 +390,94 @@ fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), 
     ))
 }
 
+fn parse_nested_function(
+    lines: &[&str],
+    start: usize,
+) -> Result<(MirNestedFunction, usize), MirParseError> {
+    let line = start + 1;
+    let parts: Vec<_> = lines[start].split_whitespace().collect();
+    if parts.len() != 8 || parts[0] != "nested" || parts[3] != "captures" {
+        return Err(error(line, "nested function header"));
+    }
+    let owner = SymbolId::from_raw(parse_prefixed(parts[1], 's', line)?);
+    let function = NestedFunctionId::from_raw(parse_named_prefix(parts[2], "nf", line)?);
+    let captures = parse_captures(parts[4], line)?;
+    let parameters = parse_wrapped_types(parts[5], "params(", line)?;
+    let results = parse_wrapped_types(parts[6], "results(", line)?;
+    let effects = parts[7]
+        .strip_prefix("effects[")
+        .and_then(|effects| effects.strip_suffix(']'))
+        .ok_or_else(|| error(line, "nested effects"))
+        .and_then(|effects| parse_effects(effects, line))?;
+    let mut position = start + 1;
+    let mut blocks = Vec::new();
+    while position < lines.len() && lines[position].starts_with("  b") {
+        let (block, next) = parse_block(lines, position)?;
+        blocks.push(block);
+        position = next;
+    }
+    if blocks.is_empty() {
+        return Err(error(line, "nested function has no blocks"));
+    }
+    Ok((
+        MirNestedFunction {
+            owner,
+            function,
+            captures,
+            parameters,
+            results,
+            effects,
+            effects_explicit: true,
+            blocks,
+        },
+        position,
+    ))
+}
+
+fn parse_wrapped_types(
+    text: &str,
+    prefix: &str,
+    line: usize,
+) -> Result<Vec<TypeId>, MirParseError> {
+    let inner = text
+        .strip_prefix(prefix)
+        .and_then(|text| text.strip_suffix(')'))
+        .ok_or_else(|| error(line, "nested signature types"))?;
+    parse_semicolon_types(inner, line)
+}
+
+fn parse_captures(text: &str, line: usize) -> Result<Vec<MirCapture>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|capture| {
+            let parts: Vec<_> = capture.split(':').collect();
+            if parts.len() != 4 {
+                return Err(error(line, "capture schema"));
+            }
+            let (binding, slot) = parts[1]
+                .split_once('@')
+                .ok_or_else(|| error(line, "capture binding slot"))?;
+            Ok(MirCapture {
+                capture: CaptureId::from_raw(parse_named_prefix(parts[0], "cap", line)?),
+                binding: BindingId::from_raw(parse_named_prefix(binding, "bind", line)?),
+                slot: parse_u32(slot, line)?,
+                type_id: TypeId::from_raw(parse_prefixed(parts[2], 't', line)?),
+                mode: parse_capture_mode(parts[3], line)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_capture_mode(text: &str, line: usize) -> Result<MirCaptureMode, MirParseError> {
+    match text {
+        "value" => Ok(MirCaptureMode::Value),
+        "cell" => Ok(MirCaptureMode::Cell),
+        _ => Err(error(line, "capture mode")),
+    }
+}
+
 fn parse_block(lines: &[&str], start: usize) -> Result<(MirBlock, usize), MirParseError> {
     let number = start + 1;
     let header = lines[start]
@@ -331,6 +539,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
             kind,
             MirInstructionKind::CallDirect { .. }
                 | MirInstructionKind::CallDirectMethod { .. }
+                | MirInstructionKind::CallInterface { .. }
                 | MirInstructionKind::CallIndirect { .. }
                 | MirInstructionKind::GcSafePoint { .. }
                 | MirInstructionKind::RetainRoot { .. }
@@ -424,8 +633,22 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             )?)));
         }
     }
-    if text.starts_with("callDirect") || text.starts_with("callIndirect") {
+    if text.starts_with("callDirect")
+        || text.starts_with("callIndirect")
+        || text.starts_with("call.interface")
+    {
         return parse_call_operation(text, line);
+    }
+    if let Some(rest) = text.strip_prefix("interface.upcast ") {
+        let mut parts = rest.split_whitespace();
+        return Ok(MirInstructionKind::InterfaceUpcast {
+            value: ValueId::from_raw(parse_prefixed(required(&mut parts, line)?, 'v', line)?),
+            interface: InterfaceId::from_raw(parse_prefixed(
+                required(&mut parts, line)?,
+                'i',
+                line,
+            )?),
+        });
     }
     if let Some(rest) = text.strip_prefix("gcSafePoint ") {
         let (safe_point, roots) = rest
@@ -585,6 +808,28 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
             .ok_or_else(|| error(line, "malformed indirect call"))?;
         return Ok(MirInstructionKind::CallIndirect {
             callee: ValueId::from_raw(parse_u32(callee, line)?),
+            arguments: parse_values(values, line)?,
+            declared_effects,
+            unwind,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("call.interface i") {
+        let (interface, rest) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "malformed interface call"))?;
+        let rest = rest
+            .strip_prefix("im")
+            .ok_or_else(|| error(line, "interface method"))?;
+        let (method, rest) = rest
+            .split_once(" slot#")
+            .ok_or_else(|| error(line, "interface slot"))?;
+        let (slot, values) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "interface arguments"))?;
+        return Ok(MirInstructionKind::CallInterface {
+            interface: InterfaceId::from_raw(parse_u32(interface, line)?),
+            method: InterfaceMethodId::from_raw(parse_u32(method, line)?),
+            slot: parse_u32(slot, line)?,
             arguments: parse_values(values, line)?,
             declared_effects,
             unwind,
@@ -780,6 +1025,32 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
             condition: ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?),
             when_true: BlockId::from_raw(parse_prefixed(parts[1], 'b', line)?),
             when_false: BlockId::from_raw(parse_prefixed(parts[2], 'b', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("union.switch ") {
+        let (head, arms_text) = rest
+            .split_once(" [")
+            .and_then(|(head, arms)| arms.strip_suffix(']').map(|arms| (head, arms)))
+            .ok_or_else(|| error(line, "malformed union switch"))?;
+        let parts: Vec<_> = head.split_whitespace().collect();
+        if parts.len() != 2 {
+            return Err(error(line, "malformed union switch header"));
+        }
+        let arms = comma_parts(arms_text)
+            .map(|arm| {
+                let (case, target) = arm
+                    .split_once(':')
+                    .ok_or_else(|| error(line, "malformed union switch arm"))?;
+                Ok(MirUnionSwitchArm {
+                    case: UnionCaseId::from_raw(parse_hash(case, "case#", line)?),
+                    target: BlockId::from_raw(parse_prefixed(target, 'b', line)?),
+                })
+            })
+            .collect::<Result<Vec<_>, MirParseError>>()?;
+        return Ok(MirTerminator::UnionSwitch {
+            scrutinee: ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?),
+            union: SymbolId::from_raw(parse_prefixed(parts[1], 's', line)?),
+            arms,
         });
     }
     Err(error(line, "unknown terminator"))
@@ -1038,6 +1309,12 @@ fn parse_prefixed(text: &str, prefix: char, line: usize) -> Result<u32, MirParse
             .ok_or_else(|| error(line, "invalid ID prefix"))?,
         line,
     )
+}
+
+fn parse_named_prefix(text: &str, prefix: &str, line: usize) -> Result<u32, MirParseError> {
+    text.strip_prefix(prefix)
+        .ok_or_else(|| error(line, "identifier prefix"))
+        .and_then(|value| parse_u32(value, line))
 }
 
 fn parse_hash(text: &str, prefix: &str, line: usize) -> Result<u32, MirParseError> {

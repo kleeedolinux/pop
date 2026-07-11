@@ -115,6 +115,12 @@ impl TypeArena {
         self.get(id).is_some_and(SemanticType::is_valid_hir_type)
     }
 
+    #[must_use]
+    pub fn is_valid_compile_time_type(&self, id: TypeId) -> bool {
+        self.get(id)
+            .is_some_and(SemanticType::is_valid_compile_time_type)
+    }
+
     fn intern_canonical(&mut self, semantic: SemanticType) -> TypeId {
         if let Some(id) = self.interned.get(&semantic) {
             return *id;
@@ -149,7 +155,12 @@ fn referenced_types(semantic: &SemanticType) -> Vec<TypeId> {
         | SemanticType::TypeParameter(_)
         | SemanticType::Opaque(_)
         | SemanticType::Error => Vec::new(),
-        SemanticType::Tuple(elements) | SemanticType::Union(elements) => elements.clone(),
+        SemanticType::Tuple(elements)
+        | SemanticType::Union(elements)
+        | SemanticType::Attribute {
+            parameters: elements,
+            ..
+        } => elements.clone(),
         SemanticType::Function {
             parameters,
             results,

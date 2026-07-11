@@ -77,8 +77,16 @@ public attribute Serializable(version: UInt32 = 1)
 `AttributeTarget` is compiler-owned and closed. Omitted `@AttributeUsage`
 permits one occurrence on namespace declarations only; it never grants an
 unrestricted target set. `@AttributeValidator` names a resolved trusted
-`@CompileTime` function, not a string. Runtime projection remains a separate
-trusted `@RetainMetadata` decision. See ADR 0023.
+`@CompileTime` function, not a string. Its parameters exactly match the
+attribute constructor parameters in declaration order and its sole result is
+`Boolean`; the compiler supplies normalized canonical arguments and rejects the
+attachment when the validator returns `false`. Version one exposes no target
+context to validators. Runtime projection remains a separate trusted
+`@RetainMetadata` decision. See ADR 0023.
+
+A namespace-targeted attribute precedes the file's `namespace` header, after
+any namespace documentation. Attributes written after that header attach to the
+following Item; they are never reinterpreted as namespace attributes.
 
 Unless stated otherwise, an attribute:
 

@@ -97,6 +97,11 @@ literal/keyword, not a type-naming exception.
 
 ## File shape
 
+Checked documentation and typed attributes for the file-scoped namespace
+precede the `namespace` header. Attributes after that header precede and attach
+to the following Item, so namespace attachment never depends on whitespace or
+lookahead across another declaration.
+
 A source file has one file-scoped namespace, followed by `using` directives,
 then declarations:
 

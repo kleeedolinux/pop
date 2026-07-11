@@ -1,20 +1,23 @@
 //! Typed, resolved, backend-neutral high-level IR.
+#![allow(clippy::too_many_lines)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use pop_foundation::{
-    AttributeId, BubbleId, ClassId, FieldId, FunctionId, LocalId, MethodId, ModuleId, NamespaceId,
-    SourceSpan, SymbolId, TypeId, UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, BubbleId, CaptureId, ClassId, FieldId, FunctionId, InterfaceId,
+    InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId, SourceSpan,
+    SymbolId, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
-    AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
-    ClassMethodDefinition, ClassMethodDispatch, FieldDefault, FloatValue, IntegerValue,
-    PrimitiveType, RecordDefinition, ResolvedAttribute, ResolvedFunctionSignature, SemanticType,
-    TypeArena, TypedBinaryOperator, TypedBody, TypedCall, TypedCallDispatch, TypedExpression,
-    TypedExpressionKind, TypedFieldValue, TypedStatement, TypedStatementKind, TypedTableEntry,
-    TypedUnaryOperator, UnionDefinition,
+    AttributeConstant, AttributeDefinition, CaptureMode, CaptureSource, ClassDefinition,
+    ClassFieldDefault, ClassInterfaceImplementation, ClassMethodDefinition, ClassMethodDispatch,
+    FieldDefault, FloatValue, IntegerValue, InterfaceDefinition, PrimitiveType, RecordDefinition,
+    ResolvedAttribute, ResolvedFunctionSignature, SemanticType, TypeArena, TypedBinaryOperator,
+    TypedBody, TypedCall, TypedCallDispatch, TypedCapture, TypedClosure, TypedExpression,
+    TypedExpressionKind, TypedFieldValue, TypedMatchArm, TypedMatchBinding, TypedStatement,
+    TypedStatementKind, TypedTableEntry, TypedUnaryOperator, UnionDefinition,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -340,6 +343,11 @@ impl HirDeclaration {
                 class: definition.class(),
                 type_id: definition.type_id(),
                 is_open: definition.is_open(),
+                interfaces: definition
+                    .interfaces()
+                    .iter()
+                    .map(lower_interface_implementation)
+                    .collect(),
                 fields: definition
                     .fields()
                     .iter()
@@ -360,6 +368,49 @@ impl HirDeclaration {
                         visibility: method.visibility(),
                         name: method.name().to_owned(),
                         dispatch: method.dispatch(),
+                        parameters: method
+                            .parameters()
+                            .iter()
+                            .map(|(name, type_id, span)| HirNamedType {
+                                name: name.clone(),
+                                type_id: *type_id,
+                                span: *span,
+                            })
+                            .collect(),
+                        results: method.results().to_vec(),
+                        span: method.span(),
+                    })
+                    .collect(),
+            }),
+            span: definition.span(),
+        }
+    }
+
+    /// Retains one accepted nominal interface with its canonical member slots.
+    #[must_use]
+    pub fn interface(
+        module: ModuleId,
+        bubble: BubbleId,
+        visibility: Visibility,
+        name: impl Into<String>,
+        definition: &InterfaceDefinition,
+    ) -> Self {
+        Self {
+            symbol: definition.symbol(),
+            module,
+            bubble,
+            visibility,
+            name: name.into(),
+            kind: HirDeclarationKind::Interface(HirInterfaceDeclaration {
+                interface: definition.interface(),
+                type_id: definition.type_id(),
+                methods: definition
+                    .methods()
+                    .iter()
+                    .map(|method| HirInterfaceMethod {
+                        method: method.method(),
+                        slot: method.slot(),
+                        name: method.name().to_owned(),
                         parameters: method
                             .parameters()
                             .iter()
@@ -440,6 +491,24 @@ impl HirDeclaration {
     }
 
     #[must_use]
+    pub const fn as_class(&self) -> Option<&HirClassDeclaration> {
+        if let HirDeclarationKind::Class(class) = &self.kind {
+            Some(class)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub const fn as_interface(&self) -> Option<&HirInterfaceDeclaration> {
+        if let HirDeclarationKind::Interface(interface) = &self.kind {
+            Some(interface)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
     pub const fn span(&self) -> SourceSpan {
         self.span
     }
@@ -450,6 +519,7 @@ pub enum HirDeclarationKind {
     Record(HirRecordDeclaration),
     Union(HirUnionDeclaration),
     Class(HirClassDeclaration),
+    Interface(HirInterfaceDeclaration),
     Attribute(HirAttributeDeclaration),
 }
 
@@ -487,8 +557,40 @@ pub struct HirClassDeclaration {
     class: ClassId,
     type_id: TypeId,
     is_open: bool,
+    interfaces: Vec<HirInterfaceImplementation>,
     fields: Vec<HirClassField>,
     methods: Vec<HirClassMethod>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirInterfaceDeclaration {
+    interface: InterfaceId,
+    type_id: TypeId,
+    methods: Vec<HirInterfaceMethod>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirInterfaceMethod {
+    method: InterfaceMethodId,
+    slot: u32,
+    name: String,
+    parameters: Vec<HirNamedType>,
+    results: Vec<TypeId>,
+    span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirInterfaceImplementation {
+    interface: InterfaceId,
+    interface_type: TypeId,
+    methods: Vec<HirInterfaceMethodImplementation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HirInterfaceMethodImplementation {
+    interface_method: InterfaceMethodId,
+    slot: u32,
+    class_method: MethodId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -628,6 +730,11 @@ impl HirClassDeclaration {
     }
 
     #[must_use]
+    pub fn interfaces(&self) -> &[HirInterfaceImplementation] {
+        &self.interfaces
+    }
+
+    #[must_use]
     pub fn fields(&self) -> &[HirClassField] {
         &self.fields
     }
@@ -635,6 +742,89 @@ impl HirClassDeclaration {
     #[must_use]
     pub fn methods(&self) -> &[HirClassMethod] {
         &self.methods
+    }
+}
+
+impl HirInterfaceDeclaration {
+    #[must_use]
+    pub const fn interface(&self) -> InterfaceId {
+        self.interface
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[HirInterfaceMethod] {
+        &self.methods
+    }
+}
+
+impl HirInterfaceMethod {
+    #[must_use]
+    pub const fn method(&self) -> InterfaceMethodId {
+        self.method
+    }
+
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[HirNamedType] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+impl HirInterfaceImplementation {
+    #[must_use]
+    pub const fn interface(&self) -> InterfaceId {
+        self.interface
+    }
+
+    #[must_use]
+    pub const fn interface_type(&self) -> TypeId {
+        self.interface_type
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[HirInterfaceMethodImplementation] {
+        &self.methods
+    }
+}
+
+impl HirInterfaceMethodImplementation {
+    #[must_use]
+    pub const fn interface_method(&self) -> InterfaceMethodId {
+        self.interface_method
+    }
+
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    #[must_use]
+    pub const fn class_method(&self) -> MethodId {
+        self.class_method
     }
 }
 
@@ -936,6 +1126,7 @@ impl HirAttributeArgument {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirParameter {
+    binding: BindingId,
     parameter: ValueParameterId,
     name: String,
     type_id: TypeId,
@@ -943,6 +1134,11 @@ pub struct HirParameter {
 }
 
 impl HirParameter {
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
     #[must_use]
     pub const fn parameter(&self) -> ValueParameterId {
         self.parameter
@@ -985,10 +1181,23 @@ impl HirStatement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirStatementKind {
     Local {
+        binding: BindingId,
         local: LocalId,
         name: String,
         local_type: TypeId,
         initializer: HirExpression,
+    },
+    LocalSet {
+        local: LocalId,
+        value: HirExpression,
+    },
+    ParameterSet {
+        parameter: ValueParameterId,
+        value: HirExpression,
+    },
+    CaptureSet {
+        capture: CaptureId,
+        value: HirExpression,
     },
     Return {
         values: Vec<HirExpression>,
@@ -1002,6 +1211,11 @@ pub enum HirStatementKind {
         condition: HirExpression,
         body: Vec<HirStatement>,
     },
+    Match {
+        scrutinee: HirExpression,
+        union: SymbolId,
+        arms: Vec<HirMatchArm>,
+    },
     FieldSet {
         base: HirExpression,
         field: FieldId,
@@ -1009,6 +1223,83 @@ pub enum HirStatementKind {
     },
     Call(HirCall),
     Expression(HirExpression),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirMatchArm {
+    union: SymbolId,
+    case: UnionCaseId,
+    bindings: Vec<HirMatchBinding>,
+    body: Vec<HirStatement>,
+    span: SourceSpan,
+}
+
+impl HirMatchArm {
+    #[must_use]
+    pub const fn union(&self) -> SymbolId {
+        self.union
+    }
+
+    #[must_use]
+    pub const fn case(&self) -> UnionCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub fn bindings(&self) -> &[HirMatchBinding] {
+        &self.bindings
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[HirStatement] {
+        &self.body
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirMatchBinding {
+    binding: Option<BindingId>,
+    local: Option<LocalId>,
+    name: String,
+    type_id: TypeId,
+    span: SourceSpan,
+}
+
+impl HirMatchBinding {
+    #[must_use]
+    pub const fn binding(&self) -> Option<BindingId> {
+        self.binding
+    }
+
+    #[must_use]
+    pub const fn local(&self) -> Option<LocalId> {
+        self.local
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+
+    #[must_use]
+    pub fn is_ignored(&self) -> bool {
+        self.name == "_" && self.binding.is_none() && self.local.is_none()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1066,8 +1357,10 @@ pub enum HirExpressionKind {
     String(String),
     Boolean(bool),
     Nil,
+    Closure(HirClosure),
     Local(LocalId),
     Parameter(ValueParameterId),
+    Capture(CaptureId),
     Function(SymbolId),
     Field {
         base: Box<HirExpression>,
@@ -1112,6 +1405,137 @@ pub enum HirExpressionKind {
         dispatch: HirCallDispatch,
         arguments: Vec<HirExpression>,
     },
+    InterfaceUpcast {
+        value: Box<HirExpression>,
+        interface: InterfaceId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirClosure {
+    function: NestedFunctionId,
+    parameters: Vec<HirClosureParameter>,
+    results: Vec<TypeId>,
+    captures: Vec<HirCapture>,
+    body: Vec<HirStatement>,
+    span: SourceSpan,
+}
+
+impl HirClosure {
+    #[must_use]
+    pub const fn function(&self) -> NestedFunctionId {
+        self.function
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[HirClosureParameter] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub fn captures(&self) -> &[HirCapture] {
+        &self.captures
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[HirStatement] {
+        &self.body
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirClosureParameter {
+    binding: BindingId,
+    parameter: ValueParameterId,
+    name: String,
+    type_id: TypeId,
+    span: SourceSpan,
+}
+
+impl HirClosureParameter {
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    #[must_use]
+    pub const fn parameter(&self) -> ValueParameterId {
+        self.parameter
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirCaptureMode {
+    Value,
+    Cell,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirCaptureSource {
+    Local(LocalId),
+    Parameter(ValueParameterId),
+    Capture(CaptureId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HirCapture {
+    capture: CaptureId,
+    binding: BindingId,
+    source: HirCaptureSource,
+    type_id: TypeId,
+    mode: HirCaptureMode,
+}
+
+impl HirCapture {
+    #[must_use]
+    pub const fn capture(&self) -> CaptureId {
+        self.capture
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> HirCaptureSource {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> HirCaptureMode {
+        self.mode
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1164,9 +1588,20 @@ impl HirFieldValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirCallDispatch {
-    Direct { function: SymbolId },
-    DirectMethod { method: MethodId },
-    Indirect { callee: Box<HirExpression> },
+    Direct {
+        function: SymbolId,
+    },
+    DirectMethod {
+        method: MethodId,
+    },
+    InterfaceMethod {
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+        slot: u32,
+    },
+    Indirect {
+        callee: Box<HirExpression>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1180,12 +1615,25 @@ pub struct HirFunctionContext {
 pub struct HirKnownCallables<'a> {
     functions: &'a BTreeSet<SymbolId>,
     methods: &'a BTreeSet<MethodId>,
+    interfaces: &'a [InterfaceDefinition],
 }
 
 impl<'a> HirKnownCallables<'a> {
     #[must_use]
     pub const fn new(functions: &'a BTreeSet<SymbolId>, methods: &'a BTreeSet<MethodId>) -> Self {
-        Self { functions, methods }
+        Self {
+            functions,
+            methods,
+            interfaces: &[],
+        }
+    }
+
+    /// Adds nominal interface member schemas used to resolve per-interface
+    /// dispatch slots while lowering typed calls.
+    #[must_use]
+    pub const fn with_interfaces(mut self, interfaces: &'a [InterfaceDefinition]) -> Self {
+        self.interfaces = interfaces;
+        self
     }
 }
 
@@ -1213,7 +1661,7 @@ pub fn build_hir_function(
     body: &TypedBody,
     arena: &TypeArena,
     known_functions: &BTreeSet<SymbolId>,
-) -> Result<HirFunction, Vec<HirVerificationError>> {
+) -> Result<HirFunction, Vec<HirBuildError>> {
     build_hir_function_with_attributes(
         HirFunctionContext::new(module, bubble, visibility),
         signature,
@@ -1236,7 +1684,7 @@ pub fn build_hir_function_with_attributes(
     arena: &TypeArena,
     known_functions: &BTreeSet<SymbolId>,
     attributes: &[ResolvedAttribute],
-) -> Result<HirFunction, Vec<HirVerificationError>> {
+) -> Result<HirFunction, Vec<HirBuildError>> {
     build_hir_function_with_methods_and_attributes(
         context,
         signature,
@@ -1261,13 +1709,56 @@ pub fn build_hir_function_with_methods_and_attributes(
     known_functions: &BTreeSet<SymbolId>,
     known_methods: &BTreeSet<MethodId>,
     attributes: &[ResolvedAttribute],
-) -> Result<HirFunction, Vec<HirVerificationError>> {
+) -> Result<HirFunction, Vec<HirBuildError>> {
+    build_hir_function_with_known_callables_and_attributes(
+        context,
+        signature,
+        body,
+        arena,
+        HirKnownCallables::new(known_functions, known_methods),
+        attributes,
+    )
+}
+
+/// Constructs a function with complete direct, class, and nominal-interface
+/// callable schemas. Interface schemas are required for interface calls because
+/// `InterfaceMethodId` is global while dispatch slots are per interface.
+///
+/// # Errors
+///
+/// Returns deterministic build or verification failures. In particular,
+/// compile-time-only attribute queries and interface calls without a known
+/// canonical slot never enter runtime HIR.
+pub fn build_hir_function_with_known_callables_and_attributes(
+    context: HirFunctionContext,
+    signature: &ResolvedFunctionSignature,
+    body: &TypedBody,
+    arena: &TypeArena,
+    known: HirKnownCallables<'_>,
+    attributes: &[ResolvedAttribute],
+) -> Result<HirFunction, Vec<HirBuildError>> {
+    if let Some(span) = first_compile_time_only_statement(body.statements()) {
+        return Err(vec![HirVerificationError::CompileTimeOnlyExpression {
+            span,
+        }]);
+    }
+    let interface_slots = collect_interface_slots(known.interfaces);
+    if let Some((interface, method, span)) =
+        first_unknown_interface_call(body.statements(), &interface_slots)
+    {
+        return Err(vec![HirVerificationError::UnknownInterfaceMethod {
+            interface,
+            method,
+            span,
+        }]);
+    }
     let parameters: Option<Vec<_>> = signature
         .parameters()
         .iter()
         .enumerate()
         .map(|(index, parameter)| {
             Some(HirParameter {
+                binding: BindingId::from_raw(u32::try_from(index).ok()?),
                 parameter: ValueParameterId::from_raw(u32::try_from(index).ok()?),
                 name: parameter.name().to_owned(),
                 type_id: parameter.parameter_type().type_id()?,
@@ -1292,10 +1783,14 @@ pub fn build_hir_function_with_methods_and_attributes(
         name: signature.name().to_owned(),
         parameters,
         results,
-        body: body.statements().iter().map(lower_statement).collect(),
+        body: body
+            .statements()
+            .iter()
+            .map(|statement| lower_statement(statement, &interface_slots))
+            .collect(),
         attributes: attributes.iter().map(lower_attribute).collect(),
     };
-    verify_hir_callable(&function, arena, known_functions, known_methods)?;
+    verify_hir_callable(&function, arena, known.functions, known.methods)?;
     Ok(function)
 }
 
@@ -1312,14 +1807,13 @@ pub fn build_hir_method(
     body: &TypedBody,
     arena: &TypeArena,
     known: HirKnownCallables<'_>,
-) -> Result<HirMethod, Vec<HirVerificationError>> {
-    let function = build_hir_function_with_methods_and_attributes(
+) -> Result<HirMethod, Vec<HirBuildError>> {
+    let function = build_hir_function_with_known_callables_and_attributes(
         context,
         signature,
         body,
         arena,
-        known.functions,
-        known.methods,
+        known,
         &[],
     )?;
     Ok(HirMethod {
@@ -1348,43 +1842,86 @@ fn lower_attribute(attribute: &ResolvedAttribute) -> HirAttribute {
     }
 }
 
-fn lower_statement(statement: &TypedStatement) -> HirStatement {
+type HirInterfaceSlotMap = BTreeMap<(InterfaceId, InterfaceMethodId), u32>;
+
+fn lower_statement(
+    statement: &TypedStatement,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirStatement {
     let kind = match statement.kind() {
         TypedStatementKind::Local {
+            binding,
             local,
             name,
             local_type,
             initializer,
         } => HirStatementKind::Local {
+            binding: *binding,
             local: *local,
             name: name.clone(),
             local_type: *local_type,
-            initializer: lower_expression(initializer),
+            initializer: lower_expression(initializer, interface_slots),
+        },
+        TypedStatementKind::LocalSet { local, value } => HirStatementKind::LocalSet {
+            local: *local,
+            value: lower_expression(value, interface_slots),
+        },
+        TypedStatementKind::ParameterSet { parameter, value } => HirStatementKind::ParameterSet {
+            parameter: *parameter,
+            value: lower_expression(value, interface_slots),
+        },
+        TypedStatementKind::CaptureSet { capture, value } => HirStatementKind::CaptureSet {
+            capture: *capture,
+            value: lower_expression(value, interface_slots),
         },
         TypedStatementKind::Return { values } => HirStatementKind::Return {
-            values: values.iter().map(lower_expression).collect(),
+            values: values
+                .iter()
+                .map(|value| lower_expression(value, interface_slots))
+                .collect(),
         },
         TypedStatementKind::If {
             condition,
             then_body,
             else_body,
         } => HirStatementKind::If {
-            condition: lower_expression(condition),
-            then_body: then_body.iter().map(lower_statement).collect(),
-            else_body: else_body.iter().map(lower_statement).collect(),
+            condition: lower_expression(condition, interface_slots),
+            then_body: then_body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+            else_body: else_body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
         },
         TypedStatementKind::While { condition, body } => HirStatementKind::While {
-            condition: lower_expression(condition),
-            body: body.iter().map(lower_statement).collect(),
+            condition: lower_expression(condition, interface_slots),
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
+        TypedStatementKind::Match {
+            scrutinee,
+            union,
+            arms,
+        } => HirStatementKind::Match {
+            scrutinee: lower_expression(scrutinee, interface_slots),
+            union: *union,
+            arms: arms
+                .iter()
+                .map(|arm| lower_match_arm(arm, interface_slots))
+                .collect(),
         },
         TypedStatementKind::FieldSet { base, field, value } => HirStatementKind::FieldSet {
-            base: lower_expression(base),
+            base: lower_expression(base, interface_slots),
             field: *field,
-            value: lower_expression(value),
+            value: lower_expression(value, interface_slots),
         },
-        TypedStatementKind::Call(call) => HirStatementKind::Call(lower_call(call)),
+        TypedStatementKind::Call(call) => HirStatementKind::Call(lower_call(call, interface_slots)),
         TypedStatementKind::Expression(expression) => {
-            HirStatementKind::Expression(lower_expression(expression))
+            HirStatementKind::Expression(lower_expression(expression, interface_slots))
         }
     };
     HirStatement {
@@ -1393,7 +1930,7 @@ fn lower_statement(statement: &TypedStatement) -> HirStatement {
     }
 }
 
-fn lower_call(call: &TypedCall) -> HirCall {
+fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCall {
     let dispatch = match call.dispatch() {
         TypedCallDispatch::Direct { function } => HirCallDispatch::Direct {
             function: *function,
@@ -1403,44 +1940,88 @@ fn lower_call(call: &TypedCall) -> HirCall {
                 dispatch: HirCallDispatch::DirectMethod { method: *method },
                 arguments: receiver
                     .iter()
-                    .map(|receiver| lower_expression(receiver))
-                    .chain(call.arguments().iter().map(lower_expression))
+                    .map(|receiver| lower_expression(receiver, interface_slots))
+                    .chain(
+                        call.arguments()
+                            .iter()
+                            .map(|argument| lower_expression(argument, interface_slots)),
+                    )
+                    .collect(),
+                span: call.span(),
+            };
+        }
+        TypedCallDispatch::InterfaceMethod {
+            interface,
+            method,
+            receiver,
+        } => {
+            return HirCall {
+                dispatch: HirCallDispatch::InterfaceMethod {
+                    interface: *interface,
+                    method: *method,
+                    slot: interface_slots[&(*interface, *method)],
+                },
+                arguments: std::iter::once(lower_expression(receiver, interface_slots))
+                    .chain(
+                        call.arguments()
+                            .iter()
+                            .map(|argument| lower_expression(argument, interface_slots)),
+                    )
                     .collect(),
                 span: call.span(),
             };
         }
         TypedCallDispatch::Indirect { callee } => HirCallDispatch::Indirect {
-            callee: Box::new(lower_expression(callee)),
+            callee: Box::new(lower_expression(callee, interface_slots)),
         },
     };
     HirCall {
         dispatch,
-        arguments: call.arguments().iter().map(lower_expression).collect(),
+        arguments: call
+            .arguments()
+            .iter()
+            .map(|argument| lower_expression(argument, interface_slots))
+            .collect(),
         span: call.span(),
     }
 }
 
-fn lower_expression(expression: &TypedExpression) -> HirExpression {
+#[allow(clippy::too_many_lines)]
+fn lower_expression(
+    expression: &TypedExpression,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirExpression {
     let kind = match expression.kind() {
         TypedExpressionKind::Integer(value) => HirExpressionKind::Integer(*value),
         TypedExpressionKind::Float(value) => HirExpressionKind::Float(*value),
         TypedExpressionKind::String(value) => HirExpressionKind::String(value.clone()),
         TypedExpressionKind::Boolean(value) => HirExpressionKind::Boolean(*value),
         TypedExpressionKind::Nil => HirExpressionKind::Nil,
+        TypedExpressionKind::AttributeQuery { .. }
+        | TypedExpressionKind::HasAttributeQuery { .. } => {
+            unreachable!("compile-time-only attribute queries are rejected before runtime HIR")
+        }
+        TypedExpressionKind::Closure(closure) => {
+            HirExpressionKind::Closure(lower_closure(closure, interface_slots))
+        }
         TypedExpressionKind::Local(local) => HirExpressionKind::Local(*local),
         TypedExpressionKind::Parameter(parameter) => HirExpressionKind::Parameter(*parameter),
+        TypedExpressionKind::Capture(capture) => HirExpressionKind::Capture(*capture),
         TypedExpressionKind::Function(function) => HirExpressionKind::Function(*function),
         TypedExpressionKind::Field { base, field } => HirExpressionKind::Field {
-            base: Box::new(lower_expression(base)),
+            base: Box::new(lower_expression(base, interface_slots)),
             field: *field,
         },
         TypedExpressionKind::ArrayGet { array, index } => HirExpressionKind::ArrayGet {
-            array: Box::new(lower_expression(array)),
-            index: Box::new(lower_expression(index)),
+            array: Box::new(lower_expression(array, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
         },
         TypedExpressionKind::Record { record, fields } => HirExpressionKind::Record {
             record: *record,
-            fields: fields.iter().map(lower_field_value).collect(),
+            fields: fields
+                .iter()
+                .map(|field| lower_field_value(field, interface_slots))
+                .collect(),
         },
         TypedExpressionKind::ClassConstruct {
             class,
@@ -1449,7 +2030,10 @@ fn lower_expression(expression: &TypedExpression) -> HirExpression {
         } => HirExpressionKind::ClassConstruct {
             class: *class,
             definition: *definition,
-            fields: fields.iter().map(lower_field_value).collect(),
+            fields: fields
+                .iter()
+                .map(|field| lower_field_value(field, interface_slots))
+                .collect(),
         },
         TypedExpressionKind::RecordUpdate {
             record,
@@ -1457,15 +2041,24 @@ fn lower_expression(expression: &TypedExpression) -> HirExpression {
             fields,
         } => HirExpressionKind::RecordUpdate {
             record: *record,
-            base: Box::new(lower_expression(base)),
-            fields: fields.iter().map(lower_field_value).collect(),
+            base: Box::new(lower_expression(base, interface_slots)),
+            fields: fields
+                .iter()
+                .map(|field| lower_field_value(field, interface_slots))
+                .collect(),
         },
-        TypedExpressionKind::Array(elements) => {
-            HirExpressionKind::Array(elements.iter().map(lower_expression).collect())
-        }
-        TypedExpressionKind::Table(entries) => {
-            HirExpressionKind::Table(entries.iter().map(lower_table_entry).collect())
-        }
+        TypedExpressionKind::Array(elements) => HirExpressionKind::Array(
+            elements
+                .iter()
+                .map(|element| lower_expression(element, interface_slots))
+                .collect(),
+        ),
+        TypedExpressionKind::Table(entries) => HirExpressionKind::Table(
+            entries
+                .iter()
+                .map(|entry| lower_table_entry(entry, interface_slots))
+                .collect(),
+        ),
         TypedExpressionKind::UnionCase {
             union,
             case,
@@ -1473,14 +2066,20 @@ fn lower_expression(expression: &TypedExpression) -> HirExpression {
         } => HirExpressionKind::UnionCase {
             union: *union,
             case: *case,
-            arguments: arguments.iter().map(lower_expression).collect(),
+            arguments: arguments
+                .iter()
+                .map(|argument| lower_expression(argument, interface_slots))
+                .collect(),
         },
-        TypedExpressionKind::Tuple(elements) => {
-            HirExpressionKind::Tuple(elements.iter().map(lower_expression).collect())
-        }
+        TypedExpressionKind::Tuple(elements) => HirExpressionKind::Tuple(
+            elements
+                .iter()
+                .map(|element| lower_expression(element, interface_slots))
+                .collect(),
+        ),
         TypedExpressionKind::Unary { operator, operand } => HirExpressionKind::Unary {
             operator: *operator,
-            operand: Box::new(lower_expression(operand)),
+            operand: Box::new(lower_expression(operand, interface_slots)),
         },
         TypedExpressionKind::Binary {
             operator,
@@ -1488,12 +2087,21 @@ fn lower_expression(expression: &TypedExpression) -> HirExpression {
             right,
         } => HirExpressionKind::Binary {
             operator: *operator,
-            left: Box::new(lower_expression(left)),
-            right: Box::new(lower_expression(right)),
+            left: Box::new(lower_expression(left, interface_slots)),
+            right: Box::new(lower_expression(right, interface_slots)),
         },
         call @ (TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::IndirectCall { .. }
-        | TypedExpressionKind::DirectMethodCall { .. }) => lower_call_expression(call),
+        | TypedExpressionKind::DirectMethodCall { .. }
+        | TypedExpressionKind::InterfaceMethodCall { .. }) => {
+            lower_call_expression(call, interface_slots)
+        }
+        TypedExpressionKind::InterfaceUpcast { value, interface } => {
+            HirExpressionKind::InterfaceUpcast {
+                value: Box::new(lower_expression(value, interface_slots)),
+                interface: *interface,
+            }
+        }
     };
     HirExpression {
         kind,
@@ -1502,7 +2110,10 @@ fn lower_expression(expression: &TypedExpression) -> HirExpression {
     }
 }
 
-fn lower_call_expression(call: &TypedExpressionKind) -> HirExpressionKind {
+fn lower_call_expression(
+    call: &TypedExpressionKind,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirExpressionKind {
     match call {
         TypedExpressionKind::DirectCall {
             function,
@@ -1511,13 +2122,19 @@ fn lower_call_expression(call: &TypedExpressionKind) -> HirExpressionKind {
             dispatch: HirCallDispatch::Direct {
                 function: *function,
             },
-            arguments: arguments.iter().map(lower_expression).collect(),
+            arguments: arguments
+                .iter()
+                .map(|argument| lower_expression(argument, interface_slots))
+                .collect(),
         },
         TypedExpressionKind::IndirectCall { callee, arguments } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Indirect {
-                callee: Box::new(lower_expression(callee)),
+                callee: Box::new(lower_expression(callee, interface_slots)),
             },
-            arguments: arguments.iter().map(lower_expression).collect(),
+            arguments: arguments
+                .iter()
+                .map(|argument| lower_expression(argument, interface_slots))
+                .collect(),
         },
         TypedExpressionKind::DirectMethodCall {
             method,
@@ -1527,38 +2144,496 @@ fn lower_call_expression(call: &TypedExpressionKind) -> HirExpressionKind {
             dispatch: HirCallDispatch::DirectMethod { method: *method },
             arguments: receiver
                 .iter()
-                .map(|receiver| lower_expression(receiver))
-                .chain(arguments.iter().map(lower_expression))
+                .map(|receiver| lower_expression(receiver, interface_slots))
+                .chain(
+                    arguments
+                        .iter()
+                        .map(|argument| lower_expression(argument, interface_slots)),
+                )
+                .collect(),
+        },
+        TypedExpressionKind::InterfaceMethodCall {
+            interface,
+            method,
+            receiver,
+            arguments,
+        } => HirExpressionKind::Call {
+            dispatch: HirCallDispatch::InterfaceMethod {
+                interface: *interface,
+                method: *method,
+                slot: interface_slots[&(*interface, *method)],
+            },
+            arguments: std::iter::once(lower_expression(receiver, interface_slots))
+                .chain(
+                    arguments
+                        .iter()
+                        .map(|argument| lower_expression(argument, interface_slots)),
+                )
                 .collect(),
         },
         _ => unreachable!("call lowering accepts only typed call expressions"),
     }
 }
 
-fn lower_field_value(field: &TypedFieldValue) -> HirFieldValue {
+fn lower_closure(closure: &TypedClosure, interface_slots: &HirInterfaceSlotMap) -> HirClosure {
+    HirClosure {
+        function: closure.function(),
+        parameters: closure
+            .parameters()
+            .iter()
+            .map(|parameter| HirClosureParameter {
+                binding: parameter.binding(),
+                parameter: parameter.parameter(),
+                name: parameter.name().to_owned(),
+                type_id: parameter.type_id(),
+                span: parameter.span(),
+            })
+            .collect(),
+        results: closure.results().to_vec(),
+        captures: closure.captures().iter().map(lower_capture).collect(),
+        body: closure
+            .body()
+            .statements()
+            .iter()
+            .map(|statement| lower_statement(statement, interface_slots))
+            .collect(),
+        span: closure.span(),
+    }
+}
+
+fn lower_capture(capture: &TypedCapture) -> HirCapture {
+    HirCapture {
+        capture: capture.capture(),
+        binding: capture.binding(),
+        source: match capture.source() {
+            CaptureSource::Local(local) => HirCaptureSource::Local(local),
+            CaptureSource::Parameter(parameter) => HirCaptureSource::Parameter(parameter),
+            CaptureSource::Capture(capture) => HirCaptureSource::Capture(capture),
+        },
+        type_id: capture.type_id(),
+        mode: match capture.mode() {
+            CaptureMode::Value => HirCaptureMode::Value,
+            CaptureMode::Cell => HirCaptureMode::Cell,
+        },
+    }
+}
+
+fn lower_match_arm(arm: &TypedMatchArm, interface_slots: &HirInterfaceSlotMap) -> HirMatchArm {
+    HirMatchArm {
+        union: arm.union(),
+        case: arm.case(),
+        bindings: arm.bindings().iter().map(lower_match_binding).collect(),
+        body: arm
+            .body()
+            .iter()
+            .map(|statement| lower_statement(statement, interface_slots))
+            .collect(),
+        span: arm.span(),
+    }
+}
+
+fn lower_match_binding(binding: &TypedMatchBinding) -> HirMatchBinding {
+    HirMatchBinding {
+        binding: binding.binding(),
+        local: binding.local(),
+        name: binding.name().to_owned(),
+        type_id: binding.type_id(),
+        span: binding.span(),
+    }
+}
+
+fn lower_interface_implementation(
+    implementation: &ClassInterfaceImplementation,
+) -> HirInterfaceImplementation {
+    HirInterfaceImplementation {
+        interface: implementation.interface(),
+        interface_type: implementation.interface_type(),
+        methods: implementation
+            .methods()
+            .iter()
+            .map(|method| HirInterfaceMethodImplementation {
+                interface_method: method.interface_method(),
+                slot: method.slot(),
+                class_method: method.class_method(),
+            })
+            .collect(),
+    }
+}
+
+fn collect_interface_slots(interfaces: &[InterfaceDefinition]) -> HirInterfaceSlotMap {
+    interfaces
+        .iter()
+        .flat_map(|interface| {
+            interface
+                .methods()
+                .iter()
+                .map(move |method| ((interface.interface(), method.method()), method.slot()))
+        })
+        .collect()
+}
+
+fn first_unknown_interface_call(
+    statements: &[TypedStatement],
+    slots: &HirInterfaceSlotMap,
+) -> Option<(InterfaceId, InterfaceMethodId, SourceSpan)> {
+    for statement in statements {
+        let found = match statement.kind() {
+            TypedStatementKind::Local { initializer, .. } => {
+                first_unknown_interface_expression(initializer, slots)
+            }
+            TypedStatementKind::LocalSet { value, .. }
+            | TypedStatementKind::ParameterSet { value, .. }
+            | TypedStatementKind::CaptureSet { value, .. }
+            | TypedStatementKind::Expression(value) => {
+                first_unknown_interface_expression(value, slots)
+            }
+            TypedStatementKind::Return { values } => values
+                .iter()
+                .find_map(|value| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => first_unknown_interface_expression(condition, slots)
+                .or_else(|| first_unknown_interface_call(then_body, slots))
+                .or_else(|| first_unknown_interface_call(else_body, slots)),
+            TypedStatementKind::While { condition, body } => {
+                first_unknown_interface_expression(condition, slots)
+                    .or_else(|| first_unknown_interface_call(body, slots))
+            }
+            TypedStatementKind::Match {
+                scrutinee, arms, ..
+            } => first_unknown_interface_expression(scrutinee, slots).or_else(|| {
+                arms.iter()
+                    .find_map(|arm| first_unknown_interface_call(arm.body(), slots))
+            }),
+            TypedStatementKind::FieldSet { base, value, .. } => {
+                first_unknown_interface_expression(base, slots)
+                    .or_else(|| first_unknown_interface_expression(value, slots))
+            }
+            TypedStatementKind::Call(call) => {
+                if let TypedCallDispatch::InterfaceMethod {
+                    interface, method, ..
+                } = call.dispatch()
+                    && !slots.contains_key(&(*interface, *method))
+                {
+                    Some((*interface, *method, call.span()))
+                } else {
+                    let receiver = match call.dispatch() {
+                        TypedCallDispatch::Direct { .. } => None,
+                        TypedCallDispatch::DirectMethod { receiver, .. } => receiver
+                            .as_deref()
+                            .and_then(|value| first_unknown_interface_expression(value, slots)),
+                        TypedCallDispatch::InterfaceMethod { receiver, .. } => {
+                            first_unknown_interface_expression(receiver, slots)
+                        }
+                        TypedCallDispatch::Indirect { callee } => {
+                            first_unknown_interface_expression(callee, slots)
+                        }
+                    };
+                    receiver.or_else(|| {
+                        call.arguments().iter().find_map(|argument| {
+                            first_unknown_interface_expression(argument, slots)
+                        })
+                    })
+                }
+            }
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn first_unknown_interface_expression(
+    expression: &TypedExpression,
+    slots: &HirInterfaceSlotMap,
+) -> Option<(InterfaceId, InterfaceMethodId, SourceSpan)> {
+    match expression.kind() {
+        TypedExpressionKind::InterfaceMethodCall {
+            interface,
+            method,
+            receiver,
+            arguments,
+        } => {
+            if !slots.contains_key(&(*interface, *method)) {
+                return Some((*interface, *method, expression.span()));
+            }
+            first_unknown_interface_expression(receiver, slots).or_else(|| {
+                arguments
+                    .iter()
+                    .find_map(|argument| first_unknown_interface_expression(argument, slots))
+            })
+        }
+        TypedExpressionKind::Closure(closure) => {
+            first_unknown_interface_call(closure.body().statements(), slots)
+        }
+        TypedExpressionKind::Field { base, .. } => first_unknown_interface_expression(base, slots),
+        TypedExpressionKind::ClassConstruct { fields, .. }
+        | TypedExpressionKind::Record { fields, .. } => fields
+            .iter()
+            .find_map(|field| first_unknown_interface_expression(field.value(), slots)),
+        TypedExpressionKind::ArrayGet { array, index } => {
+            first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedExpressionKind::RecordUpdate { base, fields, .. } => {
+            first_unknown_interface_expression(base, slots).or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|field| first_unknown_interface_expression(field.value(), slots))
+            })
+        }
+        TypedExpressionKind::Array(elements) | TypedExpressionKind::Tuple(elements) => elements
+            .iter()
+            .find_map(|element| first_unknown_interface_expression(element, slots)),
+        TypedExpressionKind::Table(entries) => entries.iter().find_map(|entry| {
+            first_unknown_interface_expression(entry.key(), slots)
+                .or_else(|| first_unknown_interface_expression(entry.value(), slots))
+        }),
+        TypedExpressionKind::UnionCase { arguments, .. }
+        | TypedExpressionKind::DirectCall { arguments, .. } => arguments
+            .iter()
+            .find_map(|argument| first_unknown_interface_expression(argument, slots)),
+        TypedExpressionKind::Unary { operand, .. } => {
+            first_unknown_interface_expression(operand, slots)
+        }
+        TypedExpressionKind::Binary { left, right, .. } => {
+            first_unknown_interface_expression(left, slots)
+                .or_else(|| first_unknown_interface_expression(right, slots))
+        }
+        TypedExpressionKind::IndirectCall { callee, arguments } => {
+            first_unknown_interface_expression(callee, slots).or_else(|| {
+                arguments
+                    .iter()
+                    .find_map(|argument| first_unknown_interface_expression(argument, slots))
+            })
+        }
+        TypedExpressionKind::DirectMethodCall {
+            receiver,
+            arguments,
+            ..
+        } => receiver
+            .as_deref()
+            .and_then(|value| first_unknown_interface_expression(value, slots))
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .find_map(|argument| first_unknown_interface_expression(argument, slots))
+            }),
+        TypedExpressionKind::InterfaceUpcast { value, .. } => {
+            first_unknown_interface_expression(value, slots)
+        }
+        TypedExpressionKind::Integer(_)
+        | TypedExpressionKind::Float(_)
+        | TypedExpressionKind::String(_)
+        | TypedExpressionKind::Boolean(_)
+        | TypedExpressionKind::Nil
+        | TypedExpressionKind::AttributeQuery { .. }
+        | TypedExpressionKind::HasAttributeQuery { .. }
+        | TypedExpressionKind::Local(_)
+        | TypedExpressionKind::Parameter(_)
+        | TypedExpressionKind::Capture(_)
+        | TypedExpressionKind::Function(_) => None,
+    }
+}
+
+fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<SourceSpan> {
+    for statement in statements {
+        let found = match statement.kind() {
+            TypedStatementKind::Local { initializer, .. } => {
+                first_compile_time_only_expression(initializer)
+            }
+            TypedStatementKind::LocalSet { value, .. }
+            | TypedStatementKind::ParameterSet { value, .. }
+            | TypedStatementKind::CaptureSet { value, .. }
+            | TypedStatementKind::Expression(value) => first_compile_time_only_expression(value),
+            TypedStatementKind::Return { values } => {
+                values.iter().find_map(first_compile_time_only_expression)
+            }
+            TypedStatementKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => first_compile_time_only_expression(condition)
+                .or_else(|| first_compile_time_only_statement(then_body))
+                .or_else(|| first_compile_time_only_statement(else_body)),
+            TypedStatementKind::While { condition, body } => {
+                first_compile_time_only_expression(condition)
+                    .or_else(|| first_compile_time_only_statement(body))
+            }
+            TypedStatementKind::Match {
+                scrutinee, arms, ..
+            } => first_compile_time_only_expression(scrutinee).or_else(|| {
+                arms.iter()
+                    .find_map(|arm| first_compile_time_only_statement(arm.body()))
+            }),
+            TypedStatementKind::FieldSet { base, value, .. } => {
+                first_compile_time_only_expression(base)
+                    .or_else(|| first_compile_time_only_expression(value))
+            }
+            TypedStatementKind::Call(call) => first_compile_time_only_call(call),
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {
+    let callee = match call.dispatch() {
+        TypedCallDispatch::Direct { .. } => None,
+        TypedCallDispatch::DirectMethod { receiver, .. } => receiver
+            .as_deref()
+            .and_then(first_compile_time_only_expression),
+        TypedCallDispatch::InterfaceMethod { receiver, .. } => {
+            first_compile_time_only_expression(receiver)
+        }
+        TypedCallDispatch::Indirect { callee } => first_compile_time_only_expression(callee),
+    };
+    callee.or_else(|| {
+        call.arguments()
+            .iter()
+            .find_map(first_compile_time_only_expression)
+    })
+}
+
+fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<SourceSpan> {
+    match expression.kind() {
+        TypedExpressionKind::AttributeQuery { .. }
+        | TypedExpressionKind::HasAttributeQuery { .. } => Some(expression.span()),
+        TypedExpressionKind::Closure(closure) => {
+            first_compile_time_only_statement(closure.body().statements())
+        }
+        TypedExpressionKind::Field { base, .. } => first_compile_time_only_expression(base),
+        TypedExpressionKind::ClassConstruct { fields, .. }
+        | TypedExpressionKind::Record { fields, .. } => fields
+            .iter()
+            .find_map(|field| first_compile_time_only_expression(field.value())),
+        TypedExpressionKind::ArrayGet { array, index } => first_compile_time_only_expression(array)
+            .or_else(|| first_compile_time_only_expression(index)),
+        TypedExpressionKind::RecordUpdate { base, fields, .. } => {
+            first_compile_time_only_expression(base).or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|field| first_compile_time_only_expression(field.value()))
+            })
+        }
+        TypedExpressionKind::Array(elements) | TypedExpressionKind::Tuple(elements) => {
+            elements.iter().find_map(first_compile_time_only_expression)
+        }
+        TypedExpressionKind::Table(entries) => entries.iter().find_map(|entry| {
+            first_compile_time_only_expression(entry.key())
+                .or_else(|| first_compile_time_only_expression(entry.value()))
+        }),
+        TypedExpressionKind::UnionCase { arguments, .. }
+        | TypedExpressionKind::DirectCall { arguments, .. } => arguments
+            .iter()
+            .find_map(first_compile_time_only_expression),
+        TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
+        TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
+            .or_else(|| first_compile_time_only_expression(right)),
+        TypedExpressionKind::IndirectCall { callee, arguments } => {
+            first_compile_time_only_expression(callee).or_else(|| {
+                arguments
+                    .iter()
+                    .find_map(first_compile_time_only_expression)
+            })
+        }
+        TypedExpressionKind::DirectMethodCall {
+            receiver,
+            arguments,
+            ..
+        } => receiver
+            .as_deref()
+            .and_then(first_compile_time_only_expression)
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .find_map(first_compile_time_only_expression)
+            }),
+        TypedExpressionKind::InterfaceMethodCall {
+            receiver,
+            arguments,
+            ..
+        } => first_compile_time_only_expression(receiver).or_else(|| {
+            arguments
+                .iter()
+                .find_map(first_compile_time_only_expression)
+        }),
+        TypedExpressionKind::InterfaceUpcast { value, .. } => {
+            first_compile_time_only_expression(value)
+        }
+        TypedExpressionKind::Integer(_)
+        | TypedExpressionKind::Float(_)
+        | TypedExpressionKind::String(_)
+        | TypedExpressionKind::Boolean(_)
+        | TypedExpressionKind::Nil
+        | TypedExpressionKind::Local(_)
+        | TypedExpressionKind::Parameter(_)
+        | TypedExpressionKind::Capture(_)
+        | TypedExpressionKind::Function(_) => None,
+    }
+}
+
+fn lower_field_value(
+    field: &TypedFieldValue,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirFieldValue {
     HirFieldValue {
         field: field.field(),
-        value: lower_expression(field.value()),
+        value: lower_expression(field.value(), interface_slots),
         span: field.span(),
     }
 }
 
-fn lower_table_entry(entry: &TypedTableEntry) -> HirTableEntry {
+fn lower_table_entry(
+    entry: &TypedTableEntry,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirTableEntry {
     HirTableEntry {
-        key: lower_expression(entry.key()),
-        value: lower_expression(entry.value()),
+        key: lower_expression(entry.key(), interface_slots),
+        value: lower_expression(entry.value(), interface_slots),
         span: entry.span(),
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirVerificationError {
+    CompileTimeOnlyExpression {
+        span: SourceSpan,
+    },
     MissingCanonicalType,
     InvalidType {
         type_id: TypeId,
         span: SourceSpan,
     },
     DuplicateLocal(LocalId),
+    DuplicateBinding(BindingId),
+    DuplicateCapture(CaptureId),
+    DuplicateCapturedBinding(BindingId),
+    UnknownCapture {
+        capture: CaptureId,
+        span: SourceSpan,
+    },
+    InvalidCaptureSource {
+        capture: CaptureId,
+        binding: BindingId,
+        span: SourceSpan,
+    },
+    CaptureTypeMismatch {
+        capture: CaptureId,
+        expected: TypeId,
+        found: TypeId,
+        span: SourceSpan,
+    },
+    CaptureModeMismatch {
+        capture: CaptureId,
+        span: SourceSpan,
+    },
+    DuplicateNestedFunction(NestedFunctionId),
     DuplicateField(FieldId),
     UnknownLocal {
         local: LocalId,
@@ -1613,6 +2688,9 @@ pub enum HirVerificationError {
     },
     DuplicateSymbol(SymbolId),
     DuplicateClass(ClassId),
+    DuplicateInterface(InterfaceId),
+    DuplicateInterfaceMethod(InterfaceMethodId),
+    DuplicateInterfaceImplementation(InterfaceId),
     DuplicateDeclaredField(FieldId),
     DuplicateUnionCase {
         union: SymbolId,
@@ -1629,6 +2707,47 @@ pub enum HirVerificationError {
     },
     UnknownClass {
         class: ClassId,
+        span: SourceSpan,
+    },
+    UnknownInterface {
+        interface: InterfaceId,
+        span: SourceSpan,
+    },
+    WrongInterfaceType {
+        interface: InterfaceId,
+        expected: TypeId,
+        found: TypeId,
+        span: SourceSpan,
+    },
+    UnknownInterfaceMethod {
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+        span: SourceSpan,
+    },
+    WrongInterfaceMethodSlot {
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+        expected: u32,
+        found: u32,
+        span: SourceSpan,
+    },
+    MissingInterfaceMethodMapping {
+        class: ClassId,
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+        span: SourceSpan,
+    },
+    InterfaceMethodMappingMismatch {
+        class: ClassId,
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+        class_method: MethodId,
+        span: SourceSpan,
+    },
+    InvalidInterfaceUpcast {
+        interface: InterfaceId,
+        source: TypeId,
+        target: TypeId,
         span: SourceSpan,
     },
     WrongClassDefinition {
@@ -1671,6 +2790,46 @@ pub enum HirVerificationError {
         found: TypeId,
         span: SourceSpan,
     },
+    MatchScrutineeTypeMismatch {
+        union: SymbolId,
+        expected: TypeId,
+        found: TypeId,
+        span: SourceSpan,
+    },
+    DuplicateMatchCase {
+        union: SymbolId,
+        case: UnionCaseId,
+        span: SourceSpan,
+    },
+    MissingMatchCase {
+        union: SymbolId,
+        case: UnionCaseId,
+        span: SourceSpan,
+    },
+    ForeignMatchCase {
+        expected_union: SymbolId,
+        found_union: SymbolId,
+        case: UnionCaseId,
+        span: SourceSpan,
+    },
+    MatchPayloadArityMismatch {
+        union: SymbolId,
+        case: UnionCaseId,
+        expected: usize,
+        found: usize,
+        span: SourceSpan,
+    },
+    MatchPayloadTypeMismatch {
+        union: SymbolId,
+        case: UnionCaseId,
+        index: usize,
+        expected: TypeId,
+        found: TypeId,
+        span: SourceSpan,
+    },
+    InvalidIgnoredMatchBinding {
+        span: SourceSpan,
+    },
     InvalidCallSignature {
         expected_arguments: usize,
         found_arguments: usize,
@@ -1703,6 +2862,12 @@ pub enum HirVerificationError {
         span: SourceSpan,
     },
 }
+
+/// Construction and verification share one closed deterministic failure set.
+/// Build-only variants prevent compile-time handles or unresolved interface
+/// slots from ever becoming HIR nodes; the remaining variants are independently
+/// rechecked whenever a complete Bubble is published.
+pub type HirBuildError = HirVerificationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HirCallableSignature {
@@ -1740,6 +2905,20 @@ struct HirClassSchema {
     definition: SymbolId,
     type_id: TypeId,
     fields: BTreeMap<FieldId, TypeId>,
+    interfaces: BTreeMap<InterfaceId, HirInterfaceImplementation>,
+}
+
+#[derive(Clone)]
+struct HirInterfaceSchema {
+    type_id: TypeId,
+    methods: BTreeMap<InterfaceMethodId, HirInterfaceMethodSchema>,
+}
+
+#[derive(Clone)]
+struct HirInterfaceMethodSchema {
+    slot: u32,
+    signature: HirCallableSignature,
+    span: SourceSpan,
 }
 
 #[derive(Clone)]
@@ -1753,6 +2932,8 @@ struct HirDeclaredMethod {
     class: ClassId,
     definition: SymbolId,
     signature: HirCallableSignature,
+    visibility: Visibility,
+    dispatch: ClassMethodDispatch,
     span: SourceSpan,
 }
 
@@ -1763,6 +2944,8 @@ struct HirSchema {
     records: BTreeMap<SymbolId, HirAggregateSchema>,
     unions: BTreeMap<SymbolId, HirUnionSchema>,
     classes: BTreeMap<ClassId, HirClassSchema>,
+    interfaces: BTreeMap<InterfaceId, HirInterfaceSchema>,
+    interface_methods: BTreeMap<InterfaceMethodId, InterfaceId>,
     fields: BTreeMap<FieldId, HirDeclaredField>,
 }
 
@@ -1779,6 +2962,8 @@ impl HirSchema {
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
             classes: BTreeMap::new(),
+            interfaces: BTreeMap::new(),
+            interface_methods: BTreeMap::new(),
             fields: BTreeMap::new(),
         };
         let mut symbols = BTreeSet::new();
@@ -1797,10 +2982,12 @@ impl HirSchema {
                 HirCallableSignature::from_function(function),
             );
         }
+        schema.verify_class_interfaces(errors);
         schema.collect_method_bodies(bubble.methods(), errors);
         schema
     }
 
+    #[allow(clippy::too_many_lines)]
     fn collect_declaration(
         &mut self,
         declaration: &HirDeclaration,
@@ -1891,6 +3078,17 @@ impl HirSchema {
                     });
                 }
                 let fields = self.collect_class_fields(class, errors);
+                let mut interfaces = BTreeMap::new();
+                for implementation in &class.interfaces {
+                    if interfaces
+                        .insert(implementation.interface, implementation.clone())
+                        .is_some()
+                    {
+                        errors.push(HirVerificationError::DuplicateInterfaceImplementation(
+                            implementation.interface,
+                        ));
+                    }
+                }
                 if self
                     .classes
                     .insert(
@@ -1899,6 +3097,7 @@ impl HirSchema {
                             definition: declaration.symbol(),
                             type_id: class.type_id,
                             fields,
+                            interfaces,
                         },
                     )
                     .is_some()
@@ -1906,6 +3105,79 @@ impl HirSchema {
                     errors.push(HirVerificationError::DuplicateClass(class.class));
                 }
                 self.collect_declared_methods(declaration.symbol(), class, errors);
+            }
+            HirDeclarationKind::Interface(interface) => {
+                if arena.get(interface.type_id)
+                    != Some(&SemanticType::Interface {
+                        interface: interface.interface,
+                        arguments: Vec::new(),
+                    })
+                {
+                    errors.push(HirVerificationError::InvalidDeclarationType {
+                        symbol: declaration.symbol(),
+                        type_id: interface.type_id,
+                        span: declaration.span(),
+                    });
+                }
+                let mut methods = BTreeMap::new();
+                for (expected_slot, method) in interface.methods.iter().enumerate() {
+                    for parameter in &method.parameters {
+                        verify_schema_type(arena, parameter.type_id, parameter.span, errors);
+                    }
+                    for result in &method.results {
+                        verify_schema_type(arena, *result, method.span, errors);
+                    }
+                    if method.slot != u32::try_from(expected_slot).unwrap_or(u32::MAX) {
+                        errors.push(HirVerificationError::WrongInterfaceMethodSlot {
+                            interface: interface.interface,
+                            method: method.method,
+                            expected: u32::try_from(expected_slot).unwrap_or(u32::MAX),
+                            found: method.slot,
+                            span: method.span,
+                        });
+                    }
+                    if self
+                        .interface_methods
+                        .insert(method.method, interface.interface)
+                        .is_some()
+                        || methods
+                            .insert(
+                                method.method,
+                                HirInterfaceMethodSchema {
+                                    slot: method.slot,
+                                    signature: HirCallableSignature {
+                                        parameters: method
+                                            .parameters
+                                            .iter()
+                                            .map(HirNamedType::type_id)
+                                            .collect(),
+                                        results: method.results.clone(),
+                                    },
+                                    span: method.span,
+                                },
+                            )
+                            .is_some()
+                    {
+                        errors.push(HirVerificationError::DuplicateInterfaceMethod(
+                            method.method,
+                        ));
+                    }
+                }
+                if self
+                    .interfaces
+                    .insert(
+                        interface.interface,
+                        HirInterfaceSchema {
+                            type_id: interface.type_id,
+                            methods,
+                        },
+                    )
+                    .is_some()
+                {
+                    errors.push(HirVerificationError::DuplicateInterface(
+                        interface.interface,
+                    ));
+                }
             }
             HirDeclarationKind::Attribute(attribute) => {
                 for parameter in &attribute.parameters {
@@ -1997,6 +3269,8 @@ impl HirSchema {
                     parameters,
                     results: method.results.clone(),
                 },
+                visibility: method.visibility,
+                dispatch: method.dispatch,
                 span: method.span,
             };
             if self
@@ -2010,6 +3284,90 @@ impl HirSchema {
                 });
             }
             self.declared_methods.insert(method.method, declared);
+        }
+    }
+
+    fn verify_class_interfaces(&self, errors: &mut Vec<HirVerificationError>) {
+        for (class_id, class) in &self.classes {
+            let mut seen = BTreeSet::new();
+            for implementation in class.interfaces.values() {
+                if !seen.insert(implementation.interface) {
+                    errors.push(HirVerificationError::DuplicateInterfaceImplementation(
+                        implementation.interface,
+                    ));
+                }
+                let Some(interface) = self.interfaces.get(&implementation.interface) else {
+                    errors.push(HirVerificationError::UnknownInterface {
+                        interface: implementation.interface,
+                        span: empty_span(),
+                    });
+                    continue;
+                };
+                if implementation.interface_type != interface.type_id {
+                    errors.push(HirVerificationError::WrongInterfaceType {
+                        interface: implementation.interface,
+                        expected: interface.type_id,
+                        found: implementation.interface_type,
+                        span: empty_span(),
+                    });
+                }
+                let mut mapped = BTreeSet::new();
+                for mapping in &implementation.methods {
+                    if !mapped.insert(mapping.interface_method) {
+                        errors.push(HirVerificationError::DuplicateInterfaceMethod(
+                            mapping.interface_method,
+                        ));
+                        continue;
+                    }
+                    let Some(required) = interface.methods.get(&mapping.interface_method) else {
+                        errors.push(HirVerificationError::UnknownInterfaceMethod {
+                            interface: implementation.interface,
+                            method: mapping.interface_method,
+                            span: empty_span(),
+                        });
+                        continue;
+                    };
+                    if mapping.slot != required.slot {
+                        errors.push(HirVerificationError::WrongInterfaceMethodSlot {
+                            interface: implementation.interface,
+                            method: mapping.interface_method,
+                            expected: required.slot,
+                            found: mapping.slot,
+                            span: required.span,
+                        });
+                    }
+                    let valid_class_method = self
+                        .declared_methods
+                        .get(&mapping.class_method)
+                        .is_some_and(|method| {
+                            method.class == *class_id
+                                && method.visibility == Visibility::Public
+                                && method.dispatch == ClassMethodDispatch::Receiver
+                                && method.signature.parameters.first() == Some(&class.type_id)
+                                && method.signature.parameters[1..] == required.signature.parameters
+                                && method.signature.results == required.signature.results
+                        });
+                    if !valid_class_method {
+                        errors.push(HirVerificationError::InterfaceMethodMappingMismatch {
+                            class: *class_id,
+                            interface: implementation.interface,
+                            method: mapping.interface_method,
+                            class_method: mapping.class_method,
+                            span: required.span,
+                        });
+                    }
+                }
+                for required in interface.methods.keys() {
+                    if !mapped.contains(required) {
+                        errors.push(HirVerificationError::MissingInterfaceMethodMapping {
+                            class: *class_id,
+                            interface: implementation.interface,
+                            method: *required,
+                            span: interface.methods[required].span,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -2144,6 +3502,17 @@ fn verify_hir_callable_with_schema(
     known_methods: &BTreeSet<MethodId>,
     schema: Option<&HirSchema>,
 ) -> Result<(), Vec<HirVerificationError>> {
+    let parameter_bindings: Vec<_> = function
+        .parameters
+        .iter()
+        .map(|parameter| parameter.binding)
+        .collect();
+    let cell_bindings = collect_cell_bindings(
+        &function.body,
+        &parameter_bindings,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
     let mut verifier = Verifier {
         arena,
         known_functions,
@@ -2154,12 +3523,25 @@ fn verify_hir_callable_with_schema(
             .iter()
             .map(|parameter| parameter.type_id)
             .collect(),
+        parameter_bindings,
         results: function.results.clone(),
         local_types: BTreeMap::new(),
+        local_bindings: BTreeMap::new(),
+        capture_types: BTreeMap::new(),
+        capture_bindings: BTreeMap::new(),
+        capture_modes: BTreeMap::new(),
+        bindings: BTreeSet::new(),
+        nested_functions: BTreeSet::new(),
+        cell_bindings,
         errors: Vec::new(),
     };
     for parameter in &function.parameters {
         verifier.verify_type(parameter.type_id, parameter.span);
+        if !verifier.bindings.insert(parameter.binding) {
+            verifier
+                .errors
+                .push(HirVerificationError::DuplicateBinding(parameter.binding));
+        }
     }
     for result in &function.results {
         if !arena.is_valid_hir_type(*result) {
@@ -2191,30 +3573,93 @@ struct Verifier<'arena> {
     known_methods: &'arena BTreeSet<MethodId>,
     schema: Option<&'arena HirSchema>,
     parameter_types: Vec<TypeId>,
+    parameter_bindings: Vec<BindingId>,
     results: Vec<TypeId>,
     local_types: BTreeMap<LocalId, TypeId>,
+    local_bindings: BTreeMap<LocalId, BindingId>,
+    capture_types: BTreeMap<CaptureId, TypeId>,
+    capture_bindings: BTreeMap<CaptureId, BindingId>,
+    capture_modes: BTreeMap<CaptureId, HirCaptureMode>,
+    bindings: BTreeSet<BindingId>,
+    nested_functions: BTreeSet<NestedFunctionId>,
+    cell_bindings: BTreeSet<BindingId>,
     errors: Vec<HirVerificationError>,
 }
 
 impl Verifier<'_> {
+    #[allow(clippy::too_many_lines)]
     fn verify_statements(&mut self, statements: &[HirStatement], visible: &BTreeSet<LocalId>) {
         let mut visible = visible.clone();
         for statement in statements {
             match statement.kind() {
                 HirStatementKind::Local {
+                    binding,
                     local,
                     local_type,
                     initializer,
                     ..
                 } => {
                     self.verify_type(*local_type, statement.span());
-                    self.verify_expression(initializer, &visible);
-                    self.verify_expression_type(*local_type, initializer);
+                    let recursive_closure = matches!(initializer.kind(), HirExpressionKind::Closure(closure)
+                    if closure.captures.iter().any(|capture| {
+                        capture.binding == *binding
+                            && capture.source == HirCaptureSource::Local(*local)
+                    }));
+                    let mut initializer_visible = visible.clone();
+                    if recursive_closure {
+                        initializer_visible.insert(*local);
+                    }
                     if self.local_types.insert(*local, *local_type).is_some() {
                         self.errors
                             .push(HirVerificationError::DuplicateLocal(*local));
                     }
+                    self.local_bindings.insert(*local, *binding);
+                    if !self.bindings.insert(*binding) {
+                        self.errors
+                            .push(HirVerificationError::DuplicateBinding(*binding));
+                    }
+                    self.verify_expression(initializer, &initializer_visible);
+                    self.verify_expression_type(*local_type, initializer);
                     visible.insert(*local);
+                }
+                HirStatementKind::LocalSet { local, value } => {
+                    self.verify_expression(value, &visible);
+                    if !visible.contains(local) {
+                        self.errors.push(HirVerificationError::UnknownLocal {
+                            local: *local,
+                            span: statement.span(),
+                        });
+                    } else if let Some(expected) = self.local_types.get(local).copied() {
+                        self.verify_expression_type(expected, value);
+                    }
+                }
+                HirStatementKind::ParameterSet { parameter, value } => {
+                    self.verify_expression(value, &visible);
+                    if let Some(expected) = self.parameter_type(*parameter) {
+                        self.verify_expression_type(expected, value);
+                    } else {
+                        self.errors.push(HirVerificationError::UnknownParameter {
+                            parameter: *parameter,
+                            span: statement.span(),
+                        });
+                    }
+                }
+                HirStatementKind::CaptureSet { capture, value } => {
+                    self.verify_expression(value, &visible);
+                    if let Some(expected) = self.capture_types.get(capture).copied() {
+                        self.verify_expression_type(expected, value);
+                        if self.capture_modes.get(capture) != Some(&HirCaptureMode::Cell) {
+                            self.errors.push(HirVerificationError::CaptureModeMismatch {
+                                capture: *capture,
+                                span: statement.span(),
+                            });
+                        }
+                    } else {
+                        self.errors.push(HirVerificationError::UnknownCapture {
+                            capture: *capture,
+                            span: statement.span(),
+                        });
+                    }
                 }
                 HirStatementKind::Return { values } => {
                     for value in values {
@@ -2237,6 +3682,11 @@ impl Verifier<'_> {
                     self.verify_condition(condition);
                     self.verify_statements(body, &visible);
                 }
+                HirStatementKind::Match {
+                    scrutinee,
+                    union,
+                    arms,
+                } => self.verify_match(scrutinee, *union, arms, statement.span(), &visible),
                 HirStatementKind::FieldSet { base, field, value } => {
                     self.verify_expression(base, &visible);
                     self.verify_expression(value, &visible);
@@ -2272,10 +3722,7 @@ impl Verifier<'_> {
                 }
             }
             HirExpressionKind::Parameter(parameter) => {
-                let parameter_type = usize::try_from(parameter.raw())
-                    .ok()
-                    .and_then(|raw| self.parameter_types.get(raw))
-                    .copied();
+                let parameter_type = self.parameter_type(*parameter);
                 if let Some(expected) = parameter_type {
                     self.verify_expression_type(expected, expression);
                 } else {
@@ -2284,6 +3731,19 @@ impl Verifier<'_> {
                         span: expression.span(),
                     });
                 }
+            }
+            HirExpressionKind::Capture(capture) => {
+                if let Some(expected) = self.capture_types.get(capture).copied() {
+                    self.verify_expression_type(expected, expression);
+                } else {
+                    self.errors.push(HirVerificationError::UnknownCapture {
+                        capture: *capture,
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::Closure(closure) => {
+                self.verify_closure(closure, expression, visible);
             }
             HirExpressionKind::Function(function) => {
                 self.verify_function(*function, expression.span());
@@ -2336,12 +3796,348 @@ impl Verifier<'_> {
                     visible,
                 );
             }
+            HirExpressionKind::InterfaceUpcast { value, interface } => {
+                self.verify_expression(value, visible);
+                self.verify_interface_upcast(*interface, value, expression);
+            }
             HirExpressionKind::Integer(_) | HirExpressionKind::Float(_) => {
                 self.verify_numeric_literal(expression);
             }
             HirExpressionKind::String(_)
             | HirExpressionKind::Boolean(_)
             | HirExpressionKind::Nil => self.verify_primitive_literal(expression),
+        }
+    }
+
+    fn parameter_type(&self, parameter: ValueParameterId) -> Option<TypeId> {
+        usize::try_from(parameter.raw())
+            .ok()
+            .and_then(|raw| self.parameter_types.get(raw))
+            .copied()
+    }
+
+    fn parameter_binding(&self, parameter: ValueParameterId) -> Option<BindingId> {
+        usize::try_from(parameter.raw())
+            .ok()
+            .and_then(|raw| self.parameter_bindings.get(raw))
+            .copied()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn verify_closure(
+        &mut self,
+        closure: &HirClosure,
+        expression: &HirExpression,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        if !self.nested_functions.insert(closure.function) {
+            self.errors
+                .push(HirVerificationError::DuplicateNestedFunction(
+                    closure.function,
+                ));
+        }
+        let expected_function = SemanticType::Function {
+            parameters: closure
+                .parameters
+                .iter()
+                .map(HirClosureParameter::type_id)
+                .collect(),
+            results: closure.results.clone(),
+        };
+        if self.arena.get(expression.type_id()) != Some(&expected_function) {
+            self.errors.push(HirVerificationError::InvalidCallableType {
+                type_id: expression.type_id(),
+                span: expression.span(),
+            });
+        }
+
+        let mut capture_ids = BTreeSet::new();
+        let mut captured_bindings = BTreeSet::new();
+        let mut previous_binding = None;
+        let mut nested_capture_types = BTreeMap::new();
+        let mut nested_capture_bindings = BTreeMap::new();
+        let mut nested_capture_modes = BTreeMap::new();
+        for capture in &closure.captures {
+            self.verify_type(capture.type_id, closure.span);
+            if !capture_ids.insert(capture.capture) {
+                self.errors
+                    .push(HirVerificationError::DuplicateCapture(capture.capture));
+            }
+            if !captured_bindings.insert(capture.binding) {
+                self.errors
+                    .push(HirVerificationError::DuplicateCapturedBinding(
+                        capture.binding,
+                    ));
+            }
+            if previous_binding.is_some_and(|previous| previous >= capture.binding) {
+                self.errors
+                    .push(HirVerificationError::InvalidCaptureSource {
+                        capture: capture.capture,
+                        binding: capture.binding,
+                        span: closure.span,
+                    });
+            }
+            previous_binding = Some(capture.binding);
+            let source = match capture.source {
+                HirCaptureSource::Local(local) if visible.contains(&local) => self
+                    .local_types
+                    .get(&local)
+                    .copied()
+                    .zip(self.local_bindings.get(&local).copied())
+                    .map(|(type_id, binding)| (type_id, binding, None)),
+                HirCaptureSource::Parameter(parameter) => self
+                    .parameter_type(parameter)
+                    .zip(self.parameter_binding(parameter))
+                    .map(|(type_id, binding)| (type_id, binding, None)),
+                HirCaptureSource::Capture(source) => self
+                    .capture_types
+                    .get(&source)
+                    .copied()
+                    .zip(self.capture_bindings.get(&source).copied())
+                    .map(|(type_id, binding)| {
+                        (type_id, binding, self.capture_modes.get(&source).copied())
+                    }),
+                HirCaptureSource::Local(_) => None,
+            };
+            let Some((source_type, source_binding, source_mode)) = source else {
+                self.errors
+                    .push(HirVerificationError::InvalidCaptureSource {
+                        capture: capture.capture,
+                        binding: capture.binding,
+                        span: closure.span,
+                    });
+                continue;
+            };
+            if source_binding != capture.binding {
+                self.errors
+                    .push(HirVerificationError::InvalidCaptureSource {
+                        capture: capture.capture,
+                        binding: capture.binding,
+                        span: closure.span,
+                    });
+            }
+            if source_type != capture.type_id {
+                self.errors.push(HirVerificationError::CaptureTypeMismatch {
+                    capture: capture.capture,
+                    expected: source_type,
+                    found: capture.type_id,
+                    span: closure.span,
+                });
+            }
+            let expected_mode = if source_mode == Some(HirCaptureMode::Cell)
+                || self.cell_bindings.contains(&capture.binding)
+            {
+                HirCaptureMode::Cell
+            } else {
+                HirCaptureMode::Value
+            };
+            if capture.mode != expected_mode {
+                self.errors.push(HirVerificationError::CaptureModeMismatch {
+                    capture: capture.capture,
+                    span: closure.span,
+                });
+            }
+            nested_capture_types.insert(capture.capture, capture.type_id);
+            nested_capture_bindings.insert(capture.capture, capture.binding);
+            nested_capture_modes.insert(capture.capture, capture.mode);
+        }
+
+        let saved_parameter_types = std::mem::replace(
+            &mut self.parameter_types,
+            closure
+                .parameters
+                .iter()
+                .map(|parameter| parameter.type_id)
+                .collect(),
+        );
+        let saved_parameter_bindings = std::mem::replace(
+            &mut self.parameter_bindings,
+            closure
+                .parameters
+                .iter()
+                .map(|parameter| parameter.binding)
+                .collect(),
+        );
+        let saved_results = std::mem::replace(&mut self.results, closure.results.clone());
+        let saved_capture_types = std::mem::replace(&mut self.capture_types, nested_capture_types);
+        let saved_capture_bindings =
+            std::mem::replace(&mut self.capture_bindings, nested_capture_bindings);
+        let saved_capture_modes = std::mem::replace(&mut self.capture_modes, nested_capture_modes);
+        let nested_parameter_bindings = self.parameter_bindings.clone();
+        let nested_cell_bindings = collect_cell_bindings(
+            &closure.body,
+            &nested_parameter_bindings,
+            &self.capture_bindings,
+            &self.capture_modes,
+        );
+        let saved_cell_bindings = std::mem::replace(&mut self.cell_bindings, nested_cell_bindings);
+        for parameter in &closure.parameters {
+            self.verify_type(parameter.type_id, parameter.span);
+            if !self.bindings.insert(parameter.binding) {
+                self.errors
+                    .push(HirVerificationError::DuplicateBinding(parameter.binding));
+            }
+        }
+        self.verify_statements(&closure.body, &BTreeSet::new());
+        self.parameter_types = saved_parameter_types;
+        self.parameter_bindings = saved_parameter_bindings;
+        self.results = saved_results;
+        self.capture_types = saved_capture_types;
+        self.capture_bindings = saved_capture_bindings;
+        self.capture_modes = saved_capture_modes;
+        self.cell_bindings = saved_cell_bindings;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn verify_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        union: SymbolId,
+        arms: &[HirMatchArm],
+        span: SourceSpan,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        self.verify_expression(scrutinee, visible);
+        let union_schema = self
+            .schema
+            .and_then(|schema| schema.unions.get(&union))
+            .cloned();
+        if self.schema.is_some() && union_schema.is_none() {
+            self.errors
+                .push(HirVerificationError::UnknownUnion { union, span });
+        }
+        if let Some(schema) = &union_schema
+            && scrutinee.type_id() != schema.type_id
+        {
+            self.errors
+                .push(HirVerificationError::MatchScrutineeTypeMismatch {
+                    union,
+                    expected: schema.type_id,
+                    found: scrutinee.type_id(),
+                    span: scrutinee.span(),
+                });
+        }
+        let mut seen = BTreeSet::new();
+        for arm in arms {
+            if arm.union != union {
+                self.errors.push(HirVerificationError::ForeignMatchCase {
+                    expected_union: union,
+                    found_union: arm.union,
+                    case: arm.case,
+                    span: arm.span,
+                });
+            }
+            if !seen.insert(arm.case) {
+                self.errors.push(HirVerificationError::DuplicateMatchCase {
+                    union,
+                    case: arm.case,
+                    span: arm.span,
+                });
+            }
+            let expected = union_schema
+                .as_ref()
+                .and_then(|schema| schema.cases.get(&arm.case));
+            if union_schema.is_some() && expected.is_none() {
+                self.errors.push(HirVerificationError::UnknownUnionCase {
+                    union,
+                    case: arm.case,
+                    span: arm.span,
+                });
+            }
+            if let Some(expected) = expected
+                && expected.len() != arm.bindings.len()
+            {
+                self.errors
+                    .push(HirVerificationError::MatchPayloadArityMismatch {
+                        union,
+                        case: arm.case,
+                        expected: expected.len(),
+                        found: arm.bindings.len(),
+                        span: arm.span,
+                    });
+            }
+            let mut arm_visible = visible.clone();
+            for (index, binding) in arm.bindings.iter().enumerate() {
+                self.verify_type(binding.type_id, binding.span);
+                if let Some(expected) = expected.and_then(|types| types.get(index))
+                    && *expected != binding.type_id
+                {
+                    self.errors
+                        .push(HirVerificationError::MatchPayloadTypeMismatch {
+                            union,
+                            case: arm.case,
+                            index,
+                            expected: *expected,
+                            found: binding.type_id,
+                            span: binding.span,
+                        });
+                }
+                match (binding.binding, binding.local, binding.name.as_str()) {
+                    (None, None, "_") => {}
+                    (Some(binding_id), Some(local), name) if name != "_" => {
+                        if self.local_types.insert(local, binding.type_id).is_some() {
+                            self.errors
+                                .push(HirVerificationError::DuplicateLocal(local));
+                        }
+                        self.local_bindings.insert(local, binding_id);
+                        if !self.bindings.insert(binding_id) {
+                            self.errors
+                                .push(HirVerificationError::DuplicateBinding(binding_id));
+                        }
+                        arm_visible.insert(local);
+                    }
+                    _ => self
+                        .errors
+                        .push(HirVerificationError::InvalidIgnoredMatchBinding {
+                            span: binding.span,
+                        }),
+                }
+            }
+            self.verify_statements(&arm.body, &arm_visible);
+        }
+        if let Some(schema) = union_schema {
+            for case in schema.cases.keys() {
+                if !seen.contains(case) {
+                    self.errors.push(HirVerificationError::MissingMatchCase {
+                        union,
+                        case: *case,
+                        span,
+                    });
+                }
+            }
+        }
+    }
+
+    fn verify_interface_upcast(
+        &mut self,
+        interface_id: InterfaceId,
+        value: &HirExpression,
+        expression: &HirExpression,
+    ) {
+        let Some(schema) = self.schema else {
+            return;
+        };
+        let Some(interface) = schema.interfaces.get(&interface_id) else {
+            self.errors.push(HirVerificationError::UnknownInterface {
+                interface: interface_id,
+                span: expression.span(),
+            });
+            return;
+        };
+        let source_class = schema
+            .classes
+            .values()
+            .find(|class| class.type_id == value.type_id());
+        let valid = source_class.is_some_and(|class| class.interfaces.contains_key(&interface_id))
+            && expression.type_id() == interface.type_id;
+        if !valid {
+            self.errors
+                .push(HirVerificationError::InvalidInterfaceUpcast {
+                    interface: interface_id,
+                    source: value.type_id(),
+                    target: expression.type_id(),
+                    span: expression.span(),
+                });
         }
     }
 
@@ -2557,6 +4353,48 @@ impl Verifier<'_> {
                 self.schema
                     .and_then(|schema| schema.methods.get(method))
                     .cloned()
+            }
+            HirCallDispatch::InterfaceMethod {
+                interface,
+                method,
+                slot,
+            } => {
+                let signature =
+                    self.schema
+                        .and_then(|schema| schema.interfaces.get(interface))
+                        .and_then(|interface_schema| {
+                            interface_schema.methods.get(method).map(|method_schema| {
+                                (interface_schema.type_id, method_schema.clone())
+                            })
+                        });
+                if let Some((receiver_type, method_schema)) = signature {
+                    if method_schema.slot != *slot {
+                        self.errors
+                            .push(HirVerificationError::WrongInterfaceMethodSlot {
+                                interface: *interface,
+                                method: *method,
+                                expected: method_schema.slot,
+                                found: *slot,
+                                span,
+                            });
+                    }
+                    let mut parameters = vec![receiver_type];
+                    parameters.extend(method_schema.signature.parameters);
+                    Some(HirCallableSignature {
+                        parameters,
+                        results: method_schema.signature.results,
+                    })
+                } else {
+                    if self.schema.is_some() {
+                        self.errors
+                            .push(HirVerificationError::UnknownInterfaceMethod {
+                                interface: *interface,
+                                method: *method,
+                                span,
+                            });
+                    }
+                    None
+                }
             }
             HirCallDispatch::Indirect { callee } => {
                 self.verify_expression(callee, visible);
@@ -3097,6 +4935,245 @@ fn hir_supports_default_equality(arena: &TypeArena, type_id: TypeId) -> bool {
     }
 }
 
+fn collect_cell_bindings(
+    statements: &[HirStatement],
+    parameter_bindings: &[BindingId],
+    capture_bindings: &BTreeMap<CaptureId, BindingId>,
+    capture_modes: &BTreeMap<CaptureId, HirCaptureMode>,
+) -> BTreeSet<BindingId> {
+    let mut local_bindings = BTreeMap::new();
+    collect_local_binding_map(statements, &mut local_bindings);
+    let mut written = BTreeSet::new();
+    for (capture, mode) in capture_modes {
+        if *mode == HirCaptureMode::Cell
+            && let Some(binding) = capture_bindings.get(capture)
+        {
+            written.insert(*binding);
+        }
+    }
+    collect_written_bindings(
+        statements,
+        parameter_bindings,
+        capture_bindings,
+        &local_bindings,
+        &mut written,
+    );
+    written
+}
+
+fn collect_local_binding_map(
+    statements: &[HirStatement],
+    local_bindings: &mut BTreeMap<LocalId, BindingId>,
+) {
+    for statement in statements {
+        match statement.kind() {
+            HirStatementKind::Local { local, binding, .. } => {
+                local_bindings.insert(*local, *binding);
+            }
+            HirStatementKind::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_local_binding_map(then_body, local_bindings);
+                collect_local_binding_map(else_body, local_bindings);
+            }
+            HirStatementKind::While { body, .. } => {
+                collect_local_binding_map(body, local_bindings);
+            }
+            HirStatementKind::Match { arms, .. } => {
+                for arm in arms {
+                    for binding in &arm.bindings {
+                        if let (Some(binding), Some(local)) = (binding.binding, binding.local) {
+                            local_bindings.insert(local, binding);
+                        }
+                    }
+                    collect_local_binding_map(&arm.body, local_bindings);
+                }
+            }
+            HirStatementKind::LocalSet { .. }
+            | HirStatementKind::ParameterSet { .. }
+            | HirStatementKind::CaptureSet { .. }
+            | HirStatementKind::Return { .. }
+            | HirStatementKind::FieldSet { .. }
+            | HirStatementKind::Call(_)
+            | HirStatementKind::Expression(_) => {}
+        }
+    }
+}
+
+fn collect_written_bindings(
+    statements: &[HirStatement],
+    parameter_bindings: &[BindingId],
+    capture_bindings: &BTreeMap<CaptureId, BindingId>,
+    local_bindings: &BTreeMap<LocalId, BindingId>,
+    written: &mut BTreeSet<BindingId>,
+) {
+    for statement in statements {
+        match statement.kind() {
+            HirStatementKind::Local { initializer, .. } => {
+                collect_cell_captures(initializer, written);
+            }
+            HirStatementKind::LocalSet { local, value } => {
+                if let Some(binding) = local_bindings.get(local) {
+                    written.insert(*binding);
+                }
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::ParameterSet { parameter, value } => {
+                if let Some(binding) = usize::try_from(parameter.raw())
+                    .ok()
+                    .and_then(|raw| parameter_bindings.get(raw))
+                {
+                    written.insert(*binding);
+                }
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::CaptureSet { capture, value } => {
+                if let Some(binding) = capture_bindings.get(capture) {
+                    written.insert(*binding);
+                }
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::Return { values } => {
+                for value in values {
+                    collect_cell_captures(value, written);
+                }
+            }
+            HirStatementKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_cell_captures(condition, written);
+                collect_written_bindings(
+                    then_body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+                collect_written_bindings(
+                    else_body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
+            HirStatementKind::While { condition, body } => {
+                collect_cell_captures(condition, written);
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
+            HirStatementKind::Match {
+                scrutinee, arms, ..
+            } => {
+                collect_cell_captures(scrutinee, written);
+                for arm in arms {
+                    collect_written_bindings(
+                        &arm.body,
+                        parameter_bindings,
+                        capture_bindings,
+                        local_bindings,
+                        written,
+                    );
+                }
+            }
+            HirStatementKind::FieldSet { base, value, .. } => {
+                collect_cell_captures(base, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::Call(call) => {
+                if let HirCallDispatch::Indirect { callee } = call.dispatch() {
+                    collect_cell_captures(callee, written);
+                }
+                for argument in call.arguments() {
+                    collect_cell_captures(argument, written);
+                }
+            }
+            HirStatementKind::Expression(expression) => {
+                collect_cell_captures(expression, written);
+            }
+        }
+    }
+}
+
+fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<BindingId>) {
+    match expression.kind() {
+        HirExpressionKind::Closure(closure) => {
+            for capture in &closure.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
+        HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
+        HirExpressionKind::ArrayGet { array, index } => {
+            collect_cell_captures(array, written);
+            collect_cell_captures(index, written);
+        }
+        HirExpressionKind::Record { fields, .. }
+        | HirExpressionKind::ClassConstruct { fields, .. } => {
+            for field in fields {
+                collect_cell_captures(field.value(), written);
+            }
+        }
+        HirExpressionKind::RecordUpdate { base, fields, .. } => {
+            collect_cell_captures(base, written);
+            for field in fields {
+                collect_cell_captures(field.value(), written);
+            }
+        }
+        HirExpressionKind::Array(elements) | HirExpressionKind::Tuple(elements) => {
+            for element in elements {
+                collect_cell_captures(element, written);
+            }
+        }
+        HirExpressionKind::Table(entries) => {
+            for entry in entries {
+                collect_cell_captures(entry.key(), written);
+                collect_cell_captures(entry.value(), written);
+            }
+        }
+        HirExpressionKind::UnionCase { arguments, .. }
+        | HirExpressionKind::Call { arguments, .. } => {
+            for argument in arguments {
+                collect_cell_captures(argument, written);
+            }
+            if let HirExpressionKind::Call {
+                dispatch: HirCallDispatch::Indirect { callee },
+                ..
+            } = expression.kind()
+            {
+                collect_cell_captures(callee, written);
+            }
+        }
+        HirExpressionKind::Unary { operand, .. } => collect_cell_captures(operand, written),
+        HirExpressionKind::Binary { left, right, .. } => {
+            collect_cell_captures(left, written);
+            collect_cell_captures(right, written);
+        }
+        HirExpressionKind::InterfaceUpcast { value, .. } => {
+            collect_cell_captures(value, written);
+        }
+        HirExpressionKind::Integer(_)
+        | HirExpressionKind::Float(_)
+        | HirExpressionKind::String(_)
+        | HirExpressionKind::Boolean(_)
+        | HirExpressionKind::Nil
+        | HirExpressionKind::Local(_)
+        | HirExpressionKind::Parameter(_)
+        | HirExpressionKind::Capture(_)
+        | HirExpressionKind::Function(_) => {}
+    }
+}
+
 fn empty_span() -> SourceSpan {
     SourceSpan::new(
         pop_foundation::FileId::from_raw(0),
@@ -3148,6 +5225,55 @@ fn dump_declaration(output: &mut String, declaration: &HirDeclaration, arena: &T
                 type_text(class.type_id, arena),
                 if class.is_open { "open" } else { "sealed" }
             );
+            for implementation in &class.interfaces {
+                let _ = write!(
+                    output,
+                    " implements i{}:{}",
+                    implementation.interface.raw(),
+                    type_text(implementation.interface_type, arena)
+                );
+                for mapping in &implementation.methods {
+                    let _ = write!(
+                        output,
+                        " [im{} slot{} => m{}]",
+                        mapping.interface_method.raw(),
+                        mapping.slot,
+                        mapping.class_method.raw()
+                    );
+                }
+            }
+        }
+        HirDeclarationKind::Interface(interface) => {
+            let _ = write!(
+                output,
+                "interface {} i{}:{}",
+                declaration.name,
+                interface.interface.raw(),
+                type_text(interface.type_id, arena)
+            );
+            for method in &interface.methods {
+                let _ = write!(
+                    output,
+                    " [im{} slot{} {}(",
+                    method.method.raw(),
+                    method.slot,
+                    method.name
+                );
+                for (index, parameter) in method.parameters.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    output.push_str(&type_text(parameter.type_id, arena));
+                }
+                output.push_str(") -> (");
+                for (index, result) in method.results.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    output.push_str(&type_text(*result, arena));
+                }
+                output.push_str(")]");
+            }
         }
         HirDeclarationKind::Attribute(attribute) => {
             let _ = write!(
@@ -3255,6 +5381,7 @@ fn dump_attribute_value(output: &mut String, value: &AttributeConstant) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn dump_statements(
     output: &mut String,
     statements: &[HirStatement],
@@ -3266,6 +5393,7 @@ fn dump_statements(
         output.push_str(&indentation);
         match statement.kind() {
             HirStatementKind::Local {
+                binding,
                 local,
                 name,
                 local_type,
@@ -3273,12 +5401,28 @@ fn dump_statements(
             } => {
                 let _ = write!(
                     output,
-                    "local l{} {}:{} = ",
+                    "local bind#{} l{} {}:{} = ",
+                    binding.raw(),
                     local.raw(),
                     name,
                     type_text(*local_type, arena)
                 );
                 dump_expression(output, initializer, arena);
+                output.push('\n');
+            }
+            HirStatementKind::LocalSet { local, value } => {
+                let _ = write!(output, "local.set l{} = ", local.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::ParameterSet { parameter, value } => {
+                let _ = write!(output, "parameter.set p{} = ", parameter.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::CaptureSet { capture, value } => {
+                let _ = write!(output, "capture.set cap{} = ", capture.raw());
+                dump_expression(output, value, arena);
                 output.push('\n');
             }
             HirStatementKind::Return { values } => {
@@ -3312,6 +5456,42 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::Match {
+                scrutinee,
+                union,
+                arms,
+            } => {
+                let _ = write!(output, "match s{} ", union.raw());
+                dump_expression(output, scrutinee, arena);
+                output.push('\n');
+                for arm in arms {
+                    output.push_str(&indentation);
+                    let _ = write!(output, "when case#{}(", arm.case.raw());
+                    for (index, binding) in arm.bindings.iter().enumerate() {
+                        if index != 0 {
+                            output.push_str(", ");
+                        }
+                        if binding.is_ignored() {
+                            let _ = write!(output, "_:{}", type_text(binding.type_id, arena));
+                        } else if let (Some(binding_id), Some(local)) =
+                            (binding.binding, binding.local)
+                        {
+                            let _ = write!(
+                                output,
+                                "bind#{} l{} {}:{}",
+                                binding_id.raw(),
+                                local.raw(),
+                                binding.name,
+                                type_text(binding.type_id, arena)
+                            );
+                        }
+                    }
+                    output.push_str(")\n");
+                    dump_statements(output, &arm.body, arena, depth + 1);
+                }
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 output.push_str("field.set ");
                 dump_expression(output, base, arena);
@@ -3332,6 +5512,7 @@ fn dump_statements(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn dump_expression(output: &mut String, expression: &HirExpression, arena: &TypeArena) {
     match expression.kind() {
         HirExpressionKind::Integer(value) => {
@@ -3341,11 +5522,61 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         HirExpressionKind::String(value) => output.push_str(value),
         HirExpressionKind::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
         HirExpressionKind::Nil => output.push_str("nil"),
+        HirExpressionKind::Closure(closure) => {
+            let _ = write!(output, "closure nested#{} [", closure.function.raw());
+            for (index, capture) in closure.captures.iter().enumerate() {
+                if index != 0 {
+                    output.push_str(", ");
+                }
+                let _ = write!(
+                    output,
+                    "capture.{} cap{} bind#{}=",
+                    match capture.mode {
+                        HirCaptureMode::Value => "value",
+                        HirCaptureMode::Cell => "cell",
+                    },
+                    capture.capture.raw(),
+                    capture.binding.raw()
+                );
+                match capture.source {
+                    HirCaptureSource::Local(local) => {
+                        let _ = write!(output, "l{}", local.raw());
+                    }
+                    HirCaptureSource::Parameter(parameter) => {
+                        let _ = write!(output, "p{}", parameter.raw());
+                    }
+                    HirCaptureSource::Capture(source) => {
+                        let _ = write!(output, "cap{}", source.raw());
+                    }
+                }
+                let _ = write!(output, ":{}", type_text(capture.type_id, arena));
+            }
+            output.push_str("] (");
+            for (index, parameter) in closure.parameters.iter().enumerate() {
+                if index != 0 {
+                    output.push_str(", ");
+                }
+                let _ = write!(
+                    output,
+                    "bind#{} p{} {}:{}",
+                    parameter.binding.raw(),
+                    parameter.parameter.raw(),
+                    parameter.name,
+                    type_text(parameter.type_id, arena)
+                );
+            }
+            output.push_str(") {\n");
+            dump_statements(output, &closure.body, arena, 1);
+            output.push('}');
+        }
         HirExpressionKind::Local(local) => {
             let _ = write!(output, "l{}", local.raw());
         }
         HirExpressionKind::Parameter(parameter) => {
             let _ = write!(output, "p{}", parameter.raw());
+        }
+        HirExpressionKind::Capture(capture) => {
+            let _ = write!(output, "cap{}", capture.raw());
         }
         HirExpressionKind::Function(function) => {
             let _ = write!(output, "function s{}", function.raw());
@@ -3425,6 +5656,10 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         } => {
             dump_call(output, dispatch, arguments, arena);
         }
+        HirExpressionKind::InterfaceUpcast { value, interface } => {
+            let _ = write!(output, "convert.interface i{} ", interface.raw());
+            dump_expression(output, value, arena);
+        }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));
 }
@@ -3453,6 +5688,19 @@ fn dump_call(
         }
         HirCallDispatch::DirectMethod { method } => {
             let _ = write!(output, "call.method m{}(", method.raw());
+        }
+        HirCallDispatch::InterfaceMethod {
+            interface,
+            method,
+            slot,
+        } => {
+            let _ = write!(
+                output,
+                "call.interface i{} im{} slot{}(",
+                interface.raw(),
+                method.raw(),
+                slot
+            );
         }
         HirCallDispatch::Indirect { callee } => {
             output.push_str("call.indirect ");
@@ -3785,6 +6033,7 @@ mod tests {
             vec![],
             vec![HirStatement {
                 kind: HirStatementKind::Local {
+                    binding: BindingId::from_raw(0),
                     local: LocalId::from_raw(0),
                     name: "value".to_owned(),
                     local_type: integer,
@@ -3868,6 +6117,7 @@ mod tests {
 
         let wrong_parameter_type = hir_function(
             vec![HirParameter {
+                binding: BindingId::from_raw(0),
                 parameter: ValueParameterId::from_raw(0),
                 name: "value".to_owned(),
                 type_id: integer,
@@ -4178,6 +6428,7 @@ mod tests {
                 class,
                 type_id: class_type,
                 is_open: false,
+                interfaces: Vec::new(),
                 fields: Vec::new(),
                 methods: vec![HirClassMethod {
                     method,
@@ -4450,6 +6701,357 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn closure_verifier_rejects_duplicate_mistyped_and_wrongly_owned_captures() {
+        let mut arena = TypeArena::new();
+        let integer = arena.source_type("Int").expect("Int");
+        let string = arena.source_type("String").expect("String");
+        let closure_type = arena
+            .intern(SemanticType::Function {
+                parameters: Vec::new(),
+                results: Vec::new(),
+            })
+            .expect("closure type");
+        let span = test_span();
+        let capture = CaptureId::from_raw(0);
+        let function = hir_function(
+            vec![hir_parameter(0, "value", integer, span)],
+            Vec::new(),
+            vec![HirStatement {
+                kind: HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::Closure(HirClosure {
+                        function: NestedFunctionId::from_raw(0),
+                        parameters: Vec::new(),
+                        results: Vec::new(),
+                        captures: vec![
+                            HirCapture {
+                                capture,
+                                binding: BindingId::from_raw(0),
+                                source: HirCaptureSource::Parameter(ValueParameterId::from_raw(0)),
+                                type_id: string,
+                                mode: HirCaptureMode::Value,
+                            },
+                            HirCapture {
+                                capture,
+                                binding: BindingId::from_raw(0),
+                                source: HirCaptureSource::Local(LocalId::from_raw(99)),
+                                type_id: integer,
+                                mode: HirCaptureMode::Cell,
+                            },
+                        ],
+                        body: vec![HirStatement {
+                            kind: HirStatementKind::Expression(HirExpression {
+                                kind: HirExpressionKind::Capture(CaptureId::from_raw(99)),
+                                type_id: integer,
+                                span,
+                            }),
+                            span,
+                        }],
+                        span,
+                    }),
+                    type_id: closure_type,
+                    span,
+                }),
+                span,
+            }],
+        );
+
+        assert!(matches!(
+            verify_hir_function(&function, &arena, &BTreeSet::new()),
+            Err(errors)
+                if errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::CaptureTypeMismatch {
+                        capture: found,
+                        expected,
+                        found: found_type,
+                        ..
+                    } if *found == capture && *expected == integer && *found_type == string
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::DuplicateCapture(found) if *found == capture
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::InvalidCaptureSource { capture: found, .. }
+                        if *found == capture
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::UnknownCapture { capture: found, .. }
+                        if *found == CaptureId::from_raw(99)
+                ))
+        ));
+    }
+
+    #[test]
+    fn match_verifier_rejects_duplicate_missing_and_mistyped_case_tables() {
+        let mut arena = TypeArena::new();
+        let integer = arena.source_type("Int").expect("Int");
+        let string = arena.source_type("String").expect("String");
+        let union_symbol = SymbolId::from_raw(10);
+        let union_type = arena
+            .intern(SemanticType::TaggedUnion {
+                definition: union_symbol,
+            })
+            .expect("union type");
+        let span = test_span();
+        let first_case = UnionCaseId::from_raw(0);
+        let second_case = UnionCaseId::from_raw(1);
+        let union = HirDeclaration {
+            symbol: union_symbol,
+            module: ModuleId::from_raw(0),
+            bubble: BubbleId::from_raw(0),
+            visibility: Visibility::Private,
+            name: "ResultValue".to_owned(),
+            kind: HirDeclarationKind::Union(HirUnionDeclaration {
+                type_id: union_type,
+                cases: vec![
+                    HirUnionCase {
+                        case: first_case,
+                        name: "Value".to_owned(),
+                        parameters: vec![HirNamedType {
+                            name: "value".to_owned(),
+                            type_id: integer,
+                            span,
+                        }],
+                        span,
+                    },
+                    HirUnionCase {
+                        case: second_case,
+                        name: "Empty".to_owned(),
+                        parameters: Vec::new(),
+                        span,
+                    },
+                ],
+            }),
+            span,
+        };
+        let invalid_binding = |binding, local| HirMatchBinding {
+            binding: Some(BindingId::from_raw(binding)),
+            local: Some(LocalId::from_raw(local)),
+            name: "payload".to_owned(),
+            type_id: string,
+            span,
+        };
+        let function = hir_function_with_symbol(
+            SymbolId::from_raw(20),
+            vec![hir_parameter(0, "result", union_type, span)],
+            Vec::new(),
+            vec![HirStatement {
+                kind: HirStatementKind::Match {
+                    scrutinee: parameter_expression(0, union_type, span),
+                    union: union_symbol,
+                    arms: vec![
+                        HirMatchArm {
+                            union: union_symbol,
+                            case: first_case,
+                            bindings: vec![invalid_binding(1, 0)],
+                            body: Vec::new(),
+                            span,
+                        },
+                        HirMatchArm {
+                            union: union_symbol,
+                            case: first_case,
+                            bindings: vec![invalid_binding(2, 1)],
+                            body: Vec::new(),
+                            span,
+                        },
+                    ],
+                },
+                span,
+            }],
+        );
+        let bubble = test_bubble(vec![union], vec![function], Vec::new());
+
+        assert!(matches!(
+            verify_hir_bubble(&bubble, &arena),
+            Err(errors)
+                if errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::DuplicateMatchCase { case, .. }
+                        if *case == first_case
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::MissingMatchCase { case, .. }
+                        if *case == second_case
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::MatchPayloadTypeMismatch {
+                        case,
+                        expected,
+                        found,
+                        ..
+                    } if *case == first_case && *expected == integer && *found == string
+                ))
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn interface_verifier_rejects_wrong_slots_mappings_arguments_and_results() {
+        let mut arena = TypeArena::new();
+        let integer = arena.source_type("Int").expect("Int");
+        let string = arena.source_type("String").expect("String");
+        let interface_id = InterfaceId::from_raw(0);
+        let interface_type = arena
+            .intern(SemanticType::Interface {
+                interface: interface_id,
+                arguments: Vec::new(),
+            })
+            .expect("interface type");
+        let class_id = ClassId::from_raw(0);
+        let class_type = arena
+            .intern(SemanticType::Class {
+                class: class_id,
+                arguments: Vec::new(),
+            })
+            .expect("class type");
+        let span = test_span();
+        let interface_method = InterfaceMethodId::from_raw(7);
+        let class_method = MethodId::from_raw(3);
+        let interface = HirDeclaration {
+            symbol: SymbolId::from_raw(10),
+            module: ModuleId::from_raw(0),
+            bubble: BubbleId::from_raw(0),
+            visibility: Visibility::Public,
+            name: "Reader".to_owned(),
+            kind: HirDeclarationKind::Interface(HirInterfaceDeclaration {
+                interface: interface_id,
+                type_id: interface_type,
+                methods: vec![HirInterfaceMethod {
+                    method: interface_method,
+                    slot: 0,
+                    name: "read".to_owned(),
+                    parameters: vec![HirNamedType {
+                        name: "count".to_owned(),
+                        type_id: integer,
+                        span,
+                    }],
+                    results: vec![string],
+                    span,
+                }],
+            }),
+            span,
+        };
+        let class_symbol = SymbolId::from_raw(11);
+        let class = HirDeclaration {
+            symbol: class_symbol,
+            module: ModuleId::from_raw(0),
+            bubble: BubbleId::from_raw(0),
+            visibility: Visibility::Public,
+            name: "FileReader".to_owned(),
+            kind: HirDeclarationKind::Class(HirClassDeclaration {
+                class: class_id,
+                type_id: class_type,
+                is_open: false,
+                interfaces: vec![HirInterfaceImplementation {
+                    interface: interface_id,
+                    interface_type,
+                    methods: vec![HirInterfaceMethodImplementation {
+                        interface_method,
+                        slot: 9,
+                        class_method,
+                    }],
+                }],
+                fields: Vec::new(),
+                methods: vec![HirClassMethod {
+                    method: class_method,
+                    visibility: Visibility::Public,
+                    name: "read".to_owned(),
+                    dispatch: ClassMethodDispatch::Receiver,
+                    parameters: vec![HirNamedType {
+                        name: "count".to_owned(),
+                        type_id: string,
+                        span,
+                    }],
+                    results: vec![integer],
+                    span,
+                }],
+            }),
+            span,
+        };
+        let method_body = HirMethod {
+            method: class_method,
+            class: class_id,
+            definition: class_symbol,
+            function: hir_function_with_symbol(
+                class_symbol,
+                vec![
+                    hir_parameter(0, "self", class_type, span),
+                    hir_parameter(1, "count", string, span),
+                ],
+                vec![integer],
+                vec![HirStatement {
+                    kind: HirStatementKind::Return {
+                        values: vec![integer_expression("0", IntegerKind::Int64, integer, span)],
+                    },
+                    span,
+                }],
+            ),
+        };
+        let caller = hir_function_with_symbol(
+            SymbolId::from_raw(20),
+            vec![hir_parameter(0, "reader", interface_type, span)],
+            vec![integer],
+            vec![HirStatement {
+                kind: HirStatementKind::Return {
+                    values: vec![HirExpression {
+                        kind: HirExpressionKind::Call {
+                            dispatch: HirCallDispatch::InterfaceMethod {
+                                interface: interface_id,
+                                method: interface_method,
+                                slot: 8,
+                            },
+                            arguments: vec![
+                                parameter_expression(0, interface_type, span),
+                                string_expression(string, span),
+                            ],
+                        },
+                        type_id: integer,
+                        span,
+                    }],
+                },
+                span,
+            }],
+        );
+        let bubble = test_bubble(vec![interface, class], vec![caller], vec![method_body]);
+
+        assert!(matches!(
+            verify_hir_bubble(&bubble, &arena),
+            Err(errors)
+                if errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::WrongInterfaceMethodSlot {
+                        method,
+                        expected: 0,
+                        found: 8 | 9,
+                        ..
+                    } if *method == interface_method
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::InterfaceMethodMappingMismatch {
+                        method,
+                        class_method: found,
+                        ..
+                    } if *method == interface_method && *found == class_method
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::CallArgumentTypeMismatch {
+                        index: 1,
+                        expected,
+                        found,
+                        ..
+                    } if *expected == integer && *found == string
+                )) && errors.iter().any(|error| matches!(
+                    error,
+                    HirVerificationError::CallResultTypeMismatch {
+                        expected,
+                        found,
+                        ..
+                    } if *expected == string && *found == integer
+                ))
+        ));
+    }
+
     fn hir_function(
         parameters: Vec<HirParameter>,
         results: Vec<TypeId>,
@@ -4480,6 +7082,7 @@ mod tests {
 
     fn hir_parameter(raw: u32, name: &str, type_id: TypeId, span: SourceSpan) -> HirParameter {
         HirParameter {
+            binding: BindingId::from_raw(raw),
             parameter: ValueParameterId::from_raw(raw),
             name: name.to_owned(),
             type_id,

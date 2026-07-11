@@ -1,11 +1,12 @@
 //! Reference interpreter for verified canonical MIR.
+#![allow(clippy::too_many_lines)]
 
 use std::cell::{Ref, RefCell};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use pop_foundation::{ClassId, FieldId, SymbolId, UnionCaseId, ValueId};
+use pop_foundation::{ClassId, FieldId, NestedFunctionId, SymbolId, UnionCaseId, ValueId};
 use pop_mir::{
     MirBubble, MirFunction, MirInstruction, MirInstructionKind, MirTerminator, MirUnwindAction,
     MirVerificationError, verify_mir_bubble,
@@ -376,6 +377,9 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             depth: 0,
             runtime: &mut *runtime,
             retained_roots: BTreeMap::new(),
+            private_values: BTreeMap::new(),
+            next_private_value: u32::MAX,
+            active_captures: None,
         }
         .call(function, &arguments)
         .map(|values| values.into_iter().map(|value| value.visible).collect())
@@ -390,6 +394,17 @@ struct Engine<'mir, 'runtime, R> {
     depth: u32,
     runtime: &'runtime mut R,
     retained_roots: BTreeMap<ManagedReference, Vec<RootHandle>>,
+    private_values: BTreeMap<SymbolId, PrivateValue>,
+    next_private_value: u32,
+    active_captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
+}
+
+enum PrivateValue {
+    Cell(Rc<RefCell<RuntimeValue>>),
+    Closure {
+        function: NestedFunctionId,
+        captures: Rc<RefCell<Vec<RuntimeValue>>>,
+    },
 }
 
 impl<R: RuntimeAdapter> Engine<'_, '_, R> {
@@ -414,32 +429,47 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         if self.depth > self.limits.maximum_call_depth {
             return Err(ExecutionError::CallDepthLimit);
         }
-        let result = self.execute(function, arguments);
+        let result = self.execute(
+            function.parameters(),
+            function.results(),
+            function.blocks(),
+            arguments,
+            None,
+        );
         self.depth -= 1;
         result
     }
 
     fn execute(
         &mut self,
-        function: &MirFunction,
+        parameters: &[pop_types::TypeId],
+        results: &[pop_types::TypeId],
+        blocks: &[pop_mir::MirBlock],
+        arguments: &[RuntimeValue],
+        captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        require_runtime_numeric_types(self.arena, parameters, arguments)?;
+        let previous_captures = self.active_captures.replace(captures);
+        let result = self.execute_blocks(results, blocks, arguments);
+        self.active_captures = previous_captures;
+        result
+    }
+
+    fn execute_blocks(
+        &mut self,
+        results: &[pop_types::TypeId],
+        blocks: &[pop_mir::MirBlock],
         arguments: &[RuntimeValue],
     ) -> Result<Vec<RuntimeValue>, ExecutionError> {
-        require_runtime_numeric_types(self.arena, function.parameters(), arguments)?;
         let mut values = BTreeMap::new();
-        let entry = function
-            .blocks()
-            .first()
-            .ok_or(ExecutionError::InvalidControlFlow)?;
+        let entry = blocks.first().ok_or(ExecutionError::InvalidControlFlow)?;
         for (argument, value) in entry.arguments().iter().zip(arguments) {
             values.insert(argument.value(), value.clone());
         }
         let mut block_index = 0_usize;
         loop {
             self.step()?;
-            let block = function
-                .blocks()
-                .get(block_index)
-                .ok_or(ExecutionError::InvalidControlFlow)?;
+            let block = blocks.get(block_index).ok_or(ExecutionError::InvalidControlFlow)?;
             let mut unwound_to_cleanup = None;
             for instruction in block.instructions() {
                 self.step()?;
@@ -471,7 +501,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             self.step()?;
             match block.terminator() {
                 MirTerminator::Branch { target, arguments } => {
-                    Self::assign_block_arguments(function, *target, arguments, &mut values)?;
+                    Self::assign_block_arguments(blocks, *target, arguments, &mut values)?;
                     block_index = target.raw() as usize;
                 }
                 MirTerminator::ConditionalBranch {
@@ -486,12 +516,40 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     };
                     block_index = target.raw() as usize;
                 }
+                MirTerminator::UnionSwitch {
+                    scrutinee,
+                    union,
+                    arms,
+                } => {
+                    let MirValue::Union {
+                        union: value_union,
+                        case,
+                        arguments,
+                    } = value(&values, *scrutinee)?.visible.clone()
+                    else {
+                        return Err(ExecutionError::TypeMismatch);
+                    };
+                    if value_union != *union {
+                        return Err(ExecutionError::TypeMismatch);
+                    }
+                    let arm = arms
+                        .iter()
+                        .find(|arm| arm.case() == case)
+                        .ok_or(ExecutionError::InvalidControlFlow)?;
+                    Self::assign_runtime_block_arguments(
+                        blocks,
+                        arm.target(),
+                        &arguments,
+                        &mut values,
+                    )?;
+                    block_index = arm.target().raw() as usize;
+                }
                 MirTerminator::Return { values: returned } => {
                     let returned: Vec<_> = returned
                         .iter()
                         .map(|value_id| value(&values, *value_id).cloned())
                         .collect::<Result<_, _>>()?;
-                    require_runtime_numeric_types(self.arena, function.results(), &returned)?;
+                    require_runtime_numeric_types(self.arena, results, &returned)?;
                     return Ok(returned);
                 }
                 MirTerminator::Trap(trap) => {
@@ -659,6 +717,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CompareFloatGreater { .. }
             | MirInstructionKind::CallDirect { .. }
             | MirInstructionKind::CallDirectMethod { .. }
+            | MirInstructionKind::CallInterface { .. }
             | MirInstructionKind::CallIndirect { .. }
             | MirInstructionKind::RecordMake { .. }
             | MirInstructionKind::ClassMake { .. }
@@ -666,6 +725,14 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::FieldGet { .. }
             | MirInstructionKind::FieldSet { .. }
             | MirInstructionKind::UnionMake { .. }
+            | MirInstructionKind::InterfaceUpcast { .. }
+            | MirInstructionKind::CaptureCellAllocate { .. }
+            | MirInstructionKind::CaptureCellLoad { .. }
+            | MirInstructionKind::CaptureCellStore { .. }
+            | MirInstructionKind::ClosureEnvironmentAllocate { .. }
+            | MirInstructionKind::CaptureLoad { .. }
+            | MirInstructionKind::CaptureCellReference { .. }
+            | MirInstructionKind::CaptureStore { .. }
             | MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
@@ -789,6 +856,33 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             MirInstructionKind::CallIndirect {
                 callee, arguments, ..
             } => single_result(self.execute_indirect_call(*callee, arguments, values)?),
+            MirInstructionKind::CallInterface {
+                method, arguments, ..
+            } => {
+                let receiver = arguments.first().ok_or(ExecutionError::WrongArity)?;
+                let MirValue::Class(class) = &value(values, *receiver)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let implementation = self
+                    .mir
+                    .declarations()
+                    .iter()
+                    .find_map(|declaration| match declaration.kind() {
+                        pop_mir::MirDeclarationKind::Class(class_declaration)
+                            if class_declaration.class() == class.class() =>
+                        {
+                            class_declaration
+                                .interfaces()
+                                .iter()
+                                .flat_map(pop_mir::MirInterfaceImplementation::methods)
+                                .find(|implementation| implementation.interface_method() == *method)
+                                .map(|implementation| implementation.class_method())
+                        }
+                        _ => None,
+                    })
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                single_result(self.execute_method_call(implementation, arguments, values)?)
+            }
             MirInstructionKind::RecordMake { record, fields } => {
                 Ok(RuntimeValue::visible(MirValue::Record {
                     record: *record,
@@ -840,6 +934,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .map(|argument| value(values, *argument).map(|value| value.visible.clone()))
                     .collect::<Result<_, _>>()?,
             })),
+            MirInstructionKind::InterfaceUpcast { value: base, .. } => {
+                Ok(value(values, *base)?.clone())
+            }
             _ => return Ok(None),
         }?;
         Ok(Some(result))
@@ -879,7 +976,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         if self.depth > self.limits.maximum_call_depth {
             return Err(ExecutionError::CallDepthLimit);
         }
-        let returned = self.execute(function, &arguments);
+        let returned = self.execute(
+            function.parameters(),
+            function.results(),
+            function.blocks(),
+            &arguments,
+            None,
+        );
         self.depth -= 1;
         returned
     }
@@ -894,17 +997,51 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             return Err(ExecutionError::TypeMismatch);
         };
         let arguments = evaluated_arguments(arguments, values)?;
-        self.call(*function, &arguments)
+        let closure = match self.private_values.get(function) {
+            Some(PrivateValue::Closure { function, captures }) => Some((*function, captures.clone())),
+            _ => None,
+        };
+        if let Some((function, captures)) = closure {
+            let nested = self
+                .mir
+                .nested_functions()
+                .iter()
+                .find(|candidate| candidate.function() == function)
+                .ok_or(ExecutionError::InvalidControlFlow)?;
+            self.depth = self
+                .depth
+                .checked_add(1)
+                .ok_or(ExecutionError::CallDepthLimit)?;
+            if self.depth > self.limits.maximum_call_depth {
+                return Err(ExecutionError::CallDepthLimit);
+            }
+            let result = self.execute(
+                nested.parameters(),
+                nested.results(),
+                nested.blocks(),
+                &arguments,
+                Some(captures),
+            );
+            self.depth -= 1;
+            result
+        } else {
+            self.call(*function, &arguments)
+        }
+    }
+
+    fn fresh_private_symbol(&mut self) -> SymbolId {
+        let symbol = SymbolId::from_raw(self.next_private_value);
+        self.next_private_value = self.next_private_value.saturating_sub(1);
+        symbol
     }
 
     fn assign_block_arguments(
-        function: &MirFunction,
+        blocks: &[pop_mir::MirBlock],
         target: pop_foundation::BlockId,
         arguments: &[ValueId],
         values: &mut BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<(), ExecutionError> {
-        let target = function
-            .blocks()
+        let target = blocks
             .get(target.raw() as usize)
             .ok_or(ExecutionError::InvalidControlFlow)?;
         if target.arguments().len() != arguments.len() {
@@ -916,6 +1053,24 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             .collect();
         for (parameter, incoming) in target.arguments().iter().zip(incoming?) {
             values.insert(parameter.value(), incoming);
+        }
+        Ok(())
+    }
+
+    fn assign_runtime_block_arguments(
+        blocks: &[pop_mir::MirBlock],
+        target: pop_foundation::BlockId,
+        arguments: &[MirValue],
+        values: &mut BTreeMap<ValueId, RuntimeValue>,
+    ) -> Result<(), ExecutionError> {
+        let target = blocks
+            .get(target.raw() as usize)
+            .ok_or(ExecutionError::InvalidControlFlow)?;
+        if target.arguments().len() != arguments.len() {
+            return Err(ExecutionError::WrongArity);
+        }
+        for (parameter, argument) in target.arguments().iter().zip(arguments) {
+            values.insert(parameter.value(), RuntimeValue::visible(argument.clone()));
         }
         Ok(())
     }

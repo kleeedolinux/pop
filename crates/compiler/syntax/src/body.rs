@@ -106,6 +106,11 @@ pub enum ExpressionSyntaxKind {
         callee: Box<ExpressionSyntax>,
         arguments: Vec<ExpressionSyntax>,
     },
+    GenericCall {
+        callee: Box<ExpressionSyntax>,
+        type_arguments: Vec<TypeSyntax>,
+        arguments: Vec<ExpressionSyntax>,
+    },
     MethodCall {
         receiver: Box<ExpressionSyntax>,
         method: String,
@@ -630,9 +635,9 @@ impl BodyParser<'_> {
         let then = self.expect(TokenKind::Then, "`then`")?;
         self.expect(TokenKind::Newline, "line break after match arm")?;
         let body = self.parse_statement_list(&[TokenKind::When, TokenKind::End])?;
-        let end = body
-            .last()
-            .map_or(then.range().end(), |statement| statement.span().range().end());
+        let end = body.last().map_or(then.range().end(), |statement| {
+            statement.span().range().end()
+        });
         Ok(MatchArmSyntax {
             case_path,
             bindings,
@@ -735,6 +740,7 @@ impl BodyParser<'_> {
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn parse_postfix(&mut self) -> Result<ExpressionSyntax, FunctionBodyError> {
         let mut expression = self.parse_primary()?;
         loop {
@@ -793,6 +799,42 @@ impl BodyParser<'_> {
                 expression = self.expression(
                     ExpressionSyntaxKind::Call {
                         callee: Box::new(expression),
+                        arguments,
+                    },
+                    start,
+                    right.range().end(),
+                );
+                continue;
+            }
+            if self.current_kind() == Some(TokenKind::LessThan)
+                && self.peek_kind() == Some(TokenKind::LessThan)
+            {
+                let start = expression.span().range().start();
+                self.position += 2;
+                let mut type_arguments = Vec::new();
+                loop {
+                    type_arguments.push(self.parse_type_prefix()?);
+                    if self.consume(TokenKind::Comma).is_none() {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::GreaterThan, "first `>` in `>>`")?;
+                self.expect(TokenKind::GreaterThan, "second `>` in `>>`")?;
+                self.expect(TokenKind::LeftParenthesis, "`(` after generic arguments")?;
+                let mut arguments = Vec::new();
+                if self.current_kind() != Some(TokenKind::RightParenthesis) {
+                    loop {
+                        arguments.push(self.parse_expression(0)?);
+                        if self.consume(TokenKind::Comma).is_none() {
+                            break;
+                        }
+                    }
+                }
+                let right = self.expect(TokenKind::RightParenthesis, "`)`")?;
+                expression = self.expression(
+                    ExpressionSyntaxKind::GenericCall {
+                        callee: Box::new(expression),
+                        type_arguments,
                         arguments,
                     },
                     start,
@@ -861,7 +903,7 @@ impl BodyParser<'_> {
                 let end = function.span().range().end();
                 Ok(self.expression(ExpressionSyntaxKind::Function(function), start, end))
             }
-            TokenKind::Identifier => self.parse_name(token),
+            TokenKind::Identifier | TokenKind::Attribute => self.parse_name(token),
             TokenKind::LeftParenthesis => self.parse_parenthesized(start),
             TokenKind::LeftBrace => self.parse_brace_literal(start),
             _ => Err(FunctionBodyError {

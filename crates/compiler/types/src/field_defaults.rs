@@ -102,6 +102,7 @@ fn evaluate_constant(
         ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }
+        | ExpressionSyntaxKind::GenericCall { .. }
         | ExpressionSyntaxKind::MethodCall { .. }
         | ExpressionSyntaxKind::Index { .. }
         | ExpressionSyntaxKind::Construct { .. }

@@ -136,3 +136,32 @@ pub fn resource_limit(
         origins,
     )
 }
+
+#[must_use]
+pub fn attribute_validator_rejected(
+    span: SourceSpan,
+    attribute: impl Into<String>,
+    origins: impl IntoIterator<Item = DiagnosticOrigin>,
+) -> Diagnostic {
+    execution_error(
+        "POP4008",
+        "compileTime.attributeValidatorRejected",
+        span,
+        vec![DiagnosticArgument::Identifier(attribute.into())],
+        origins,
+    )
+}
+
+#[must_use]
+pub fn invalid_attribute_validator_signature(
+    span: SourceSpan,
+    function: impl Into<String>,
+) -> Diagnostic {
+    execution_error(
+        "POP4009",
+        "compileTime.invalidAttributeValidatorSignature",
+        span,
+        vec![DiagnosticArgument::Identifier(function.into())],
+        [],
+    )
+}

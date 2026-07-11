@@ -11,6 +11,7 @@ use pop_source::SourceFile;
 mod attribute;
 mod body;
 mod class;
+mod constant;
 mod data;
 mod interface;
 mod lexer;
@@ -30,6 +31,7 @@ pub use class::{
     ClassMethodParameterSyntax, ClassMethodSyntax, VisibilitySyntax, parse_class_declaration,
     parse_class_method_body,
 };
+pub use constant::{ConstDeclarationError, ConstDeclarationSyntax, parse_const_declaration};
 pub use data::{
     DataDeclarationError, RecordDeclarationSyntax, RecordFieldSyntax, UnionCaseParameterSyntax,
     UnionCaseSyntax, UnionDeclarationSyntax, parse_record_declaration, parse_union_declaration,
@@ -300,7 +302,6 @@ impl Parser<'_, '_> {
                 | TokenKind::Interface
                 | TokenKind::Union
                 | TokenKind::Enum
-                | TokenKind::Attribute
                 | TokenKind::Match => depth += 1,
                 TokenKind::End => {
                     depth -= 1;

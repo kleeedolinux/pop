@@ -266,3 +266,164 @@ fn non_attribute_types_used_as_attributes_are_never_silently_discarded() {
         result.diagnostic_snapshot()
     );
 }
+
+#[test]
+fn attribute_validators_receive_normalized_arguments_after_defaults_and_named_arguments() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function validateRange(minimum: Int, maximum: Int): Boolean\n\
+             return minimum < maximum\n\
+         end\n\
+         @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+         @AttributeValidator(validateRange)\n\
+         public attribute Range(minimum: Int, maximum: Int = 10)\n\
+         @Range(maximum = 10, minimum = 1)\n\
+         public function accepted(): Int\n\
+             return 1\n\
+         end\n",
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    assert!(result.hir().is_some());
+    assert!(result.compile_time_evaluations().iter().any(|evaluation| {
+        matches!(
+            evaluation
+                .result()
+                .map(pop_compile_time::EvaluationResult::value),
+            Some(pop_compile_time::CompileTimeValue::Boolean(true))
+        )
+    }));
+}
+
+#[test]
+fn attribute_validator_false_rejects_the_attachment() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function reject(value: Int): Boolean\n\
+             return false\n\
+         end\n\
+         @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+         @AttributeValidator(reject)\n\
+         public attribute Checked(value: Int)\n\
+         @Checked(1)\n\
+         public function rejected(): Int\n\
+             return 1\n\
+         end\n",
+    );
+
+    assert!(result.hir().is_none());
+    assert!(
+        result
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "POP4008")
+    );
+}
+
+#[test]
+fn attribute_validator_signature_must_exactly_match_constructor_and_boolean_result() {
+    for validator in [
+        "private function invalid(value: String): Boolean\n    return true\nend",
+        "private function invalid(value: Int): Int\n    return value\nend",
+    ] {
+        let result = analyze(&format!(
+            "namespace Example\n@CompileTime\n{validator}\n\
+             @AttributeValidator(invalid)\n\
+             public attribute Checked(value: Int)\n"
+        ));
+        assert!(result.hir().is_none());
+        assert!(
+            result
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code().as_str() == "POP4009"),
+            "{}",
+            result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
+fn source_constants_are_typed_evaluated_and_published_without_runtime_functions() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function addOne(value: UInt8): UInt8\n\
+             return value + 1\n\
+         end\n\
+         private const ANSWER: UInt8 = addOne(41)\n\
+         private const INFERRED = 20 + 22\n",
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    assert_eq!(result.constants().len(), 2);
+    assert!(result.constants().iter().all(|constant| matches!(
+        constant.value(),
+        pop_compile_time::CompileTimeValue::Integer(value) if value.to_string() == "42"
+    )));
+    assert!(result.hir().expect("runtime HIR").functions().is_empty());
+}
+
+#[test]
+fn source_attribute_queries_use_resolved_type_and_attribute_identities() {
+    let result = analyze(
+        "namespace Example\n\
+         @AttributeUsage(targets = { AttributeTarget.Record }, repeatable = false)\n\
+         public attribute Label(value: String)\n\
+         @Label(\"user\")\n\
+         public record User\n\
+             name: String\n\
+         end\n\
+         private const HAS_LABEL = hasAttribute<<Label>>(User)\n\
+         private const USER_LABEL = attribute<<Label>>(User)\n",
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let has = result
+        .constants()
+        .iter()
+        .find(|constant| constant.name() == "HAS_LABEL")
+        .unwrap();
+    assert_eq!(
+        has.value(),
+        &pop_compile_time::CompileTimeValue::Boolean(true)
+    );
+    let label = result
+        .constants()
+        .iter()
+        .find(|constant| constant.name() == "USER_LABEL")
+        .unwrap();
+    assert!(matches!(
+        label.value(),
+        pop_compile_time::CompileTimeValue::Attribute { arguments, .. }
+            if arguments == &[pop_compile_time::CompileTimeValue::String("user".to_owned())]
+    ));
+    assert!(
+        result
+            .compile_time_evaluations()
+            .iter()
+            .filter_map(|evaluation| evaluation.result())
+            .any(|evaluation| {
+                evaluation
+                    .dependencies()
+                    .iter()
+                    .any(|dependency| matches!(dependency, CompileTimeDependency::Attribute(_)))
+                    && evaluation
+                        .dependencies()
+                        .iter()
+                        .any(|dependency| matches!(dependency, CompileTimeDependency::Type(_)))
+            })
+    );
+}

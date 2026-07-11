@@ -154,6 +154,7 @@ pub enum AttributeContractError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttributeDefinition {
     attribute: AttributeId,
+    type_id: TypeId,
     symbol: SymbolId,
     parameters: Vec<AttributeParameterDefinition>,
     usage: AttributeUsage,
@@ -166,6 +167,11 @@ impl AttributeDefinition {
     #[must_use]
     pub const fn attribute(&self) -> AttributeId {
         self.attribute
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
     }
 
     #[must_use]
@@ -849,8 +855,20 @@ impl SignatureResolver<'_> {
                 span: parameter.span(),
             });
         }
+        let attribute = AttributeId::from_raw(self.next_attribute);
+        let type_id = self
+            .arena
+            .intern(SemanticType::Attribute {
+                attribute,
+                parameters: parameters
+                    .iter()
+                    .map(AttributeParameterDefinition::parameter_type)
+                    .collect(),
+            })
+            .expect("attribute parameter types were already resolved");
         let definition = diagnostics.is_empty().then(|| AttributeDefinition {
-            attribute: AttributeId::from_raw(self.next_attribute),
+            attribute,
+            type_id,
             symbol,
             parameters,
             usage: AttributeUsage::default(),

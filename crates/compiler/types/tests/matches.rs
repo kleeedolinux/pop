@@ -31,11 +31,9 @@ fn check(text: &str) -> pop_types::TypedBodyResult {
         let union = parse_union_declaration(&source, &syntax, node).expect("union");
         let symbol = database
             .index()
-            .declaration_by_qualified_name(
-                &format!("Example.{}", union.name()),
-                SymbolSpace::Type,
-            )[0]
-            .symbol();
+            .declaration_by_qualified_name(&format!("Example.{}", union.name()), SymbolSpace::Type)
+            [0]
+        .symbol();
         let result = resolver.define_union(module, symbol, &union);
         assert!(result.diagnostics().is_empty());
     }
@@ -58,8 +56,12 @@ fn check(text: &str) -> pop_types::TypedBodyResult {
         .signature()
         .expect("signature")
         .clone();
-    BodyChecker::new(module, &mut resolver, &BTreeMap::from([(function, signature.clone())]))
-        .check(&signature, &body)
+    BodyChecker::new(
+        module,
+        &mut resolver,
+        &BTreeMap::from([(function, signature.clone())]),
+    )
+    .check(&signature, &body)
 }
 
 const PREFIX: &str = "namespace Example\n\
@@ -81,7 +83,11 @@ fn exhaustive_match_resolves_cases_and_arm_local_payload_bindings() {
              end\n\
          end\n"
     ));
-    assert!(result.diagnostics().is_empty(), "{}", result.diagnostic_snapshot());
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
     let TypedStatementKind::Match { union, arms, .. } =
         result.body().expect("typed").statements()[0].kind()
     else {
@@ -112,9 +118,11 @@ fn missing_case_is_an_error_with_a_safe_identity_based_insertion_fix() {
     let diagnostic = &result.diagnostics()[0];
     assert_eq!(diagnostic.fixes().len(), 1);
     assert!(diagnostic.fixes()[0].is_safe());
-    assert!(diagnostic.fixes()[0].edit().edits()[0]
-        .replacement()
-        .contains("when ResultValue.Error(message) then"));
+    assert!(
+        diagnostic.fixes()[0].edit().edits()[0]
+            .replacement()
+            .contains("when ResultValue.Error(message) then")
+    );
 }
 
 #[test]

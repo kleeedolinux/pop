@@ -1,4 +1,5 @@
 //! Build orchestration owned by the unified Pop Lang driver.
+#![allow(clippy::match_same_arms, clippy::similar_names)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,7 +17,8 @@ use pop_foundation::{
 };
 use pop_hir::{
     HirBubble, HirDeclaration, HirDeclarationKind, HirFunction, HirFunctionContext,
-    HirKnownCallables, HirMethod, build_hir_function_with_methods_and_attributes, build_hir_method,
+    HirKnownCallables, HirMethod, build_hir_function_with_known_callables_and_attributes,
+    build_hir_method,
 };
 use pop_query::{BudgetError, QueryBudget};
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
@@ -24,8 +26,9 @@ use pop_source::SourceFile;
 use pop_syntax::{
     AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind, FunctionBodySyntax, NodeKind,
     SyntaxTree, parse_attribute_declaration, parse_attribute_use, parse_class_declaration,
-    parse_class_method_body, parse_file, parse_function_body, parse_function_signature,
-    parse_record_declaration, parse_union_declaration,
+    parse_class_method_body, parse_const_declaration, parse_file, parse_function_body,
+    parse_function_signature, parse_interface_declaration, parse_record_declaration,
+    parse_union_declaration,
 };
 use pop_types::{
     AttributeAttachmentError, AttributeConstant, AttributeQueryIndex, AttributeTarget,
@@ -92,7 +95,35 @@ pub struct FrontEndResult {
     types: TypeArena,
     attribute_queries: AttributeQueryIndex,
     compile_time_evaluations: Vec<FrontEndCompileTimeEvaluation>,
+    constants: Vec<FrontEndConstant>,
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontEndConstant {
+    symbol: SymbolId,
+    name: String,
+    type_id: TypeId,
+    value: CompileTimeValue,
+}
+
+impl FrontEndConstant {
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+    #[must_use]
+    pub const fn value(&self) -> &CompileTimeValue {
+        &self.value
+    }
 }
 
 /// One source-requested compile-time outcome retained for incremental
@@ -140,6 +171,11 @@ impl FrontEndResult {
     #[must_use]
     pub fn compile_time_evaluations(&self) -> &[FrontEndCompileTimeEvaluation] {
         &self.compile_time_evaluations
+    }
+
+    #[must_use]
+    pub fn constants(&self) -> &[FrontEndConstant] {
+        &self.constants
     }
 
     #[must_use]
@@ -192,6 +228,12 @@ struct DeclarationAttributeWork {
     attributes: Vec<ResolvedAttribute>,
 }
 
+struct ConstantWork {
+    module: ModuleId,
+    symbol: SymbolId,
+    syntax: pop_syntax::ConstDeclarationSyntax,
+}
+
 struct MethodWork {
     module: ModuleId,
     definition: ClassDefinition,
@@ -208,6 +250,7 @@ struct MethodWork {
 /// resolver symbol cannot be published once in the immutable attribute-query
 /// snapshot. Both are toolchain incidents guarded by bootstrap/query tests.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let parsed = parse_modules(input.modules);
     let module_inputs: Vec<_> = parsed
@@ -227,6 +270,10 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
+    let (constant_work, mut constant_attributes) =
+        define_constants(&parsed, &database, &mut diagnostics);
+    declaration_attributes.append(&mut constant_attributes);
+    declaration_attributes.sort_by_key(|work| work.symbol);
     let mut functions = resolve_functions(
         &parsed,
         &database,
@@ -272,6 +319,15 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut compile_time_evaluations,
         &mut diagnostics,
     );
+    let constants = evaluate_source_constants(
+        &constant_work,
+        &signatures,
+        &compile_time,
+        &attribute_queries,
+        &mut resolver,
+        &mut compile_time_evaluations,
+        &mut diagnostics,
+    );
     declarations = refresh_declarations(declarations, &resolver);
     let (hir_functions, hir_methods) = build_runtime_hir(
         input.bubble,
@@ -300,6 +356,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         types: resolver.into_arena(),
         attribute_queries,
         compile_time_evaluations,
+        constants,
         diagnostics,
     }
 }
@@ -332,9 +389,11 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
                 matches!(
                     node.kind(),
                     NodeKind::AttributeDeclaration
+                        | NodeKind::ConstDeclaration
                         | NodeKind::RecordDeclaration
                         | NodeKind::UnionDeclaration
                         | NodeKind::ClassDeclaration
+                        | NodeKind::InterfaceDeclaration
                         | NodeKind::FunctionDeclaration
                 )
             });
@@ -349,6 +408,61 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
             }
         }
     }
+}
+
+fn define_constants(
+    modules: &[ParsedModule],
+    database: &ResolutionDatabase,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (Vec<ConstantWork>, Vec<DeclarationAttributeWork>) {
+    let mut constants = Vec::new();
+    let mut attribute_work = Vec::new();
+    for module in modules {
+        let mut pending_attributes = Vec::new();
+        for node in module.syntax.root().children() {
+            if node.kind() == NodeKind::AttributeUse {
+                match parse_attribute_use(&module.source, &module.syntax, node) {
+                    Ok(syntax) => pending_attributes.push(syntax),
+                    Err(error) => diagnostics.push(syntax_error(error.span(), error.expectation())),
+                }
+                continue;
+            }
+            if node.kind() != NodeKind::ConstDeclaration {
+                pending_attributes.clear();
+                continue;
+            }
+            let attribute_uses = std::mem::take(&mut pending_attributes);
+            match parse_const_declaration(&module.source, &module.syntax, node) {
+                Ok(syntax) => {
+                    if let Some(symbol) = resolve_symbol(
+                        database,
+                        module.module,
+                        syntax.name(),
+                        SymbolSpace::Value,
+                        syntax.span(),
+                        diagnostics,
+                    ) {
+                        constants.push(ConstantWork {
+                            module: module.module,
+                            symbol,
+                            syntax,
+                        });
+                        attribute_work.push(DeclarationAttributeWork {
+                            module: module.module,
+                            symbol,
+                            target: AttributeTarget::Constant,
+                            attribute_uses,
+                            attributes: Vec::new(),
+                        });
+                    }
+                }
+                Err(error) => diagnostics.push(syntax_error(error.span(), error.expectation())),
+            }
+        }
+    }
+    constants.sort_by_key(|work| work.symbol);
+    attribute_work.sort_by_key(|work| work.symbol);
+    (constants, attribute_work)
 }
 
 fn build_runtime_hir(
@@ -366,6 +480,7 @@ fn build_runtime_hir(
         .collect();
     let known_methods: BTreeSet<MethodId> =
         methods.iter().map(|work| work.method.method()).collect();
+    let interfaces: Vec<_> = resolver.interface_definitions().cloned().collect();
     let mut hir_functions = Vec::new();
     for function in functions {
         if function.is_compile_time {
@@ -377,13 +492,12 @@ fn build_runtime_hir(
         let Some(body) = typed.body() else {
             continue;
         };
-        if let Ok(function) = build_hir_function_with_methods_and_attributes(
+        if let Ok(function) = build_hir_function_with_known_callables_and_attributes(
             HirFunctionContext::new(function.module, bubble, function.visibility),
             &function.signature,
             body,
             resolver.arena(),
-            &known_functions,
-            &known_methods,
+            HirKnownCallables::new(&known_functions, &known_methods).with_interfaces(&interfaces),
             &function.attributes,
         ) {
             hir_functions.push(function);
@@ -407,7 +521,7 @@ fn build_runtime_hir(
             &method.signature,
             body,
             resolver.arena(),
-            HirKnownCallables::new(&known_functions, &known_methods),
+            HirKnownCallables::new(&known_functions, &known_methods).with_interfaces(&interfaces),
         ) {
             hir_methods.push(lowered);
         }
@@ -515,8 +629,14 @@ fn define_data(
     Vec<DeclarationAttributeWork>,
 ) {
     let mut methods = Vec::new();
-    let mut declarations = Vec::new();
-    let mut attribute_work = Vec::new();
+    let (mut declarations, mut attribute_work) =
+        define_records_and_unions(modules, bubble, database, resolver, diagnostics);
+    // Interface identities and exact member slots are indexed before classes
+    // so an explicit `implements` clause never depends on Module/source order.
+    let (mut interface_declarations, mut interface_attribute_work) =
+        define_interfaces(modules, bubble, database, resolver, diagnostics);
+    declarations.append(&mut interface_declarations);
+    attribute_work.append(&mut interface_attribute_work);
     for module in modules {
         let mut pending_attributes = Vec::new();
         for node in module.syntax.root().children() {
@@ -528,32 +648,6 @@ fn define_data(
                 continue;
             }
             match node.kind() {
-                NodeKind::RecordDeclaration => {
-                    let (declaration, work) = define_record(
-                        module,
-                        node,
-                        bubble,
-                        database,
-                        resolver,
-                        diagnostics,
-                        std::mem::take(&mut pending_attributes),
-                    );
-                    declarations.extend(declaration);
-                    attribute_work.extend(work);
-                }
-                NodeKind::UnionDeclaration => {
-                    let (declaration, work) = define_union(
-                        module,
-                        node,
-                        bubble,
-                        database,
-                        resolver,
-                        diagnostics,
-                        std::mem::take(&mut pending_attributes),
-                    );
-                    declarations.extend(declaration);
-                    attribute_work.extend(work);
-                }
                 NodeKind::ClassDeclaration => {
                     let (class_methods, declaration, work) = define_class(
                         module,
@@ -576,6 +670,123 @@ fn define_data(
     declarations.sort_by_key(HirDeclaration::symbol);
     attribute_work.sort_by_key(|work| work.symbol);
     (methods, declarations, attribute_work)
+}
+
+fn define_records_and_unions(
+    modules: &[ParsedModule],
+    bubble: BubbleId,
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (Vec<HirDeclaration>, Vec<DeclarationAttributeWork>) {
+    let mut declarations = Vec::new();
+    let mut attribute_work = Vec::new();
+    for module in modules {
+        let mut pending_attributes = Vec::new();
+        for node in module.syntax.root().children() {
+            if node.kind() == NodeKind::AttributeUse {
+                match parse_attribute_use(&module.source, &module.syntax, node) {
+                    Ok(syntax) => pending_attributes.push(syntax),
+                    Err(error) => diagnostics.push(syntax_error(error.span(), error.expectation())),
+                }
+                continue;
+            }
+            let (declaration, work) = match node.kind() {
+                NodeKind::RecordDeclaration => define_record(
+                    module,
+                    node,
+                    bubble,
+                    database,
+                    resolver,
+                    diagnostics,
+                    std::mem::take(&mut pending_attributes),
+                ),
+                NodeKind::UnionDeclaration => define_union(
+                    module,
+                    node,
+                    bubble,
+                    database,
+                    resolver,
+                    diagnostics,
+                    std::mem::take(&mut pending_attributes),
+                ),
+                _ => {
+                    pending_attributes.clear();
+                    continue;
+                }
+            };
+            declarations.extend(declaration);
+            attribute_work.extend(work);
+        }
+    }
+    (declarations, attribute_work)
+}
+
+fn define_interfaces(
+    modules: &[ParsedModule],
+    bubble: BubbleId,
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> (Vec<HirDeclaration>, Vec<DeclarationAttributeWork>) {
+    let mut declarations = Vec::new();
+    let mut attribute_work = Vec::new();
+    for module in modules {
+        let mut pending_attributes = Vec::new();
+        for node in module.syntax.root().children() {
+            if node.kind() == NodeKind::AttributeUse {
+                match parse_attribute_use(&module.source, &module.syntax, node) {
+                    Ok(syntax) => pending_attributes.push(syntax),
+                    Err(error) => diagnostics.push(syntax_error(error.span(), error.expectation())),
+                }
+                continue;
+            }
+            if node.kind() != NodeKind::InterfaceDeclaration {
+                pending_attributes.clear();
+                continue;
+            }
+            let attribute_uses = std::mem::take(&mut pending_attributes);
+            let syntax = match parse_interface_declaration(&module.source, &module.syntax, node) {
+                Ok(syntax) => syntax,
+                Err(error) => {
+                    diagnostics.push(syntax_error(error.span(), error.expectation()));
+                    continue;
+                }
+            };
+            let Some(symbol) = resolve_symbol(
+                database,
+                module.module,
+                syntax.name(),
+                SymbolSpace::Type,
+                syntax.span(),
+                diagnostics,
+            ) else {
+                continue;
+            };
+            let result = resolver.define_interface(module.module, symbol, &syntax);
+            diagnostics.extend(result.diagnostics().iter().cloned());
+            let (Some(definition), Some(declaration)) =
+                (result.definition(), database.index().declaration(symbol))
+            else {
+                continue;
+            };
+            declarations.push(HirDeclaration::interface(
+                module.module,
+                bubble,
+                declaration.visibility(),
+                syntax.name(),
+                definition,
+            ));
+            attribute_work.push(DeclarationAttributeWork {
+                module: module.module,
+                symbol,
+                target: AttributeTarget::Interface,
+                attribute_uses,
+                attributes: Vec::new(),
+            });
+        }
+    }
+    (declarations, attribute_work)
 }
 
 fn define_record(
@@ -881,6 +1092,7 @@ fn resolve_attribute_contracts(
     database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
     compile_time: &CompileTimeContext,
+    signatures: &BTreeMap<SymbolId, ResolvedFunctionSignature>,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -916,11 +1128,33 @@ fn resolve_attribute_contracts(
                     }
                 }
                 Some(CompilerAttributeRole::AttributeValidator) => {
+                    let definition = resolver.attribute_definition(declaration.symbol).cloned();
+                    let validator_symbol = syntax
+                        .arguments()
+                        .first()
+                        .and_then(|argument| match argument.value().kind() {
+                            ExpressionSyntaxKind::Name(path) => Some(path.join(".")),
+                            _ => None,
+                        })
+                        .and_then(|name| {
+                            database
+                                .resolve(
+                                    declaration.module,
+                                    &name,
+                                    SymbolSpace::Value,
+                                    syntax.span(),
+                                )
+                                .symbol()
+                        });
                     match resolve_attribute_validator(
                         database,
                         declaration.module,
                         &syntax,
                         compile_time,
+                        definition.as_ref(),
+                        validator_symbol.and_then(|symbol| signatures.get(&symbol)),
+                        resolver.arena().source_type("Boolean"),
+                        diagnostics,
                     ) {
                         Some(validator) => {
                             if resolver
@@ -1041,11 +1275,16 @@ fn parse_attribute_targets(
         .collect()
 }
 
+#[allow(clippy::question_mark, clippy::too_many_arguments)]
 fn resolve_attribute_validator(
     database: &ResolutionDatabase,
     module: ModuleId,
     syntax: &AttributeUseSyntax,
     compile_time: &CompileTimeContext,
+    attribute: Option<&pop_types::AttributeDefinition>,
+    source_signature: Option<&ResolvedFunctionSignature>,
+    boolean: Option<TypeId>,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<AttributeValidator> {
     let [argument] = syntax.arguments() else {
         return None;
@@ -1061,10 +1300,34 @@ fn resolve_attribute_validator(
         .resolve(module, &name, SymbolSpace::Value, argument.value().span())
         .symbol()?;
     let function = FunctionId::from_raw(symbol.raw());
-    compile_time
-        .eligible
-        .contains(&function)
-        .then(|| AttributeValidator::new(function))
+    let Some(attribute) = attribute else {
+        return None;
+    };
+    let expected_parameters: Vec<_> = attribute
+        .parameters()
+        .iter()
+        .map(pop_types::AttributeParameterDefinition::parameter_type)
+        .collect();
+    let valid_parameters = source_signature.is_some_and(|signature| {
+        signature.parameters().len() == expected_parameters.len()
+            && signature.parameters().iter().zip(&expected_parameters).all(
+                |(parameter, expected)| parameter.parameter_type().type_id() == Some(*expected),
+            )
+    });
+    let valid_result = source_signature.is_some_and(|signature| {
+        signature.results().len() == 1
+            && boolean.is_some_and(|boolean| signature.results()[0].type_id() == Some(boolean))
+    });
+    if !valid_parameters || !valid_result {
+        diagnostics.push(
+            compile_time_diagnostics::invalid_attribute_validator_signature(syntax.span(), name),
+        );
+        return None;
+    }
+    if !compile_time.eligible.contains(&function) {
+        return None;
+    }
+    Some(AttributeValidator::new(function))
 }
 
 fn resolve_source_attributes(
@@ -1080,6 +1343,7 @@ fn resolve_source_attributes(
         context.database,
         context.bootstrap,
         context.compile_time,
+        context.signatures,
         resolver,
         diagnostics,
     );
@@ -1271,10 +1535,85 @@ fn resolve_attribute_uses(
         );
         diagnostics.extend(result.diagnostics().iter().cloned());
         if let Some(attribute) = result.attribute() {
-            attributes.push(attribute.clone());
+            if validate_resolved_attribute(
+                attribute,
+                &definition,
+                compile_time,
+                resolver.arena(),
+                compile_time_evaluations,
+                diagnostics,
+            ) {
+                attributes.push(attribute.clone());
+            }
         }
     }
     attributes
+}
+
+fn validate_resolved_attribute(
+    attribute: &ResolvedAttribute,
+    definition: &pop_types::AttributeDefinition,
+    compile_time: &CompileTimeContext,
+    types: &TypeArena,
+    compile_time_evaluations: &mut Vec<FrontEndCompileTimeEvaluation>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let Some(validator) = definition.validator() else {
+        return true;
+    };
+    let arguments: Vec<_> = attribute
+        .arguments()
+        .iter()
+        .map(|argument| attribute_constant_compile_time_value(argument.value()))
+        .collect();
+    let result = evaluate_compile_time_function(
+        validator.function(),
+        &arguments,
+        attribute.span(),
+        compile_time,
+        types,
+        compile_time_evaluations,
+    );
+    match result {
+        Ok(CompileTimeValue::Boolean(true)) => true,
+        Ok(CompileTimeValue::Boolean(false)) => {
+            diagnostics.push(compile_time_diagnostics::attribute_validator_rejected(
+                attribute.span(),
+                format!("attribute#{}", attribute.attribute().raw()),
+                [],
+            ));
+            false
+        }
+        Ok(_) => {
+            diagnostics.push(
+                compile_time_diagnostics::invalid_attribute_validator_signature(
+                    attribute.span(),
+                    compile_time_function_name(&compile_time.names, validator.function()),
+                ),
+            );
+            false
+        }
+        Err(errors) => {
+            diagnostics.extend(errors);
+            false
+        }
+    }
+}
+
+fn attribute_constant_compile_time_value(value: &AttributeConstant) -> CompileTimeValue {
+    match value {
+        AttributeConstant::Nil => CompileTimeValue::Nil,
+        AttributeConstant::Boolean(value) => CompileTimeValue::Boolean(*value),
+        AttributeConstant::Integer(value) => CompileTimeValue::Integer(*value),
+        AttributeConstant::Float(value) => CompileTimeValue::Float(*value),
+        AttributeConstant::String(value) => CompileTimeValue::String(value.clone()),
+        AttributeConstant::Tuple(values) => CompileTimeValue::Tuple(
+            values
+                .iter()
+                .map(attribute_constant_compile_time_value)
+                .collect(),
+        ),
+    }
 }
 
 fn attribute_attachment_diagnostic(error: &AttributeAttachmentError) -> Diagnostic {
@@ -1308,6 +1647,7 @@ fn build_attribute_query_index(
     resolver: &SignatureResolver<'_>,
 ) -> AttributeQueryIndex {
     let mut index = resolver.attribute_query_index();
+    let mut indexed_types = BTreeSet::new();
     for declaration in declarations {
         let validated = resolver.validate_attribute_attachments(
             declaration.target,
@@ -1317,6 +1657,13 @@ fn build_attribute_query_index(
             index
                 .insert_symbol(declaration.symbol, attachments.clone())
                 .expect("validated declaration has one indexed resolver symbol");
+            if let Some(type_id) = resolver.declaration_type(declaration.symbol) {
+                if indexed_types.insert(type_id) {
+                    index
+                        .insert_type(type_id, declaration.symbol, attachments.clone())
+                        .expect("validated declaration type has one indexed identity");
+                }
+            }
         }
     }
     for function in functions {
@@ -1470,6 +1817,7 @@ fn collect_direct_calls(
             }
             calls.push((*function, expression.span()));
         }
+        CompileTimeExpressionKind::AttributeQuery { .. } => {}
     }
 }
 
@@ -1507,9 +1855,67 @@ fn evaluate_declaration_defaults(
                 compile_time_evaluations,
                 diagnostics,
             ),
-            HirDeclarationKind::Union(_) => {}
+            HirDeclarationKind::Union(_) | HirDeclarationKind::Interface(_) => {}
         }
     }
+}
+
+fn evaluate_source_constants(
+    constants: &[ConstantWork],
+    signatures: &BTreeMap<SymbolId, ResolvedFunctionSignature>,
+    compile_time: &CompileTimeContext,
+    attribute_queries: &AttributeQueryIndex,
+    resolver: &mut SignatureResolver<'_>,
+    compile_time_evaluations: &mut Vec<FrontEndCompileTimeEvaluation>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<FrontEndConstant> {
+    let mut evaluated = Vec::new();
+    for constant in constants {
+        let expected = if let Some(annotation) = constant.syntax.annotation() {
+            let (resolved, type_diagnostics) =
+                resolver.resolve_standalone_type(constant.module, annotation);
+            diagnostics.extend(type_diagnostics);
+            resolved
+        } else {
+            None
+        };
+        if constant.syntax.annotation().is_some() && expected.is_none() {
+            continue;
+        }
+        let typed = BodyChecker::new(constant.module, resolver, signatures)
+            .check_constant_expression(constant.syntax.initializer(), expected);
+        diagnostics.extend(typed.diagnostics().iter().cloned());
+        let Some(expression) = typed.expression() else {
+            continue;
+        };
+        let type_id = expression.type_id();
+        let lowered = match lower_compile_time_expression(expression, resolver.arena()) {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                diagnostics.push(compile_time_diagnostics::ineligible_constant_expression(
+                    compile_time_lowering_span(error, constant.syntax.span()),
+                    "constant initializer",
+                ));
+                continue;
+            }
+        };
+        match evaluate_compile_time_expression(
+            lowered,
+            compile_time,
+            resolver.arena(),
+            Some(attribute_queries),
+            compile_time_evaluations,
+        ) {
+            Ok(value) => evaluated.push(FrontEndConstant {
+                symbol: constant.symbol,
+                name: constant.syntax.name().to_owned(),
+                type_id,
+                value,
+            }),
+            Err(errors) => diagnostics.extend(errors),
+        }
+    }
+    evaluated
 }
 
 fn evaluate_attribute_defaults(
@@ -1717,6 +2123,7 @@ fn evaluate_required_expression(
         lowered,
         compile_time,
         resolver.arena(),
+        None,
         compile_time_evaluations,
     )
 }
@@ -1725,6 +2132,7 @@ fn evaluate_compile_time_expression(
     expression: CompileTimeExpression,
     context: &CompileTimeContext,
     types: &TypeArena,
+    attribute_queries: Option<&AttributeQueryIndex>,
     compile_time_evaluations: &mut Vec<FrontEndCompileTimeEvaluation>,
 ) -> Result<CompileTimeValue, Vec<Diagnostic>> {
     let mut selected = BTreeMap::new();
@@ -1735,12 +2143,57 @@ fn evaluate_compile_time_expression(
     let wrapper_function = CompileTimeFunction::new(wrapper, Vec::new(), result_type, expression);
     let mut definitions: Vec<_> = selected.into_values().collect();
     definitions.push(wrapper_function);
-    let program = CompileTimeProgram::new(definitions, types)
+    let mut program = CompileTimeProgram::new(definitions, types)
         .map_err(|error| vec![program_diagnostic(error, span, context)])?;
+    if let Some(attribute_queries) = attribute_queries {
+        program = program.with_attribute_queries(attribute_queries.clone());
+    }
     let mut eligible = context.eligible.clone();
     eligible.insert(wrapper);
     match CompileTimeInterpreter::new(&program, &eligible, default_compile_time_budget())
         .evaluate_detailed_from(wrapper, &[], span)
+    {
+        Ok(result) => {
+            let value = result.value().clone();
+            compile_time_evaluations.push(FrontEndCompileTimeEvaluation::Result(result));
+            Ok(value)
+        }
+        Err(failure) => {
+            let diagnostic = evaluation_diagnostic(&failure, context);
+            compile_time_evaluations.push(FrontEndCompileTimeEvaluation::Failure(failure));
+            Err(vec![diagnostic])
+        }
+    }
+}
+
+fn evaluate_compile_time_function(
+    function: FunctionId,
+    arguments: &[CompileTimeValue],
+    origin: SourceSpan,
+    context: &CompileTimeContext,
+    types: &TypeArena,
+    compile_time_evaluations: &mut Vec<FrontEndCompileTimeEvaluation>,
+) -> Result<CompileTimeValue, Vec<Diagnostic>> {
+    if !context.eligible.contains(&function) {
+        return Err(vec![compile_time_diagnostics::function_not_eligible(
+            origin,
+            compile_time_function_name(&context.names, function),
+            [],
+        )]);
+    }
+    let Some(root) = context.functions.get(&function).cloned() else {
+        return Err(vec![compile_time_diagnostics::function_not_eligible(
+            origin,
+            compile_time_function_name(&context.names, function),
+            [],
+        )]);
+    };
+    let mut selected = BTreeMap::from([(function, root.clone())]);
+    collect_reachable_compile_time_functions(root.body(), context, &mut selected)?;
+    let program = CompileTimeProgram::new(selected.into_values().collect(), types)
+        .map_err(|error| vec![program_diagnostic(error, origin, context)])?;
+    match CompileTimeInterpreter::new(&program, &context.eligible, default_compile_time_budget())
+        .evaluate_detailed_from(function, arguments, origin)
     {
         Ok(result) => {
             let value = result.value().clone();
@@ -1922,6 +2375,7 @@ fn compile_time_attribute_constant(value: CompileTimeValue) -> Option<AttributeC
             .collect::<Option<Vec<_>>>()
             .map(AttributeConstant::Tuple),
         CompileTimeValue::Array(_)
+        | CompileTimeValue::Attribute { .. }
         | CompileTimeValue::Record(_)
         | CompileTimeValue::Union { .. }
         | CompileTimeValue::TypeReference(_)
@@ -1938,6 +2392,7 @@ fn compile_time_field_default(value: CompileTimeValue) -> Option<FieldDefault> {
         CompileTimeValue::String(value) => Some(FieldDefault::String(value)),
         CompileTimeValue::Tuple(_)
         | CompileTimeValue::Array(_)
+        | CompileTimeValue::Attribute { .. }
         | CompileTimeValue::Record(_)
         | CompileTimeValue::Union { .. }
         | CompileTimeValue::TypeReference(_)

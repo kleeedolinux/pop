@@ -20,6 +20,16 @@ ambient I/O, and permitted compiler-query capabilities. A caller may state a
 strict superset of a callee's effects, never a smaller set. There is no
 `Unknown` or dynamic effect.
 
+The initial source surface has no effect punctuation. After typed bodies and
+resolved call identities exist, the compiler computes the least fixed point of
+local operation effects and direct-call edges for each recursive call-graph
+component. A closure function type receives the resulting closed summary;
+calls through function values use that summary rather than an all-effects or
+unknown fallback. Interface summaries are the exact declared member summaries,
+and an implementation may not widen them. Compile-time query capabilities are
+present only on eligible compile-time functions and cannot escape into runtime
+function types.
+
 Expected recoverable failures remain ordinary typed `Result<T, E>` values.
 Runtime traps use a closed backend-neutral `TrapKind`; checked operations name
 their possible trap explicitly, and an unconditional trap is a terminator.
@@ -73,6 +83,8 @@ Rejected because conservative scanning contradicts the moving-nursery contract.
 ## Required conformance tests
 
 - exact call-effect subset verification and no unknown-effect fallback;
+- deterministic least-fixed-point inference for direct recursion, mutual
+  recursion, closures, and interface implementations;
 - checked-operation traps, unconditional traps, panic propagation, cleanup, and
   resumed unwind;
 - object/array/environment allocation maps and precise stack maps;

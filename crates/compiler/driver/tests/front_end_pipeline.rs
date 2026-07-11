@@ -468,6 +468,9 @@ fn source_interfaces_are_nominal_and_dispatch_by_resolved_slot() {
         FileId::from_raw(0),
         "src/reader.pop",
         "namespace Main\n\
+         private interface Closeable\n\
+             function close()\n\
+         end\n\
          public interface Reader\n\
              function read(count: Int): String\n\
          end\n\
@@ -476,8 +479,9 @@ fn source_interfaces_are_nominal_and_dispatch_by_resolved_slot() {
                  return \"\"\n\
              end\n\
          end\n\
-         public function readOne(reader: Reader): String\n\
-             return reader:read(1)\n\
+         public function readOne(reader: FileReader): String\n\
+             local contract: Reader = reader\n\
+             return contract:read(1)\n\
          end\n",
     )
     .expect("source");
@@ -493,9 +497,157 @@ fn source_interfaces_are_nominal_and_dispatch_by_resolved_slot() {
         "{}",
         result.diagnostic_snapshot()
     );
-    let dump = result.hir().expect("verified HIR").dump(result.types());
+    let hir = result.hir().expect("verified HIR");
+    let reader = hir
+        .declarations()
+        .iter()
+        .find(|declaration| declaration.name() == "Reader")
+        .and_then(pop_hir::HirDeclaration::as_interface)
+        .expect("Reader interface");
+    assert_eq!(reader.methods()[0].slot(), 0);
+    assert_ne!(
+        reader.methods()[0].method().raw(),
+        reader.methods()[0].slot()
+    );
+    let HirStatementKind::Local { initializer, .. } = hir.functions()[0].body()[0].kind() else {
+        panic!("interface upcast local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::InterfaceUpcast { interface, .. }
+            if *interface == reader.interface()
+    ));
+    let HirStatementKind::Return { values } = hir.functions()[0].body()[1].kind() else {
+        panic!("interface call return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        HirExpressionKind::Call {
+            dispatch: HirCallDispatch::InterfaceMethod {
+                interface,
+                method,
+                slot: 0,
+            },
+            ..
+        } if *interface == reader.interface() && *method == reader.methods()[0].method()
+    ));
+    let dump = hir.dump(result.types());
     assert!(dump.contains("interface Reader"), "{dump}");
-    assert!(dump.contains("callInterface"), "{dump}");
+    assert!(dump.contains("convert.interface"), "{dump}");
+    assert!(dump.contains("call.interface"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("lookup name"), "{dump}");
+}
+
+#[test]
+fn source_interface_resolution_is_independent_of_module_order() {
+    let implementation = SourceFile::new(
+        FileId::from_raw(0),
+        "src/fileReader.pop",
+        "namespace Main\n\
+         using Contracts\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(count: Int): String\n\
+                 return \"\"\n\
+             end\n\
+         end\n",
+    )
+    .expect("implementation");
+    let contract = SourceFile::new(
+        FileId::from_raw(1),
+        "src/reader.pop",
+        "namespace Contracts\n\
+         public interface Reader\n\
+             function read(count: Int): String\n\
+         end\n",
+    )
+    .expect("contract");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![
+            FrontEndModule::new(ModuleId::from_raw(0), implementation),
+            FrontEndModule::new(ModuleId::from_raw(1), contract),
+        ],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("verified HIR");
+    assert_eq!(
+        hir.declarations()
+            .iter()
+            .filter(|declaration| matches!(declaration.kind(), HirDeclarationKind::Interface(_)))
+            .count(),
+        1
+    );
+    let class = hir
+        .declarations()
+        .iter()
+        .find_map(pop_hir::HirDeclaration::as_class)
+        .expect("class");
+    assert_eq!(class.interfaces().len(), 1);
+    assert_eq!(class.interfaces()[0].methods().len(), 1);
+}
+
+#[test]
+fn explicit_interface_implementation_is_required_and_exact() {
+    let cases = [
+        (
+            "public class FileReader implements Reader\n\
+                 end",
+            "POP2018",
+        ),
+        (
+            "public class FileReader implements Reader\n\
+                     public function FileReader:read(count: Int): Boolean\n\
+                         return false\n\
+                     end\n\
+                 end",
+            "POP2019",
+        ),
+        (
+            "public class FileReader\n\
+                     public function FileReader:read(count: Int): String\n\
+                         return \"\"\n\
+                     end\n\
+                 end\n\
+                 public function asReader(reader: FileReader): Reader\n\
+                     return reader\n\
+                 end",
+            "POP2003",
+        ),
+    ];
+    for (declarations, diagnostic) in cases {
+        let source = SourceFile::new(
+            FileId::from_raw(0),
+            "src/invalidInterface.pop",
+            format!(
+                "namespace Main\n\
+                 public interface Reader\n\
+                     function read(count: Int): String\n\
+                 end\n\
+                 {declarations}\n"
+            ),
+        )
+        .expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+
+        assert!(result.hir().is_none());
+        assert!(
+            result.diagnostic_snapshot().contains(diagnostic),
+            "{}",
+            result.diagnostic_snapshot()
+        );
+    }
 }
 
 #[test]

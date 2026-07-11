@@ -203,6 +203,11 @@ fn remap_terminator(terminator: &mut MirTerminator, mapping: &BTreeMap<BlockId, 
             *when_true = mapping[when_true];
             *when_false = mapping[when_false];
         }
+        MirTerminator::UnionSwitch { arms, .. } => {
+            for arm in arms {
+                arm.target = mapping[&arm.target];
+            }
+        }
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
@@ -251,6 +256,9 @@ fn used_values(function: &super::MirFunction) -> BTreeSet<ValueId> {
             }
             MirTerminator::ConditionalBranch { condition, .. } => {
                 used.insert(*condition);
+            }
+            MirTerminator::UnionSwitch { scrutinee, .. } => {
+                used.insert(*scrutinee);
             }
             MirTerminator::Missing
             | MirTerminator::Trap(_)

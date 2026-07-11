@@ -67,8 +67,8 @@ fn interface_members_reject_visibility_fields_and_bodies() {
         "namespace Example\npublic interface Reader\nvalue: Int\nend\n",
         "namespace Example\npublic interface Reader\nfunction read()\nreturn\nend\nend\n",
     ] {
-        let source = SourceFile::new(FileId::from_raw(0), "src/invalid.pop", invalid)
-            .expect("source");
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/invalid.pop", invalid).expect("source");
         let syntax = parse_file(&source);
         let node = syntax
             .root()

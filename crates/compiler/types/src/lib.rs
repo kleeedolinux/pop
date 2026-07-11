@@ -3,7 +3,9 @@
 //! This first contract encodes the accepted primitive and nominal type model.
 //! It deliberately has no operational unknown or dynamic fallback type.
 
-use pop_foundation::{BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId};
+use pop_foundation::{
+    AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId,
+};
 
 mod arena;
 mod attributes;
@@ -227,6 +229,11 @@ pub enum SemanticType {
         interface: InterfaceId,
         arguments: Vec<TypeId>,
     },
+    /// A nominal compile-time-only user-defined attribute value.
+    Attribute {
+        attribute: AttributeId,
+        parameters: Vec<TypeId>,
+    },
     Builtin {
         definition: BuiltinTypeId,
         arguments: Vec<TypeId>,
@@ -241,6 +248,11 @@ pub enum SemanticType {
 impl SemanticType {
     #[must_use]
     pub const fn is_valid_hir_type(&self) -> bool {
+        !matches!(self, Self::Attribute { .. } | Self::Error)
+    }
+
+    #[must_use]
+    pub const fn is_valid_compile_time_type(&self) -> bool {
         !matches!(self, Self::Error)
     }
 }
