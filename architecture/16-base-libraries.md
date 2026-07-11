@@ -231,6 +231,12 @@ and user-library namespaces still require `using`. `pop build
 --no-standard-library` exists only for runtime/toolchain development and
 freestanding targets.
 
+During the ADR 0024 standalone native bootstrap, verified bootstrap metadata
+exposes the source-level prelude function `print(Int) -> ()` by a stable
+standard-function identity. HIR and MIR retain that identity, and the LLVM
+backend lowers it to a fixed Rust `Pop.Standard` adapter. The adapter's ABI
+spelling is never resolved from user source.
+
 ### Namespace catalog
 
 Catalog entries name public concepts, not classes. Unless identity/lifecycle

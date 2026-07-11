@@ -1,11 +1,49 @@
 use pop_runtime_interface::{
-    ErrorContract, GarbageCollectorContract, InitializationState, PlriVersion,
+    ErrorContract, GarbageCollectorContract, InitializationState, PlriVersion, RuntimeOperation,
 };
 
 #[test]
 fn plri_version_is_explicit_and_ordered() {
     assert!(PlriVersion::new(1, 1) > PlriVersion::new(1, 0));
     assert!(PlriVersion::new(2, 0) > PlriVersion::new(1, 99));
+}
+
+#[test]
+fn native_runtime_operation_symbols_are_explicit_and_unique() {
+    let operations = [
+        RuntimeOperation::AllocateObject,
+        RuntimeOperation::AllocateArray,
+        RuntimeOperation::AllocateTable,
+        RuntimeOperation::TupleMake,
+        RuntimeOperation::ArrayGet,
+        RuntimeOperation::ArraySet,
+        RuntimeOperation::FieldGet,
+        RuntimeOperation::FieldSet,
+        RuntimeOperation::RecordUpdate,
+        RuntimeOperation::UnionMake,
+        RuntimeOperation::CaptureLoad,
+        RuntimeOperation::CaptureStore,
+        RuntimeOperation::DispatchCall,
+        RuntimeOperation::RetainRoot,
+        RuntimeOperation::ReleaseRoot,
+        RuntimeOperation::PublishRoots,
+        RuntimeOperation::GcSafePoint,
+        RuntimeOperation::SatbWriteBarrier,
+        RuntimeOperation::GenerationalWriteBarrier,
+        RuntimeOperation::Trap,
+        RuntimeOperation::Panic,
+        RuntimeOperation::ContinueUnwind,
+        RuntimeOperation::Suspend,
+        RuntimeOperation::Resume,
+        RuntimeOperation::InitializeModule,
+        RuntimeOperation::InitializeBubble,
+    ];
+    let symbols: std::collections::BTreeSet<_> = operations
+        .into_iter()
+        .map(RuntimeOperation::abi_symbol)
+        .collect();
+    assert_eq!(symbols.len(), operations.len());
+    assert!(symbols.iter().all(|symbol| symbol.starts_with("pop_rt_")));
 }
 
 #[test]

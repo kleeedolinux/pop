@@ -4,7 +4,7 @@ use std::fmt;
 use pop_foundation::{
     BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
     InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, SymbolId, TextRange,
-    TextSize, TypeId, UnionCaseId, ValueId,
+    StandardFunctionId, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -676,7 +676,8 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             )?)));
         }
     }
-    if text.starts_with("callDirect")
+    if text.starts_with("callStandard")
+        || text.starts_with("callDirect")
         || text.starts_with("callIndirect")
         || text.starts_with("call.interface")
     {
@@ -897,6 +898,22 @@ fn parse_constant_operation(
 }
 
 fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirParseError> {
+    if let Some(rest) = text.strip_prefix("callStandard sf") {
+        let (call, effects) = rest
+            .split_once(" effects[")
+            .ok_or_else(|| error(line, "standard call effect contract"))?;
+        let effects = effects
+            .strip_suffix(']')
+            .ok_or_else(|| error(line, "standard call effect contract"))?;
+        let (function, values) = call
+            .split_once(' ')
+            .ok_or_else(|| error(line, "malformed standard call"))?;
+        return Ok(MirInstructionKind::CallStandard {
+            function: StandardFunctionId::from_raw(parse_u32(function, line)?),
+            arguments: parse_values(values, line)?,
+            declared_effects: parse_effects(effects, line)?,
+        });
+    }
     let (text, declared_effects, unwind) =
         if let Some((call, contract)) = text.split_once(" effects[") {
             let (effects, unwind) = contract

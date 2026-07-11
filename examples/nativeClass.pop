@@ -1,0 +1,15 @@
+namespace NativeClass
+
+public class Box
+    public value: Int
+
+    public function Box.new(value: Int): Box
+        return Box { value = value }
+    end
+end
+
+public function run(): Int
+    local box = Box.new(41)
+    print(box.value + 1)
+    return 0
+end

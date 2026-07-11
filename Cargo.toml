@@ -18,6 +18,8 @@ members = [
     "crates/compiler/syntax",
     "crates/compiler/target",
     "crates/compiler/types",
+    "crates/libraries/internal",
+    "crates/libraries/standard",
     "crates/runtime/interface",
     "crates/runtime/native",
     "crates/tools/architecture-tests",
@@ -35,6 +37,7 @@ rust-version = "1.85"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
+inkwell = { version = "0.9.0", default-features = false, features = ["llvm22-1-prefer-dynamic", "target-x86"] }
 pop-foundation = { path = "crates/compiler/foundation" }
 pop-source = { path = "crates/compiler/source" }
 pop-syntax = { path = "crates/compiler/syntax" }
@@ -42,6 +45,8 @@ pop-projects = { path = "crates/compiler/projects" }
 pop-query = { path = "crates/compiler/query" }
 pop-resolve = { path = "crates/compiler/resolve" }
 pop-types = { path = "crates/compiler/types" }
+pop-internal = { path = "crates/libraries/internal" }
+pop-standard = { path = "crates/libraries/standard" }
 pop-compile-time = { path = "crates/compiler/compile-time" }
 pop-hir = { path = "crates/compiler/hir" }
 pop-mir = { path = "crates/compiler/mir" }
@@ -61,7 +66,7 @@ pop-documentation-generator = { path = "crates/tools/documentation-generator" }
 pop-test-runner = { path = "crates/tools/test-runner" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"

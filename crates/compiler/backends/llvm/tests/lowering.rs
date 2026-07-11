@@ -1,0 +1,366 @@
+use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
+use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
+use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
+use pop_mir::lower_hir_bubble;
+use pop_source::SourceFile;
+use pop_target::{Endianness, PointerWidth, TargetSpec};
+use std::fs;
+use std::process::Command;
+
+fn target() -> TargetSpec {
+    TargetSpec::builder("x86_64-unknown-linux-gnu")
+        .pointer_width(PointerWidth::Bits64)
+        .endianness(Endianness::Little)
+        .build()
+        .expect("complete target")
+}
+
+#[test]
+fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\npublic function run(): Int\n    local value: Int = 40 + 2\n    return value\nend\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(front_end.diagnostics().is_empty());
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("target triple = \"x86_64-unknown-linux-gnu\""));
+    assert!(text.contains("define i64 @pop_s0()"));
+    assert!(text.contains("add i64"));
+    assert!(text.contains("ret i64"));
+    assert!(
+        !text.contains("llvm."),
+        "runtime operations must use PLRI names"
+    );
+}
+
+#[test]
+fn emitted_text_is_accepted_by_llvm_as() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\npublic function run(): Int\n    return 40 + 2\nend\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+    let input = std::env::temp_dir().join("pop-backend-llvm-conformance.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-conformance.bc");
+    fs::write(&input, text).expect("write temporary LLVM input");
+    let result = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed for the native backend conformance test");
+    assert!(
+        result.status.success(),
+        "llvm-as rejected generated IR: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+#[test]
+fn emitted_llvm_executes_a_pure_pop_function() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\npublic function run(): Int\n    return 42\nend\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering");
+    let input = std::env::temp_dir().join("pop-backend-llvm-execution.ll");
+    fs::write(&input, module.to_string()).expect("write temporary LLVM input");
+    let result = Command::new("lli")
+        .arg(&input)
+        .output()
+        .expect("lli must be installed");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "lli rejected or failed generated IR: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let _ = fs::remove_file(input);
+}
+
+#[test]
+fn emitted_llvm_can_link_against_the_rust_bootstrap_runtime() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let build = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-p", "pop-runtime-native"])
+        .output()
+        .expect("cargo must be available");
+    assert!(
+        build.status.success(),
+        "runtime build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let source = std::env::temp_dir().join("pop-runtime-link.ll");
+    let executable = std::env::temp_dir().join("pop-runtime-link");
+    fs::write(
+        &source,
+        concat!(
+            "target triple = \"x86_64-unknown-linux-gnu\"\n",
+            "declare i64 @pop_rt_allocate_array(i64, i1)\n",
+            "declare i8 @pop_rt_array_set(i64, i64, i64)\n",
+            "declare i64 @pop_rt_array_get(i64, i64)\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %handle = call i64 @pop_rt_allocate_array(i64 2, i1 0)\n",
+            "  %stored = call i8 @pop_rt_array_set(i64 %handle, i64 1, i64 41)\n",
+            "  %value = call i64 @pop_rt_array_get(i64 %handle, i64 1)\n",
+            "  %valid_handle = icmp ne i64 %handle, 0\n",
+            "  %valid_store = icmp eq i8 %stored, 1\n",
+            "  %valid_value = icmp eq i64 %value, 41\n",
+            "  %valid_store_and_handle = and i1 %valid_handle, %valid_store\n",
+            "  %valid = and i1 %valid_store_and_handle, %valid_value\n",
+            "  %code = zext i1 %valid to i32\n",
+            "  ret i32 %code\n",
+            "}\n"
+        ),
+    )
+    .expect("write runtime-link LLVM input");
+    let library = root.join("target/debug/libpop_runtime_native.a");
+    let link = Command::new("clang")
+        .current_dir(root)
+        .arg(&source)
+        .arg(&library)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang must be installed");
+    assert!(
+        link.status.success(),
+        "native runtime link failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&executable)
+        .output()
+        .expect("linked runtime executable must run");
+    assert_eq!(run.status.code(), Some(1));
+    let _ = fs::remove_file(source);
+    let _ = fs::remove_file(executable);
+}
+
+#[test]
+fn allocating_and_calling_mir_modules_are_accepted_by_llvm_as() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+public function add(left: Int, right: Int): Int\n\
+    return left + right\n\
+end\n\
+public function run(): {Int}\n\
+    local pair: (Int, Int) = (1, 2)\n\
+    local values: {Int} = { add(1, 2) }\n\
+    return values\n\
+end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+    assert!(!text.contains("semantic_"));
+    assert!(text.contains("pop_rt_array_set"));
+    let input = std::env::temp_dir().join("pop-backend-llvm-allocations.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-allocations.bc");
+    fs::write(&input, text).expect("write temporary LLVM input");
+    let result = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        result.status.success(),
+        "llvm-as rejected allocation/call IR: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+#[test]
+fn class_field_operations_lower_to_layouted_runtime_calls() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+public class Box\n\
+    public value: Int\n\
+    public function Box.new(value: Int): Box\n\
+        return Box { value = value }\n\
+    end\n\
+end\n\
+public function run(): Int\n\
+    local box = Box.new(41)\n\
+    return box.value\n\
+end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+    assert!(text.contains("pop_rt_field_set"));
+    assert!(text.contains("pop_rt_field_get"));
+    let input = std::env::temp_dir().join("pop-backend-llvm-class.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-class.bc");
+    fs::write(&input, text).expect("write class LLVM input");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected class IR: {}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let build = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-p", "pop-runtime-native"])
+        .output()
+        .expect("cargo must be available");
+    assert!(build.status.success());
+    let executable = std::env::temp_dir().join("pop-backend-llvm-class");
+    let input = std::env::temp_dir().join("pop-backend-llvm-class-execution.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-class-execution.bc");
+    let class_text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+    fs::write(&input, class_text).expect("write executable class IR");
+    let link = Command::new("clang")
+        .current_dir(root)
+        .arg(&input)
+        .arg(root.join("target/debug/libpop_runtime_native.a"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang must be installed");
+    assert!(
+        link.status.success(),
+        "class runtime link failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&executable)
+        .output()
+        .expect("class executable runs");
+    assert_eq!(run.status.code(), Some(41));
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+    let _ = fs::remove_file(executable);
+}
+
+#[test]
+fn backend_rejects_unverified_mir_instead_of_emitting_partial_llvm() {
+    let mir = pop_mir::parse_mir_dump(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[]\n  b0():\n    missing\n",
+    )
+    .expect("fixture parses");
+    let arena = pop_types::TypeArena::new();
+    let error = lower_mir_to_llvm_ir(&mir, &arena, &target(), LlvmLoweringOptions::default())
+        .expect_err("invalid MIR must be rejected");
+    assert!(error.to_string().contains("MIR verification"));
+}

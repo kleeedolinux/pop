@@ -6,6 +6,7 @@
 //! marking, or production write barriers.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, OnceLock};
 
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, CollectionStatistics,
@@ -13,6 +14,198 @@ use pop_runtime_interface::{
     PanicPayload, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
     SafePointOutcome, WriteBarrier,
 };
+
+static ABI_RUNTIME: OnceLock<Mutex<BootstrapRuntime>> = OnceLock::new();
+
+fn abi_runtime() -> &'static Mutex<BootstrapRuntime> {
+    ABI_RUNTIME.get_or_init(|| Mutex::new(BootstrapRuntime::new()))
+}
+
+/// C-compatible bootstrap runtime identity. The bootstrap collector is
+/// intentionally versioned separately from the future production collector.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_abi_major() -> u16 {
+    1
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_abi_minor() -> u16 {
+    0
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_gc_stage() -> u8 {
+    1
+}
+
+/// Allocates a scalar array and returns its opaque managed handle, or zero on
+/// a typed runtime failure.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_allocate_array(length: u64, managed: u8) -> u64 {
+    let Ok(length) = u32::try_from(length) else {
+        return 0;
+    };
+    let request = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        AllocationClass::Mature,
+        length,
+        if managed == 0 {
+            ArrayElementMap::Scalar
+        } else {
+            ArrayElementMap::ManagedReference
+        },
+    );
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .allocate_array(&request)
+        .map_or(0, ManagedReference::raw)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_allocate_object(slot_count: u64) -> u64 {
+    let Ok(slot_count) = u32::try_from(slot_count) else {
+        return 0;
+    };
+    abi_allocate_object(slot_count)
+}
+
+fn abi_allocate_object(slot_count: u32) -> u64 {
+    let Ok(object_map) = ObjectMap::new(slot_count, Vec::new()) else {
+        return 0;
+    };
+    let request =
+        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .allocate_object(&request)
+        .map_or(0, ManagedReference::raw)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_allocate_table(length: u64) -> u64 {
+    let Ok(length) = u32::try_from(length) else {
+        return 0;
+    };
+    abi_allocate_object(length)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_tuple_make(length: u64) -> u64 {
+    let Ok(length) = u32::try_from(length) else {
+        return 0;
+    };
+    abi_allocate_object(length)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_array_get(reference: u64, index: u64) -> u64 {
+    let Some(slot) = array_slot(index) else {
+        return 0;
+    };
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .load_array_value(ManagedReference::new(reference), slot)
+        .unwrap_or(0)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_array_set(reference: u64, index: u64, value: u64) -> u8 {
+    let Some(slot) = array_slot(index) else {
+        return 0;
+    };
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(
+        runtime
+            .store_array_value(ManagedReference::new(reference), slot, value)
+            .is_ok(),
+    )
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_field_get(reference: u64, field: u64) -> u64 {
+    let Some(slot) = array_slot(field) else {
+        return 0;
+    };
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .load_array_value(ManagedReference::new(reference), slot)
+        .unwrap_or(0)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_field_set(reference: u64, field: u64, value: u64) -> u8 {
+    let Some(slot) = array_slot(field) else {
+        return 0;
+    };
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(
+        runtime
+            .store_array_value(ManagedReference::new(reference), slot, value)
+            .is_ok(),
+    )
+}
+
+fn array_slot(index: u64) -> Option<ObjectSlot> {
+    (index > 0)
+        .then(|| u32::try_from(index - 1).ok())
+        .flatten()
+        .map(ObjectSlot::new)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_retain_root(reference: u64) -> u64 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .retain_root(ManagedReference::new(reference))
+        .map_or(0, RootHandle::raw)
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(runtime.release_root(RootHandle::new(root)).is_ok())
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_gc_safe_point(_safe_point: u32) {}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_satb_write_barrier(owner: u64) {
+    if let Ok(runtime) = abi_runtime().lock() {
+        let _ = runtime.contains(ManagedReference::new(owner));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapLimits {
@@ -190,6 +383,78 @@ impl BootstrapRuntime {
         }
         *current = SlotValue::Scalar(value);
         Ok(())
+    }
+
+    /// Loads a scalar from a precise non-reference slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable invariant panic for invalid objects, slots, or
+    /// reference-designated slots.
+    pub fn load_scalar(
+        &self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+    ) -> Result<u64, RuntimeFailure> {
+        let allocation = self
+            .objects
+            .get(&owner)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        match allocation.slots.get(slot.raw() as usize) {
+            Some(SlotValue::Scalar(value)) => Ok(*value),
+            Some(SlotValue::Reference(_)) | None => Err(RuntimeFailure::runtime_invariant()),
+        }
+    }
+
+    /// Stores either a scalar or a managed handle according to the slot's
+    /// precise allocation map.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable invariant panic for an invalid allocation, slot, or
+    /// managed handle.
+    pub fn store_array_value(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        value: u64,
+    ) -> Result<(), RuntimeFailure> {
+        let is_reference = self
+            .objects
+            .get(&owner)
+            .and_then(|allocation| allocation.slots.get(slot.raw() as usize))
+            .is_some_and(|slot| matches!(slot, SlotValue::Reference(_)));
+        if is_reference {
+            self.store_reference(
+                owner,
+                slot,
+                (value != 0).then(|| ManagedReference::new(value)),
+            )
+        } else {
+            self.store_scalar(owner, slot, value)
+        }
+    }
+
+    /// Loads either a scalar or a managed handle according to the slot's
+    /// precise allocation map. Empty references are returned as zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable invariant panic for an invalid allocation or slot.
+    pub fn load_array_value(
+        &self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+    ) -> Result<u64, RuntimeFailure> {
+        let allocation = self
+            .objects
+            .get(&owner)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        match allocation.slots.get(slot.raw() as usize) {
+            Some(SlotValue::Scalar(value)) => Ok(*value),
+            Some(SlotValue::Reference(value)) => Ok(value.map_or(0, ManagedReference::raw)),
+            None => Err(RuntimeFailure::runtime_invariant()),
+        }
     }
 
     /// Performs a precise stop-the-world collection using registered strong

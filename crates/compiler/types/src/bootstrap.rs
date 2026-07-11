@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use pop_foundation::{AttributeId, BuiltinTypeId};
+use pop_foundation::{AttributeId, BuiltinTypeId, StandardFunctionId};
 
 use crate::PrimitiveType;
 
@@ -12,6 +12,56 @@ const STANDARD_TYPES: &str =
     include_str!("../../../../libraries/standard/bootstrap/prelude-types.tsv");
 const STANDARD_COMPILER_ATTRIBUTES: &str =
     include_str!("../../../../libraries/standard/bootstrap/compiler-attributes.tsv");
+const STANDARD_FUNCTIONS: &str =
+    include_str!("../../../../libraries/standard/bootstrap/functions.tsv");
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapStandardFunctionEntry {
+    id: StandardFunctionId,
+    source_name: &'static str,
+    owner_bubble: &'static str,
+    parameter_types: Vec<&'static str>,
+    result_types: Vec<&'static str>,
+    effects: Vec<&'static str>,
+    prelude: bool,
+}
+
+impl BootstrapStandardFunctionEntry {
+    #[must_use]
+    pub const fn id(&self) -> StandardFunctionId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn source_name(&self) -> &'static str {
+        self.source_name
+    }
+
+    #[must_use]
+    pub fn parameter_types(&self) -> &[&'static str] {
+        &self.parameter_types
+    }
+
+    #[must_use]
+    pub fn result_types(&self) -> &[&'static str] {
+        &self.result_types
+    }
+
+    #[must_use]
+    pub fn effects(&self) -> &[&'static str] {
+        &self.effects
+    }
+
+    #[must_use]
+    pub const fn owner_bubble(&self) -> &'static str {
+        self.owner_bubble
+    }
+
+    #[must_use]
+    pub const fn is_in_prelude(&self) -> bool {
+        self.prelude
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CompilerAttributeId(u32);
@@ -218,6 +268,7 @@ pub struct BootstrapSchema {
     types: Vec<BootstrapTypeEntry>,
     intrinsics: Vec<BootstrapIntrinsicEntry>,
     compiler_attributes: Vec<BootstrapCompilerAttributeEntry>,
+    standard_functions: Vec<BootstrapStandardFunctionEntry>,
 }
 
 impl BootstrapSchema {
@@ -249,6 +300,21 @@ impl BootstrapSchema {
     #[must_use]
     pub fn compiler_attributes(&self) -> &[BootstrapCompilerAttributeEntry] {
         &self.compiler_attributes
+    }
+
+    #[must_use]
+    pub fn standard_functions(&self) -> &[BootstrapStandardFunctionEntry] {
+        &self.standard_functions
+    }
+
+    #[must_use]
+    pub fn standard_function_by_source_name(
+        &self,
+        name: &str,
+    ) -> Option<&BootstrapStandardFunctionEntry> {
+        self.standard_functions
+            .iter()
+            .find(|entry| entry.prelude && entry.source_name == name)
     }
 
     /// Finds a trusted prelude compiler-attribute candidate by source name.
@@ -328,12 +394,14 @@ pub fn embedded_bootstrap_schema() -> Result<BootstrapSchema, BootstrapSchemaErr
     let (internal_type_version, mut types) = parse_types("internal type", INTERNAL_TYPES)?;
     let (standard_type_version, standard_types) = parse_types("standard type", STANDARD_TYPES)?;
     let (compiler_attribute_version, compiler_attributes) = parse_compiler_attributes()?;
+    let (standard_function_version, standard_functions) = parse_standard_functions()?;
     types.extend(standard_types);
     if [
         intrinsic_version,
         internal_type_version,
         standard_type_version,
         compiler_attribute_version,
+        standard_function_version,
     ]
     .into_iter()
     .any(|version| version != primitive_version)
@@ -344,13 +412,64 @@ pub fn embedded_bootstrap_schema() -> Result<BootstrapSchema, BootstrapSchemaErr
     validate_types(&types)?;
     validate_intrinsics(&intrinsics)?;
     validate_compiler_attributes(&compiler_attributes)?;
+    validate_standard_functions(&standard_functions)?;
     Ok(BootstrapSchema {
         version: primitive_version,
         primitives,
         types,
         intrinsics,
         compiler_attributes,
+        standard_functions,
     })
+}
+
+fn parse_standard_functions()
+-> Result<(u32, Vec<BootstrapStandardFunctionEntry>), BootstrapSchemaError> {
+    let mut lines = STANDARD_FUNCTIONS.lines();
+    let version = parse_version("standard function", lines.next())?;
+    if lines.next()
+        != Some(
+            "functionId\tsourceName\townerBubble\tparameterTypes\tresultTypes\teffects\tprelude",
+        )
+    {
+        return Err(error("standard function", 2, "unexpected header"));
+    }
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 7 {
+            return Err(error("standard function", index + 3, "expected seven fields"));
+        }
+        let id = fields[0]
+            .parse()
+            .map(StandardFunctionId::from_raw)
+            .map_err(|_| error("standard function", index + 3, "invalid function ID"))?;
+        entries.push(BootstrapStandardFunctionEntry {
+            id,
+            source_name: fields[1],
+            owner_bubble: fields[2],
+            parameter_types: schema_list(fields[3]),
+            result_types: schema_list(fields[4]),
+            effects: schema_list(fields[5]),
+            prelude: match fields[6] {
+                "true" => true,
+                "false" => false,
+                _ => return Err(error("standard function", index + 3, "invalid prelude flag")),
+            },
+        });
+    }
+    Ok((version, entries))
+}
+
+fn schema_list(field: &'static str) -> Vec<&'static str> {
+    if field == "-" {
+        Vec::new()
+    } else {
+        field.split(',').collect()
+    }
 }
 
 fn parse_types(
@@ -667,6 +786,34 @@ fn validate_compiler_attributes(
         1,
         CompilerAttributeTarget::Attribute,
     )?;
+    Ok(())
+}
+
+fn validate_standard_functions(
+    entries: &[BootstrapStandardFunctionEntry],
+) -> Result<(), BootstrapSchemaError> {
+    if entries.len() != 1 {
+        return Err(error(
+            "standard function",
+            2,
+            "bootstrap requires exactly one standard function",
+        ));
+    }
+    let entry = &entries[0];
+    if entry.id.raw() != 0
+        || entry.source_name != "print"
+        || entry.owner_bubble != "Pop.Standard"
+        || entry.parameter_types != ["Int"]
+        || !entry.result_types.is_empty()
+        || entry.effects != ["AmbientIo"]
+        || !entry.prelude
+    {
+        return Err(error(
+            "standard function",
+            2,
+            "invalid trusted print contract",
+        ));
+    }
     Ok(())
 }
 

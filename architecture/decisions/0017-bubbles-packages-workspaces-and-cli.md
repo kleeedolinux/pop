@@ -36,7 +36,11 @@ ownership hierarchy remains intact. Those session-local identities do not come
 from the filename and are not Package discovery, dependency resolution,
 artifact identity, or a compatibility promise. Standalone inspection cannot
 declare Bubble dependencies, exercise cross-Module visibility, emit build
-artifacts, or populate Package/Workspace caches.
+artifacts, or populate Package/Workspace caches. ADR 0024 separately authorizes
+a native bootstrap `pop build <source.pop> --output <executable>` and `pop run
+<source.pop>` path for one-Module conformance examples. That path emits an
+explicitly requested disposable executable; it does not create a Package
+artifact, infer publishable identity, or populate Package/Workspace caches.
 
 `--dump hir` and `--dump mir` are repeatable debugging controls on `pop check`.
 HIR is printed only after successful HIR verification, and MIR only after
@@ -95,6 +99,8 @@ selection, diagnostics, configuration, and machine protocols.
 - CLI human/JSON parity and deterministic multi-Package diagnostics;
 - standalone Module HIR/MIR dump determinism, verification-before-output,
   invalid-source/invalid-option rejection, and no partial dump on failure;
+- bootstrap standalone native build/run rejects ambiguous entries and emits an
+  executable only at the explicit output path;
 - monorepo incremental-cache isolation and reuse;
 - package archive reproducibility and forbidden build-script capability tests.
 

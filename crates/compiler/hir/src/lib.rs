@@ -7,7 +7,7 @@ use std::fmt::Write;
 use pop_foundation::{
     AttributeId, BindingId, BubbleId, CaptureId, ClassId, FieldId, FunctionId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId, SourceSpan,
-    SymbolId, TypeId, UnionCaseId, ValueParameterId,
+    StandardFunctionId, SymbolId, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -1600,6 +1600,9 @@ impl HirFieldValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirCallDispatch {
+    Standard {
+        function: StandardFunctionId,
+    },
     Direct {
         function: SymbolId,
     },
@@ -1945,6 +1948,9 @@ fn lower_statement(
 
 fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCall {
     let dispatch = match call.dispatch() {
+        TypedCallDispatch::Standard { function } => HirCallDispatch::Standard {
+            function: *function,
+        },
         TypedCallDispatch::Direct { function } => HirCallDispatch::Direct {
             function: *function,
         },
@@ -2103,7 +2109,8 @@ fn lower_expression(
             left: Box::new(lower_expression(left, interface_slots)),
             right: Box::new(lower_expression(right, interface_slots)),
         },
-        call @ (TypedExpressionKind::DirectCall { .. }
+        call @ (TypedExpressionKind::StandardCall { .. }
+        | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::IndirectCall { .. }
         | TypedExpressionKind::DirectMethodCall { .. }
         | TypedExpressionKind::InterfaceMethodCall { .. }) => {
@@ -2128,6 +2135,18 @@ fn lower_call_expression(
     interface_slots: &HirInterfaceSlotMap,
 ) -> HirExpressionKind {
     match call {
+        TypedExpressionKind::StandardCall {
+            function,
+            arguments,
+        } => HirExpressionKind::Call {
+            dispatch: HirCallDispatch::Standard {
+                function: *function,
+            },
+            arguments: arguments
+                .iter()
+                .map(|argument| lower_expression(argument, interface_slots))
+                .collect(),
+        },
         TypedExpressionKind::DirectCall {
             function,
             arguments,
@@ -2334,6 +2353,7 @@ fn first_unknown_interface_call(
                     Some((*interface, *method, call.span()))
                 } else {
                     let receiver = match call.dispatch() {
+                        TypedCallDispatch::Standard { .. } => None,
                         TypedCallDispatch::Direct { .. } => None,
                         TypedCallDispatch::DirectMethod { receiver, .. } => receiver
                             .as_deref()
@@ -2407,7 +2427,8 @@ fn first_unknown_interface_expression(
                 .or_else(|| first_unknown_interface_expression(entry.value(), slots))
         }),
         TypedExpressionKind::UnionCase { arguments, .. }
-        | TypedExpressionKind::DirectCall { arguments, .. } => arguments
+        | TypedExpressionKind::DirectCall { arguments, .. }
+        | TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .find_map(|argument| first_unknown_interface_expression(argument, slots)),
         TypedExpressionKind::Unary { operand, .. } => {
@@ -2498,6 +2519,7 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
 
 fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {
     let callee = match call.dispatch() {
+        TypedCallDispatch::Standard { .. } => None,
         TypedCallDispatch::Direct { .. } => None,
         TypedCallDispatch::DirectMethod { receiver, .. } => receiver
             .as_deref()
@@ -2543,7 +2565,8 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
                 .or_else(|| first_compile_time_only_expression(entry.value()))
         }),
         TypedExpressionKind::UnionCase { arguments, .. }
-        | TypedExpressionKind::DirectCall { arguments, .. } => arguments
+        | TypedExpressionKind::DirectCall { arguments, .. }
+        | TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .find_map(first_compile_time_only_expression),
         TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
@@ -4352,6 +4375,16 @@ impl Verifier<'_> {
         visible: &BTreeSet<LocalId>,
     ) {
         let signature = match dispatch {
+            HirCallDispatch::Standard { function } => {
+                if function.raw() == 0 {
+                    self.arena.source_type("Int").map(|int| HirCallableSignature {
+                        parameters: vec![int],
+                        results: Vec::new(),
+                    })
+                } else {
+                    None
+                }
+            }
             HirCallDispatch::Direct { function } => {
                 self.verify_function(*function, span);
                 self.schema
@@ -5700,6 +5733,9 @@ fn dump_call(
     arena: &TypeArena,
 ) {
     match dispatch {
+        HirCallDispatch::Standard { function } => {
+            let _ = write!(output, "call.standard sf{}(", function.raw());
+        }
         HirCallDispatch::Direct { function } => {
             let _ = write!(output, "call.direct s{}(", function.raw());
         }

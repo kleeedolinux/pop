@@ -10,9 +10,23 @@ LLVM-generated native code may call a C-compatible runtime ABI. A future VM may
 implement the same operations directly in its interpreter. MIR refers to PLRI
 operations, never to C symbol names.
 
+The bootstrap native ABI uses nonzero `u64` opaque managed/root handles and
+zero as the invalid/null sentinel. The LLVM backend chooses this physical
+representation in its private lowering; MIR remains expressed in abstract
+managed references and `RuntimeOperation` identities. Exported `pop_rt_*`
+symbols are versioned and cover only operations with a defined bootstrap
+failure sentinel; richer failures remain typed `RuntimeFailure` values in PLRI
+and Rust adapters.
+
 `Pop.Internal` supplies the trusted managed/intrinsic side of these contracts;
 `Pop.Standard` calls public typed adapters rather than PLRI entries directly.
 See [Base libraries](./16-base-libraries.md).
+
+The standalone native bootstrap links Rust static archives for both foundation
+libraries. A trusted `Pop.Standard` prelude-function identity maps the typed
+source call `print(Int)` to a fixed integer-output adapter. This adapter is not
+a PLRI operation, and its host ABI spelling never participates in source name
+resolution.
 
 ## Runtime responsibilities
 

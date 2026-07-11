@@ -33,6 +33,7 @@ typed_id!(
     FileId,
     SpanId,
     SymbolId,
+    StandardFunctionId,
     TypeId,
     BuiltinTypeId,
     ClassId,

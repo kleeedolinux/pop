@@ -42,7 +42,11 @@ in the direction authorized by the component architecture. In particular:
 
 The initial skeleton uses the Rust standard library only. Adding a third-party
 dependency requires a concrete component need, license/security review
-proportional to its role, and tests proving the boundary it supports. Cargo
+proportional to its role, and tests proving the boundary it supports. Inkwell
+0.9 is the first approved exception: the LLVM backend alone uses its Apache-2.0
+safe wrapper with the exact installed LLVM-major feature, no default target
+set, and only the native target enabled. Inkwell and `llvm-sys` types cannot
+cross the backend crate boundary. Cargo
 package/crate names are implementation details and do not replace Pop Lang's
 `Item → Module → Bubble → Package → Workspace` terminology.
 
@@ -90,6 +94,9 @@ already requires an explicit decision to avoid architecture drift.
 - foundation and runtime-interface crates have no forbidden higher-layer
   dependencies;
 - `pop-driver` produces the binary named `pop`;
+- the only approved external dependency is Inkwell in the LLVM backend, pinned
+  centrally with default features disabled and the LLVM-major/native-target
+  feature set reviewed by architecture tests;
 - the workspace builds and tests without undeclared external dependencies.
 
 ## Documents/components affected

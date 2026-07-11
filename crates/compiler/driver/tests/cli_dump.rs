@@ -9,6 +9,15 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn example(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .join("examples")
+        .join(name)
+}
+
 fn run_pop(arguments: &[&str], source: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pop"));
     command.args(arguments);
@@ -134,6 +143,62 @@ fn missing_check_arguments_are_a_usage_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(output_text(&output.stderr).contains("pop check"));
+}
+
+#[test]
+fn build_and_run_emit_and_execute_a_native_pop_program_with_standard_output() {
+    let output_path = std::env::temp_dir().join("pop-native-cli-example");
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .arg("build")
+        .arg(fixture("native.pop"))
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .expect("pop build runs");
+    assert!(
+        build.status.success(),
+        "stderr:\n{}",
+        output_text(&build.stderr)
+    );
+    assert!(output_path.is_file(), "pop build must emit an executable");
+
+    let executable = Command::new(&output_path)
+        .output()
+        .expect("built Pop executable runs");
+    assert!(executable.status.success());
+    assert_eq!(output_text(&executable.stdout), "42\n");
+
+    let run = run_pop(&["run"], Some("native.pop"));
+    assert!(
+        run.status.success(),
+        "stderr:\n{}",
+        output_text(&run.stderr)
+    );
+    assert_eq!(output_text(&run.stdout), "42\n");
+    let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
+fn native_class_example_executes_rust_runtime_fields_and_standard_output() {
+    let output_path = std::env::temp_dir().join("pop-native-class-example");
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .arg("build")
+        .arg(example("nativeClass.pop"))
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .expect("pop build runs");
+    assert!(
+        build.status.success(),
+        "stderr:\n{}",
+        output_text(&build.stderr)
+    );
+    let executable = Command::new(&output_path)
+        .output()
+        .expect("native class example runs");
+    assert!(executable.status.success());
+    assert_eq!(output_text(&executable.stdout), "42\n");
+    let _ = std::fs::remove_file(output_path);
 }
 
 fn run_check_dump(source: &str, dump: &str) -> Output {

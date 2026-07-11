@@ -45,6 +45,17 @@ The LLVM backend performs:
 6. running an LLVM optimization pipeline;
 7. emitting object code, assembly, or optional textual/bitcode IR.
 
+The Rust implementation uses Inkwell only inside the LLVM backend. Verified
+canonical MIR first becomes backend-private IR; Inkwell then constructs or
+parses that private emission, verifies the LLVM module, applies target data, and
+emits the object. No Inkwell or `llvm-sys` value escapes into MIR, the driver,
+the runtime interface, or another backend.
+
+The bootstrap conformance path must assemble emitted textual IR with the target
+LLVM toolchain and execute a pure entry point through LLVM's native execution
+environment. This proves that the private lowering is real LLVM output without
+making LLVM a semantic dependency of MIR.
+
 LLVM opaque pointers, address spaces, intrinsics, and metadata remain confined
 to this backend. LLVM IR is disposable output: it can be regenerated from MIR
 and is not read by semantic compiler stages.

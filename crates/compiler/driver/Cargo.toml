@@ -10,11 +10,15 @@ name = "pop"
 path = "src/main.rs"
 
 [dependencies]
+pop-backend-llvm.workspace = true
 pop-compile-time.workspace = true
 pop-diagnostics.workspace = true
 pop-foundation.workspace = true
 pop-hir.workspace = true
 pop-mir.workspace = true
+pop-runtime-native.workspace = true
+pop-standard.workspace = true
+pop-target.workspace = true
 pop-projects.workspace = true
 pop-query.workspace = true
 pop-resolve.workspace = true

@@ -1,6 +1,7 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_hir::{HirCallDispatch, HirDeclarationKind, HirExpressionKind, HirStatementKind};
+use pop_mir::lower_hir_bubble;
 use pop_source::SourceFile;
 
 #[test]
@@ -49,6 +50,67 @@ fn multi_module_bubble_reaches_verified_typed_hir() {
     ));
     assert_eq!(hir.public_symbols().len(), 2);
     assert!(hir.dump(result.types()).contains("identity"));
+}
+
+#[test]
+fn standard_print_is_identity_bound_and_survives_hir_and_mir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\npublic function run(): Int\n    print(42)\n    return 0\nend\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(result.diagnostics().is_empty(), "{}", result.diagnostic_snapshot());
+    let hir = result.hir().expect("HIR");
+    assert!(hir.dump(result.types()).contains("call.standard sf0"));
+    let mir = lower_hir_bubble(hir, result.types()).expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callStandard sf0"));
+    assert!(!dump.contains("pop_std_print_int"));
+    assert_eq!(pop_mir::parse_mir_dump(&dump).expect("round trip"), mir);
+}
+
+#[test]
+fn standard_print_rejects_wrong_calls_and_nearer_declarations_shadow_it() {
+    for body in ["print()", "print(true)"] {
+        let source = SourceFile::new(
+            FileId::from_raw(0),
+            "src/invalid.pop",
+            format!("namespace Main\npublic function run(): Int\n    {body}\n    return 0\nend\n"),
+        )
+        .expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+        assert!(!result.diagnostics().is_empty());
+        assert!(result.hir().is_none());
+    }
+
+    let source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/shadow.pop",
+        "namespace Main\npublic function print(value: Int): Int\n    return value\nend\npublic function run(): Int\n    return print(42)\nend\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(result.diagnostics().is_empty(), "{}", result.diagnostic_snapshot());
+    let dump = result.hir().expect("HIR").dump(result.types());
+    assert!(dump.contains("call.direct s0"));
+    assert!(!dump.contains("call.standard"));
 }
 
 #[test]

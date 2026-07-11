@@ -476,6 +476,10 @@ impl<'index> SignatureResolver<'index> {
         &self.arena
     }
 
+    pub(crate) const fn schema(&self) -> &BootstrapSchema {
+        &self.schema
+    }
+
     #[must_use]
     pub fn into_arena(self) -> TypeArena {
         self.arena

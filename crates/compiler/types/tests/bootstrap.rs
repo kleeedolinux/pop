@@ -55,6 +55,22 @@ fn intrinsic_ids_are_unique_typed_and_backend_neutral() {
 }
 
 #[test]
+fn standard_print_has_a_stable_typed_prelude_identity() {
+    let schema = embedded_bootstrap_schema().expect("valid embedded bootstrap schema");
+    let print = schema
+        .standard_function_by_source_name("print")
+        .expect("trusted print function");
+
+    assert_eq!(print.id().raw(), 0);
+    assert_eq!(print.owner_bubble(), "Pop.Standard");
+    assert_eq!(print.parameter_types(), ["Int"]);
+    assert!(print.result_types().is_empty());
+    assert_eq!(print.effects(), ["AmbientIo"]);
+    assert!(print.is_in_prelude());
+    assert!(schema.standard_function_by_source_name("Print").is_none());
+}
+
+#[test]
 fn compile_time_attribute_has_a_stable_trusted_prelude_contract() {
     let schema = embedded_bootstrap_schema().expect("valid embedded bootstrap schema");
     let attributes = schema.compiler_attributes();

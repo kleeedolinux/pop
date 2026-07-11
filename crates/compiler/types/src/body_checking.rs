@@ -4,7 +4,7 @@ use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagno
 use pop_foundation::{
     AttributeId, BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan, SymbolId,
-    TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
+    StandardFunctionId, TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -121,6 +121,9 @@ impl TypedCall {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypedCallDispatch {
+    Standard {
+        function: StandardFunctionId,
+    },
     Direct {
         function: SymbolId,
     },
@@ -225,6 +228,10 @@ pub enum TypedExpressionKind {
     },
     DirectCall {
         function: SymbolId,
+        arguments: Vec<TypedExpression>,
+    },
+    StandardCall {
+        function: StandardFunctionId,
         arguments: Vec<TypedExpression>,
     },
     IndirectCall {
@@ -1921,6 +1928,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<CheckedInvocation> {
         if let ExpressionSyntaxKind::Name(path) = callee.kind() {
+            if let Some(checked) = self.check_standard_invocation(path, arguments, span) {
+                return Some(CheckedInvocation::Call(checked));
+            }
             if let Some(checked) = self.check_static_method_invocation(path, arguments, span) {
                 return Some(CheckedInvocation::Call(checked));
             }
@@ -2001,6 +2011,68 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn check_standard_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<CheckedCall> {
+        let [name] = path else {
+            return None;
+        };
+        if self
+            .resolver
+            .database()
+            .resolve(self.module, name, SymbolSpace::Value, span)
+            .symbol()
+            .is_some()
+        {
+            return None;
+        }
+        let entry = self
+            .resolver
+            .schema()
+            .standard_function_by_source_name(name)?;
+        let function = entry.id();
+        let parameter_names = entry.parameter_types().to_vec();
+        let result_names = entry.result_types().to_vec();
+        if arguments.len() != parameter_names.len() {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "call",
+                parameter_names.len(),
+                arguments.len(),
+            ));
+            return None;
+        }
+        let parameter_types = parameter_names
+            .iter()
+            .map(|name| self.resolver.arena().source_type(name))
+            .collect::<Option<Vec<_>>>()?;
+        let result_types = result_names
+            .iter()
+            .map(|name| self.resolver.arena().source_type(name))
+            .collect::<Option<Vec<_>>>()?;
+        let typed_arguments = arguments
+            .iter()
+            .zip(parameter_types)
+            .map(|(argument, expected)| {
+                self.check_expression_expected(
+                    argument,
+                    Some(ExpectedExpressionType::plain(expected)),
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(CheckedCall {
+            call: TypedCall {
+                dispatch: TypedCallDispatch::Standard { function },
+                arguments: typed_arguments,
+                span,
+            },
+            results: result_types,
+        })
     }
 
     fn check_static_method_invocation(
@@ -2227,6 +2299,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             span,
         } = checked.call;
         let kind = match dispatch {
+            TypedCallDispatch::Standard { function } => TypedExpressionKind::StandardCall {
+                function,
+                arguments,
+            },
             TypedCallDispatch::Direct { function } => TypedExpressionKind::DirectCall {
                 function,
                 arguments,
@@ -3117,6 +3193,7 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
 
 fn finalize_call_captures(call: &mut TypedCall, written: &BTreeSet<BindingId>) {
     match &mut call.dispatch {
+        TypedCallDispatch::Standard { .. } => {}
         TypedCallDispatch::Direct { .. } => {}
         TypedCallDispatch::DirectMethod { receiver, .. } => {
             if let Some(receiver) = receiver {
@@ -3185,7 +3262,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             }
         }
         TypedExpressionKind::UnionCase { arguments, .. }
-        | TypedExpressionKind::DirectCall { arguments, .. } => {
+        | TypedExpressionKind::DirectCall { arguments, .. }
+        | TypedExpressionKind::StandardCall { arguments, .. } => {
             for argument in arguments {
                 finalize_expression_captures(argument, written);
             }

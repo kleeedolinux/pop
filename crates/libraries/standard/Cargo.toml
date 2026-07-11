@@ -1,5 +1,5 @@
 [package]
-name = "pop-runtime-native"
+name = "pop-standard"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,7 @@ path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-pop-runtime-interface.workspace = true
+pop-internal.workspace = true
 
 [lints]
 workspace = true

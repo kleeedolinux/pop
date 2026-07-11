@@ -36,9 +36,9 @@ pub use body_checking::{
 };
 pub use bootstrap::{
     AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
-    BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError, BootstrapTypeEntry,
-    BootstrapTypeRole, CompilerAttributeId, CompilerAttributeRole, CompilerAttributeTarget,
-    embedded_bootstrap_schema,
+    BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError, BootstrapStandardFunctionEntry,
+    BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId, CompilerAttributeRole,
+    CompilerAttributeTarget, embedded_bootstrap_schema,
 };
 pub use classes::{
     ClassDefinition, ClassDefinitionResult, ClassFieldDefinition, ClassMethodDefinition,

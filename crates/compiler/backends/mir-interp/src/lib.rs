@@ -717,6 +717,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CompareIntegerGreater { .. }
             | MirInstructionKind::CompareFloatLess { .. }
             | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CallStandard { .. }
             | MirInstructionKind::CallDirect { .. }
             | MirInstructionKind::CallDirectMethod { .. }
             | MirInstructionKind::CallInterface { .. }
@@ -751,6 +752,21 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         values: &BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<(), ExecutionError> {
         let returned = match instruction {
+            MirInstructionKind::CallStandard {
+                function,
+                arguments,
+                ..
+            } => {
+                if function.raw() != 0 || arguments.len() != 1 {
+                    return Err(ExecutionError::InvalidControlFlow);
+                }
+                let MirValue::Integer(value) = &value(values, arguments[0])?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let value = value.signed().ok_or(ExecutionError::TypeMismatch)?;
+                pop_standard::pop_std_print_int(value);
+                return Ok(());
+            }
             MirInstructionKind::CallDirect {
                 function,
                 arguments,

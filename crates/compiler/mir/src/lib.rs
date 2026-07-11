@@ -11,7 +11,7 @@ use std::fmt::Write;
 use pop_foundation::{
     BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, SymbolId,
-    TextRange, TextSize, TypeId, UnionCaseId, ValueId, ValueParameterId,
+    StandardFunctionId, TextRange, TextSize, TypeId, UnionCaseId, ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure, HirDeclaration,
@@ -796,6 +796,11 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
+    CallStandard {
+        function: StandardFunctionId,
+        arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+    },
     CallDirectMethod {
         method: MethodId,
         arguments: Vec<ValueId>,
@@ -1121,6 +1126,7 @@ pub enum MirVerificationError {
     },
     UnknownInterface(InterfaceId),
     UnknownInterfaceMethod(InterfaceMethodId),
+    UnknownStandardFunction(StandardFunctionId),
     WrongInterfaceMethodSlot {
         method: InterfaceMethodId,
         expected: u32,
@@ -2332,6 +2338,14 @@ impl<'hir> FunctionBuilder<'hir> {
         arguments: &[HirExpression],
     ) -> MirInstructionKind {
         match dispatch {
+            HirCallDispatch::Standard { function } => MirInstructionKind::CallStandard {
+                function: *function,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.lower_expression(argument))
+                    .collect(),
+                declared_effects: MirEffectSummary::empty().with(MirEffect::AmbientIo),
+            },
             HirCallDispatch::Direct { function } => MirInstructionKind::CallDirect {
                 function: *function,
                 arguments: arguments
@@ -2706,6 +2720,9 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
             MirEffectSummary::from_effects([MirEffect::WritesManagedReference])
         }
         MirInstructionKind::CallDirect {
+            declared_effects, ..
+        }
+        | MirInstructionKind::CallStandard {
             declared_effects, ..
         }
         | MirInstructionKind::CallDirectMethod {
@@ -4756,6 +4773,26 @@ fn verify_callable_instruction(
                 verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
+        MirInstructionKind::CallStandard {
+            function,
+            arguments,
+            ..
+        } => {
+            if function.raw() == 0 {
+                if let Some(int) = arena.source_type("Int") {
+                    verify_call_signature(
+                        instruction,
+                        arguments,
+                        &[int],
+                        &[],
+                        values,
+                        errors,
+                    );
+                }
+            } else {
+                errors.push(MirVerificationError::UnknownStandardFunction(*function));
+            }
+        }
         MirInstructionKind::CallDirectMethod {
             method, arguments, ..
         } => {
@@ -5078,6 +5115,9 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             elements: values, ..
         }
         | MirInstructionKind::CallDirect {
+            arguments: values, ..
+        }
+        | MirInstructionKind::CallStandard {
             arguments: values, ..
         }
         | MirInstructionKind::CallDirectMethod {
@@ -5593,6 +5633,17 @@ fn dump_callable_or_schema_instruction(
     instruction: &MirInstructionKind,
 ) -> bool {
     match instruction {
+        MirInstructionKind::CallStandard {
+            function,
+            arguments,
+            declared_effects,
+        } => {
+            let _ = write!(output, "callStandard sf{} ", function.raw());
+            dump_value_list(output, arguments);
+            output.push_str(" effects[");
+            dump_effects(output, *declared_effects);
+            output.push(']');
+        }
         MirInstructionKind::CallDirect {
             function,
             arguments,

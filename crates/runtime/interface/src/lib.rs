@@ -201,6 +201,17 @@ impl InitializationState {
 pub enum RuntimeOperation {
     AllocateObject,
     AllocateArray,
+    AllocateTable,
+    TupleMake,
+    ArrayGet,
+    ArraySet,
+    FieldGet,
+    FieldSet,
+    RecordUpdate,
+    UnionMake,
+    CaptureLoad,
+    CaptureStore,
+    DispatchCall,
     RetainRoot,
     ReleaseRoot,
     PublishRoots,
@@ -214,6 +225,42 @@ pub enum RuntimeOperation {
     Resume,
     InitializeModule,
     InitializeBubble,
+}
+
+impl RuntimeOperation {
+    /// Stable C-ABI symbol selected by a native backend. MIR carries the
+    /// operation, never this spelling; other backends may dispatch directly.
+    #[must_use]
+    pub const fn abi_symbol(self) -> &'static str {
+        match self {
+            Self::AllocateObject => "pop_rt_allocate_object",
+            Self::AllocateArray => "pop_rt_allocate_array",
+            Self::AllocateTable => "pop_rt_allocate_table",
+            Self::TupleMake => "pop_rt_tuple_make",
+            Self::ArrayGet => "pop_rt_array_get",
+            Self::ArraySet => "pop_rt_array_set",
+            Self::FieldGet => "pop_rt_field_get",
+            Self::FieldSet => "pop_rt_field_set",
+            Self::RecordUpdate => "pop_rt_record_update",
+            Self::UnionMake => "pop_rt_union_make",
+            Self::CaptureLoad => "pop_rt_capture_load",
+            Self::CaptureStore => "pop_rt_capture_store",
+            Self::DispatchCall => "pop_rt_dispatch_call",
+            Self::RetainRoot => "pop_rt_retain_root",
+            Self::ReleaseRoot => "pop_rt_release_root",
+            Self::PublishRoots => "pop_rt_publish_roots",
+            Self::GcSafePoint => "pop_rt_gc_safe_point",
+            Self::SatbWriteBarrier => "pop_rt_satb_write_barrier",
+            Self::GenerationalWriteBarrier => "pop_rt_generational_write_barrier",
+            Self::Trap => "pop_rt_trap",
+            Self::Panic => "pop_rt_panic",
+            Self::ContinueUnwind => "pop_rt_continue_unwind",
+            Self::Suspend => "pop_rt_suspend",
+            Self::Resume => "pop_rt_resume",
+            Self::InitializeModule => "pop_rt_initialize_module",
+            Self::InitializeBubble => "pop_rt_initialize_bubble",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

@@ -23,6 +23,8 @@ const MEMBERS: &[&str] = &[
     "crates/compiler/syntax",
     "crates/compiler/target",
     "crates/compiler/types",
+    "crates/libraries/internal",
+    "crates/libraries/standard",
     "crates/runtime/interface",
     "crates/runtime/native",
     "crates/tools/architecture-tests",
@@ -112,7 +114,7 @@ fn every_member_inherits_workspace_metadata_and_has_a_target() {
 }
 
 #[test]
-fn dependencies_are_centralized_path_only_workspace_dependencies() {
+fn dependencies_are_centralized_and_external_dependencies_are_approved() {
     let root = repository_root();
     let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read root Cargo.toml");
     let dependency_table = root_manifest
@@ -127,9 +129,13 @@ fn dependencies_are_centralized_path_only_workspace_dependencies() {
         .lines()
         .filter(|line| !line.trim().is_empty())
     {
+        let local =
+            line.starts_with("pop-") && line.contains(" = { path = \"") && line.ends_with("\" }");
+        let approved_inkwell = line
+            == "inkwell = { version = \"0.9.0\", default-features = false, features = [\"llvm22-1-prefer-dynamic\", \"target-x86\"] }";
         assert!(
-            line.starts_with("pop-") && line.contains(" = { path = \"") && line.ends_with("\" }"),
-            "workspace dependency must be a local path: {line}"
+            local || approved_inkwell,
+            "unapproved workspace dependency: {line}"
         );
     }
 
@@ -145,13 +151,32 @@ fn dependencies_are_centralized_path_only_workspace_dependencies() {
                 .find("\n[")
                 .map_or(dependencies, |end| &dependencies[..end]);
             for line in dependencies.lines().filter(|line| !line.trim().is_empty()) {
+                let inherited_local =
+                    line.starts_with("pop-") && line.ends_with(".workspace = true");
+                let inherited_inkwell = *member == "crates/compiler/backends/llvm"
+                    && line == "inkwell.workspace = true";
                 assert!(
-                    line.starts_with("pop-") && line.ends_with(".workspace = true"),
+                    inherited_local || inherited_inkwell,
                     "{} {table} entry is not inherited from the workspace: {line}",
                     manifest_path.display(),
                 );
             }
         }
+    }
+}
+
+#[test]
+fn inkwell_is_confined_to_the_llvm_backend() {
+    let root = repository_root();
+    for member in MEMBERS {
+        let manifest_path = root.join(member).join("Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_path.display()));
+        assert_eq!(
+            manifest.contains("inkwell.workspace = true"),
+            *member == "crates/compiler/backends/llvm",
+            "Inkwell must remain private to pop-backend-llvm"
+        );
     }
 }
 
@@ -189,6 +214,17 @@ fn portable_crates_do_not_name_backend_packages() {
             );
         }
     }
+}
+
+#[test]
+fn reserved_library_layers_have_the_required_dependency_direction() {
+    let root = repository_root();
+    let internal = fs::read_to_string(root.join("crates/libraries/internal/Cargo.toml"))
+        .expect("read Pop.Internal implementation manifest");
+    let standard = fs::read_to_string(root.join("crates/libraries/standard/Cargo.toml"))
+        .expect("read Pop.Standard implementation manifest");
+    assert!(standard.contains("pop-internal.workspace = true"));
+    assert!(!internal.contains("pop-standard.workspace = true"));
 }
 
 #[test]

@@ -1,0 +1,11 @@
+namespace NativeMath
+
+public function multiply(left: Int, right: Int): Int
+    return left * right
+end
+
+public function run(): Int
+    local result = multiply(6, 7)
+    print(result)
+    return 0
+end
