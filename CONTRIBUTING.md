@@ -103,7 +103,7 @@ boundary.
 Repository scripts should not be written in Python. Ruby is preferred when a
 script is needed and Ruby is available.
 
-When a script is intended to become part of the repository and Ruby is not
-installed, contributors should ask the host machine owner to install it and
-provide installation instructions appropriate for the operating system.
-Python scripts are not accepted into the repository.
+Contributors are responsible for installing Ruby on their own development
+machines. If Ruby cannot be installed, do not add the script. Only commit
+scripts that are necessary for the repository, and do not commit Python
+scripts.
