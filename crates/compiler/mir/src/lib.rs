@@ -1248,8 +1248,12 @@ pub fn lower_hir_bubble(
         nested_functions,
     };
     recompute_effects(&mut mir);
-    insert_gc_safe_points(&mut mir, arena);
-    recompute_effects(&mut mir);
+    while insert_gc_safe_points(&mut mir, arena) {
+        // Backedge safe points make their containing function a GC safe point.
+        // Recompute the transitive call effects before deciding which callers
+        // also require a safe point immediately before the call.
+        recompute_effects(&mut mir);
+    }
     seal_effects(&mut mir);
     verify_mir_bubble(&mir, arena)?;
     Ok(mir)
@@ -1419,6 +1423,12 @@ struct BuildingBlock {
     arguments: Vec<MirBlockArgument>,
     instructions: Vec<MirInstruction>,
     terminator: MirTerminator,
+}
+
+struct LiveState {
+    parameters: Vec<ValueParameterId>,
+    locals: Vec<LocalId>,
+    specs: Vec<(TypeId, SourceSpan)>,
 }
 
 struct FunctionBuilder<'hir> {
@@ -1939,45 +1949,55 @@ impl<'hir> FunctionBuilder<'hir> {
         then_body: &[HirStatement],
         else_body: &[HirStatement],
     ) {
+        let condition_span = condition.span();
         let condition = self.lower_expression(condition);
+        let state = self.live_state(condition_span);
         let then_block = self.new_block();
         let else_block = self.new_block();
-        let join_block = self.new_block();
+        let (join_block, join_arguments) = self.new_block_with_arguments(&state.specs);
         self.terminate(MirTerminator::ConditionalBranch {
             condition,
             when_true: then_block,
             when_false: else_block,
         });
+        let outer_parameters = self.parameters.clone();
         let outer_locals = self.locals.clone();
         self.current = then_block;
         self.lower_statements(then_body);
-        self.branch_if_open(join_block);
+        self.branch_with_state_if_open(join_block, &state);
+        self.parameters.clone_from(&outer_parameters);
         self.locals.clone_from(&outer_locals);
         self.current = else_block;
         self.lower_statements(else_body);
-        self.branch_if_open(join_block);
-        self.locals = outer_locals;
+        self.branch_with_state_if_open(join_block, &state);
         self.current = join_block;
+        self.install_state(&state, &join_arguments);
     }
 
     fn lower_while(&mut self, condition: &HirExpression, body: &[HirStatement]) {
-        let condition_block = self.new_block();
+        let state = self.live_state(condition.span());
+        let initial_values = self.state_values(&state);
+        let (condition_block, condition_arguments) = self.new_block_with_arguments(&state.specs);
         let body_block = self.new_block();
-        let exit_block = self.new_block();
-        self.branch_if_open(condition_block);
+        let exit_edge = self.new_block();
+        let (exit_block, exit_arguments) = self.new_block_with_arguments(&state.specs);
+        self.branch_with_arguments_if_open(condition_block, initial_values);
         self.current = condition_block;
+        self.install_state(&state, &condition_arguments);
         let condition = self.lower_expression(condition);
         self.terminate(MirTerminator::ConditionalBranch {
             condition,
             when_true: body_block,
-            when_false: exit_block,
+            when_false: exit_edge,
         });
-        let outer_locals = self.locals.clone();
         self.current = body_block;
         self.lower_statements(body);
-        self.branch_if_open(condition_block);
-        self.locals = outer_locals;
+        self.branch_with_state_if_open(condition_block, &state);
+        self.current = exit_edge;
+        self.install_state(&state, &condition_arguments);
+        self.branch_with_state_if_open(exit_block, &state);
         self.current = exit_block;
+        self.install_state(&state, &exit_arguments);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2479,6 +2499,71 @@ impl<'hir> FunctionBuilder<'hir> {
         (block, values)
     }
 
+    fn live_state(&self, span: SourceSpan) -> LiveState {
+        let parameters = self
+            .parameters
+            .keys()
+            .filter(|parameter| !self.parameter_cells.contains_key(parameter))
+            .copied()
+            .collect::<Vec<_>>();
+        let locals = self
+            .locals
+            .keys()
+            .filter(|local| !self.local_cells.contains_key(local))
+            .copied()
+            .collect::<Vec<_>>();
+        let specs = parameters
+            .iter()
+            .map(|parameter| self.parameters[parameter])
+            .chain(locals.iter().map(|local| self.locals[local]))
+            .map(|value| (self.value_type(value), span))
+            .collect();
+        LiveState {
+            parameters,
+            locals,
+            specs,
+        }
+    }
+
+    fn state_values(&self, state: &LiveState) -> Vec<ValueId> {
+        state
+            .parameters
+            .iter()
+            .map(|parameter| self.parameters[parameter])
+            .chain(state.locals.iter().map(|local| self.locals[local]))
+            .collect()
+    }
+
+    fn install_state(&mut self, state: &LiveState, values: &[ValueId]) {
+        let parameter_count = state.parameters.len();
+        for (parameter, value) in state.parameters.iter().zip(values.iter().copied()) {
+            self.parameters.insert(*parameter, value);
+        }
+        for (local, value) in state
+            .locals
+            .iter()
+            .zip(values[parameter_count..].iter().copied())
+        {
+            self.locals.insert(*local, value);
+        }
+    }
+
+    fn value_type(&self, value: ValueId) -> TypeId {
+        self.blocks
+            .iter()
+            .flat_map(|block| block.arguments.iter())
+            .find(|argument| argument.value == value)
+            .map(|argument| argument.type_id)
+            .or_else(|| {
+                self.blocks
+                    .iter()
+                    .flat_map(|block| block.instructions.iter())
+                    .find(|instruction| instruction.result == value)
+                    .and_then(|instruction| instruction.result_type)
+            })
+            .expect("lowered live state always has a statically proven MIR type")
+    }
+
     fn current_block(&self) -> &BuildingBlock {
         &self.blocks[self.current.raw() as usize]
     }
@@ -2498,6 +2583,16 @@ impl<'hir> FunctionBuilder<'hir> {
                 arguments: Vec::new(),
             });
         }
+    }
+
+    fn branch_with_arguments_if_open(&mut self, target: BlockId, arguments: Vec<ValueId>) {
+        if matches!(self.current_block().terminator, MirTerminator::Missing) {
+            self.terminate(MirTerminator::Branch { target, arguments });
+        }
+    }
+
+    fn branch_with_state_if_open(&mut self, target: BlockId, state: &LiveState) {
+        self.branch_with_arguments_if_open(target, self.state_values(state));
     }
 }
 
@@ -2877,16 +2972,18 @@ fn recompute_function_effects(
     changed
 }
 
-fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) {
+fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) -> bool {
+    let mut changed = false;
     for function in &mut bubble.functions {
-        insert_function_safe_points(function, arena);
+        changed |= insert_function_safe_points(function, arena);
     }
     for method in &mut bubble.methods {
-        insert_function_safe_points(&mut method.function, arena);
+        changed |= insert_function_safe_points(&mut method.function, arena);
     }
+    changed
 }
 
-fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) {
+fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) -> bool {
     let mut next_value = function
         .blocks
         .iter()
@@ -2902,11 +2999,22 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) {
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    let mut next_safe_point = 0_u32;
+    let mut next_safe_point = function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match instruction.kind {
+            MirInstructionKind::GcSafePoint { safe_point, .. } => Some(safe_point.raw()),
+            _ => None,
+        })
+        .max()
+        .map_or(0, |safe_point| safe_point.saturating_add(1));
+    let mut changed = false;
     for block in &mut function.blocks {
-        let mut instructions = Vec::new();
+        let mut instructions: Vec<MirInstruction> = Vec::new();
         let mut straight_line_work = 0_usize;
         for instruction in std::mem::take(&mut block.instructions) {
+            let is_safe_point = matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. });
             let operation_requires_safe_point = instruction.effects.contains(MirEffect::Allocates)
                 || matches!(
                     instruction.kind,
@@ -2915,8 +3023,13 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) {
                         | MirInstructionKind::CallInterface { .. }
                         | MirInstructionKind::CallIndirect { .. }
                 ) && instruction.effects.contains(MirEffect::GcSafePoint);
-            if operation_requires_safe_point
-                || straight_line_work >= MAX_STRAIGHT_LINE_WORK_BETWEEN_SAFE_POINTS
+            let already_at_safe_point = instructions.last().is_some_and(|previous| {
+                matches!(previous.kind, MirInstructionKind::GcSafePoint { .. })
+            });
+            if !is_safe_point
+                && !already_at_safe_point
+                && (operation_requires_safe_point
+                    || straight_line_work >= MAX_STRAIGHT_LINE_WORK_BETWEEN_SAFE_POINTS)
             {
                 instructions.push(empty_safe_point(
                     ValueId::from_raw(next_value),
@@ -2926,8 +3039,8 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) {
                 next_value = next_value.saturating_add(1);
                 next_safe_point = next_safe_point.saturating_add(1);
                 straight_line_work = 0;
+                changed = true;
             }
-            let is_safe_point = matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. });
             instructions.push(instruction);
             if is_safe_point {
                 straight_line_work = 0;
@@ -2950,10 +3063,12 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) {
             ));
             next_value = next_value.saturating_add(1);
             next_safe_point = next_safe_point.saturating_add(1);
+            changed = true;
         }
         block.instructions = instructions;
     }
     populate_stack_maps(function, arena);
+    changed
 }
 
 fn empty_safe_point(result: ValueId, safe_point: SafePointId, span: SourceSpan) -> MirInstruction {

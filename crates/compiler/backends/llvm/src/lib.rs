@@ -16,7 +16,7 @@ use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_foundation::{BlockId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
 use pop_mir::{
     MirBubble, MirDeclarationKind, MirInstructionKind, MirTerminator, verify_mir_bubble,
 };
@@ -393,9 +393,22 @@ fn lower_function(
             }
         }
     }
+    let mut incoming_edges: BTreeMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = BTreeMap::new();
+    for predecessor in function.blocks() {
+        if let MirTerminator::Branch { target, arguments } = predecessor.terminator() {
+            incoming_edges
+                .entry(*target)
+                .or_default()
+                .push((predecessor.block(), arguments.clone()));
+        }
+    }
     let mut blocks = Vec::new();
     for block in function.blocks() {
-        let mut instructions = Vec::new();
+        let mut instructions = lower_block_arguments(
+            block,
+            incoming_edges.get(&block.block()).map(Vec::as_slice),
+            types,
+        )?;
         for instruction in block.instructions() {
             if options.emit_comments {
                 instructions.push(format!("; mir v{}", instruction.result().raw()));
@@ -425,6 +438,38 @@ fn lower_function(
         result: llvm_results(function.results(), types)?,
         blocks,
     })
+}
+
+fn lower_block_arguments(
+    block: &pop_mir::MirBlock,
+    incoming: Option<&[(BlockId, Vec<ValueId>)]>,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let Some(incoming) = incoming else {
+        return Ok(Vec::new());
+    };
+    block
+        .arguments()
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let incoming_values = incoming
+                .iter()
+                .map(|(predecessor, values)| {
+                    let value = values
+                        .get(index)
+                        .ok_or(LlvmLoweringError::InvalidType(argument.type_id()))?;
+                    Ok(format!("[ %v{}, %b{} ]", value.raw(), predecessor.raw()))
+                })
+                .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
+            Ok(format!(
+                "%v{} = phi {} {}",
+                argument.value().raw(),
+                llvm_type(argument.type_id(), types)?,
+                incoming_values.join(", ")
+            ))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_lines)]

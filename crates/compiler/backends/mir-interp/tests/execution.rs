@@ -60,6 +60,40 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
 }
 
 #[test]
+fn mutable_locals_flow_through_loop_backedges_and_branch_joins() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function calculate(doubleValue: Boolean): Int\n\
+             local value = 0\n\
+             while value < 10 do\n\
+                 value = value + 1\n\
+             end\n\
+             if doubleValue then\n\
+                 value = value + value\n\
+             else\n\
+                 value = value + 1\n\
+             end\n\
+             return value\n\
+         end\n",
+    );
+    let function = mir.functions()[0].symbol();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+
+    assert_eq!(
+        interpreter
+            .call(function, &[MirValue::Boolean(true)])
+            .expect("then branch"),
+        vec![int(20)]
+    );
+    assert_eq!(
+        interpreter
+            .call(function, &[MirValue::Boolean(false)])
+            .expect("else branch"),
+        vec![int(11)]
+    );
+}
+
+#[test]
 fn standard_print_executes_by_trusted_identity_and_returns_no_value() {
     let (mir, types) = executable_source(
         "namespace Main\n\

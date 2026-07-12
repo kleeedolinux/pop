@@ -5,7 +5,7 @@ use pop_mir::lower_hir_bubble;
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Output};
 
 fn target() -> TargetSpec {
     TargetSpec::builder("x86_64-unknown-linux-gnu")
@@ -129,6 +129,118 @@ fn emitted_llvm_executes_a_pure_pop_function() {
         String::from_utf8_lossy(&result.stderr)
     );
     let _ = fs::remove_file(input);
+}
+
+#[test]
+fn emitted_llvm_executes_nested_control_flow_and_typed_helper_returns() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+private function choose(left: Int, right: Int): Int\n\
+    if left < right then\n\
+        return left + right\n\
+    else\n\
+        return right\n\
+    end\n\
+end\n\
+private function enabled(): Boolean\n\
+    return true\n\
+end\n\
+private function count(): Int\n\
+    local value = 0\n\
+    while value < 42 do\n\
+        value = value + 1\n\
+    end\n\
+    return value\n\
+end\n\
+private function idle()\n\
+    while false do\n\
+    end\n\
+end\n\
+public function run(): Int\n\
+    idle()\n\
+    if enabled() then\n\
+        return choose(0, count())\n\
+    else\n\
+        return 1\n\
+    end\n\
+end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let entry = mir
+        .functions()
+        .iter()
+        .find(|function| function.symbol().raw() == 4)
+        .expect("run")
+        .symbol();
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+    let result = link_with_runtime_and_run(&module, "control-flow");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted control flow: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let build = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-p", "pop-runtime-native"])
+        .output()
+        .expect("cargo must be available");
+    assert!(
+        build.status.success(),
+        "runtime build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
+    let executable = std::env::temp_dir().join(format!("pop-backend-llvm-{name}"));
+    fs::write(&input, module.to_string()).expect("write temporary LLVM input");
+    let link = Command::new("clang")
+        .arg(&input)
+        .arg(root.join("target/debug/libpop_runtime_native.a"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang must be installed");
+    assert!(
+        link.status.success(),
+        "clang rejected LLVM: {}\n{}",
+        String::from_utf8_lossy(&link.stderr),
+        module
+    );
+    let result = Command::new(&executable)
+        .output()
+        .expect("native executable runs");
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(executable);
+    result
 }
 
 #[test]
