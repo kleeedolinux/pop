@@ -75,6 +75,7 @@ not table or runtime-name lookup.
 ## Milestone 4 — LLVM native backend
 
 - target layout and Inkwell-confined LLVM lowering through backend-private IR;
+- deterministic verified `pop check <source.pop> --dump ll` inspection;
 - PLRI native ABI and runtime library;
 - `.poplib` Bubble manifests/reference metadata, object emission, and platform linking;
 - standalone bootstrap `pop build`/`pop run` examples that exercise Rust

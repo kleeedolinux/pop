@@ -910,13 +910,20 @@ fn unsupported_compile_time_construct(
         TypedExpressionKind::Capture(_) => UnsupportedCompileTimeConstruct::Capture,
         TypedExpressionKind::Function(_) => UnsupportedCompileTimeConstruct::FunctionReference,
         TypedExpressionKind::Field { .. } => UnsupportedCompileTimeConstruct::FieldAccess,
-        TypedExpressionKind::ArrayGet { .. } => UnsupportedCompileTimeConstruct::ArrayAccess,
+        TypedExpressionKind::ArrayGet { .. }
+        | TypedExpressionKind::ArrayLength { .. }
+        | TypedExpressionKind::ArrayGetChecked { .. } => {
+            UnsupportedCompileTimeConstruct::ArrayAccess
+        }
+        TypedExpressionKind::ArrayCreate { .. } | TypedExpressionKind::Array(_) => {
+            UnsupportedCompileTimeConstruct::Array
+        }
+        TypedExpressionKind::ArrayFill { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedExpressionKind::Record { .. } => UnsupportedCompileTimeConstruct::Record,
         TypedExpressionKind::ClassConstruct { .. } => {
             UnsupportedCompileTimeConstruct::ClassConstruction
         }
         TypedExpressionKind::RecordUpdate { .. } => UnsupportedCompileTimeConstruct::RecordUpdate,
-        TypedExpressionKind::Array(_) => UnsupportedCompileTimeConstruct::Array,
         TypedExpressionKind::Table(_) => UnsupportedCompileTimeConstruct::Table,
         TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,

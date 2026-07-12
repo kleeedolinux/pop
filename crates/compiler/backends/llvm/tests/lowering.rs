@@ -367,6 +367,116 @@ end\n",
 }
 
 #[test]
+fn non_escaping_scalar_arrays_lower_to_direct_llvm_storage() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local values = Array.create<<Int>>(4, 0)\n\
+    Array.fill(values, 7)\n\
+    values[1] = 3\n\
+    return Array.length(values) + Array.get(values, 1)\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s0()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered scalar array function");
+    assert!(function.contains("call noalias ptr @malloc"));
+    assert!(function.contains("getelementptr i64"));
+    assert!(function.contains("load i64"));
+    assert!(function.contains("store i64"));
+    assert!(function.contains("call void @free"));
+    assert!(!function.contains("pop_rt_allocate_array_filled"));
+    assert!(!function.contains("pop_rt_array_length"));
+    assert!(!function.contains("pop_rt_array_get_checked"));
+    assert!(!function.contains("pop_rt_array_fill"));
+    assert!(!function.contains("pop_rt_array_set"));
+
+    let result = link_with_runtime_and_run(&module, "fixed-array-core");
+    assert_eq!(
+        result.status.code(),
+        Some(7),
+        "native fixed arrays failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn escaping_and_managed_arrays_retain_the_runtime_path() {
+    let module = native_module(
+        "namespace Main\n\
+private function makeValues(): Array<Int>\n\
+    return Array.create<<Int>>(2, 20)\n\
+end\n\
+private function main(): Int\n\
+    local values = makeValues()\n\
+    local names = Array.create<<String>>(1, \"Pop\")\n\
+    names[1] = \"Lang\"\n\
+    return Array.get(values, 1) + Array.length(names) + 1\n\
+end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("call i64 @pop_rt_allocate_array_filled"));
+    assert!(text.contains("call i8 @pop_rt_array_get_checked"));
+    assert!(text.contains("call i8 @pop_rt_array_set"));
+
+    let result = link_with_runtime_and_run(&module, "runtime-array-boundary");
+    assert_eq!(
+        result.status.code(),
+        Some(22),
+        "runtime array boundary failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn loop_carried_scalar_arrays_keep_direct_access_and_precise_gc_roots() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local values = Array.create<<Int>>(10, 0)\n\
+    local index = 1\n\
+    repeat\n\
+        values[index] = index\n\
+        index = index + 1\n\
+    until index == 11\n\
+    index = 1\n\
+    local total = 0\n\
+    repeat\n\
+        total = total + Array.get(values, index)\n\
+        index = index + 1\n\
+    until index == 11\n\
+    return total\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s0()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered scalar array loop");
+    assert!(!function.contains("pop_rt_allocate_array_filled"));
+    assert!(!function.contains("pop_rt_array_get_checked"));
+    assert!(!function.contains("pop_rt_array_set"));
+    assert!(function.contains("getelementptr i64"));
+    assert!(function.contains("call i8 @pop_rt_gc_safe_point"));
+    assert!(
+        function.contains("ptr null, i64 0"),
+        "backend-private scalar storage must not enter precise managed roots: {function}"
+    );
+
+    let result = link_with_runtime_and_run(&module, "direct-scalar-array-loop");
+    assert_eq!(
+        result.status.code(),
+        Some(55),
+        "direct scalar array loop failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn constant_bounded_integer_reductions_elide_proven_overflow_edges() {
     let module = native_module(
         "namespace Main\n\

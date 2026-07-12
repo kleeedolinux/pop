@@ -1385,6 +1385,21 @@ pub enum HirExpressionKind {
         array: Box<HirExpression>,
         index: Box<HirExpression>,
     },
+    ArrayCreate {
+        length: Box<HirExpression>,
+        initial_value: Box<HirExpression>,
+    },
+    ArrayLength {
+        array: Box<HirExpression>,
+    },
+    ArrayGetChecked {
+        array: Box<HirExpression>,
+        index: Box<HirExpression>,
+    },
+    ArrayFill {
+        array: Box<HirExpression>,
+        value: Box<HirExpression>,
+    },
     Record {
         record: SymbolId,
         fields: Vec<HirFieldValue>,
@@ -2060,6 +2075,26 @@ fn lower_expression(
             array: Box::new(lower_expression(array, interface_slots)),
             index: Box::new(lower_expression(index, interface_slots)),
         },
+        TypedExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => HirExpressionKind::ArrayCreate {
+            length: Box::new(lower_expression(length, interface_slots)),
+            initial_value: Box::new(lower_expression(initial_value, interface_slots)),
+        },
+        TypedExpressionKind::ArrayLength { array } => HirExpressionKind::ArrayLength {
+            array: Box::new(lower_expression(array, interface_slots)),
+        },
+        TypedExpressionKind::ArrayGetChecked { array, index } => {
+            HirExpressionKind::ArrayGetChecked {
+                array: Box::new(lower_expression(array, interface_slots)),
+                index: Box::new(lower_expression(index, interface_slots)),
+            }
+        }
+        TypedExpressionKind::ArrayFill { array, value } => HirExpressionKind::ArrayFill {
+            array: Box::new(lower_expression(array, interface_slots)),
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
         TypedExpressionKind::Record { record, fields } => HirExpressionKind::Record {
             record: *record,
             fields: fields
@@ -2449,6 +2484,22 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
         }
+        TypedExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => first_unknown_interface_expression(length, slots)
+            .or_else(|| first_unknown_interface_expression(initial_value, slots)),
+        TypedExpressionKind::ArrayLength { array } => {
+            first_unknown_interface_expression(array, slots)
+        }
+        TypedExpressionKind::ArrayGetChecked { array, index } => {
+            first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedExpressionKind::ArrayFill { array, value } => {
+            first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(value, slots))
+        }
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             first_unknown_interface_expression(base, slots).or_else(|| {
                 fields
@@ -2597,6 +2648,20 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             .find_map(|field| first_compile_time_only_expression(field.value())),
         TypedExpressionKind::ArrayGet { array, index } => first_compile_time_only_expression(array)
             .or_else(|| first_compile_time_only_expression(index)),
+        TypedExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => first_compile_time_only_expression(length)
+            .or_else(|| first_compile_time_only_expression(initial_value)),
+        TypedExpressionKind::ArrayLength { array } => first_compile_time_only_expression(array),
+        TypedExpressionKind::ArrayGetChecked { array, index } => {
+            first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+        }
+        TypedExpressionKind::ArrayFill { array, value } => {
+            first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(value))
+        }
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             first_compile_time_only_expression(base).or_else(|| {
                 fields
@@ -3864,6 +3929,63 @@ impl Verifier<'_> {
             }
             HirExpressionKind::ArrayGet { array, index } => {
                 self.verify_array_get(array, index, visible);
+            }
+            HirExpressionKind::ArrayCreate {
+                length,
+                initial_value,
+            } => {
+                self.verify_expression(length, visible);
+                self.verify_expression(initial_value, visible);
+                if let Some(integer) = self.arena.source_type("Int") {
+                    self.verify_expression_type(integer, length);
+                }
+                if let Some(SemanticType::Array(element)) = self.arena.get(expression.type_id()) {
+                    self.verify_expression_type(*element, initial_value);
+                } else {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::ArrayLength { array } => {
+                self.verify_expression(array, visible);
+                if !matches!(
+                    self.arena.get(array.type_id()),
+                    Some(SemanticType::Array(_))
+                ) {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: array.type_id(),
+                            span: array.span(),
+                        });
+                }
+                if let Some(integer) = self.arena.source_type("Int") {
+                    self.verify_expression_type(integer, expression);
+                }
+            }
+            HirExpressionKind::ArrayGetChecked { array, index } => {
+                self.verify_array_get(array, index, visible);
+                if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id()) {
+                    self.verify_expression_type(*element, expression);
+                }
+            }
+            HirExpressionKind::ArrayFill { array, value } => {
+                self.verify_expression(array, visible);
+                self.verify_expression(value, visible);
+                if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id()) {
+                    self.verify_expression_type(*element, value);
+                } else {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: array.type_id(),
+                            span: array.span(),
+                        });
+                }
+                if let Some(nil) = self.arena.source_type("nil") {
+                    self.verify_expression_type(nil, expression);
+                }
             }
             HirExpressionKind::Array(elements) => {
                 self.verify_array(expression, elements, visible);
@@ -5255,9 +5377,22 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             }
         }
         HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
-        HirExpressionKind::ArrayGet { array, index } => {
+        HirExpressionKind::ArrayGet { array, index }
+        | HirExpressionKind::ArrayGetChecked { array, index } => {
             collect_cell_captures(array, written);
             collect_cell_captures(index, written);
+        }
+        HirExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            collect_cell_captures(length, written);
+            collect_cell_captures(initial_value, written);
+        }
+        HirExpressionKind::ArrayLength { array } => collect_cell_captures(array, written),
+        HirExpressionKind::ArrayFill { array, value } => {
+            collect_cell_captures(array, written);
+            collect_cell_captures(value, written);
         }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
@@ -5749,6 +5884,31 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
         HirExpressionKind::ArrayGet { array, index } => {
             dump_array_get(output, array, index, arena);
+        }
+        HirExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            output.push_str("array.create ");
+            dump_expression(output, length, arena);
+            output.push(' ');
+            dump_expression(output, initial_value, arena);
+        }
+        HirExpressionKind::ArrayLength { array } => {
+            output.push_str("array.length ");
+            dump_expression(output, array, arena);
+        }
+        HirExpressionKind::ArrayGetChecked { array, index } => {
+            output.push_str("array.get.checked ");
+            dump_expression(output, array, arena);
+            output.push(' ');
+            dump_expression(output, index, arena);
+        }
+        HirExpressionKind::ArrayFill { array, value } => {
+            output.push_str("array.fill ");
+            dump_expression(output, array, arena);
+            output.push(' ');
+            dump_expression(output, value, arena);
         }
         HirExpressionKind::Record { record, fields } => {
             let _ = write!(output, "record s{} ", record.raw());

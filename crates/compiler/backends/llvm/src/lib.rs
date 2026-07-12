@@ -62,6 +62,19 @@ impl LlvmModule {
         &self.triple
     }
 
+    /// Parses and verifies the generated textual LLVM module.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when LLVM rejects the backend-private IR.
+    pub fn verify(&self) -> Result<(), LlvmEmissionError> {
+        let context = Context::create();
+        let module = self.parse_module(&context)?;
+        module
+            .verify()
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))
+    }
+
     /// Verifies this module through LLVM and emits a native object with Inkwell.
     ///
     /// # Errors
@@ -72,12 +85,7 @@ impl LlvmModule {
         Target::initialize_native(&InitializationConfig::default())
             .map_err(LlvmEmissionError::TargetInitialization)?;
         let context = Context::create();
-        let mut text = self.to_string().into_bytes();
-        text.push(0);
-        let buffer = MemoryBuffer::create_from_memory_range_copy(&text, "pop-module");
-        let module = context
-            .create_module_from_ir(buffer)
-            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
+        let module = self.parse_module(&context)?;
         let triple = TargetTriple::create(&self.triple);
         module.set_triple(&triple);
         let target = Target::from_triple(&triple)
@@ -115,6 +123,18 @@ impl LlvmModule {
         machine
             .write_to_file(&module, FileType::Object, path)
             .map_err(|error| LlvmEmissionError::ObjectEmission(error.to_string()))
+    }
+
+    fn parse_module<'context>(
+        &self,
+        context: &'context Context,
+    ) -> Result<inkwell::module::Module<'context>, LlvmEmissionError> {
+        let mut text = self.to_string().into_bytes();
+        text.push(0);
+        let buffer = MemoryBuffer::create_from_memory_range_copy(&text, "pop-module");
+        context
+            .create_module_from_ir(buffer)
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))
     }
 }
 
@@ -276,6 +296,7 @@ pub fn lower_mir_to_llvm_ir(
             &string_literals,
         )?);
     }
+    functions.push(direct_scalar_array_fill_function());
     functions.extend(lower_interface_dispatchers(bubble, types)?);
     functions.extend(lower_indirect_dispatchers(bubble, types)?);
     let entry_point = options
@@ -291,6 +312,10 @@ pub fn lower_mir_to_llvm_ir(
         format!(
             "declare i64 @{}(i64, i1)",
             RuntimeOperation::AllocateArray.abi_symbol()
+        ),
+        format!(
+            "declare i64 @{}(i64, i1, i64)",
+            RuntimeOperation::AllocateArrayFilled.abi_symbol()
         ),
         format!(
             "declare i64 @{}(i64, i1, i1)",
@@ -326,6 +351,8 @@ pub fn lower_mir_to_llvm_ir(
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
         "declare i1 @llvm.expect.i1(i1, i1)".to_owned(),
+        "declare noalias ptr @malloc(i64) nounwind".to_owned(),
+        "declare void @free(ptr) nounwind".to_owned(),
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
@@ -341,6 +368,42 @@ pub fn lower_mir_to_llvm_ir(
             functions_internal: options.entry_point.is_some(),
         },
     })
+}
+
+fn direct_scalar_array_fill_function() -> PrivateFunction {
+    PrivateFunction {
+        name: "pop_llvm_fill_scalar_array".to_owned(),
+        parameters: vec![
+            "ptr %storage".to_owned(),
+            "i64 %length".to_owned(),
+            "i64 %value".to_owned(),
+        ],
+        result: "void".to_owned(),
+        blocks: vec![
+            PrivateBlock {
+                label: "entry".to_owned(),
+                instructions: vec!["%empty = icmp eq i64 %length, 0".to_owned()],
+                terminator: "br i1 %empty, label %done, label %fill".to_owned(),
+            },
+            PrivateBlock {
+                label: "fill".to_owned(),
+                instructions: vec![
+                    "%index = phi i64 [ 0, %entry ], [ %next, %fill ]".to_owned(),
+                    "%slot = getelementptr i64, ptr %storage, i64 %index".to_owned(),
+                    "store i64 %value, ptr %slot, align 8".to_owned(),
+                    "%next = add nuw i64 %index, 1".to_owned(),
+                    "%filled = icmp eq i64 %next, %length".to_owned(),
+                ],
+                terminator: "br i1 %filled, label %done, label %fill".to_owned(),
+            },
+            PrivateBlock {
+                label: "done".to_owned(),
+                instructions: Vec::new(),
+                terminator: "ret void".to_owned(),
+            },
+        ],
+        attributes: vec!["nounwind"],
+    }
 }
 
 fn checked_integer_declarations() -> Vec<String> {
@@ -506,12 +569,24 @@ fn runtime_declarations() -> Vec<String> {
             RuntimeOperation::ArrayGet.abi_symbol()
         ),
         format!(
+            "declare i8 @{}(i64, ptr) nounwind",
+            RuntimeOperation::ArrayLength.abi_symbol()
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, ptr) nounwind",
+            RuntimeOperation::ArrayGetChecked.abi_symbol()
+        ),
+        format!(
             "declare i64 @{}(i64, i64) nounwind",
             RuntimeOperation::FieldGet.abi_symbol()
         ),
         format!(
             "declare i8 @{}(i64, i64, i64) nounwind",
             RuntimeOperation::ArraySet.abi_symbol()
+        ),
+        format!(
+            "declare i8 @{}(i64, i64) nounwind",
+            RuntimeOperation::ArrayFill.abi_symbol()
         ),
         format!(
             "declare i8 @{}(i64, i64, i64) nounwind",
@@ -1119,7 +1194,209 @@ fn lower_function(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DirectScalarArray {
+    length: ValueId,
+    initial_value: ValueId,
+    element_type: TypeId,
+}
+
+#[derive(Debug, Default)]
+struct DirectScalarArrays {
+    allocations: BTreeMap<ValueId, DirectScalarArray>,
+    aliases: BTreeMap<ValueId, ValueId>,
+}
+
+impl DirectScalarArrays {
+    #[allow(clippy::too_many_lines)]
+    fn analyze(
+        blocks: &[pop_mir::MirBlock],
+        value_types: &BTreeMap<ValueId, TypeId>,
+        types: &TypeArena,
+    ) -> Self {
+        let Some(entry) = blocks.first() else {
+            return Self::default();
+        };
+        let mut allocations = BTreeMap::new();
+        let mut aliases = BTreeMap::new();
+        for instruction in entry.instructions() {
+            let MirInstructionKind::ArrayCreate {
+                length,
+                initial_value,
+                element_map: ArrayElementMap::Scalar,
+            } = instruction.kind()
+            else {
+                continue;
+            };
+            let Some(SemanticType::Array(element_type)) = value_types
+                .get(&instruction.result())
+                .and_then(|type_id| types.get(*type_id))
+            else {
+                continue;
+            };
+            if !is_direct_scalar_element(*element_type, types) {
+                continue;
+            }
+            allocations.insert(
+                instruction.result(),
+                DirectScalarArray {
+                    length: *length,
+                    initial_value: *initial_value,
+                    element_type: *element_type,
+                },
+            );
+            aliases.insert(instruction.result(), instruction.result());
+        }
+        if allocations.is_empty() {
+            return Self::default();
+        }
+
+        let mut incoming: BTreeMap<BlockId, Vec<Vec<ValueId>>> = BTreeMap::new();
+        for block in blocks {
+            if let MirTerminator::Branch { target, arguments } = block.terminator() {
+                incoming.entry(*target).or_default().push(arguments.clone());
+            }
+        }
+        loop {
+            let mut changed = false;
+            for block in blocks {
+                let Some(edges) = incoming.get(&block.block()) else {
+                    continue;
+                };
+                for (index, argument) in block.arguments().iter().enumerate() {
+                    let origins = edges
+                        .iter()
+                        .filter_map(|values| values.get(index))
+                        .filter_map(|value| aliases.get(value).copied())
+                        .collect::<BTreeSet<_>>();
+                    let Some(origin) = origins.first().copied() else {
+                        continue;
+                    };
+                    if origins.len() == 1 && !aliases.contains_key(&argument.value()) {
+                        aliases.insert(argument.value(), origin);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut rejected = BTreeSet::new();
+        for block in blocks {
+            for instruction in block.instructions() {
+                let used = instruction
+                    .operands()
+                    .into_iter()
+                    .filter_map(|value| aliases.get(&value).copied())
+                    .collect::<BTreeSet<_>>();
+                for origin in used {
+                    let allowed_array = match instruction.kind() {
+                        MirInstructionKind::ArrayLength { array }
+                        | MirInstructionKind::ArrayGetChecked { array, .. }
+                        | MirInstructionKind::ArraySet { array, .. }
+                        | MirInstructionKind::ArrayFill { array, .. } => {
+                            aliases.get(array).copied() == Some(origin)
+                        }
+                        _ => false,
+                    };
+                    let has_non_array_use = instruction.operands().into_iter().any(|value| {
+                        aliases.get(&value).copied() == Some(origin)
+                            && !matches!(
+                                instruction.kind(),
+                                MirInstructionKind::ArrayLength { array }
+                                    | MirInstructionKind::ArrayGetChecked { array, .. }
+                                    | MirInstructionKind::ArraySet { array, .. }
+                                    | MirInstructionKind::ArrayFill { array, .. }
+                                    if *array == value
+                            )
+                    });
+                    if !allowed_array || has_non_array_use {
+                        rejected.insert(origin);
+                    }
+                }
+            }
+            match block.terminator() {
+                MirTerminator::Branch { target, arguments } => {
+                    let target_arguments = blocks
+                        .iter()
+                        .find(|candidate| candidate.block() == *target)
+                        .map(pop_mir::MirBlock::arguments)
+                        .unwrap_or_default();
+                    for (index, value) in arguments.iter().enumerate() {
+                        let Some(origin) = aliases.get(value).copied() else {
+                            continue;
+                        };
+                        let target_origin = target_arguments
+                            .get(index)
+                            .and_then(|argument| aliases.get(&argument.value()))
+                            .copied();
+                        if target_origin != Some(origin) {
+                            rejected.insert(origin);
+                            rejected.extend(target_origin);
+                        }
+                    }
+                }
+                MirTerminator::Return { values } => {
+                    rejected.extend(
+                        values
+                            .iter()
+                            .filter_map(|value| aliases.get(value).copied()),
+                    );
+                }
+                MirTerminator::ConditionalBranch { condition, .. } => {
+                    if let Some(origin) = aliases.get(condition) {
+                        rejected.insert(*origin);
+                    }
+                }
+                MirTerminator::UnionSwitch { scrutinee, .. } => {
+                    if let Some(origin) = aliases.get(scrutinee) {
+                        rejected.insert(*origin);
+                    }
+                }
+                MirTerminator::Missing
+                | MirTerminator::Trap(_)
+                | MirTerminator::Panic(_)
+                | MirTerminator::ContinueUnwind(_)
+                | MirTerminator::Unreachable => {}
+            }
+        }
+        allocations.retain(|origin, _| !rejected.contains(origin));
+        aliases.retain(|_, origin| allocations.contains_key(origin));
+        Self {
+            allocations,
+            aliases,
+        }
+    }
+
+    fn origin(&self, value: ValueId) -> Option<ValueId> {
+        self.aliases.get(&value).copied()
+    }
+
+    fn allocation(&self, value: ValueId) -> Option<(ValueId, DirectScalarArray)> {
+        let origin = self.origin(value)?;
+        self.allocations
+            .get(&origin)
+            .copied()
+            .map(|allocation| (origin, allocation))
+    }
+}
+
+fn is_direct_scalar_element(type_id: TypeId, types: &TypeArena) -> bool {
+    matches!(
+        types.get(type_id),
+        Some(SemanticType::Primitive(
+            PrimitiveType::Boolean
+                | PrimitiveType::Integer(_)
+                | PrimitiveType::Float32
+                | PrimitiveType::Float64
+        ))
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn lower_function_parts(
     bubble: BubbleId,
     name: String,
@@ -1152,16 +1429,21 @@ fn lower_function_parts(
             }
         }
     }
+    let direct_scalar_arrays = DirectScalarArrays::analyze(function_blocks, &value_types, types);
     let mut incoming_edges: BTreeMap<BlockId, Vec<(String, Vec<ValueId>)>> = BTreeMap::new();
     let mut union_payload_sources = BTreeMap::new();
     let mut has_union_switch = false;
     for predecessor in function_blocks {
         match predecessor.terminator() {
             MirTerminator::Branch { target, arguments } => {
-                incoming_edges
-                    .entry(*target)
-                    .or_default()
-                    .push((llvm_block_exit_label(predecessor), arguments.clone()));
+                incoming_edges.entry(*target).or_default().push((
+                    llvm_block_exit_label(
+                        predecessor,
+                        &proven_non_overflow_adds,
+                        &direct_scalar_arrays,
+                    ),
+                    arguments.clone(),
+                ));
             }
             MirTerminator::UnionSwitch {
                 scrutinee, arms, ..
@@ -1183,7 +1465,12 @@ fn lower_function_parts(
             types,
         )?;
         if block_index == 0 {
-            instructions.splice(0..0, initialize_gc_poll(has_gc_safe_point));
+            let mut initialization = initialize_gc_poll(has_gc_safe_point);
+            initialization.extend(initialize_array_outputs(
+                function_blocks,
+                &direct_scalar_arrays,
+            ));
+            instructions.splice(0..0, initialization);
         }
         for instruction in block.instructions() {
             if options.emit_comments {
@@ -1200,12 +1487,18 @@ fn lower_function_parts(
                 string_literals,
                 environment,
                 &proven_non_overflow_adds,
+                &direct_scalar_arrays,
             )?);
         }
         blocks.push(PrivateBlock {
             label: format!("b{}", block.block().raw()),
             instructions,
-            terminator: lower_terminator(block.terminator(), &value_types, types)?,
+            terminator: lower_terminator(
+                block.terminator(),
+                &value_types,
+                types,
+                &direct_scalar_arrays,
+            )?,
         });
     }
     if has_union_switch {
@@ -1484,33 +1777,65 @@ fn initialize_gc_poll(has_gc_safe_point: bool) -> Vec<String> {
     ]
 }
 
-fn llvm_block_exit_label(block: &pop_mir::MirBlock) -> String {
+fn initialize_array_outputs(
+    blocks: &[pop_mir::MirBlock],
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> Vec<String> {
+    blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter(|instruction| {
+            matches!(
+                instruction.kind(),
+                MirInstructionKind::ArrayLength { .. } | MirInstructionKind::ArrayGetChecked { .. }
+            ) && match instruction.kind() {
+                MirInstructionKind::ArrayLength { array }
+                | MirInstructionKind::ArrayGetChecked { array, .. } => {
+                    direct_scalar_arrays.origin(*array).is_none()
+                }
+                _ => true,
+            }
+        })
+        .map(|instruction| format!("%v{}_output = alloca i64", instruction.result().raw()))
+        .collect()
+}
+
+fn llvm_block_exit_label(
+    block: &pop_mir::MirBlock,
+    proven_non_overflow_adds: &BTreeSet<ValueId>,
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> String {
     block
         .instructions()
         .iter()
         .rev()
-        .find(|instruction| {
-            matches!(
-                instruction.kind(),
+        .find_map(|instruction| {
+            let suffix = match instruction.kind() {
                 MirInstructionKind::CheckedIntegerAdd { .. }
-                    | MirInstructionKind::CheckedIntegerSubtract { .. }
-                    | MirInstructionKind::CheckedIntegerMultiply { .. }
-                    | MirInstructionKind::CheckedIntegerDivide { .. }
-                    | MirInstructionKind::CheckedIntegerRemainder { .. }
-                    | MirInstructionKind::IntegerNegate { .. }
-                    | MirInstructionKind::GcSafePoint { .. }
-            )
-        })
-        .map_or_else(
-            || format!("b{}", block.block().raw()),
-            |instruction| {
-                if matches!(instruction.kind(), MirInstructionKind::GcSafePoint { .. }) {
-                    format!("v{}_poll_continue", instruction.result().raw())
-                } else {
-                    format!("v{}_continue", instruction.result().raw())
+                    if proven_non_overflow_adds.contains(&instruction.result()) =>
+                {
+                    return None;
                 }
-            },
-        )
+                MirInstructionKind::CheckedIntegerAdd { .. }
+                | MirInstructionKind::CheckedIntegerSubtract { .. }
+                | MirInstructionKind::CheckedIntegerMultiply { .. }
+                | MirInstructionKind::CheckedIntegerDivide { .. }
+                | MirInstructionKind::CheckedIntegerRemainder { .. }
+                | MirInstructionKind::IntegerNegate { .. }
+                | MirInstructionKind::ArraySet { .. }
+                | MirInstructionKind::ArrayFill { .. } => "continue",
+                MirInstructionKind::GcSafePoint { .. } => "poll_continue",
+                MirInstructionKind::ArrayCreate { .. } => "create",
+                MirInstructionKind::ArrayLength { array }
+                | MirInstructionKind::ArrayGetChecked { array, .. } => {
+                    let _ = direct_scalar_arrays.origin(*array);
+                    "load"
+                }
+                _ => return None,
+            };
+            Some(format!("v{}_{suffix}", instruction.result().raw()))
+        })
+        .unwrap_or_else(|| format!("b{}", block.block().raw()))
 }
 
 fn lower_block_arguments(
@@ -1572,6 +1897,7 @@ fn lower_instruction(
     string_literals: &BTreeMap<String, String>,
     environment: Option<(&str, &BTreeSet<u32>)>,
     proven_non_overflow_adds: &BTreeSet<ValueId>,
+    direct_scalar_arrays: &DirectScalarArrays,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
@@ -1748,7 +2074,7 @@ fn lower_instruction(
         }
         MirInstructionKind::GcSafePoint {
             safe_point, roots, ..
-        } => lower_gc_safe_point(&result, safe_point.raw(), roots),
+        } => lower_gc_safe_point(&result, safe_point.raw(), roots, direct_scalar_arrays),
         MirInstructionKind::RetainRoot { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
             RuntimeOperation::RetainRoot.abi_symbol(),
@@ -1794,6 +2120,27 @@ fn lower_instruction(
             elements,
             element_map,
         } => lower_array_make(&result, elements, *element_map, value_types, types)?,
+        MirInstructionKind::ArrayCreate {
+            length,
+            initial_value,
+            element_map,
+        } => {
+            if let Some((origin, allocation)) =
+                direct_scalar_arrays.allocation(instruction.result())
+            {
+                debug_assert_eq!(origin, instruction.result());
+                lower_direct_array_create(&result, allocation, value_types, types)?
+            } else {
+                lower_array_create(
+                    &result,
+                    *length,
+                    *initial_value,
+                    *element_map,
+                    value_types,
+                    types,
+                )?
+            }
+        }
         MirInstructionKind::TableMake {
             entries,
             key_map,
@@ -1877,11 +2224,68 @@ fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::ArrayLength { array } => {
+            if let Some((_, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_length(&result, allocation)
+            } else {
+                lower_array_output_call(
+                    &result,
+                    instruction.result_type(),
+                    RuntimeOperation::ArrayLength,
+                    &[*array],
+                    value_types,
+                    types,
+                )?
+            }
+        }
+        MirInstructionKind::ArrayGetChecked { array, index } => {
+            if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_get(
+                    &result,
+                    origin,
+                    allocation,
+                    *index,
+                    instruction.result_type(),
+                    types,
+                )?
+            } else {
+                lower_array_output_call(
+                    &result,
+                    instruction.result_type(),
+                    RuntimeOperation::ArrayGetChecked,
+                    &[*array, *index],
+                    value_types,
+                    types,
+                )?
+            }
+        }
         MirInstructionKind::ArraySet {
             array,
             index,
             value,
-        } => lower_array_set(&result, *array, *index, *value, value_types, types)?,
+            ..
+        } => {
+            if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_set(
+                    &result,
+                    origin,
+                    allocation,
+                    *index,
+                    *value,
+                    value_types,
+                    types,
+                )?
+            } else {
+                lower_array_set(&result, *array, *index, *value, value_types, types)?
+            }
+        }
+        MirInstructionKind::ArrayFill { array, value, .. } => {
+            if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_fill(&result, origin, allocation, *value, value_types, types)?
+            } else {
+                lower_array_fill(&result, *array, *value, value_types, types)?
+            }
+        }
         MirInstructionKind::RecordUpdate {
             record,
             base,
@@ -1983,8 +2387,9 @@ fn lower_terminator(
     terminator: &MirTerminator,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    direct_scalar_arrays: &DirectScalarArrays,
 ) -> Result<String, LlvmLoweringError> {
-    Ok(match terminator {
+    let lowered = match terminator {
         MirTerminator::Branch { target, .. } => format!("br label %b{}", target.raw()),
         MirTerminator::ConditionalBranch {
             condition,
@@ -2035,7 +2440,27 @@ fn lower_terminator(
                 scrutinee.raw()
             )
         }
-    })
+    };
+    if matches!(terminator, MirTerminator::Return { .. })
+        && !direct_scalar_arrays.allocations.is_empty()
+    {
+        let releases = direct_scalar_arrays
+            .allocations
+            .keys()
+            .map(|origin| {
+                format!(
+                    "%pop_direct_array_{}_storage = inttoptr i64 %v{} to ptr\n  call void @free(ptr %pop_direct_array_{}_storage)",
+                    origin.raw(),
+                    origin.raw(),
+                    origin.raw()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        Ok(format!("{releases}\n  {lowered}"))
+    } else {
+        Ok(lowered)
+    }
 }
 
 fn lower_checked_integer_binary(
@@ -2363,6 +2788,351 @@ fn runtime_call(
     ))
 }
 
+fn lower_array_create(
+    result: &str,
+    length: ValueId,
+    initial_value: ValueId,
+    element_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let initial_type = *values
+        .get(&initial_value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) = lower_runtime_slot_store(
+        initial_value,
+        initial_type,
+        &llvm_type(initial_type, types)?,
+    )?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!("{result}_length_valid = icmp sge i64 %v{}, 0", length.raw()),
+        format!(
+            "{result}_length_expected = call i1 @llvm.expect.i1(i1 {result}_length_valid, i1 true)"
+        ),
+        format!(
+            "br i1 {result}_length_expected, label %{label}_create, label %{label}_length_trap"
+        ),
+        format!("{label}_length_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_create:"),
+        format!(
+            "  {result} = call i64 @{}(i64 %v{}, i1 {}, i64 {stored})",
+            RuntimeOperation::AllocateArrayFilled.abi_symbol(),
+            length.raw(),
+            u8::from(element_map == ArrayElementMap::ManagedReference)
+        ),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+fn lower_direct_array_create(
+    result: &str,
+    allocation: DirectScalarArray,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let initial_type = *values
+        .get(&allocation.initial_value)
+        .ok_or(LlvmLoweringError::InvalidType(allocation.element_type))?;
+    if initial_type != allocation.element_type {
+        return Err(LlvmLoweringError::InvalidType(allocation.element_type));
+    }
+    let (mut lines, stored) = lower_runtime_slot_store(
+        allocation.initial_value,
+        initial_type,
+        &llvm_type(initial_type, types)?,
+    )?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_size_pair = call {{ i64, i1 }} @llvm.umul.with.overflow.i64(i64 %v{}, i64 8)",
+            allocation.length.raw()
+        ),
+        format!("{result}_size = extractvalue {{ i64, i1 }} {result}_size_pair, 0"),
+        format!("{result}_size_overflow = extractvalue {{ i64, i1 }} {result}_size_pair, 1"),
+        format!(
+            "{result}_length_nonnegative = icmp sge i64 %v{}, 0",
+            allocation.length.raw()
+        ),
+        format!("{result}_size_valid = xor i1 {result}_size_overflow, true"),
+        format!(
+            "{result}_shape_valid = and i1 {result}_length_nonnegative, {result}_size_valid"
+        ),
+        format!(
+            "{result}_shape_expected = call i1 @llvm.expect.i1(i1 {result}_shape_valid, i1 true)"
+        ),
+        format!(
+            "br i1 {result}_shape_expected, label %{label}_allocate, label %{label}_length_trap"
+        ),
+        format!("{label}_length_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_allocate:"),
+        format!("  {result}_storage = call noalias ptr @malloc(i64 {result}_size)"),
+        format!(
+            "  {result}_empty = icmp eq i64 %v{}, 0",
+            allocation.length.raw()
+        ),
+        format!("  {result}_allocated = icmp ne ptr {result}_storage, null"),
+        format!(
+            "  {result}_allocation_valid = or i1 {result}_empty, {result}_allocated"
+        ),
+        format!(
+            "  {result}_allocation_expected = call i1 @llvm.expect.i1(i1 {result}_allocation_valid, i1 true)"
+        ),
+        format!(
+            "  br i1 {result}_allocation_expected, label %{label}_initialize, label %{label}_allocation_trap"
+        ),
+        format!("{label}_allocation_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_initialize:"),
+        format!(
+            "  call void @pop_llvm_fill_scalar_array(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            allocation.length.raw()
+        ),
+        format!("  br label %{label}_create"),
+        format!("{label}_create:"),
+        format!("  {result} = ptrtoint ptr {result}_storage to i64"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+fn lower_direct_array_length(result: &str, allocation: DirectScalarArray) -> String {
+    let label = result.trim_start_matches('%');
+    format!(
+        "br label %{label}_load\n{label}_load:\n  {result} = add i64 %v{}, 0",
+        allocation.length.raw()
+    )
+}
+
+fn lower_direct_array_get(
+    result: &str,
+    origin: ValueId,
+    allocation: DirectScalarArray,
+    index: ValueId,
+    result_type: TypeId,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let element_type = llvm_type(result_type, types)?;
+    let expected_type = llvm_type(allocation.element_type, types)?;
+    if element_type != expected_type {
+        return Err(LlvmLoweringError::InvalidType(result_type));
+    }
+    let label = result.trim_start_matches('%');
+    let mut lines = vec![
+        format!("{result}_zero_index = sub i64 %v{}, 1", index.raw()),
+        format!(
+            "{result}_in_bounds = icmp ult i64 {result}_zero_index, %v{}",
+            allocation.length.raw()
+        ),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+        format!(
+            "  {result}_storage = inttoptr i64 %v{} to ptr",
+            origin.raw()
+        ),
+        format!(
+            "  {result}_slot = getelementptr i64, ptr {result}_storage, i64 {result}_zero_index"
+        ),
+    ];
+    lines.extend(lower_array_output_load(
+        result,
+        result_type,
+        &format!("{result}_slot"),
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_direct_array_set(
+    result: &str,
+    origin: ValueId,
+    allocation: DirectScalarArray,
+    index: ValueId,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(allocation.element_type))?;
+    if value_type != allocation.element_type {
+        return Err(LlvmLoweringError::InvalidType(allocation.element_type));
+    }
+    let (mut conversion, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    conversion.extend([
+        format!("{result}_zero_index = sub i64 %v{}, 1", index.raw()),
+        format!(
+            "{result}_in_bounds = icmp ult i64 {result}_zero_index, %v{}",
+            allocation.length.raw()
+        ),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!(
+            "  {result}_storage = inttoptr i64 %v{} to ptr",
+            origin.raw()
+        ),
+        format!(
+            "  {result}_slot = getelementptr i64, ptr {result}_storage, i64 {result}_zero_index"
+        ),
+        format!("  store i64 {stored}, ptr {result}_slot, align 8"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(conversion.join("\n"))
+}
+
+fn lower_direct_array_fill(
+    result: &str,
+    origin: ValueId,
+    allocation: DirectScalarArray,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(allocation.element_type))?;
+    if value_type != allocation.element_type {
+        return Err(LlvmLoweringError::InvalidType(allocation.element_type));
+    }
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!("{result}_storage = inttoptr i64 %v{} to ptr", origin.raw()),
+        format!(
+            "call void @pop_llvm_fill_scalar_array(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            allocation.length.raw()
+        ),
+        format!("br label %{label}_continue"),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+fn lower_array_output_call(
+    result: &str,
+    result_type: TypeId,
+    operation: RuntimeOperation,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let output = format!("{result}_output");
+    let success = format!("{result}_success");
+    let expected = format!("{result}_success_expected");
+    let label = result.trim_start_matches('%');
+    let arguments = arguments
+        .iter()
+        .map(|value| {
+            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut lines = Vec::new();
+    lines.extend([
+        format!(
+            "{success} = call i8 @{}({}, ptr {output})",
+            operation.abi_symbol(),
+            arguments.join(", ")
+        ),
+        format!("{success}_condition = icmp ne i8 {success}, 0"),
+        format!("{expected} = call i1 @llvm.expect.i1(i1 {success}_condition, i1 true)"),
+        format!("br i1 {expected}, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+    ]);
+    lines.extend(lower_array_output_load(
+        result,
+        result_type,
+        &output,
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+fn lower_array_output_load(
+    result: &str,
+    result_type: TypeId,
+    output: &str,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let ty = llvm_type(result_type, types)?;
+    let loaded = format!("{result}_slot");
+    Ok(match ty.as_str() {
+        "i64" => vec![format!("  {result} = load i64, ptr {output}")],
+        "i1" | "i8" | "i16" | "i32" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {result} = trunc i64 {loaded} to {ty}"),
+        ],
+        "float" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {loaded}_bits = trunc i64 {loaded} to i32"),
+            format!("  {result} = bitcast i32 {loaded}_bits to float"),
+        ],
+        "double" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {result} = bitcast i64 {loaded} to double"),
+        ],
+        "ptr" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {result} = inttoptr i64 {loaded} to ptr"),
+        ],
+        _ => return Err(LlvmLoweringError::InvalidType(result_type)),
+    })
+}
+
+fn lower_array_fill(
+    result: &str,
+    array: ValueId,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_filled = call i8 @{}(i64 %v{}, i64 {stored})",
+            RuntimeOperation::ArrayFill.abi_symbol(),
+            array.raw()
+        ),
+        format!("{result}_success = icmp ne i8 {result}_filled, 0"),
+        format!("{result}_expected = call i1 @llvm.expect.i1(i1 {result}_success, i1 true)"),
+        format!("br i1 {result}_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
 fn lower_array_set(
     result: &str,
     array: ValueId,
@@ -2462,7 +3232,17 @@ fn lower_mapped_allocation(result: &str, slot_count: u32, reference_slots: &[u32
     lines
 }
 
-fn lower_gc_safe_point(result: &str, safe_point: u32, roots: &[ValueId]) -> String {
+fn lower_gc_safe_point(
+    result: &str,
+    safe_point: u32,
+    roots: &[ValueId],
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> String {
+    let roots = roots
+        .iter()
+        .copied()
+        .filter(|root| direct_scalar_arrays.origin(*root).is_none())
+        .collect::<Vec<_>>();
     let label = result.trim_start_matches('%');
     let budget = format!("{result}_poll_budget");
     let remaining = format!("{result}_poll_remaining");

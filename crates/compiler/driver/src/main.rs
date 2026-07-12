@@ -20,7 +20,7 @@ use pop_types::SemanticType;
 
 const USAGE: &str = "\
 Usage:
-    pop check <source.pop> [--dump <hir|mir>]...
+    pop check <source.pop> [--dump <hir|mir|ll>]...
     pop build <source.pop> --output <executable>
     pop transpile <source.pop> --to c
     pop run <source.pop> [-- <arguments>...]
@@ -35,6 +35,7 @@ serialization formats.";
 enum DumpKind {
     Hir,
     Mir,
+    Ll,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -117,7 +118,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Comm
         }
         if argument == "--dump" {
             let Some(kind) = arguments.next() else {
-                return Err("`--dump` requires hir|mir".to_owned());
+                return Err("`--dump` requires hir|mir|ll".to_owned());
             };
             let kind = parse_dump_kind(&kind)?;
             if !dumps.contains(&kind) {
@@ -246,8 +247,9 @@ fn parse_dump_kind(kind: &OsStr) -> Result<DumpKind, String> {
     match kind.to_str() {
         Some("hir") => Ok(DumpKind::Hir),
         Some("mir") => Ok(DumpKind::Mir),
+        Some("ll") => Ok(DumpKind::Ll),
         _ => Err(format!(
-            "unsupported dump kind `{}`; expected hir|mir",
+            "unsupported dump kind `{}`; expected hir|mir|ll",
             kind.to_string_lossy()
         )),
     }
@@ -303,15 +305,50 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
             return ExitCode::from(101);
         }
     };
+    let llvm = if dumps.contains(&DumpKind::Ll) {
+        let module = match lower_mir_to_llvm_ir(
+            &mir,
+            result.types(),
+            &native_target(),
+            LlvmLoweringOptions::default(),
+        ) {
+            Ok(module) => module,
+            Err(error) => {
+                eprintln!("pop: internal compiler error: LLVM lowering failed: {error}");
+                return ExitCode::from(101);
+            }
+        };
+        if let Err(error) = module.verify() {
+            eprintln!("pop: internal compiler error: {error}");
+            return ExitCode::from(101);
+        }
+        Some(module)
+    } else {
+        None
+    };
 
     let mut output = String::new();
     for dump in dumps {
         match dump {
             DumpKind::Hir => output.push_str(&hir.dump(result.types())),
             DumpKind::Mir => output.push_str(&mir.dump()),
+            DumpKind::Ll => output.push_str(
+                &llvm
+                    .as_ref()
+                    .expect("requested LLVM dump was lowered and verified")
+                    .to_string(),
+            ),
         }
     }
     write_output(&output)
+}
+
+fn native_target() -> TargetSpec {
+    TargetSpec::builder("x86_64-unknown-linux-gnu")
+        .pointer_width(PointerWidth::Bits64)
+        .endianness(Endianness::Little)
+        .build()
+        .expect("repository native target is complete")
 }
 
 fn write_diagnostics(diagnostics: &str) -> ExitCode {
@@ -333,11 +370,7 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let Some(program) = lower_native_source(source_path) else {
         return ExitCode::FAILURE;
     };
-    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
-        .expect("repository native target is complete");
+    let target = native_target();
     let module = match lower_mir_to_llvm_ir(
         &program.mir,
         &program.types,
@@ -556,11 +589,7 @@ fn collect_sources_in(
 }
 
 fn emit_native_object(program: &NativeProgram, output_path: &Path) -> Option<()> {
-    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
-        .expect("repository native target is complete");
+    let target = native_target();
     let options = program
         .entry
         .map_or_else(LlvmLoweringOptions::default, |entry| {
@@ -710,13 +739,13 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
     let runtime = root.join(format!("target/{profile}/libpop_runtime_native.a"));
 
     let mut command = Command::new("cargo");
-        command
+    command
         .current_dir(root)
         .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"]);
-        if profile == "release" {
+    if profile == "release" {
         command.arg("--release");
-        }
-        let build = command.status();
+    }
+    let build = command.status();
 
     if !matches!(build, Ok(status) if status.success()) {
         eprintln!("pop: could not build bootstrap foundation archives");

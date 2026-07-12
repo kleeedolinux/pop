@@ -209,6 +209,21 @@ pub enum TypedExpressionKind {
         array: Box<TypedExpression>,
         index: Box<TypedExpression>,
     },
+    ArrayCreate {
+        length: Box<TypedExpression>,
+        initial_value: Box<TypedExpression>,
+    },
+    ArrayLength {
+        array: Box<TypedExpression>,
+    },
+    ArrayGetChecked {
+        array: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+    },
+    ArrayFill {
+        array: Box<TypedExpression>,
+        value: Box<TypedExpression>,
+    },
     Record {
         record: SymbolId,
         fields: Vec<TypedFieldValue>,
@@ -1609,6 +1624,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             ));
             return None;
         };
+        if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
+            return self.check_array_create(type_arguments, arguments, span);
+        }
         let [query] = path.as_slice() else {
             self.diagnostics.push(resolution_diagnostics::unknown_name(
                 callee.span(),
@@ -1975,6 +1993,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<CheckedInvocation> {
         if let ExpressionSyntaxKind::Name(path) = callee.kind() {
+            if matches!(
+                path.as_slice(),
+                [array, operation]
+                    if array == "Array"
+                        && matches!(operation.as_str(), "length" | "get" | "fill")
+            ) {
+                return self
+                    .check_array_invocation(path, arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if let Some(checked) = self.check_standard_invocation(path, arguments, span) {
                 return Some(CheckedInvocation::Call(checked));
             }
@@ -2058,6 +2086,153 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn check_array_create(
+        &mut self,
+        type_arguments: &[pop_syntax::TypeSyntax],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if type_arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                span,
+                "Array.create",
+                1,
+                type_arguments.len(),
+            ));
+            return None;
+        }
+        if arguments.len() != 2 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "Array.create",
+                2,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let signature = self.signature_stack.last()?.clone();
+        let (resolved, diagnostics) =
+            self.resolver
+                .resolve_annotation(self.module, &type_arguments[0], &signature);
+        self.diagnostics.extend(diagnostics);
+        let element_type = resolved?.type_id()?;
+        let integer = self.resolver.arena().source_type("Int")?;
+        let length = self.check_expression_expected(
+            &arguments[0],
+            Some(ExpectedExpressionType::plain(integer)),
+        )?;
+        self.require_same_type(
+            integer,
+            length.type_id(),
+            length.span(),
+            arguments[0].span(),
+        );
+        let initial_value = self.check_expression_expected(
+            &arguments[1],
+            Some(ExpectedExpressionType::plain(element_type)),
+        )?;
+        self.require_same_type(
+            element_type,
+            initial_value.type_id(),
+            initial_value.span(),
+            type_arguments[0].span(),
+        );
+        let array_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Array(element_type))
+            .ok()?;
+        Some(TypedExpression {
+            kind: TypedExpressionKind::ArrayCreate {
+                length: Box::new(length),
+                initial_value: Box::new(initial_value),
+            },
+            type_id: array_type,
+            span,
+        })
+    }
+
+    fn check_array_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let operation = path.get(1)?.as_str();
+        let expected_arity = if operation == "fill" {
+            2
+        } else {
+            1 + usize::from(operation == "get")
+        };
+        if arguments.len() != expected_arity {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                format!("Array.{operation}"),
+                expected_arity,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let array = self.check_expression(&arguments[0])?;
+        let Some(SemanticType::Array(element_type)) =
+            self.resolver.arena().get(array.type_id()).cloned()
+        else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                arguments[0].span(),
+                "Array<T>",
+                self.type_name(array.type_id()),
+                span,
+            ));
+            return None;
+        };
+        match operation {
+            "length" => Some(TypedExpression {
+                kind: TypedExpressionKind::ArrayLength {
+                    array: Box::new(array),
+                },
+                type_id: self.resolver.arena().source_type("Int")?,
+                span,
+            }),
+            "get" => {
+                let integer = self.resolver.arena().source_type("Int")?;
+                let index = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(integer)),
+                )?;
+                self.require_same_type(integer, index.type_id(), index.span(), arguments[1].span());
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ArrayGetChecked {
+                        array: Box::new(array),
+                        index: Box::new(index),
+                    },
+                    type_id: element_type,
+                    span,
+                })
+            }
+            "fill" => {
+                let value = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(element_type)),
+                )?;
+                self.require_same_type(
+                    element_type,
+                    value.type_id(),
+                    value.span(),
+                    arguments[1].span(),
+                );
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ArrayFill {
+                        array: Box::new(array),
+                        value: Box::new(value),
+                    },
+                    type_id: self.resolver.arena().source_type("nil")?,
+                    span,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn check_standard_invocation(
@@ -3303,6 +3478,7 @@ fn finalize_call_captures(call: &mut TypedCall, written: &BTreeSet<BindingId>) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTreeSet<BindingId>) {
     match &mut expression.kind {
         TypedExpressionKind::Integer(_)
@@ -3333,9 +3509,24 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
                 finalize_expression_captures(&mut field.value, written);
             }
         }
-        TypedExpressionKind::ArrayGet { array, index } => {
+        TypedExpressionKind::ArrayGet { array, index }
+        | TypedExpressionKind::ArrayGetChecked { array, index } => {
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);
+        }
+        TypedExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            finalize_expression_captures(length, written);
+            finalize_expression_captures(initial_value, written);
+        }
+        TypedExpressionKind::ArrayLength { array } => {
+            finalize_expression_captures(array, written);
+        }
+        TypedExpressionKind::ArrayFill { array, value } => {
+            finalize_expression_captures(array, written);
+            finalize_expression_captures(value, written);
         }
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             finalize_expression_captures(base, written);

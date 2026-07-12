@@ -350,7 +350,7 @@ Core commands:
 | Command | Contract |
 | --- | --- |
 | `pop new` / `pop initialize` | Create a Package or Workspace using canonical layout |
-| `pop check` | Resolve and type-check through HIR/MIR verification without final native linking |
+| `pop check` | Resolve and type-check through HIR/MIR verification, with optional verified backend dumps and no final native linking |
 | `pop build` | Build selected Bubbles and dependencies |
 | `pop transpile` | Experimentally emit a selected backend source artifact without compiling it |
 | `pop run` | Build and run exactly one binary/example Bubble |
@@ -399,7 +399,8 @@ the explicit debug-oriented form:
 ```text
 pop check path/to/example.pop --dump hir
 pop check path/to/example.pop --dump mir
-pop check path/to/example.pop --dump hir --dump mir
+pop check path/to/example.pop --dump ll
+pop check path/to/example.pop --dump hir --dump mir --dump ll
 ```
 
 The driver supplies an ephemeral Workspace, Package, Bubble, Module, and
@@ -409,12 +410,15 @@ resolve dependencies, widen visibility, emit build artifacts, or populate
 normal Package/Workspace caches. It therefore cannot replace manifest-driven
 selection for a real program.
 
-`--dump hir` and `--dump mir` are repeatable and preserve request order. The
-driver completes front-end diagnostics, verified HIR construction, and
-canonical MIR verification before writing any requested dump. Diagnostics are
-written to standard error; failure writes no partial IR to standard output.
-Dump text is deterministic for a compiler version and is a test/debug format,
-not a stable serialization or machine compatibility contract.
+`--dump hir`, `--dump mir`, and `--dump ll` are repeatable and preserve request
+order. The driver completes front-end diagnostics, verified HIR construction,
+canonical MIR verification, and, when requested, LLVM lowering and LLVM
+verification before writing any dump. `ll` uses the fixed standalone inspection
+target and is the conventional suffix for textual LLVM IR; it does not enter
+HIR or MIR. Diagnostics are written to standard error; failure writes no
+partial IR to standard output. Dump text is deterministic for a compiler
+version and inspection target and is a test/debug format, not a stable
+serialization or machine compatibility contract.
 
 ### Experimental C transpilation
 
@@ -471,7 +475,7 @@ Stable machine-facing contracts are:
 - structured diagnostics and workspace edits;
 - `pop metadata --messageFormat json` with an explicit schema version;
 - newline-delimited build events for progress/artifacts/diagnostics;
-- deterministic HIR/MIR/debug dumps for the compiler version;
+- deterministic HIR/MIR/LLVM debug dumps for the compiler version and inspection target;
 - dep-info files listing tracked source, manifest, environment capability, and
   generated inputs;
 - cancellation and bounded editor queries;

@@ -29,7 +29,7 @@ The unified command is `pop`, with Cargo-like build/check/run/test/doc,
 dependency, metadata, packaging, and Workspace selection workflows. Dependency
 requirements live in `bubble.toml`; exact resolution lives in `bubble.lock`.
 
-During compiler bootstrap, `pop check <source.pop> --dump hir|mir` also provides
+During compiler bootstrap, `pop check <source.pop> --dump hir|mir|ll` also provides
 a standalone Module inspection mode. The driver creates an ephemeral
 Workspace, Package, and one-Module Bubble for that invocation so the normal
 ownership hierarchy remains intact. Those session-local identities do not come
@@ -42,11 +42,14 @@ a native bootstrap `pop build <source.pop> --output <executable>` and `pop run
 explicitly requested disposable executable; it does not create a Package
 artifact, infer publishable identity, or populate Package/Workspace caches.
 
-`--dump hir` and `--dump mir` are repeatable debugging controls on `pop check`.
-HIR is printed only after successful HIR verification, and MIR only after
-successful canonical MIR verification. The dumps are deterministic for one
-compiler version but are not stable serialization formats. Diagnostics go to
-standard error, and a failed check prints no partial IR to standard output.
+`--dump hir`, `--dump mir`, and `--dump ll` are repeatable debugging controls on
+`pop check`. HIR is printed only after successful HIR verification, MIR only
+after successful canonical MIR verification, and LLVM text only after
+successful backend lowering and LLVM verification for the inspection target.
+The dumps are deterministic for one compiler version and inspection target but
+are not stable serialization formats. Diagnostics go to standard error, and a
+failed check prints no partial IR to standard output. `ll` is the conventional
+LLVM textual-IR suffix; it does not make LLVM part of HIR or MIR.
 
 Reusable library Bubbles continue to emit `.poplib` artifacts. Source semantics
 use `BubbleIdentity`; “library” describes a Bubble/artifact kind or the standard
@@ -97,7 +100,7 @@ selection, diagnostics, configuration, and machine protocols.
 - deterministic `bubble.lock`, offline/locked/frozen modes, and resolver tests;
 - local/registry/Git dependency identity and hash verification;
 - CLI human/JSON parity and deterministic multi-Package diagnostics;
-- standalone Module HIR/MIR dump determinism, verification-before-output,
+- standalone Module HIR/MIR/LLVM dump determinism, verification-before-output,
   invalid-source/invalid-option rejection, and no partial dump on failure;
 - bootstrap standalone native build/run rejects ambiguous entries and emits an
   executable only at the explicit output path;

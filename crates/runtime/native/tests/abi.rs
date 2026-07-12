@@ -1,10 +1,11 @@
 use pop_runtime_native::{
     abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
     allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
-    pop_rt_allocate_array, pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_get,
-    pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage, pop_rt_pin,
-    pop_rt_release_root, pop_rt_retain_root, pop_rt_string_equal, pop_rt_string_read, pop_rt_unpin,
-    request_abi_collection,
+    pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_object,
+    pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
+    pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
+    pop_rt_pin, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_equal, pop_rt_string_read,
+    pop_rt_unpin, request_abi_collection,
 };
 use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -20,8 +21,51 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 3);
+    assert_eq!(pop_rt_abi_minor(), 4);
     assert_eq!(pop_rt_gc_stage(), 1);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn bulk_scalar_array_operations_distinguish_zero_values_from_failure() {
+    let _guard = abi_test_lock();
+    let array = pop_rt_allocate_array_filled(4, 0, 7);
+    assert_ne!(array, 0);
+
+    let mut length = u64::MAX;
+    let mut value = u64::MAX;
+    // SAFETY: Both output pointers address live writable `u64` values.
+    unsafe {
+        assert_eq!(pop_rt_array_length(array, &raw mut length), 1);
+        assert_eq!(pop_rt_array_get_checked(array, 1, &raw mut value), 1);
+    }
+    assert_eq!(length, 4);
+    assert_eq!(value, 7);
+
+    assert_eq!(pop_rt_array_fill(array, 0), 1);
+    // SAFETY: `value` remains a live writable `u64`.
+    unsafe {
+        assert_eq!(pop_rt_array_get_checked(array, 4, &raw mut value), 1);
+        assert_eq!(pop_rt_array_get_checked(array, 5, &raw mut value), 0);
+    }
+    assert_eq!(value, 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn array_operations_reject_non_array_allocations() {
+    let _guard = abi_test_lock();
+    let object = pop_rt_allocate_object(2);
+    assert_ne!(object, 0);
+    assert_eq!(pop_rt_array_set(object, 1, 9), 0);
+    assert_eq!(pop_rt_array_get(object, 1), 0);
+    assert_eq!(pop_rt_array_fill(object, 9), 0);
+    let mut output = 0;
+    // SAFETY: `output` remains live and writable for both ABI calls.
+    unsafe {
+        assert_eq!(pop_rt_array_length(object, &raw mut output), 0);
+        assert_eq!(pop_rt_array_get_checked(object, 1, &raw mut output), 0);
+    }
 }
 
 #[test]

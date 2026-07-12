@@ -38,6 +38,11 @@ fn intrinsic_ids_are_unique_typed_and_backend_neutral() {
     assert_eq!(ids.len(), schema.intrinsics().len());
     assert!(ids.contains("Integer.CheckedAdd"));
     assert!(ids.contains("Array.Length"));
+    assert!(ids.contains("Array.Create"));
+    assert!(ids.contains("Array.Get"));
+    assert!(ids.contains("Array.GetOptional"));
+    assert!(ids.contains("Array.Set"));
+    assert!(ids.contains("Array.Fill"));
     assert!(ids.contains("Gc.SafePoint"));
     assert!(ids.contains("Gc.SatbWriteBarrier"));
     assert!(ids.contains("Gc.GenerationalWriteBarrier"));
