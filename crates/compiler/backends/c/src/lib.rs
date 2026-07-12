@@ -1,0 +1,1018 @@
+//! Experimental verified MIR-to-C11 backend boundary.
+
+use std::collections::BTreeSet;
+use std::fmt::{self, Write as _};
+
+use pop_foundation::{BlockId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_mir::{
+    MirBubble, MirEffect, MirFunction, MirInstructionKind, MirTerminator, verify_mir_bubble,
+};
+use pop_types::{
+    FloatKind, FloatValue, IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena,
+};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CLoweringOptions {
+    entry_point: Option<SymbolId>,
+}
+
+impl CLoweringOptions {
+    #[must_use]
+    pub const fn with_entry_point(mut self, symbol: SymbolId) -> Self {
+        self.entry_point = Some(symbol);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CTranslationUnit(String);
+
+impl CTranslationUnit {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CTranslationUnit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CBackendError {
+    MirVerification(Vec<pop_mir::MirVerificationError>),
+    UnsupportedType(TypeId),
+    UnsupportedDeclarations,
+    UnsupportedEffects(FunctionId),
+    UnsupportedInstruction {
+        function: FunctionId,
+        value: ValueId,
+    },
+    UnsupportedTerminator {
+        function: FunctionId,
+        block: BlockId,
+    },
+    UnsupportedFunctionSignature(SymbolId),
+    InvalidEntryPoint(SymbolId),
+    UnsupportedEntryPointSignature(SymbolId),
+}
+
+impl fmt::Display for CBackendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MirVerification(errors) => {
+                write!(formatter, "MIR verification failed: {errors:?}")
+            }
+            Self::UnsupportedType(type_id) => {
+                write!(
+                    formatter,
+                    "C backend does not support MIR type t{}",
+                    type_id.raw()
+                )
+            }
+            Self::UnsupportedDeclarations => write!(
+                formatter,
+                "C backend requires the Pop runtime for record, union, class, method, or closure declarations"
+            ),
+            Self::UnsupportedEffects(function) => write!(
+                formatter,
+                "C backend does not support the effects of MIR function f{}",
+                function.raw()
+            ),
+            Self::UnsupportedInstruction { function, value } => write!(
+                formatter,
+                "C backend encountered unsupported MIR instruction f{} v{}",
+                function.raw(),
+                value.raw()
+            ),
+            Self::UnsupportedTerminator { function, block } => write!(
+                formatter,
+                "C backend encountered unsupported MIR terminator f{} b{}",
+                function.raw(),
+                block.raw()
+            ),
+            Self::UnsupportedFunctionSignature(symbol) => write!(
+                formatter,
+                "C backend does not support the signature of symbol s{}",
+                symbol.raw()
+            ),
+            Self::InvalidEntryPoint(symbol) => {
+                write!(
+                    formatter,
+                    "C backend cannot find entry symbol s{}",
+                    symbol.raw()
+                )
+            }
+            Self::UnsupportedEntryPointSignature(symbol) => write!(
+                formatter,
+                "C backend requires a no-argument entry returning nothing or Int: s{}",
+                symbol.raw()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CBackendError {}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CheckedOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Negate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CheckedHelper {
+    operation: CheckedOperation,
+    kind: IntegerKind,
+}
+
+/// Lowers one verified runtime-free MIR Bubble to deterministic ISO C11.
+///
+/// # Errors
+///
+/// Rejects invalid MIR, unsupported runtime/type operations, and an invalid
+/// requested entry point before returning any translation unit.
+pub fn lower_mir_to_c(
+    bubble: &MirBubble,
+    types: &TypeArena,
+    options: CLoweringOptions,
+) -> Result<CTranslationUnit, CBackendError> {
+    verify_mir_bubble(bubble, types).map_err(CBackendError::MirVerification)?;
+    validate_bubble(bubble, types, options)?;
+
+    let helpers = collect_checked_helpers(bubble);
+    let float_helpers = collect_float_helpers(bubble);
+    let standard_calls = collect_standard_calls(bubble);
+    let needs_trap = !helpers.is_empty() || contains_explicit_trap(bubble);
+    let mut output = String::from(
+        "/* Generated by Pop Lang's experimental C backend. */\n\
+         #include <stdbool.h>\n\
+         #include <stddef.h>\n\
+         #include <stdint.h>\n\
+         #include <inttypes.h>\n\
+         #include <stdio.h>\n\
+         #include <stdlib.h>\n\
+         #include <string.h>\n\
+         #include <limits.h>\n\n\
+         #include <float.h>\n\n\
+         #if !defined(__STDC_IEC_559__)\n\
+         #error \"Pop Lang C output requires IEC 60559 floating-point semantics\"\n\
+         #endif\n\n\
+         _Static_assert(CHAR_BIT == 8, \"Pop Lang requires 8-bit bytes\");\n\
+         _Static_assert(FLT_RADIX == 2, \"Pop Lang requires binary floating point\");\n\
+         _Static_assert(sizeof(float) == 4, \"Pop Float32 requires 32-bit float\");\n\
+         _Static_assert(sizeof(double) == 8, \"Pop Float64 requires 64-bit double\");\n\n",
+    );
+    if needs_trap {
+        output.push_str("static _Noreturn void pop_trap(void) { abort(); }\n\n");
+    }
+    if float_helpers.contains(&FloatKind::Float32) {
+        output.push_str(
+            "static float pop_float32_from_bits(uint32_t bits)\n\
+             {\n\
+                 float value;\n\
+                 memcpy(&value, &bits, sizeof(value));\n\
+                 return value;\n\
+             }\n\n",
+        );
+    }
+    if float_helpers.contains(&FloatKind::Float64) {
+        output.push_str(
+            "static double pop_float64_from_bits(uint64_t bits)\n\
+             {\n\
+                 double value;\n\
+                 memcpy(&value, &bits, sizeof(value));\n\
+                 return value;\n\
+             }\n\n",
+        );
+    }
+    if standard_calls.contains(&1) {
+        output.push_str(
+            "typedef struct\n\
+             {\n\
+                 const unsigned char *data;\n\
+                 size_t length;\n\
+             } pop_string;\n\n",
+        );
+    }
+    if standard_calls.contains(&0) {
+        output.push_str(
+            "static void pop_print_int(int64_t value)\n\
+             {\n\
+                 (void)printf(\"%\" PRId64 \"\\n\", value);\n\
+             }\n\n",
+        );
+    }
+    if standard_calls.contains(&1) {
+        output.push_str(
+            "static void pop_print_string(pop_string value)\n\
+             {\n\
+                 (void)fwrite(value.data, 1, value.length, stdout);\n\
+                 (void)fputc('\\n', stdout);\n\
+             }\n\n",
+        );
+    }
+    for helper in helpers {
+        emit_checked_helper(&mut output, helper);
+    }
+    emit_string_literals(&mut output, bubble);
+    for function in bubble.functions() {
+        emit_function_declaration(&mut output, bubble, function, types)?;
+    }
+    output.push('\n');
+    for function in bubble.functions() {
+        emit_function(&mut output, bubble, function, types)?;
+    }
+    if let Some(entry) = options.entry_point {
+        emit_entry(&mut output, bubble, types, entry)?;
+    }
+    Ok(CTranslationUnit(output))
+}
+
+fn validate_bubble(
+    bubble: &MirBubble,
+    types: &TypeArena,
+    options: CLoweringOptions,
+) -> Result<(), CBackendError> {
+    if !bubble.declarations().is_empty()
+        || !bubble.methods().is_empty()
+        || !bubble.nested_functions().is_empty()
+    {
+        return Err(CBackendError::UnsupportedDeclarations);
+    }
+    for function in bubble.functions() {
+        validate_function(function, types)?;
+    }
+    if let Some(entry) = options.entry_point {
+        let function = bubble
+            .functions()
+            .iter()
+            .find(|function| function.symbol() == entry)
+            .ok_or(CBackendError::InvalidEntryPoint(entry))?;
+        let int = types.source_type("Int");
+        if !function.parameters().is_empty()
+            || !(function.results().is_empty()
+                || function.results().len() == 1 && function.results().first().copied() == int)
+        {
+            return Err(CBackendError::UnsupportedEntryPointSignature(entry));
+        }
+    }
+    Ok(())
+}
+
+fn validate_function(function: &MirFunction, types: &TypeArena) -> Result<(), CBackendError> {
+    if function.results().len() > 1 {
+        return Err(CBackendError::UnsupportedFunctionSignature(
+            function.symbol(),
+        ));
+    }
+    for type_id in function.parameters().iter().chain(function.results()) {
+        c_type(*type_id, types)?;
+    }
+    for block in function.blocks() {
+        for argument in block.arguments() {
+            c_type(argument.type_id(), types)?;
+        }
+        for instruction in block.instructions() {
+            if let Some(type_id) = instruction.optional_result_type() {
+                c_type(type_id, types)?;
+            }
+            if !is_supported_instruction(instruction.kind()) {
+                return Err(CBackendError::UnsupportedInstruction {
+                    function: function.function(),
+                    value: instruction.result(),
+                });
+            }
+            if matches!(
+                instruction.kind(),
+                MirInstructionKind::IntegerNegate { kind, .. } if !kind.is_signed()
+            ) {
+                return Err(CBackendError::UnsupportedInstruction {
+                    function: function.function(),
+                    value: instruction.result(),
+                });
+            }
+        }
+        if !matches!(
+            block.terminator(),
+            MirTerminator::Branch { .. }
+                | MirTerminator::ConditionalBranch { .. }
+                | MirTerminator::Return { .. }
+                | MirTerminator::Trap(_)
+                | MirTerminator::Unreachable
+        ) {
+            return Err(CBackendError::UnsupportedTerminator {
+                function: function.function(),
+                block: block.block(),
+            });
+        }
+    }
+    let unsupported_effects = [
+        MirEffect::Allocates,
+        MirEffect::WritesManagedReference,
+        MirEffect::MayUnwind,
+        MirEffect::Suspends,
+        MirEffect::UnsafeMemory,
+        MirEffect::ForeignFunction,
+        MirEffect::CompilerQuery,
+        MirEffect::GcSafePoint,
+        MirEffect::Roots,
+    ];
+    if unsupported_effects
+        .into_iter()
+        .any(|effect| function.effects().contains(effect))
+    {
+        return Err(CBackendError::UnsupportedEffects(function.function()));
+    }
+    Ok(())
+}
+
+fn is_supported_instruction(kind: &MirInstructionKind) -> bool {
+    if let MirInstructionKind::CallStandard {
+        function,
+        arguments,
+        ..
+    } = kind
+    {
+        return matches!(function.raw(), 0 | 1) && arguments.len() == 1;
+    }
+    matches!(
+        kind,
+        MirInstructionKind::IntegerConstant(_)
+            | MirInstructionKind::FloatConstant(_)
+            | MirInstructionKind::StringConstant(_)
+            | MirInstructionKind::BooleanConstant(_)
+            | MirInstructionKind::CheckedIntegerAdd { .. }
+            | MirInstructionKind::CheckedIntegerSubtract { .. }
+            | MirInstructionKind::CheckedIntegerMultiply { .. }
+            | MirInstructionKind::CheckedIntegerDivide { .. }
+            | MirInstructionKind::CheckedIntegerRemainder { .. }
+            | MirInstructionKind::FloatAdd { .. }
+            | MirInstructionKind::FloatSubtract { .. }
+            | MirInstructionKind::FloatMultiply { .. }
+            | MirInstructionKind::FloatDivide { .. }
+            | MirInstructionKind::BooleanNot { .. }
+            | MirInstructionKind::IntegerNegate { .. }
+            | MirInstructionKind::FloatNegate { .. }
+            | MirInstructionKind::BooleanAnd { .. }
+            | MirInstructionKind::BooleanOr { .. }
+            | MirInstructionKind::CompareEqual { .. }
+            | MirInstructionKind::CompareNotEqual { .. }
+            | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CallDirect { .. }
+    )
+}
+
+fn c_type(type_id: TypeId, types: &TypeArena) -> Result<&'static str, CBackendError> {
+    match types.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Boolean)) => Ok("bool"),
+        Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Ok(integer_c_type(*kind)),
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => Ok("float"),
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => Ok("double"),
+        Some(SemanticType::Primitive(PrimitiveType::String)) => Ok("pop_string"),
+        _ => Err(CBackendError::UnsupportedType(type_id)),
+    }
+}
+
+const fn integer_c_type(kind: IntegerKind) -> &'static str {
+    match kind {
+        IntegerKind::Int8 => "int8_t",
+        IntegerKind::Int16 => "int16_t",
+        IntegerKind::Int32 => "int32_t",
+        IntegerKind::Int64 => "int64_t",
+        IntegerKind::UInt8 => "uint8_t",
+        IntegerKind::UInt16 => "uint16_t",
+        IntegerKind::UInt32 => "uint32_t",
+        IntegerKind::UInt64 => "uint64_t",
+    }
+}
+
+fn collect_checked_helpers(bubble: &MirBubble) -> BTreeSet<CheckedHelper> {
+    let mut helpers = BTreeSet::new();
+    for function in bubble.functions() {
+        for block in function.blocks() {
+            for instruction in block.instructions() {
+                let helper = match instruction.kind() {
+                    MirInstructionKind::CheckedIntegerAdd { kind, .. } => {
+                        Some((CheckedOperation::Add, *kind))
+                    }
+                    MirInstructionKind::CheckedIntegerSubtract { kind, .. } => {
+                        Some((CheckedOperation::Subtract, *kind))
+                    }
+                    MirInstructionKind::CheckedIntegerMultiply { kind, .. } => {
+                        Some((CheckedOperation::Multiply, *kind))
+                    }
+                    MirInstructionKind::CheckedIntegerDivide { kind, .. } => {
+                        Some((CheckedOperation::Divide, *kind))
+                    }
+                    MirInstructionKind::CheckedIntegerRemainder { kind, .. } => {
+                        Some((CheckedOperation::Remainder, *kind))
+                    }
+                    MirInstructionKind::IntegerNegate { kind, .. } => {
+                        Some((CheckedOperation::Negate, *kind))
+                    }
+                    _ => None,
+                };
+                if let Some((operation, kind)) = helper {
+                    helpers.insert(CheckedHelper { operation, kind });
+                }
+            }
+        }
+    }
+    helpers
+}
+
+fn collect_float_helpers(bubble: &MirBubble) -> BTreeSet<FloatKind> {
+    bubble
+        .functions()
+        .iter()
+        .flat_map(MirFunction::blocks)
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::FloatConstant(value) => Some(value.kind()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn contains_explicit_trap(bubble: &MirBubble) -> bool {
+    bubble.functions().iter().any(|function| {
+        function.blocks().iter().any(|block| {
+            matches!(
+                block.terminator(),
+                MirTerminator::Trap(_) | MirTerminator::Unreachable
+            )
+        })
+    })
+}
+
+fn collect_standard_calls(bubble: &MirBubble) -> BTreeSet<u32> {
+    bubble
+        .functions()
+        .iter()
+        .flat_map(MirFunction::blocks)
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::CallStandard { function, .. } => Some(function.raw()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn emit_string_literals(output: &mut String, bubble: &MirBubble) {
+    for function in bubble.functions() {
+        for block in function.blocks() {
+            for instruction in block.instructions() {
+                let MirInstructionKind::StringConstant(value) = instruction.kind() else {
+                    continue;
+                };
+                let _ = write!(
+                    output,
+                    "static const unsigned char pop_b{}_s{}_v{}_bytes[] = {{",
+                    bubble.bubble().raw(),
+                    function.symbol().raw(),
+                    instruction.result().raw()
+                );
+                if value.is_empty() {
+                    output.push_str(" UINT8_C(0)");
+                } else {
+                    for byte in value.as_bytes() {
+                        let _ = write!(output, " UINT8_C(0x{byte:02X}),");
+                    }
+                }
+                output.push_str(" };\n");
+            }
+        }
+    }
+    output.push('\n');
+}
+
+fn emit_checked_helper(output: &mut String, helper: CheckedHelper) {
+    let ty = integer_c_type(helper.kind);
+    let suffix = integer_suffix(helper.kind);
+    let name = checked_helper_name(helper.operation, helper.kind);
+    let minimum = integer_limit(helper.kind, false);
+    let maximum = integer_limit(helper.kind, true);
+    match (helper.operation, helper.kind.is_signed()) {
+        (CheckedOperation::Add, true) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if ((right > 0 && left > {maximum} - right) || (right < 0 && left < {minimum} - right)) pop_trap();\n    return ({ty})(left + right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Add, false) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if (left > {maximum} - right) pop_trap();\n    return ({ty})(left + right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Subtract, true) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if ((right < 0 && left > {maximum} + right) || (right > 0 && left < {minimum} + right)) pop_trap();\n    return ({ty})(left - right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Subtract, false) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if (left < right) pop_trap();\n    return ({ty})(left - right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Multiply, true) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if (left == 0 || right == 0) return 0;\n    if ((left == -1 && right == {minimum}) || (right == -1 && left == {minimum})) pop_trap();\n    if (left > 0) {{\n        if ((right > 0 && left > {maximum} / right) || (right < 0 && right < {minimum} / left)) pop_trap();\n    }} else if ((right > 0 && left < {minimum} / right) || (right < 0 && left < {maximum} / right)) {{\n        pop_trap();\n    }}\n    return ({ty})(left * right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Multiply, false) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if (right != 0 && left > {maximum} / right) pop_trap();\n    return ({ty})(left * right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Divide | CheckedOperation::Remainder, signed) => {
+            let operator = if helper.operation == CheckedOperation::Divide {
+                "/"
+            } else {
+                "%"
+            };
+            let overflow = if signed {
+                format!("\n    if (left == {minimum} && right == -1) pop_trap();")
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} left, {ty} right)\n{{\n    if (right == 0) pop_trap();{overflow}\n    return ({ty})(left {operator} right);\n}}\n"
+            );
+        }
+        (CheckedOperation::Negate, true) => {
+            let _ = writeln!(
+                output,
+                "static inline {ty} {name}({ty} value)\n{{\n    if (value == {minimum}) pop_trap();\n    return ({ty})(-value);\n}}\n"
+            );
+        }
+        (CheckedOperation::Negate, false) => {
+            let _ = suffix;
+            unreachable!("verified MIR never negates unsigned integers")
+        }
+    }
+}
+
+const fn integer_suffix(kind: IntegerKind) -> &'static str {
+    match kind {
+        IntegerKind::Int8 => "i8",
+        IntegerKind::Int16 => "i16",
+        IntegerKind::Int32 => "i32",
+        IntegerKind::Int64 => "i64",
+        IntegerKind::UInt8 => "u8",
+        IntegerKind::UInt16 => "u16",
+        IntegerKind::UInt32 => "u32",
+        IntegerKind::UInt64 => "u64",
+    }
+}
+
+fn integer_limit(kind: IntegerKind, maximum: bool) -> String {
+    let suffix = integer_suffix(kind).to_ascii_uppercase();
+    if kind.is_signed() {
+        format!(
+            "INT{width}_{which}",
+            width = kind.bit_width(),
+            which = if maximum { "MAX" } else { "MIN" }
+        )
+    } else if maximum {
+        format!("UINT{}_MAX", kind.bit_width())
+    } else {
+        let _ = suffix;
+        "0".to_owned()
+    }
+}
+
+fn checked_helper_name(operation: CheckedOperation, kind: IntegerKind) -> String {
+    let operation = match operation {
+        CheckedOperation::Add => "add",
+        CheckedOperation::Subtract => "subtract",
+        CheckedOperation::Multiply => "multiply",
+        CheckedOperation::Divide => "divide",
+        CheckedOperation::Remainder => "remainder",
+        CheckedOperation::Negate => "negate",
+    };
+    format!("pop_checked_{operation}_{}", integer_suffix(kind))
+}
+
+fn emit_function_declaration(
+    output: &mut String,
+    bubble: &MirBubble,
+    function: &MirFunction,
+    types: &TypeArena,
+) -> Result<(), CBackendError> {
+    write_function_header(output, bubble, function, types)?;
+    output.push_str(";\n");
+    Ok(())
+}
+
+fn write_function_header(
+    output: &mut String,
+    bubble: &MirBubble,
+    function: &MirFunction,
+    types: &TypeArena,
+) -> Result<(), CBackendError> {
+    output.push_str("static ");
+    output.push_str(if let Some(result) = function.results().first() {
+        c_type(*result, types)?
+    } else {
+        "void"
+    });
+    let _ = write!(
+        output,
+        " pop_b{}_s{}(",
+        bubble.bubble().raw(),
+        function.symbol().raw()
+    );
+    if function.parameters().is_empty() {
+        output.push_str("void");
+    } else {
+        let entry = &function.blocks()[0];
+        for (index, (type_id, argument)) in function
+            .parameters()
+            .iter()
+            .zip(entry.arguments())
+            .enumerate()
+        {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            let _ = write!(
+                output,
+                "{} v{}",
+                c_type(*type_id, types)?,
+                argument.value().raw()
+            );
+        }
+    }
+    output.push(')');
+    Ok(())
+}
+
+fn emit_function(
+    output: &mut String,
+    bubble: &MirBubble,
+    function: &MirFunction,
+    types: &TypeArena,
+) -> Result<(), CBackendError> {
+    write_function_header(output, bubble, function, types)?;
+    output.push_str("\n{\n");
+    let parameter_values: BTreeSet<_> = function.blocks()[0]
+        .arguments()
+        .iter()
+        .map(|argument| argument.value())
+        .collect();
+    for block in function.blocks() {
+        for argument in block.arguments() {
+            if !parameter_values.contains(&argument.value()) {
+                let _ = writeln!(
+                    output,
+                    "    {} v{};",
+                    c_type(argument.type_id(), types)?,
+                    argument.value().raw()
+                );
+            }
+        }
+        for instruction in block.instructions() {
+            if let Some(type_id) = instruction.optional_result_type() {
+                let _ = writeln!(
+                    output,
+                    "    {} v{};",
+                    c_type(type_id, types)?,
+                    instruction.result().raw()
+                );
+            }
+        }
+    }
+    output.push_str("    goto pop_b0;\n");
+    for block in function.blocks() {
+        let _ = writeln!(output, "pop_b{}:", block.block().raw());
+        for argument in block.arguments() {
+            let _ = writeln!(output, "    (void)v{};", argument.value().raw());
+        }
+        for instruction in block.instructions() {
+            emit_instruction(output, bubble, function, instruction);
+        }
+        emit_terminator(output, function, block, types)?;
+    }
+    output.push_str("}\n\n");
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn emit_instruction(
+    output: &mut String,
+    bubble: &MirBubble,
+    function: &MirFunction,
+    instruction: &pop_mir::MirInstruction,
+) {
+    let result = instruction.result().raw();
+    match instruction.kind() {
+        MirInstructionKind::IntegerConstant(value) => {
+            let _ = writeln!(output, "    v{result} = {};", integer_literal(*value));
+        }
+        MirInstructionKind::FloatConstant(value) => {
+            let _ = writeln!(output, "    v{result} = {};", float_literal(*value));
+        }
+        MirInstructionKind::StringConstant(value) => {
+            let _ = writeln!(
+                output,
+                "    v{result} = (pop_string){{ pop_b{}_s{}_v{result}_bytes, (size_t){} }};",
+                bubble.bubble().raw(),
+                function.symbol().raw(),
+                value.len()
+            );
+        }
+        MirInstructionKind::BooleanConstant(value) => {
+            let _ = writeln!(
+                output,
+                "    v{result} = {};",
+                if *value { "true" } else { "false" }
+            );
+        }
+        MirInstructionKind::CheckedIntegerAdd { kind, left, right }
+        | MirInstructionKind::CheckedIntegerSubtract { kind, left, right }
+        | MirInstructionKind::CheckedIntegerMultiply { kind, left, right }
+        | MirInstructionKind::CheckedIntegerDivide { kind, left, right }
+        | MirInstructionKind::CheckedIntegerRemainder { kind, left, right } => {
+            let operation = match instruction.kind() {
+                MirInstructionKind::CheckedIntegerAdd { .. } => CheckedOperation::Add,
+                MirInstructionKind::CheckedIntegerSubtract { .. } => CheckedOperation::Subtract,
+                MirInstructionKind::CheckedIntegerMultiply { .. } => CheckedOperation::Multiply,
+                MirInstructionKind::CheckedIntegerDivide { .. } => CheckedOperation::Divide,
+                _ => CheckedOperation::Remainder,
+            };
+            let _ = writeln!(
+                output,
+                "    v{result} = {}(v{}, v{});",
+                checked_helper_name(operation, *kind),
+                left.raw(),
+                right.raw()
+            );
+        }
+        MirInstructionKind::IntegerNegate { kind, operand } => {
+            let _ = writeln!(
+                output,
+                "    v{result} = {}(v{});",
+                checked_helper_name(CheckedOperation::Negate, *kind),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::FloatAdd { left, right, .. } => {
+            emit_binary(output, result, *left, "+", *right);
+        }
+        MirInstructionKind::FloatSubtract { left, right, .. } => {
+            emit_binary(output, result, *left, "-", *right);
+        }
+        MirInstructionKind::FloatMultiply { left, right, .. } => {
+            emit_binary(output, result, *left, "*", *right);
+        }
+        MirInstructionKind::FloatDivide { left, right, .. } => {
+            emit_binary(output, result, *left, "/", *right);
+        }
+        MirInstructionKind::BooleanAnd { left, right } => {
+            emit_binary(output, result, *left, "&&", *right);
+        }
+        MirInstructionKind::BooleanOr { left, right } => {
+            emit_binary(output, result, *left, "||", *right);
+        }
+        MirInstructionKind::CompareEqual { left, right } => {
+            emit_binary(output, result, *left, "==", *right);
+        }
+        MirInstructionKind::CompareNotEqual { left, right } => {
+            emit_binary(output, result, *left, "!=", *right);
+        }
+        MirInstructionKind::CompareIntegerLess { left, right, .. }
+        | MirInstructionKind::CompareFloatLess { left, right, .. } => {
+            emit_binary(output, result, *left, "<", *right);
+        }
+        MirInstructionKind::CompareIntegerGreater { left, right, .. }
+        | MirInstructionKind::CompareFloatGreater { left, right, .. } => {
+            emit_binary(output, result, *left, ">", *right);
+        }
+        MirInstructionKind::BooleanNot { operand } => {
+            let _ = writeln!(output, "    v{result} = !v{};", operand.raw());
+        }
+        MirInstructionKind::FloatNegate { operand, .. } => {
+            let _ = writeln!(output, "    v{result} = -v{};", operand.raw());
+        }
+        MirInstructionKind::CallDirect {
+            function,
+            arguments,
+            ..
+        } => {
+            output.push_str("    ");
+            if instruction.has_result() {
+                let _ = write!(output, "v{result} = ");
+            }
+            let _ = write!(
+                output,
+                "pop_b{}_s{}(",
+                bubble.bubble().raw(),
+                function.raw()
+            );
+            emit_values(output, arguments);
+            output.push_str(");\n");
+        }
+        MirInstructionKind::CallStandard {
+            function,
+            arguments,
+            ..
+        } => {
+            let adapter = match function.raw() {
+                0 => "pop_print_int",
+                1 => "pop_print_string",
+                _ => unreachable!("C standard call was validated before rendering"),
+            };
+            let _ = write!(output, "    {adapter}(");
+            emit_values(output, arguments);
+            output.push_str(");\n");
+        }
+        _ => unreachable!("C instruction was validated before rendering"),
+    }
+    if instruction.has_result() {
+        let _ = writeln!(output, "    (void)v{result};");
+    }
+}
+
+fn emit_binary(output: &mut String, result: u32, left: ValueId, operator: &str, right: ValueId) {
+    let _ = writeln!(
+        output,
+        "    v{result} = v{} {operator} v{};",
+        left.raw(),
+        right.raw()
+    );
+}
+
+fn emit_terminator(
+    output: &mut String,
+    function: &MirFunction,
+    block: &pop_mir::MirBlock,
+    types: &TypeArena,
+) -> Result<(), CBackendError> {
+    match block.terminator() {
+        MirTerminator::Branch { target, arguments } => {
+            emit_branch(output, block.block(), *target, arguments, function, types)?;
+        }
+        MirTerminator::ConditionalBranch {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            let _ = writeln!(
+                output,
+                "    if (v{}) goto pop_b{};",
+                condition.raw(),
+                when_true.raw()
+            );
+            let _ = writeln!(output, "    goto pop_b{};", when_false.raw());
+        }
+        MirTerminator::Return { values } => {
+            if let Some(value) = values.first() {
+                let _ = writeln!(output, "    return v{};", value.raw());
+            } else {
+                output.push_str("    return;\n");
+            }
+        }
+        MirTerminator::Trap(_) | MirTerminator::Unreachable => output.push_str("    pop_trap();\n"),
+        _ => unreachable!("C terminator was validated before rendering"),
+    }
+    Ok(())
+}
+
+fn emit_branch(
+    output: &mut String,
+    source: BlockId,
+    target: BlockId,
+    arguments: &[ValueId],
+    function: &MirFunction,
+    types: &TypeArena,
+) -> Result<(), CBackendError> {
+    let target_block = &function.blocks()[target.raw() as usize];
+    if arguments.is_empty() {
+        let _ = writeln!(output, "    goto pop_b{};", target.raw());
+        return Ok(());
+    }
+    output.push_str("    {\n");
+    for (index, (value, argument)) in arguments.iter().zip(target_block.arguments()).enumerate() {
+        let _ = writeln!(
+            output,
+            "        {} edge_b{}_b{}_{} = v{};",
+            c_type(argument.type_id(), types)?,
+            source.raw(),
+            target.raw(),
+            index,
+            value.raw()
+        );
+    }
+    for (index, argument) in target_block.arguments().iter().enumerate() {
+        let _ = writeln!(
+            output,
+            "        v{} = edge_b{}_b{}_{};",
+            argument.value().raw(),
+            source.raw(),
+            target.raw(),
+            index
+        );
+    }
+    let _ = writeln!(output, "        goto pop_b{};", target.raw());
+    output.push_str("    }\n");
+    Ok(())
+}
+
+fn emit_entry(
+    output: &mut String,
+    bubble: &MirBubble,
+    types: &TypeArena,
+    entry: SymbolId,
+) -> Result<(), CBackendError> {
+    let function = bubble
+        .functions()
+        .iter()
+        .find(|function| function.symbol() == entry)
+        .ok_or(CBackendError::InvalidEntryPoint(entry))?;
+    output.push_str("static int pop_process_status(int64_t status)\n{\n    uint32_t bits = (uint32_t)(uint64_t)status;\n    if (bits <= (uint32_t)INT32_MAX) return (int)bits;\n    return -1 - (int)(UINT32_MAX - bits);\n}\n\nint main(void)\n{\n");
+    if function.results().is_empty() {
+        let _ = writeln!(
+            output,
+            "    pop_b{}_s{}();",
+            bubble.bubble().raw(),
+            entry.raw()
+        );
+        output.push_str("    return 0;\n");
+    } else {
+        let int = types
+            .source_type("Int")
+            .ok_or(CBackendError::UnsupportedEntryPointSignature(entry))?;
+        if function.results() != [int] {
+            return Err(CBackendError::UnsupportedEntryPointSignature(entry));
+        }
+        let _ = writeln!(
+            output,
+            "    return pop_process_status(pop_b{}_s{}());",
+            bubble.bubble().raw(),
+            entry.raw()
+        );
+    }
+    output.push_str("}\n");
+    Ok(())
+}
+
+fn emit_values(output: &mut String, values: &[ValueId]) {
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        let _ = write!(output, "v{}", value.raw());
+    }
+}
+
+fn integer_literal(value: IntegerValue) -> String {
+    if let Some(signed) = value.signed() {
+        let minimum = -(1_i128 << (value.kind().bit_width() - 1));
+        if i128::from(signed) == minimum {
+            return integer_limit(value.kind(), false);
+        }
+        if value.kind() == IntegerKind::Int64 {
+            format!("INT64_C({signed})")
+        } else {
+            format!(
+                "({})INT{}_C({signed})",
+                integer_c_type(value.kind()),
+                value.kind().bit_width()
+            )
+        }
+    } else {
+        let unsigned = value.unsigned().expect("unsigned integer value");
+        if value.kind() == IntegerKind::UInt64 {
+            format!("UINT64_C({unsigned})")
+        } else {
+            format!(
+                "({})UINT{}_C({unsigned})",
+                integer_c_type(value.kind()),
+                value.kind().bit_width()
+            )
+        }
+    }
+}
+
+fn float_literal(value: FloatValue) -> String {
+    match value.kind() {
+        FloatKind::Float32 => format!("pop_float32_from_bits(UINT32_C(0x{:08X}))", value.bits()),
+        FloatKind::Float64 => format!("pop_float64_from_bits(UINT64_C(0x{:016X}))", value.bits()),
+    }
+}

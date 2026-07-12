@@ -65,6 +65,9 @@ transplanted into a Luau-shaped file.
 - MIR has explicit control flow, calls, lifetime effects, and failure edges
   wherever those details affect code generation.
 - Language semantics are identical across conforming backends.
+- The experimental C11 backend consumes optimized verified MIR, preserves
+  checked semantics without C undefined behavior, and rejects runtime features
+  outside its declared capability set.
 - Classes, modules, records, tuples, arrays, and tables are distinct
   concepts even when an implementation can share storage internally.
 - Runtime services are reached through a versioned backend-neutral interface.

@@ -9,6 +9,7 @@
 | Compile-time HIR | Restricted typed evaluation | constants, UDA values, type/symbol handles | parsing, runtime reflection |
 | HIR | Typed language semantics | classes, attributes, patterns, typed expressions | parser recovery, LLVM values |
 | MIR | Portable execution semantics | CFGs, typed values, abstract runtime operations | source sugar, LLVM opcodes |
+| C11 source | Experimental backend artifact | exact-width C types, checked helpers, private control-flow lowering | canonical language semantics, unchecked fallbacks |
 | LLVM IR | Native backend implementation | LLVM types, intrinsics, target ABI | canonical language semantics |
 
 ## Stable identities

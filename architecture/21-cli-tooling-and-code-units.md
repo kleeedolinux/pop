@@ -330,6 +330,7 @@ Core commands:
 | `pop new` / `pop initialize` | Create a Package or Workspace using canonical layout |
 | `pop check` | Resolve and type-check through HIR/MIR verification without final native linking |
 | `pop build` | Build selected Bubbles and dependencies |
+| `pop transpile` | Experimentally emit a selected backend source artifact without compiling it |
 | `pop run` | Build and run exactly one binary/example Bubble |
 | `pop test` | Build and run unit, integration, and XML documentation tests |
 | `pop benchmark` | Build/run benchmark Bubbles under an explicit profile |
@@ -392,6 +393,32 @@ canonical MIR verification before writing any requested dump. Diagnostics are
 written to standard error; failure writes no partial IR to standard output.
 Dump text is deterministic for a compiler version and is a test/debug format,
 not a stable serialization or machine compatibility contract.
+
+### Experimental C transpilation
+
+The accepted bootstrap form is:
+
+```text
+pop transpile path/to/example.pop --to c
+```
+
+Like standalone inspection, this direct path supplies an ephemeral
+Workspace/Package/Bubble/Module context and resolves no dependencies. It
+requires a canonical binary entry; the runtime-free first slice accepts only a
+no-argument entry with no result or an `Int` result. The driver completes source
+analysis, verified MIR construction, portable optimization, and C-backend
+validation before writing the complete deterministic C11 translation unit to
+standard output. Diagnostics go to standard error, and failure emits no partial
+C source.
+
+`--to` names a deliberate backend source format, not a platform target. Only
+`c` is accepted initially. The C artifact and its private helpers are
+experimental and have no stable spelling or ABI promise. Stable typed integer
+and literal-string output use private C standard-I/O adapters without the Pop
+runtime. Unsupported managed allocation, PLRI, dispatch, unwind, coroutine,
+unsafe, or FFI operations are capability errors rather than unchecked C
+fallbacks. See
+[ADR 0031](./decisions/0031-experimental-secure-c-transpilation-backend.md).
 
 `lib.pop` and `src/bin/` are reserved conventional filesystem names requested
 by the Package layout. They do not authorize `Lib`, `Bin`, or other truncated

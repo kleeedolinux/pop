@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 const MEMBERS: &[&str] = &[
     "crates/compiler/backend-api",
+    "crates/compiler/backends/c",
     "crates/compiler/backends/llvm",
     "crates/compiler/backends/mir-interp",
     "crates/compiler/backends/vm",
@@ -204,6 +205,7 @@ fn portable_crates_do_not_name_backend_packages() {
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_path.display()));
         for forbidden in [
             "pop-backend-llvm",
+            "pop-backend-c",
             "pop-backend-mir-interp",
             "pop-backend-vm",
         ] {
