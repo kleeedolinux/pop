@@ -204,6 +204,60 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_executes_exhaustive_union_switches_with_typed_payloads() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+public union ResultValue\n\
+    Ok(value: Int)\n\
+    Error(message: String)\n\
+end\n\
+private function consume(result: ResultValue): Int\n\
+    match result\n\
+    when ResultValue.Ok(value) then\n\
+        return value\n\
+    when ResultValue.Error(_) then\n\
+        return 1\n\
+    end\n\
+end\n\
+public function run(): Int\n\
+    return consume(ResultValue.Ok(7))\n\
+end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let entry = mir.functions().last().expect("run").symbol();
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+    let result = link_with_runtime_and_run(&module, "union-switch");
+    assert_eq!(
+        result.status.code(),
+        Some(7),
+        "native executable misexecuted union match: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

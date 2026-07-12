@@ -254,7 +254,6 @@ fn runtime_declarations() -> Vec<String> {
         RuntimeOperation::ArrayGet,
         RuntimeOperation::FieldGet,
         RuntimeOperation::RecordUpdate,
-        RuntimeOperation::UnionMake,
         RuntimeOperation::CaptureLoad,
         RuntimeOperation::DispatchCall,
     ]
@@ -394,12 +393,25 @@ fn lower_function(
         }
     }
     let mut incoming_edges: BTreeMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = BTreeMap::new();
+    let mut union_payload_sources = BTreeMap::new();
+    let mut has_union_switch = false;
     for predecessor in function.blocks() {
-        if let MirTerminator::Branch { target, arguments } = predecessor.terminator() {
-            incoming_edges
-                .entry(*target)
-                .or_default()
-                .push((predecessor.block(), arguments.clone()));
+        match predecessor.terminator() {
+            MirTerminator::Branch { target, arguments } => {
+                incoming_edges
+                    .entry(*target)
+                    .or_default()
+                    .push((predecessor.block(), arguments.clone()));
+            }
+            MirTerminator::UnionSwitch {
+                scrutinee, arms, ..
+            } => {
+                has_union_switch = true;
+                for arm in arms {
+                    union_payload_sources.insert(arm.target(), *scrutinee);
+                }
+            }
+            _ => {}
         }
     }
     let mut blocks = Vec::new();
@@ -407,6 +419,7 @@ fn lower_function(
         let mut instructions = lower_block_arguments(
             block,
             incoming_edges.get(&block.block()).map(Vec::as_slice),
+            union_payload_sources.get(&block.block()).copied(),
             types,
         )?;
         for instruction in block.instructions() {
@@ -426,6 +439,16 @@ fn lower_function(
             terminator: lower_terminator(block.terminator(), &value_types, types)?,
         });
     }
+    if has_union_switch {
+        blocks.push(PrivateBlock {
+            label: "pop_invalid_union".to_owned(),
+            instructions: Vec::new(),
+            terminator: format!(
+                "call void @{}()\n  unreachable",
+                RuntimeOperation::Trap.abi_symbol()
+            ),
+        });
+    }
     let parameters = function
         .parameters()
         .iter()
@@ -443,33 +466,47 @@ fn lower_function(
 fn lower_block_arguments(
     block: &pop_mir::MirBlock,
     incoming: Option<&[(BlockId, Vec<ValueId>)]>,
+    union_payload_source: Option<ValueId>,
     types: &TypeArena,
 ) -> Result<Vec<String>, LlvmLoweringError> {
-    let Some(incoming) = incoming else {
+    if let Some(incoming) = incoming {
+        return block
+            .arguments()
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                let incoming_values = incoming
+                    .iter()
+                    .map(|(predecessor, values)| {
+                        let value = values
+                            .get(index)
+                            .ok_or(LlvmLoweringError::InvalidType(argument.type_id()))?;
+                        Ok(format!("[ %v{}, %b{} ]", value.raw(), predecessor.raw()))
+                    })
+                    .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
+                Ok(format!(
+                    "%v{} = phi {} {}",
+                    argument.value().raw(),
+                    llvm_type(argument.type_id(), types)?,
+                    incoming_values.join(", ")
+                ))
+            })
+            .collect();
+    }
+    let Some(scrutinee) = union_payload_source else {
         return Ok(Vec::new());
     };
-    block
-        .arguments()
-        .iter()
-        .enumerate()
-        .map(|(index, argument)| {
-            let incoming_values = incoming
-                .iter()
-                .map(|(predecessor, values)| {
-                    let value = values
-                        .get(index)
-                        .ok_or(LlvmLoweringError::InvalidType(argument.type_id()))?;
-                    Ok(format!("[ %v{}, %b{} ]", value.raw(), predecessor.raw()))
-                })
-                .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
-            Ok(format!(
-                "%v{} = phi {} {}",
-                argument.value().raw(),
-                llvm_type(argument.type_id(), types)?,
-                incoming_values.join(", ")
-            ))
-        })
-        .collect()
+    let mut instructions = Vec::new();
+    for (index, argument) in block.arguments().iter().enumerate() {
+        instructions.extend(lower_runtime_slot_load(
+            argument.value(),
+            argument.type_id(),
+            scrutinee,
+            index + 2,
+            types,
+        )?);
+    }
+    Ok(instructions)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -773,14 +810,9 @@ fn lower_instruction(
             types,
             field_layout,
         )?,
-        MirInstructionKind::UnionMake { arguments, .. } => runtime_call(
-            &result,
-            result_type,
-            RuntimeOperation::UnionMake,
-            arguments,
-            value_types,
-            types,
-        )?,
+        MirInstructionKind::UnionMake {
+            case, arguments, ..
+        } => lower_union_make(&result, *case, arguments, value_types, types)?,
         MirInstructionKind::InterfaceUpcast { value, .. } => runtime_call(
             &result,
             result_type,
@@ -861,8 +893,26 @@ fn lower_terminator(
             RuntimeOperation::ContinueUnwind.abi_symbol()
         ),
         MirTerminator::Unreachable | MirTerminator::Missing => "unreachable".to_owned(),
-        MirTerminator::UnionSwitch { scrutinee, .. } => {
-            format!("switch i32 %v{}, label %b0 []", scrutinee.raw())
+        MirTerminator::UnionSwitch {
+            scrutinee, arms, ..
+        } => {
+            let tag = format!("%v{}_union_tag", scrutinee.raw());
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "    i64 {}, label %b{}",
+                        arm.case().raw(),
+                        arm.target().raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{tag} = call i64 @{}(i64 %v{}, i64 1)\n  switch i64 {tag}, label %pop_invalid_union [\n{cases}\n  ]",
+                RuntimeOperation::FieldGet.abi_symbol(),
+                scrutinee.raw()
+            )
         }
     })
 }
@@ -968,6 +1018,109 @@ fn lower_object_make(
         ));
     }
     Ok(lines.join("\n"))
+}
+
+fn lower_union_make(
+    result: &str,
+    case: pop_foundation::UnionCaseId,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {})",
+        RuntimeOperation::AllocateObject.abi_symbol(),
+        arguments.len() + 1
+    )];
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {})",
+        RuntimeOperation::FieldSet.abi_symbol(),
+        case.raw()
+    ));
+    for (index, value) in arguments.iter().enumerate() {
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let ty = llvm_type(type_id, types)?;
+        let (conversions, stored) = lower_runtime_slot_store(*value, type_id, &ty)?;
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            RuntimeOperation::FieldSet.abi_symbol(),
+            index + 2
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn lower_runtime_slot_store(
+    value: ValueId,
+    type_id: TypeId,
+    ty: &str,
+) -> Result<(Vec<String>, String), LlvmLoweringError> {
+    let source = format!("%v{}", value.raw());
+    let converted = format!("%v{}_slot", value.raw());
+    match ty {
+        "i64" => Ok((Vec::new(), source)),
+        "i1" | "i8" | "i16" | "i32" => Ok((
+            vec![format!("{converted} = zext {ty} {source} to i64")],
+            converted,
+        )),
+        "float" => Ok((
+            vec![
+                format!("{converted}_bits = bitcast float {source} to i32"),
+                format!("{converted} = zext i32 {converted}_bits to i64"),
+            ],
+            converted,
+        )),
+        "double" => Ok((
+            vec![format!("{converted} = bitcast double {source} to i64")],
+            converted,
+        )),
+        "ptr" => Ok((
+            vec![format!("{converted} = ptrtoint ptr {source} to i64")],
+            converted,
+        )),
+        _ => Err(LlvmLoweringError::InvalidType(type_id)),
+    }
+}
+
+fn lower_runtime_slot_load(
+    result: ValueId,
+    result_type: TypeId,
+    owner: ValueId,
+    slot: usize,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let ty = llvm_type(result_type, types)?;
+    let result = format!("%v{}", result.raw());
+    let loaded = format!("{result}_slot");
+    let call = format!(
+        "call i64 @{}(i64 %v{}, i64 {slot})",
+        RuntimeOperation::FieldGet.abi_symbol(),
+        owner.raw()
+    );
+    Ok(match ty.as_str() {
+        "i64" => vec![format!("{result} = {call}")],
+        "i1" | "i8" | "i16" | "i32" => vec![
+            format!("{loaded} = {call}"),
+            format!("{result} = trunc i64 {loaded} to {ty}"),
+        ],
+        "float" => vec![
+            format!("{loaded} = {call}"),
+            format!("{loaded}_bits = trunc i64 {loaded} to i32"),
+            format!("{result} = bitcast i32 {loaded}_bits to float"),
+        ],
+        "double" => vec![
+            format!("{loaded} = {call}"),
+            format!("{result} = bitcast i64 {loaded} to double"),
+        ],
+        "ptr" => vec![
+            format!("{loaded} = {call}"),
+            format!("{result} = inttoptr i64 {loaded} to ptr"),
+        ],
+        _ => return Err(LlvmLoweringError::InvalidType(result_type)),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
