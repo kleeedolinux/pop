@@ -258,12 +258,13 @@ pub fn lower_mir_to_llvm_ir(
             "declare i64 @{}(i64)",
             RuntimeOperation::AllocateObject.abi_symbol()
         ),
+        "declare i64 @pop_rt_allocate_mapped_object(i64, ptr, i64)".to_owned(),
         format!(
             "declare i64 @{}(i64, i1)",
             RuntimeOperation::AllocateArray.abi_symbol()
         ),
         format!(
-            "declare void @{}(i32)",
+            "declare i8 @{}(i32, ptr, i64)",
             RuntimeOperation::GcSafePoint.abi_symbol()
         ),
         format!(
@@ -1279,11 +1280,9 @@ fn lower_instruction(
             }
             format!("call void @pop_std_print_int(i64 %v{})", arguments[0].raw())
         }
-        MirInstructionKind::GcSafePoint { safe_point, .. } => format!(
-            "call void @{}(i32 {})",
-            RuntimeOperation::GcSafePoint.abi_symbol(),
-            safe_point.raw()
-        ),
+        MirInstructionKind::GcSafePoint {
+            safe_point, roots, ..
+        } => lower_gc_safe_point(&result, safe_point.raw(), roots),
         MirInstructionKind::RetainRoot { value } => format!(
             "call void @{}(i64 %v{})",
             RuntimeOperation::RetainRoot.abi_symbol(),
@@ -1412,6 +1411,7 @@ fn lower_instruction(
             *base,
             fields,
             record_fields,
+            record_field_types,
             field_layout,
             value_types,
             types,
@@ -1889,11 +1889,18 @@ fn lower_object_make(
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
 ) -> Result<String, LlvmLoweringError> {
-    let mut lines = vec![format!(
-        "{result} = call i64 @{}(i64 {})",
-        RuntimeOperation::AllocateObject.abi_symbol(),
-        slot_count
-    )];
+    let reference_slots = fields
+        .iter()
+        .filter_map(|(field, value)| {
+            values
+                .get(value)
+                .copied()
+                .filter(|type_id| is_managed_type(*type_id, types))
+                .and_then(|_| field_layout.get(field).copied())
+                .map(|slot| slot - 1)
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(result, slot_count, &reference_slots);
     for (field, value) in fields {
         let slot = field_layout
             .get(field)
@@ -1913,17 +1920,97 @@ fn lower_object_make(
     Ok(lines.join("\n"))
 }
 
+fn lower_mapped_allocation(result: &str, slot_count: u32, reference_slots: &[u32]) -> Vec<String> {
+    if reference_slots.is_empty() {
+        return vec![format!(
+            "{result} = call i64 @pop_rt_allocate_mapped_object(i64 {slot_count}, ptr null, i64 0)"
+        )];
+    }
+    let map = format!("{result}_object_map");
+    let mut lines = vec![format!("{map} = alloca [{} x i32]", reference_slots.len())];
+    for (index, slot) in reference_slots.iter().enumerate() {
+        let entry = format!("{map}_{index}");
+        lines.extend([
+            format!(
+                "{entry} = getelementptr [{} x i32], ptr {map}, i64 0, i64 {index}",
+                reference_slots.len()
+            ),
+            format!("store i32 {slot}, ptr {entry}"),
+        ]);
+    }
+    lines.push(format!(
+        "{result} = call i64 @pop_rt_allocate_mapped_object(i64 {slot_count}, ptr {map}, i64 {})",
+        reference_slots.len()
+    ));
+    lines
+}
+
+fn lower_gc_safe_point(result: &str, safe_point: u32, roots: &[ValueId]) -> String {
+    if roots.is_empty() {
+        return format!(
+            "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
+            RuntimeOperation::GcSafePoint.abi_symbol()
+        );
+    }
+    let root_array = format!("{result}_roots");
+    let mut lines = vec![format!("{root_array} = alloca [{} x i64]", roots.len())];
+    for (index, root) in roots.iter().enumerate() {
+        let entry = format!("{root_array}_{index}");
+        lines.extend([
+            format!(
+                "{entry} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                roots.len()
+            ),
+            format!("store i64 %v{}, ptr {entry}", root.raw()),
+        ]);
+    }
+    lines.push(format!(
+        "call i8 @{}(i32 {safe_point}, ptr {root_array}, i64 {})",
+        RuntimeOperation::GcSafePoint.abi_symbol(),
+        roots.len()
+    ));
+    lines.join("\n")
+}
+
+fn is_managed_type(type_id: TypeId, types: &TypeArena) -> bool {
+    !matches!(
+        types.get(type_id),
+        Some(
+            SemanticType::Primitive(
+                PrimitiveType::Nil
+                    | PrimitiveType::Boolean
+                    | PrimitiveType::Integer(_)
+                    | PrimitiveType::Float32
+                    | PrimitiveType::Float64
+                    | PrimitiveType::Never
+            ) | SemanticType::Function { .. }
+        )
+    )
+}
+
 fn lower_tuple_make(
     result: &str,
     elements: &[ValueId],
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
 ) -> Result<String, LlvmLoweringError> {
-    let mut lines = vec![format!(
-        "{result} = call i64 @{}(i64 {})",
-        RuntimeOperation::AllocateObject.abi_symbol(),
-        elements.len()
-    )];
+    let reference_slots = elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            values
+                .get(value)
+                .copied()
+                .filter(|type_id| is_managed_type(*type_id, types))
+                .and_then(|_| u32::try_from(index).ok())
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(elements.len())
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        &reference_slots,
+    );
     for (index, value) in elements.iter().enumerate() {
         let type_id = *values
             .get(value)
@@ -1947,6 +2034,7 @@ fn lower_record_update(
     base: ValueId,
     updates: &[(FieldId, ValueId)],
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     field_layout: &BTreeMap<FieldId, u32>,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
@@ -1954,11 +2042,25 @@ fn lower_record_update(
     let fields = record_fields
         .get(&record)
         .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    let mut lines = vec![format!(
-        "{result} = call i64 @{}(i64 {})",
-        RuntimeOperation::AllocateObject.abi_symbol(),
-        fields.len()
-    )];
+    let base_type = *values
+        .get(&base)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let reference_slots = record_field_types
+        .get(&base_type)
+        .ok_or(LlvmLoweringError::InvalidType(base_type))?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, type_id)| {
+            is_managed_type(*type_id, types)
+                .then(|| u32::try_from(index).ok())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(fields.len()).map_err(|_| LlvmLoweringError::InvalidType(base_type))?,
+        &reference_slots,
+    );
     for field in fields {
         let slot = *field_layout
             .get(field)
@@ -2018,11 +2120,23 @@ fn lower_union_make(
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
 ) -> Result<String, LlvmLoweringError> {
-    let mut lines = vec![format!(
-        "{result} = call i64 @{}(i64 {})",
-        RuntimeOperation::AllocateObject.abi_symbol(),
-        arguments.len() + 1
-    )];
+    let reference_slots = arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            values
+                .get(value)
+                .copied()
+                .filter(|type_id| is_managed_type(*type_id, types))
+                .and_then(|_| u32::try_from(index + 1).ok())
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(arguments.len() + 1)
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        &reference_slots,
+    );
     lines.push(format!(
         "call i8 @{}(i64 {result}, i64 1, i64 {})",
         RuntimeOperation::FieldSet.abi_symbol(),
@@ -2063,10 +2177,11 @@ fn lower_capture_cell_allocate(
         .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
     let (conversions, stored) =
         lower_runtime_slot_store(initial, type_id, &llvm_type(type_id, types)?)?;
-    let mut lines = vec![format!(
-        "{result} = call i64 @{}(i64 1)",
-        RuntimeOperation::AllocateObject.abi_symbol()
-    )];
+    let reference_slots = is_managed_type(type_id, types)
+        .then_some(0)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(result, 1, &reference_slots);
     lines.extend(conversions);
     lines.push(format!(
         "call i8 @{}(i64 {result}, i64 1, i64 {stored})",
@@ -2083,11 +2198,21 @@ fn lower_closure_environment_allocate(
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
 ) -> Result<String, LlvmLoweringError> {
-    let mut lines = vec![format!(
-        "{result} = call i64 @{}(i64 {})",
-        RuntimeOperation::AllocateObject.abi_symbol(),
-        captures.len() + 1
-    )];
+    let reference_slots = captures
+        .iter()
+        .filter_map(|capture| {
+            (capture.self_reference()
+                || capture.mode() == pop_mir::MirCaptureMode::Cell
+                || is_managed_type(capture.type_id(), types))
+            .then_some(capture.slot() + 1)
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(captures.len() + 1)
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        &reference_slots,
+    );
     lines.push(format!(
         "call i8 @{}(i64 {result}, i64 1, i64 {})",
         RuntimeOperation::FieldSet.abi_symbol(),

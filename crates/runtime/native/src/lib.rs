@@ -76,6 +76,58 @@ pub extern "C" fn pop_rt_allocate_object(slot_count: u64) -> u64 {
     abi_allocate_object(slot_count)
 }
 
+/// Allocates an object using explicit zero-based managed-reference slots.
+#[must_use]
+pub fn allocate_mapped_object(slot_count: u64, reference_slots: &[u32]) -> u64 {
+    let Ok(slot_count) = u32::try_from(slot_count) else {
+        return 0;
+    };
+    let slots = reference_slots
+        .iter()
+        .copied()
+        .map(ObjectSlot::new)
+        .collect();
+    let Ok(object_map) = ObjectMap::new(slot_count, slots) else {
+        return 0;
+    };
+    let request =
+        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .allocate_object(&request)
+        .map_or(0, ManagedReference::raw)
+}
+
+/// C-compatible mapped-object allocation boundary used by native LLVM code.
+///
+/// # Safety
+///
+/// When `reference_count` is nonzero, `reference_slots` must address that many
+/// readable `u32` slot indices for the duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_allocate_mapped_object(
+    slot_count: u64,
+    reference_slots: *const u32,
+    reference_count: u64,
+) -> u64 {
+    let Ok(reference_count) = usize::try_from(reference_count) else {
+        return 0;
+    };
+    if reference_count == 0 {
+        return allocate_mapped_object(slot_count, &[]);
+    }
+    if reference_slots.is_null() {
+        return 0;
+    }
+    // SAFETY: The backend passes a stack array containing exactly the declared
+    // number of immutable slot indices.
+    let reference_slots = unsafe { std::slice::from_raw_parts(reference_slots, reference_count) };
+    allocate_mapped_object(slot_count, reference_slots)
+}
+
 fn abi_allocate_object(slot_count: u32) -> u64 {
     let Ok(object_map) = ObjectMap::new(slot_count, Vec::new()) else {
         return 0;
@@ -260,9 +312,67 @@ pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
     u8::from(runtime.release_root(RootHandle::new(root)).is_ok())
 }
 
+#[must_use]
+pub fn request_abi_collection() -> bool {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return false;
+    };
+    runtime.request_collection();
+    true
+}
+
+pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
+    let root_slots = (0..roots.len())
+        .filter_map(|index| u32::try_from(index).ok())
+        .map(pop_runtime_interface::RootSlot::new)
+        .collect();
+    let Ok(stack_map) = pop_runtime_interface::StackMap::new(
+        pop_runtime_interface::SafePointId::new(safe_point),
+        root_slots,
+    ) else {
+        return 0;
+    };
+    let roots = roots
+        .iter()
+        .copied()
+        .map(|root| (root != 0).then(|| ManagedReference::new(root)))
+        .collect();
+    let Ok(publication) = RootPublication::new(stack_map, roots) else {
+        return 0;
+    };
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(runtime.safe_point(&publication).is_ok())
+}
+
+/// Publishes exact live managed handles for one native safe point.
+///
+/// # Safety
+///
+/// When `root_count` is nonzero, `roots` must address that many readable `u64`
+/// managed handles for the duration of this call.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn pop_rt_gc_safe_point(_safe_point: u32) {}
+pub unsafe extern "C" fn pop_rt_gc_safe_point(
+    safe_point: u32,
+    roots: *const u64,
+    root_count: u64,
+) -> u8 {
+    let Ok(root_count) = usize::try_from(root_count) else {
+        return 0;
+    };
+    if root_count == 0 {
+        return abi_safe_point(safe_point, &[]);
+    }
+    if roots.is_null() {
+        return 0;
+    }
+    // SAFETY: The backend passes a stack array containing the declared number
+    // of live managed handles.
+    let roots = unsafe { std::slice::from_raw_parts(roots, root_count) };
+    abi_safe_point(safe_point, roots)
+}
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
