@@ -76,10 +76,7 @@ fn parser_diagnostics_have_a_deterministic_snapshot() {
     let tree = parse_file(&source);
 
     assert_eq!(tree.reconstruct(&source), text);
-    assert_eq!(
-        tree.diagnostic_snapshot(),
-        "POP0004@15..21\nPOP0005@43..51\n"
-    );
+    assert_eq!(tree.diagnostic_snapshot(), "POP0004@15..21\n");
 }
 
 #[test]

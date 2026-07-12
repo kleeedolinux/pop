@@ -340,7 +340,7 @@ fn package_run_does_not_ignore_an_invalid_internal_library() {
 }
 
 #[test]
-fn omitted_main_visibility_is_not_accepted_in_a_library_bubble() {
+fn omitted_main_visibility_defaults_to_internal_in_a_library_bubble() {
     let package = temporary_package(
         "implicit-library-main",
         "namespace Studio.Entry.Library\n\
@@ -357,8 +357,12 @@ fn omitted_main_visibility_is_not_accepted_in_a_library_bubble() {
         .arg(package.join("bubble.toml"))
         .output()
         .expect("pop run resolves a Package");
-    assert!(!run.status.success());
-    assert!(output_text(&run.stderr).contains("POP0005"));
+    assert!(
+        run.status.success(),
+        "stderr:\n{}",
+        output_text(&run.stderr)
+    );
+    assert_eq!(output_text(&run.stdout), "42\n");
     std::fs::remove_dir_all(package).expect("remove temporary Package");
 }
 

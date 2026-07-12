@@ -16,6 +16,7 @@ pub struct ModuleInput<'source> {
     bubble: BubbleId,
     source: &'source SourceFile,
     syntax: &'source SyntaxTree,
+    implicit_main_is_private: bool,
 }
 
 impl<'source> ModuleInput<'source> {
@@ -31,7 +32,16 @@ impl<'source> ModuleInput<'source> {
             bubble,
             source,
             syntax,
+            implicit_main_is_private: false,
         }
+    }
+
+    /// Marks this binary-root Module as eligible for the private `main`
+    /// shorthand defined by ADR 0026 and ADR 0029.
+    #[must_use]
+    pub const fn with_implicit_main_entry(mut self) -> Self {
+        self.implicit_main_is_private = true;
+        self
     }
 }
 
@@ -162,8 +172,12 @@ impl IndexBuilder {
             .iter()
             .find_map(|token| visibility(token.kind()))
             .or_else(|| {
-                (kind == DeclarationKind::Function && name == "main").then_some(Visibility::Private)
-            })?;
+                (input.implicit_main_is_private
+                    && kind == DeclarationKind::Function
+                    && name == "main")
+                    .then_some(Visibility::Private)
+            })
+            .unwrap_or(Visibility::Internal);
         let span = SourceSpan::new(input.source.id(), name_token.range());
         let key = (namespace.to_owned(), kind.symbol_space(), name.clone());
         if kind != DeclarationKind::Function {

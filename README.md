@@ -142,11 +142,16 @@ Canonical Pop Lang naming is part of the language contract:
 | Constant | `UPPER_SNAKE_CASE` | `MAX_RETRIES` |
 | Attribute | `PascalCase` | `@Serializable` |
 
-Every namespace-scope declaration explicitly uses `public`, `internal`, or
-`private`. `public` crosses a Bubble boundary through reference metadata;
-`internal` is visible inside one Bubble; `private` stops at the declaring
-Module. There is no `export` prefix, export list, or implicit namespace
-visibility.
+Every namespace-scope declaration resolves to `public`, `internal`, or
+`private`. Omitted visibility defaults to `internal`; the binary-root `main`
+shorthand remains `private`. `public` crosses a Bubble boundary through
+reference metadata; `internal` is visible inside one Bubble; `private` stops at
+the declaring Module. There is no `export` prefix, export list, or implicit
+public visibility.
+
+An omitted function return annotation denotes an empty result pack. It is not
+return-type inference: functions that return values and all parameters require
+explicit types.
 
 `using` changes compile-time name lookup only. It does not load code, create a
 runtime value, forward visibility, or create a dependency by itself.

@@ -74,7 +74,7 @@ HIR invariants:
 - source spans survive desugaring through origin chains;
 - no target word size is assumed for language-defined numeric types;
 - no valid HIR node means “perform this operation dynamically.”
-- every namespace-scope declaration has explicit visibility; `publicSymbols` is
+- every namespace-scope declaration has resolved visibility; `publicSymbols` is
   derived from declarations and is not a source-level export list;
 - every item and source origin identifies its owning `ModuleId` and `BubbleId`.
 

@@ -325,17 +325,20 @@ Functions may live directly in namespaces.
 
 ## Namespaces and visibility
 
-**Keep active:** one file-scoped namespace per Module, explicit namespace-scope
-visibility, and no export/re-export model.
+**Keep active:** one file-scoped namespace per Module, default-internal
+namespace-scope visibility, and no export/re-export model.
 
 Every `.pop` Module declares one file-scoped namespace. A namespace is a static
 name scope, not a runtime value, table, Bubble, Package, or filesystem folder.
 
-Every namespace-scope declaration explicitly uses exactly one of:
+Every namespace-scope declaration resolves to exactly one of:
 
 - `public`: visible to dependent Bubbles and emitted in reference metadata;
 - `internal`: visible across Modules in the same Bubble only;
 - `private`: visible only in the declaring Module/file.
+
+Omitted visibility defaults to `internal`. The exact binary-root `function
+main(...)` shorthand is the sole exception and resolves to `private`.
 
 `local` remains block/function-local. Namespace declarations themselves have no
 visibility modifier.
@@ -584,7 +587,8 @@ honesty about checks not run.
 For architecture changes, at minimum verify:
 
 - all relative Markdown links resolve;
-- every Luau namespace-scope example uses explicit visibility;
+- every Luau namespace-scope example follows the default-internal visibility
+  contract and makes public/private boundaries explicit;
 - no example uses `export` syntax;
 - no lowercase attribute names appear;
 - no forbidden dynamic types/operations were introduced;

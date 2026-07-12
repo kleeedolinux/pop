@@ -68,13 +68,15 @@ fn parses_native_class_fields_and_owned_method_signatures() {
 }
 
 #[test]
-fn class_members_require_explicit_visibility() {
+fn class_and_members_default_to_internal_visibility() {
     let source = SourceFile::new(
         FileId::from_raw(0),
-        "src/invalid.pop",
+        "src/defaults.pop",
         "namespace Example\n\
-         public class Connection\n\
+         class Connection\n\
              closed: Boolean\n\
+             function Connection:close()\n\
+             end\n\
          end\n",
     )
     .expect("source");
@@ -85,10 +87,10 @@ fn class_members_require_explicit_visibility() {
         .iter()
         .find(|node| node.kind() == NodeKind::ClassDeclaration)
         .expect("class");
-    let error = parse_class_declaration(&source, &syntax, class)
-        .expect_err("class member visibility is mandatory");
+    let parsed = parse_class_declaration(&source, &syntax, class).expect("class defaults");
 
-    assert_eq!(error.expectation(), "class member visibility");
+    assert_eq!(parsed.fields()[0].visibility(), VisibilitySyntax::Internal);
+    assert_eq!(parsed.methods()[0].visibility(), VisibilitySyntax::Internal);
 }
 
 #[test]

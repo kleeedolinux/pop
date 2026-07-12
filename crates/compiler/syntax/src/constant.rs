@@ -66,8 +66,8 @@ impl ConstDeclarationError {
 ///
 /// # Errors
 ///
-/// Returns an error for a missing visibility/name/initializer, an invalid type,
-/// or trailing source after the initializer.
+/// Returns an error for a missing name/initializer, an invalid type, or trailing
+/// source after the initializer. Omitted visibility is `internal`.
 pub fn parse_const_declaration(
     source: &SourceFile,
     syntax: &SyntaxTree,
@@ -87,20 +87,18 @@ pub fn parse_const_declaration(
         })
         .collect();
     let mut position = 0_usize;
-    let visibility_token = next(&tokens, &mut position)
-        .ok_or_else(|| error(source, node.range(), "explicit visibility"))?;
-    let visibility = match visibility_token.kind() {
-        TokenKind::Public => VisibilitySyntax::Public,
-        TokenKind::Internal => VisibilitySyntax::Internal,
-        TokenKind::Private => VisibilitySyntax::Private,
-        _ => {
-            return Err(error(
-                source,
-                visibility_token.range(),
-                "explicit visibility",
-            ));
-        }
+    let visibility = match tokens.get(position).map(|token| token.kind()) {
+        Some(TokenKind::Public) => VisibilitySyntax::Public,
+        Some(TokenKind::Private) => VisibilitySyntax::Private,
+        _ => VisibilitySyntax::Internal,
     };
+    let has_explicit_visibility = matches!(
+        tokens.get(position).map(|token| token.kind()),
+        Some(TokenKind::Public | TokenKind::Internal | TokenKind::Private)
+    );
+    if has_explicit_visibility {
+        position += 1;
+    }
     expect(source, &tokens, &mut position, TokenKind::Const, "`const`")?;
     let name = expect(
         source,
@@ -156,12 +154,6 @@ pub fn parse_const_declaration(
         initializer,
         span: SourceSpan::new(source.id(), node.range()),
     })
-}
-
-fn next(tokens: &[Token], position: &mut usize) -> Option<Token> {
-    let token = tokens.get(*position).copied()?;
-    *position += 1;
-    Some(token)
 }
 
 fn expect(

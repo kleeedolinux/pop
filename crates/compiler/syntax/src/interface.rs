@@ -147,13 +147,12 @@ impl InterfaceParser<'_> {
             return Err(self.error("interface declaration"));
         }
         let start = self.current_span().range().start();
-        if !matches!(
+        if matches!(
             self.current_kind(),
             Some(TokenKind::Public | TokenKind::Internal | TokenKind::Private)
         ) {
-            return Err(self.error("visibility"));
+            self.position += 1;
         }
-        self.position += 1;
         self.expect(TokenKind::Interface, "`interface`")?;
         let name = self.expect(TokenKind::Identifier, "interface name")?;
         let name = name.text(self.source).to_owned();

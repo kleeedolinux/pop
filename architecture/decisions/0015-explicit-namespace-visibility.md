@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-10
+- Superseded in part by: ADR 0029 default internal visibility and empty results
 
 ## Context
 
@@ -13,9 +14,10 @@ language toward unnecessary OOP.
 
 ## Decision
 
-Every namespace-scope declaration explicitly uses exactly one visibility:
-`public`, `internal`, or `private`. Pop Lang has no `export` keyword, export
-list, or re-export operation.
+Every namespace-scope declaration has exactly one resolved visibility:
+`public`, `internal`, or `private`. ADR 0029 makes omitted visibility resolve
+to `internal` except for the binary-root `main` shorthand defined by ADR 0026.
+Pop Lang has no `export` keyword, export list, or re-export operation.
 
 - `public` is visible to dependent Bubbles and appears in reference metadata.
 - `internal` is visible to all Modules in the declaring Bubble and is
@@ -35,7 +37,8 @@ visibility; `protected` is not part of the initial language.
 
 ## Consequences
 
-- The parser diagnoses missing namespace visibility and rejects `export`.
+- The parser assigns default internal visibility where the modifier is omitted
+  and rejects `export`.
 - Declaration indexes, symbols, HIR, documentation, and metadata carry the
   visibility enum directly.
 - Reference metadata includes only public declarations and compile-time facts
@@ -53,8 +56,8 @@ and makes `internal`/`private` design less coherent.
 
 ### Use implicit default visibility
 
-Rejected because public API changes could occur silently when declarations are
-moved between Modules or Bubbles.
+Superseded by ADR 0029. Default `internal` does not expose a public API and
+keeps Bubble-local declarations concise.
 
 ### Put namespace functions in static utility classes
 
@@ -63,7 +66,7 @@ ceremony where data and functions express the design.
 
 ## Required conformance tests
 
-- parser tests for all three modifiers and rejected/missing visibility;
+- parser tests for all three modifiers and default internal visibility;
 - resolver tests for file-private and Bubble-internal boundaries;
 - reference-metadata tests proving only public declarations are exposed;
 - HIR snapshots carrying explicit visibility without export lists;

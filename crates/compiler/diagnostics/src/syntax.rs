@@ -53,15 +53,3 @@ pub fn unsupported_export(span: SourceSpan) -> Diagnostic {
     )
     .with_fix(fix)
 }
-
-#[must_use]
-pub fn missing_visibility(span: SourceSpan) -> Diagnostic {
-    Diagnostic::new(
-        DiagnosticCode::new("POP0005"),
-        DiagnosticSeverity::Error,
-        DiagnosticCategory::Syntax,
-        MessageKey::new("syntax.missingVisibility"),
-        Vec::new(),
-        span,
-    )
-}
