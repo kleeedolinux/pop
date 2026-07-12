@@ -83,11 +83,27 @@ editor files, or generated artifacts.
 
 ## Commits and pull requests
 
-Commit messages should state the change and remain easy to review. A pull
-request should explain the problem, the architectural authorization, the test
-coverage, and any remaining limitation. Keep one logical change per pull
-request when possible.
+Commit messages follow Linux Git conventions: a short, specific subject line
+in the imperative mood, no trailing period, and a blank line before any longer
+explanation. The body should explain why the change is needed and describe
+important consequences that are not obvious from the code. Commit messages
+should remain concise, readable, and focused on one logical change.
 
-No pull request is complete while it leaves contradictory old terminology,
-uncovered public behavior, or an unexplained failing check. Maintainers may ask
-for a smaller patch, a design change, or a test that proves the boundary.
+Pull requests should explain the problem, the architectural authorization, the
+test coverage, and any remaining limitations. One logical change per pull
+request is preferred whenever practical.
+
+A pull request is not complete while it leaves contradictory old terminology,
+uncovered public behavior, or an unexplained failing check. Maintainers may
+request a smaller patch, a design change, or a test that proves the relevant
+boundary.
+
+## Avoid using Python
+
+Repository scripts should not be written in Python. Ruby is preferred when a
+script is needed and Ruby is available.
+
+When a script is intended to become part of the repository and Ruby is not
+installed, contributors should ask the host machine owner to install it and
+provide installation instructions appropriate for the operating system.
+Python scripts are not accepted into the repository.
