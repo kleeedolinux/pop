@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-07-11
 - Supersedes: ADR 0024 standalone native entry clause
+- Superseded in part by: ADR 0026 clean binary entry forms
 
 ## Context
 
@@ -50,6 +51,9 @@ is converted to the platform process status according to the target ABI.
 This decision supersedes only ADR 0024's temporary standalone `() -> Int`
 entry clause. Its handle ABI, native runtime, foundation-library, and prelude
 decisions remain accepted.
+
+ADR 0026 supersedes this decision's one exact entry shape. Binary-only
+`SymbolId` selection and exact argument preservation remain accepted.
 
 ## Consequences
 

@@ -67,6 +67,7 @@ pub struct FrontEndBubbleInput {
     namespace: NamespaceId,
     dependencies: Vec<BubbleId>,
     modules: Vec<FrontEndModule>,
+    allows_implicit_main: bool,
 }
 
 impl FrontEndBubbleInput {
@@ -85,7 +86,16 @@ impl FrontEndBubbleInput {
             namespace,
             dependencies,
             modules,
+            allows_implicit_main: false,
         }
+    }
+
+    /// Allows the binary-root `function main(...)` shorthand. Library and
+    /// ordinary analysis inputs retain mandatory explicit visibility.
+    #[must_use]
+    pub const fn with_implicit_main_entry(mut self) -> Self {
+        self.allows_implicit_main = true;
+        self
     }
 }
 
@@ -259,6 +269,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         .collect();
     let indexed = build_declaration_index(&module_inputs);
     let mut diagnostics = indexed.diagnostics().to_vec();
+    validate_implicit_main_visibility(&parsed, input.allows_implicit_main, &mut diagnostics);
     validate_source_attribute_targets(&parsed, &mut diagnostics);
     let database = ResolutionDatabase::new(indexed.into_index());
     let bootstrap = embedded_bootstrap_schema().expect("repository-validated bootstrap schema");
@@ -358,6 +369,46 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         compile_time_evaluations,
         constants,
         diagnostics,
+    }
+}
+
+fn validate_implicit_main_visibility(
+    modules: &[ParsedModule],
+    allows_implicit_main: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if allows_implicit_main {
+        return;
+    }
+    for module in modules {
+        for node in module
+            .syntax
+            .root()
+            .children()
+            .iter()
+            .filter(|node| node.kind() == NodeKind::FunctionDeclaration)
+        {
+            let mut tokens = module.syntax.tokens().iter().filter(|token| {
+                !token.kind().is_trivia()
+                    && token.range().start() >= node.range().start()
+                    && token.range().end() <= node.range().end()
+            });
+            let Some(function) = tokens.next() else {
+                continue;
+            };
+            let Some(name) = tokens.next() else {
+                continue;
+            };
+            if function.kind() == pop_syntax::TokenKind::Function
+                && name.kind() == pop_syntax::TokenKind::Identifier
+                && name.text(&module.source) == "main"
+            {
+                diagnostics.push(syntax_diagnostics::missing_visibility(SourceSpan::new(
+                    module.source.id(),
+                    function.range(),
+                )));
+            }
+        }
     }
 }
 

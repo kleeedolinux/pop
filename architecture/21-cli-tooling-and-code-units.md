@@ -160,21 +160,31 @@ Additional target filenames/directories use `camelCase` and derive a
 noncanonical derivation is an error with a manifest-override quick fix; the tool
 never performs Cargo-style dash/underscore identity rewriting.
 
-A binary root must resolve exactly one canonical entry item:
+A binary root must resolve exactly one entry item. The minimal form is:
 
 ```luau
-private function main(arguments: Array<String>): Int
+function main()
+    print(42)
 end
 ```
 
-`arguments` excludes the executable path; returning zero means success. Every
-argument must be valid UTF-8 and is preserved exactly, including empty and
-non-ASCII strings. Invalid platform argument bytes cause a closed runtime trap
-before `main` executes rather than lossy conversion.
+The explicit full form remains
+`private function main(arguments: Array<String>): Int`. Entry visibility may be
+omitted or explicitly `private`; parameters may be absent or exactly
+`arguments: Array<String>`; the result may be absent or exactly `Int`. Normal
+completion of a no-result entry means status zero. `arguments` excludes the
+executable path. Every requested argument must be valid UTF-8 and is preserved
+exactly, including empty and non-ASCII strings. Invalid platform argument bytes
+cause a closed runtime trap before an argument-taking `main` executes rather
+than lossy conversion.
 Applications keep typed `Result` errors internally and translate them explicitly
 at the entry boundary. Async programs call the typed `Async.run` adapter rather
 than adding hidden async entry behavior. Entry selection uses `SymbolId` during
 compilation, never runtime string lookup.
+
+Library Bubbles do not resolve an entry item. A Package may build `src/lib.pop`
+and `src/main.pop` together without imposing the binary's `main` contract on the
+library.
 
 A Package without `src/lib.pop` is valid. A Bubble can be declared explicitly
 when the conventional layout is insufficient:

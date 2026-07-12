@@ -141,7 +141,6 @@ impl IndexBuilder {
     ) -> Option<SymbolId> {
         let kind = declaration_kind(node.kind())?;
         let tokens = significant_tokens(input, node);
-        let visibility = tokens.iter().find_map(|token| visibility(token.kind()))?;
         let Some(keyword_index) = tokens
             .iter()
             .position(|token| token_kind_matches_declaration(token.kind(), kind))
@@ -159,6 +158,12 @@ impl IndexBuilder {
             return None;
         };
         let name = name_token.text(input.source).to_owned();
+        let visibility = tokens
+            .iter()
+            .find_map(|token| visibility(token.kind()))
+            .or_else(|| {
+                (kind == DeclarationKind::Function && name == "main").then_some(Visibility::Private)
+            })?;
         let span = SourceSpan::new(input.source.id(), name_token.range());
         let key = (namespace.to_owned(), kind.symbol_space(), name.clone());
         if kind != DeclarationKind::Function {

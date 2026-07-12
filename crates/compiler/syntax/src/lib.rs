@@ -238,8 +238,10 @@ impl Parser<'_, '_> {
                     (index, declaration)
                 }
                 kind if declaration_node_kind(kind).is_some() || kind == TokenKind::Open => {
-                    self.diagnostics
-                        .push(syntax_diagnostics::missing_visibility(self.span(index)));
+                    if !self.is_implicit_main_candidate(index) {
+                        self.diagnostics
+                            .push(syntax_diagnostics::missing_visibility(self.span(index)));
+                    }
                     (index, index)
                 }
                 _ => {
@@ -361,6 +363,16 @@ impl Parser<'_, '_> {
             }
         }
         cursor
+    }
+
+    fn is_implicit_main_candidate(&self, index: usize) -> bool {
+        if self.tokens[index].kind() != TokenKind::Function {
+            return false;
+        }
+        self.next_significant(index + 1).is_some_and(|name| {
+            self.tokens[name].kind() == TokenKind::Identifier
+                && self.tokens[name].text(self.source) == "main"
+        })
     }
 
     fn node_for_tokens(&self, kind: NodeKind, start: usize, end: usize) -> SyntaxNode {

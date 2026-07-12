@@ -4,8 +4,7 @@ public function multiply(left: Int, right: Int): Int
     return left * right
 end
 
-private function main(arguments: Array<String>): Int
+function main()
     local result = multiply(6, 7)
     print(result)
-    return 0
 end

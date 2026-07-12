@@ -16,7 +16,7 @@ use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use pop_foundation::{BlockId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_foundation::{BlockId, BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
 use pop_mir::{
     MirBubble, MirDeclarationKind, MirInstructionKind, MirTerminator, verify_mir_bubble,
 };
@@ -168,7 +168,7 @@ impl fmt::Display for LlvmLoweringError {
             }
             Self::UnsupportedEntryPointSignature(symbol) => write!(
                 formatter,
-                "entry point s{} must have signature (Array<String>) -> Int",
+                "entry point s{} must accept () or (Array<String>) and return () or Int",
                 symbol.raw()
             ),
         }
@@ -201,6 +201,7 @@ pub fn lower_mir_to_llvm_ir(
         .iter()
         .map(|function| {
             lower_function(
+                bubble.bubble(),
                 function,
                 types,
                 options,
@@ -213,6 +214,7 @@ pub fn lower_mir_to_llvm_ir(
         .collect::<Result<Vec<_>, _>>()?;
     for method in bubble.methods() {
         let mut lowered = lower_function(
+            bubble.bubble(),
             method.function(),
             types,
             options,
@@ -221,7 +223,7 @@ pub fn lower_mir_to_llvm_ir(
             &record_field_types,
             &string_literals,
         )?;
-        lowered.name = format!("pop_method_{}", method.method().raw());
+        lowered.name = method_name(bubble.bubble(), method.method());
         functions.push(lowered);
     }
     for nested in bubble.nested_functions() {
@@ -230,11 +232,8 @@ pub fn lower_mir_to_llvm_ir(
             .cloned()
             .unwrap_or_default();
         functions.push(lower_function_parts(
-            format!(
-                "pop_nested_{}_{}",
-                nested.owner().raw(),
-                nested.function().raw()
-            ),
+            bubble.bubble(),
+            nested_name(bubble.bubble(), nested.owner(), nested.function()),
             nested.parameters(),
             nested.results(),
             nested.blocks(),
@@ -518,6 +517,7 @@ fn lower_interface_dispatchers(
                 })
                 .collect::<Vec<_>>();
             dispatchers.push(lower_interface_dispatcher(
+                bubble.bubble(),
                 interface.interface(),
                 method,
                 &implementations,
@@ -529,6 +529,7 @@ fn lower_interface_dispatchers(
 }
 
 fn lower_interface_dispatcher(
+    bubble: BubbleId,
     interface: pop_foundation::InterfaceId,
     method: &pop_mir::MirInterfaceMethod,
     implementations: &[(ClassId, pop_foundation::MethodId)],
@@ -577,16 +578,16 @@ fn lower_interface_dispatcher(
         let (instructions, terminator) = if method.results().is_empty() {
             (
                 vec![format!(
-                    "call void @pop_method_{}({arguments})",
-                    class_method.raw()
+                    "call void @{}({arguments})",
+                    method_name(bubble, *class_method)
                 )],
                 "ret void".to_owned(),
             )
         } else {
             (
                 vec![format!(
-                    "{dispatch_result} = call {result_type} @pop_method_{}({arguments})",
-                    class_method.raw()
+                    "{dispatch_result} = call {result_type} @{}({arguments})",
+                    method_name(bubble, *class_method)
                 )],
                 format!("ret {result_type} {dispatch_result}"),
             )
@@ -606,11 +607,7 @@ fn lower_interface_dispatcher(
         ),
     });
     Ok(PrivateFunction {
-        name: format!(
-            "pop_interface_{}_{}",
-            interface.raw(),
-            method.method().raw()
-        ),
+        name: interface_name(bubble, interface, method.method()),
         parameters,
         result: result_type,
         blocks,
@@ -763,7 +760,7 @@ fn lower_indirect_dispatcher(
     for function in direct {
         blocks.push(indirect_call_target(
             format!("direct_s{}", function.symbol().raw()),
-            &format!("@pop_s{}", function.symbol().raw()),
+            &format!("@{}", function_name(bubble.bubble(), function.symbol())),
             &argument_text,
             &result_type,
             result_types.is_empty(),
@@ -782,9 +779,8 @@ fn lower_indirect_dispatcher(
                 function.function().raw()
             ),
             &format!(
-                "@pop_nested_{}_{}",
-                function.owner().raw(),
-                function.function().raw()
+                "@{}",
+                nested_name(bubble.bubble(), function.owner(), function.function())
             ),
             &arguments,
             &result_type,
@@ -800,7 +796,7 @@ fn lower_indirect_dispatcher(
         ),
     });
     Ok(PrivateFunction {
-        name: format!("pop_indirect_t{}", function_type.raw()),
+        name: indirect_name(bubble.bubble(), function_type),
         parameters,
         result: result_type,
         blocks,
@@ -895,17 +891,77 @@ fn lower_entry_point(
     let string_type = types
         .source_type("String")
         .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    let canonical_parameter = function.parameters().first().is_some_and(|parameter| {
-        matches!(types.get(*parameter), Some(SemanticType::Array(element)) if *element == string_type)
-    });
-    if function.parameters().len() != 1 || !canonical_parameter || function.results() != [int_type]
+    let takes_arguments = function.parameters().len() == 1
+        && function.parameters().first().is_some_and(|parameter| {
+            matches!(types.get(*parameter), Some(SemanticType::Array(element)) if *element == string_type)
+        });
+    let returns_status = function.results() == [int_type];
+    if !(function.parameters().is_empty() || takes_arguments)
+        || !(function.results().is_empty() || returns_status)
     {
         return Err(LlvmLoweringError::UnsupportedEntryPointSignature(symbol));
     }
+    let entry = function_name(bubble.bubble(), symbol);
+    if takes_arguments {
+        let invocation = if returns_status {
+            format!(
+                "  %pop_exit_value = call i64 @{entry}(i64 %pop_arguments)\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code"
+            )
+        } else {
+            format!("  call void @{entry}(i64 %pop_arguments)\n  ret i32 0")
+        };
+        return Ok(format!(
+            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n{invocation}\n}}"
+        ));
+    }
+    let invocation = if returns_status {
+        format!(
+            "  %pop_exit_value = call i64 @{entry}()\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code"
+        )
+    } else {
+        format!("  call void @{entry}()\n  ret i32 0")
+    };
     Ok(format!(
-        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n  %pop_exit_value = call i64 @pop_s{}(i64 %pop_arguments)\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code\n}}",
-        symbol.raw()
+        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{invocation}\n}}"
     ))
+}
+
+fn function_name(bubble: BubbleId, symbol: SymbolId) -> String {
+    format!("pop_b{}_s{}", bubble.raw(), symbol.raw())
+}
+
+fn method_name(bubble: BubbleId, method: pop_foundation::MethodId) -> String {
+    format!("pop_b{}_method_{}", bubble.raw(), method.raw())
+}
+
+fn interface_name(
+    bubble: BubbleId,
+    interface: pop_foundation::InterfaceId,
+    method: pop_foundation::InterfaceMethodId,
+) -> String {
+    format!(
+        "pop_b{}_interface_{}_{}",
+        bubble.raw(),
+        interface.raw(),
+        method.raw()
+    )
+}
+
+fn nested_name(
+    bubble: BubbleId,
+    owner: SymbolId,
+    function: pop_foundation::NestedFunctionId,
+) -> String {
+    format!(
+        "pop_b{}_nested_{}_{}",
+        bubble.raw(),
+        owner.raw(),
+        function.raw()
+    )
+}
+
+fn indirect_name(bubble: BubbleId, function_type: TypeId) -> String {
+    format!("pop_b{}_indirect_t{}", bubble.raw(), function_type.raw())
 }
 
 impl PrivateFunction {
@@ -928,7 +984,9 @@ impl PrivateFunction {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_function(
+    bubble: BubbleId,
     function: &pop_mir::MirFunction,
     types: &TypeArena,
     options: LlvmLoweringOptions,
@@ -938,7 +996,8 @@ fn lower_function(
     string_literals: &BTreeMap<String, String>,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     lower_function_parts(
-        format!("pop_s{}", function.symbol().raw()),
+        bubble,
+        function_name(bubble, function.symbol()),
         function.parameters(),
         function.results(),
         function.blocks(),
@@ -954,6 +1013,7 @@ fn lower_function(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_function_parts(
+    bubble: BubbleId,
     name: String,
     parameter_types: &[TypeId],
     result_types: &[TypeId],
@@ -1012,6 +1072,7 @@ fn lower_function_parts(
                 instructions.push(format!("; mir v{}", instruction.result().raw()));
             }
             instructions.push(lower_instruction(
+                bubble,
                 instruction,
                 &value_types,
                 types,
@@ -1127,6 +1188,7 @@ fn lower_block_arguments(
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn lower_instruction(
+    bubble: BubbleId,
     instruction: &pop_mir::MirInstruction,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
@@ -1270,7 +1332,7 @@ fn lower_instruction(
         } => call_line(
             &result,
             result_type,
-            &format!("@pop_s{}", callee.raw()),
+            &format!("@{}", function_name(bubble, *callee)),
             arguments,
             value_types,
             types,
@@ -1361,7 +1423,7 @@ fn lower_instruction(
         } => call_line(
             &result,
             result_type,
-            &format!("@pop_method_{}", method.raw()),
+            &format!("@{}", method_name(bubble, *method)),
             arguments,
             value_types,
             types,
@@ -1374,7 +1436,7 @@ fn lower_instruction(
         } => call_line(
             &result,
             result_type,
-            &format!("@pop_interface_{}_{}", interface.raw(), method.raw()),
+            &format!("@{}", interface_name(bubble, *interface, *method)),
             arguments,
             value_types,
             types,
@@ -1392,7 +1454,7 @@ fn lower_instruction(
             call_line(
                 &result,
                 result_type,
-                &format!("@pop_indirect_t{}", callee_type.raw()),
+                &format!("@{}", indirect_name(bubble, callee_type)),
                 &arguments,
                 value_types,
                 types,

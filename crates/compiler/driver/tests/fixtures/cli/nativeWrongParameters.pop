@@ -1,5 +1,5 @@
 namespace NativeWrongParameters
 
-private function main(): Int
+private function main(first: Int, second: Int): Int
     return 0
 end

@@ -31,6 +31,20 @@ fn output_text(output: &[u8]) -> String {
     String::from_utf8(output.to_vec()).expect("pop output is UTF-8")
 }
 
+fn temporary_package(name: &str, library: &str, binary: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("pop-package-{name}-{}", std::process::id()));
+    let source = root.join("src");
+    std::fs::create_dir_all(&source).expect("create temporary Package");
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Entry\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write Package manifest");
+    std::fs::write(source.join("lib.pop"), library).expect("write library Bubble root");
+    std::fs::write(source.join("main.pop"), binary).expect("write binary Bubble root");
+    root
+}
+
 #[test]
 fn check_dumps_deterministic_verified_hir_for_a_pop_module() {
     let first = run_check_dump("inspectable.pop", "hir");
@@ -221,11 +235,131 @@ fn native_build_rejects_every_noncanonical_entry_shape() {
         );
         let stderr = output_text(&output.stderr);
         assert!(
-            stderr.contains("private function main(arguments: Array<String>): Int"),
+            stderr.contains("binary entry must be"),
             "{fixture_name} emitted an imprecise entry diagnostic: {stderr}"
         );
         assert!(!output_path.exists());
     }
+}
+
+#[test]
+fn clean_main_forms_print_and_complete_without_return_zero() {
+    for fixture_name in ["nativeCleanMain.pop", "nativePrivateCleanMain.pop"] {
+        let output_path = std::env::temp_dir().join(format!("pop-clean-main-{fixture_name}"));
+        let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+            .arg("build")
+            .arg(fixture(fixture_name))
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .expect("pop build runs");
+        assert!(
+            build.status.success(),
+            "{fixture_name} failed: {}",
+            output_text(&build.stderr)
+        );
+        let run = Command::new(&output_path)
+            .output()
+            .expect("clean main executable runs");
+        assert!(run.status.success());
+        assert_eq!(output_text(&run.stdout), "42\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let invalid = Command::new(&output_path)
+                .arg(std::ffi::OsString::from_vec(vec![0xff]))
+                .output()
+                .expect("no-argument main ignores platform argument encoding");
+            assert!(invalid.status.success());
+            assert_eq!(output_text(&invalid.stdout), "42\n");
+        }
+        let _ = std::fs::remove_file(output_path);
+    }
+}
+
+#[test]
+fn package_run_compiles_an_internal_library_without_main() {
+    let package = temporary_package(
+        "internal-library",
+        "namespace Studio.Entry.Library\n\
+         public function announce()\n\
+             print(41)\n\
+         end\n\
+         public function message(): String\n\
+             return \"library\"\n\
+         end\n",
+        "namespace Studio.Entry.Application\n\
+         function main()\n\
+             print(42)\n\
+         end\n",
+    );
+    let manifest = package.join("bubble.toml");
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(&manifest)
+        .args(["--", "argument"])
+        .output()
+        .expect("pop run executes a Package binary");
+    assert!(
+        run.status.success(),
+        "Package run failed: {}",
+        output_text(&run.stderr)
+    );
+    assert_eq!(output_text(&run.stdout), "42\n");
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_run_does_not_ignore_an_invalid_internal_library() {
+    let package = temporary_package(
+        "invalid-library",
+        "namespace Studio.Entry.Library\n\
+         public function broken(): Missing\n\
+             return missing\n\
+         end\n",
+        "namespace Studio.Entry.Application\n\
+         private function main(arguments: Array<String>): Int\n\
+             return 0\n\
+         end\n",
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop run resolves a Package");
+    assert!(!run.status.success());
+    assert!(
+        output_text(&run.stderr).contains("POP1002"),
+        "invalid library diagnostic was lost: {}",
+        output_text(&run.stderr)
+    );
+    assert!(!package.join("target/debug/Studio.Entry").exists());
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn omitted_main_visibility_is_not_accepted_in_a_library_bubble() {
+    let package = temporary_package(
+        "implicit-library-main",
+        "namespace Studio.Entry.Library\n\
+         function main()\n\
+             print(41)\n\
+         end\n",
+        "namespace Studio.Entry.Application\n\
+         function main()\n\
+             print(42)\n\
+         end\n",
+    );
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop run resolves a Package");
+    assert!(!run.status.success());
+    assert!(output_text(&run.stderr).contains("POP0005"));
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
 }
 
 #[test]

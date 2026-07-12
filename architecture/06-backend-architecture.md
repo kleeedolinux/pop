@@ -53,10 +53,17 @@ the runtime interface, or another backend.
 
 The executable entry wrapper is a target boundary, not a second language entry
 contract. It maps the platform argument vector through the typed runtime
-adapter, calls the canonical entry `SymbolId` with a managed `Array<String>`,
-and maps its `Int` result to process status. Entry discovery remains a
-resolved-program/driver responsibility; the LLVM backend receives the selected
-ID and never scans names or signatures to invent an entry.
+adapter when the selected entry requests `Array<String>`, calls the canonical
+entry `SymbolId`, and maps either its `Int` result or successful no-result
+completion to process status. Entry discovery remains a resolved-program/driver
+responsibility; the LLVM backend receives the selected ID and never scans names
+or signatures to invent an entry.
+
+Native definitions and backend-generated dispatch helpers are mangled with
+their owning `BubbleId` plus typed item identity. Two Bubbles may therefore use
+the same local raw `SymbolId`, method ID, or helper ID without colliding when a
+Package links its library and binary objects. Source names never become linker
+identity.
 
 The bootstrap conformance path must assemble emitted textual IR with the target
 LLVM toolchain and execute a pure entry point through LLVM's native execution

@@ -42,7 +42,7 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     .expect("LLVM lowering");
     let text = module.to_string();
     assert!(text.contains("target triple = \"x86_64-unknown-linux-gnu\""));
-    assert!(text.contains("define i64 @pop_s0(i64 %v0)"));
+    assert!(text.contains("define i64 @pop_b0_s0(i64 %v0)"));
     assert!(text.contains("add i64"));
     assert!(text.contains("ret i64"));
     assert!(
@@ -119,13 +119,33 @@ fn emitted_llvm_executes_a_pure_pop_function() {
     let text = module.to_string();
     assert!(text.contains("define i32 @main(i32 %pop_argc, ptr %pop_argv)"));
     assert!(text.contains("call i64 @pop_rt_process_arguments"));
-    assert!(text.contains("call i64 @pop_s0(i64 %pop_arguments)"));
+    assert!(text.contains("call i64 @pop_b0_s0(i64 %pop_arguments)"));
     let result = link_with_runtime_and_run(&module, "pure-entry");
     assert_eq!(
         result.status.code(),
         Some(42),
         "lli rejected or failed generated IR: {}",
         String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn no_argument_no_result_entry_returns_zero_without_decoding_arguments() {
+    let module = native_module(
+        "namespace Main\n\
+private function main()\n\
+end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("call void @pop_b0_s0()"));
+    assert!(text.contains("ret i32 0"));
+    assert!(!text.contains("call i64 @pop_rt_process_arguments"));
+    let result = link_with_runtime_and_run(&module, "clean-entry");
+    assert!(
+        result.status.success(),
+        "clean entry failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
     );
 }
 

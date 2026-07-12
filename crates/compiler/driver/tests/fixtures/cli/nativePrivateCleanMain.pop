@@ -1,0 +1,5 @@
+namespace NativePrivateCleanMain
+
+private function main()
+    print(42)
+end

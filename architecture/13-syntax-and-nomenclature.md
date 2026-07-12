@@ -177,14 +177,19 @@ function, and constant must use one of:
   public reference metadata;
 - `private`: visible only inside the current Module/file.
 
-There is no implicit namespace-scope visibility. The compiler offers a quick fix
-to select one. `local` remains for block/function-local bindings and functions.
+There is no general implicit namespace-scope visibility. The sole exception is
+the exact binary-root entry declaration `function main(...)`, which is assigned
+`private` by the target-aware entry contract from ADR 0026. A library `main` and
+every other namespace-scope declaration still require an explicit visibility
+keyword. The compiler offers a quick fix to select one. `local` remains for
+block/function-local bindings and functions.
 
 The declaration prefix grammar is deliberately small:
 
 ```text
-namespaceDeclaration := visibility declaration
+namespaceDeclaration := visibility declaration | binaryEntryDeclaration
 visibility           := "public" | "internal" | "private"
+binaryEntryDeclaration := "function" "main" functionSignature functionBody "end"
 ```
 
 Documentation and attributes precede that prefix. Visibility is stored on the

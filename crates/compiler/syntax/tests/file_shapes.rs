@@ -109,6 +109,19 @@ fn every_namespace_declaration_kind_requires_visibility() {
 }
 
 #[test]
+fn parser_recognizes_only_main_as_an_implicit_binary_entry_candidate() {
+    let entry = parse("namespace Application\nfunction main()\nend\n");
+    assert!(
+        entry.diagnostics().is_empty(),
+        "{}",
+        entry.diagnostic_snapshot()
+    );
+
+    let ordinary = parse("namespace Application\nfunction run()\nend\n");
+    assert_eq!(ordinary.diagnostic_snapshot(), "POP0005@22..30\n");
+}
+
+#[test]
 fn export_recovery_applies_to_native_data_declarations() {
     let tree = parse("namespace Broken\nexport record Data\nend\n");
 

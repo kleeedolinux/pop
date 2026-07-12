@@ -11,10 +11,9 @@ end
 private function idle()
 end
 
-private function main(arguments: Array<String>): Int
+function main(arguments: Array<String>)
     idle()
     helperText()
     local result = add(20, 22)
     print(result)
-    return 0
 end
