@@ -218,7 +218,7 @@ Minimum traceability matrix:
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |
-| Explicit namespace visibility | parser, resolver, HIR, metadata | modifier/access/public-surface tests |
+| Default internal visibility | parser, resolver, HIR, metadata | default/access/public-surface tests |
 | Complete public names | formatter, analyzers, libraries | naming baseline and truncation diagnostics |
 | Backend-neutral MIR | MIR, interpreter, LLVM, VM | verifier plus cross-backend conformance |
 | Restricted UDAs/compile time | compile-time engine | capability/string-injection negative tests |
@@ -257,7 +257,8 @@ Architecture CI should eventually verify:
 - exact `Pop.Standard` prelude/API baselines;
 - `Pop.Internal`/`Pop.Standard` dependency direction;
 - naming/PascalCase/no-lower-snake rules;
-- explicit namespace visibility and absence of export/re-export syntax;
+- default-internal visibility, private binary-entry shorthand, and absence of
+  export/re-export syntax;
 - complete-word API rules, including `Iterable`/`Iterator`/`Sequence` baselines;
 - non-OOP standard API analyzer checks;
 - compile-time/reflection capability negative tests;

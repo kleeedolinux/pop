@@ -457,11 +457,11 @@ fn restricted_lowering_rejects_result_packs_and_non_deterministic_body_shapes() 
     ));
     // A tuple is one result; this source confirms tuples stay supported rather than
     // being confused with Pop Lang's statically typed multiple-result packs.
-    assert!(
-        checked.lower("manyResults").body().type_id()
-            == checked.functions["manyResults"].signature.results()[0]
-                .type_id()
-                .expect("tuple result")
+    assert_eq!(
+        checked.lower("manyResults").body().type_id(),
+        checked.functions["manyResults"].signature.results()[0]
+            .type_id()
+            .expect("tuple result")
     );
     assert!(matches!(
         checked.lower_error("trailingStatements"),

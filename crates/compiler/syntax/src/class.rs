@@ -199,9 +199,9 @@ impl ClassDeclarationError {
 ///
 /// # Errors
 ///
-/// Returns a precise syntax error when a class member omits visibility or a
-/// required type/name delimiter. It never reinterprets class members as table
-/// entries or runtime string lookups.
+/// Returns a precise syntax error for a required type/name delimiter. Omitted
+/// class and class-member visibility is `internal`; it never reinterprets
+/// members as table entries or runtime string lookups.
 pub fn parse_class_declaration(
     source: &SourceFile,
     syntax: &SyntaxTree,
@@ -266,7 +266,7 @@ struct ClassParser<'source> {
 impl ClassParser<'_> {
     fn parse(mut self) -> Result<ClassDeclarationSyntax, ClassDeclarationError> {
         let start = self.current_span().range().start();
-        self.parse_visibility()?;
+        self.parse_visibility_or_internal();
         let is_open = self.consume(TokenKind::Open).is_some();
         self.expect(TokenKind::Class, "`class`")?;
         let name = self.expect(TokenKind::Identifier, "class name")?;
@@ -285,13 +285,7 @@ impl ClassParser<'_> {
         let mut methods = Vec::new();
         self.skip_newlines();
         while self.current_kind() != Some(TokenKind::End) {
-            if !matches!(
-                self.current_kind(),
-                Some(TokenKind::Public | TokenKind::Internal | TokenKind::Private)
-            ) {
-                return Err(self.error("class member visibility"));
-            }
-            let visibility = self.parse_visibility()?;
+            let visibility = self.parse_visibility_or_internal();
             if self.current_kind() == Some(TokenKind::Function) {
                 methods.push(self.parse_method(visibility)?);
             } else {
@@ -448,15 +442,15 @@ impl ClassParser<'_> {
         Err(self.error("method `end`"))
     }
 
-    fn parse_visibility(&mut self) -> Result<VisibilitySyntax, ClassDeclarationError> {
+    fn parse_visibility_or_internal(&mut self) -> VisibilitySyntax {
         let visibility = match self.current_kind() {
             Some(TokenKind::Public) => VisibilitySyntax::Public,
             Some(TokenKind::Internal) => VisibilitySyntax::Internal,
             Some(TokenKind::Private) => VisibilitySyntax::Private,
-            _ => return Err(self.error("visibility")),
+            _ => return VisibilitySyntax::Internal,
         };
         self.position += 1;
-        Ok(visibility)
+        visibility
     }
 
     fn expect_line_end(&mut self) -> Result<(), ClassDeclarationError> {

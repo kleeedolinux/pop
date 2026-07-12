@@ -1,5 +1,5 @@
 use pop_foundation::{BubbleId, FileId, ModuleId};
-use pop_resolve::{ModuleInput, SymbolSpace, build_declaration_index};
+use pop_resolve::{ModuleInput, SymbolSpace, Visibility, build_declaration_index};
 use pop_source::SourceFile;
 use pop_syntax::parse_file;
 
@@ -92,4 +92,89 @@ fn using_aliases_are_indexed_without_creating_runtime_operations() {
     assert!(result.diagnostics().is_empty());
     assert_eq!(module.usings()[0].alias(), Some("Models"));
     assert_eq!(module.usings()[0].namespace(), "Game.Models");
+}
+
+#[test]
+fn omitted_visibility_defaults_to_internal_except_for_binary_main() {
+    let ordinary = SourceFile::new(
+        FileId::from_raw(0),
+        "src/ordinary.pop",
+        "namespace Example\n\
+         function run()\n\
+         end\n\
+         const VALUE = 1\n\
+         type Name = String\n\
+         attribute Marker()\n\
+         record Data\n\
+         end\n\
+         union Choice\n\
+         end\n\
+         class Service\n\
+         end\n\
+         interface Reader\n\
+         end\n\
+         enum Color\n\
+         end\n",
+    )
+    .expect("source");
+    let ordinary_syntax = parse_file(&ordinary);
+    let ordinary_index = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(0),
+        &ordinary,
+        &ordinary_syntax,
+    )]);
+    assert!(ordinary_index.diagnostics().is_empty());
+    for declaration in ordinary_index.index().declarations() {
+        assert_eq!(declaration.visibility(), Visibility::Internal);
+        assert!(!declaration.is_in_public_reference_surface());
+    }
+
+    let library_main = SourceFile::new(
+        FileId::from_raw(2),
+        "src/library.pop",
+        "namespace Library\nfunction main()\nend\n",
+    )
+    .expect("source");
+    let library_main_syntax = parse_file(&library_main);
+    let library_main_index = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(2),
+        BubbleId::from_raw(0),
+        &library_main,
+        &library_main_syntax,
+    )]);
+    assert_eq!(
+        library_main_index
+            .index()
+            .declarations()
+            .next()
+            .expect("library main declaration")
+            .visibility(),
+        Visibility::Internal
+    );
+
+    let entry = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\nfunction main()\nend\n",
+    )
+    .expect("source");
+    let entry_syntax = parse_file(&entry);
+    let entry_index = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(1),
+        BubbleId::from_raw(0),
+        &entry,
+        &entry_syntax,
+    )
+    .with_implicit_main_entry()]);
+    assert!(entry_index.diagnostics().is_empty());
+    assert_eq!(
+        entry_index
+            .index()
+            .declarations()
+            .next()
+            .expect("entry declaration")
+            .visibility(),
+        Visibility::Private
+    );
 }

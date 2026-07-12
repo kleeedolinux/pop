@@ -170,26 +170,25 @@ public const MAX_PLAYERS = 64
 ```
 
 Every namespace-scope record, union, alias, class, interface, enum, attribute,
-function, and constant must use one of:
+function, and constant resolves to one of:
 
 - `public`: visible to dependent Bubbles and present in reference metadata;
 - `internal`: visible to every Module in the same Bubble, absent from
   public reference metadata;
 - `private`: visible only inside the current Module/file.
 
-There is no general implicit namespace-scope visibility. The sole exception is
-the exact binary-root entry declaration `function main(...)`, which is assigned
-`private` by the target-aware entry contract from ADR 0026. A library `main` and
-every other namespace-scope declaration still require an explicit visibility
-keyword. The compiler offers a quick fix to select one. `local` remains for
+When a visibility modifier is omitted, the declaration is `internal`. The
+sole exception is the exact binary-root entry declaration `function main(...)`,
+which is assigned `private` by the target-aware entry contract from ADR 0026.
+A library `main` is ordinary and defaults to `internal`; explicit `public` or
+`internal` remains invalid for the binary entry. `local` remains for
 block/function-local bindings and functions.
 
 The declaration prefix grammar is deliberately small:
 
 ```text
-namespaceDeclaration := visibility declaration | binaryEntryDeclaration
+namespaceDeclaration := [visibility] declaration
 visibility           := "public" | "internal" | "private"
-binaryEntryDeclaration := "function" "main" functionSignature functionBody "end"
 ```
 
 Documentation and attributes precede that prefix. Visibility is stored on the
@@ -272,6 +271,11 @@ local function clampScore(score: Int, maximum: Int): Int
 end
 ```
 
+Omitting the annotation is the explicit empty result-pack form, not return-type
+inference. A no-result function may use `return` without values or fall through;
+a function that returns values must declare their result type. Parameters always
+carry explicit types.
+
 Generic declarations use Luau's angle form; explicit generic calls use Luau's
 double-angle form to avoid ambiguity with comparisons:
 
@@ -321,9 +325,10 @@ private const DEFAULT_TIMEOUT = 5
 public const MAX_CONNECTIONS = 1024
 ```
 
-Namespace constants require explicit visibility. Ordinary locals use `camelCase`
-even when the binding model prevents reassignment; uppercase communicates a
-named compile-time/runtime constant, not merely immutability.
+Namespace constants default to `internal` when visibility is omitted. Ordinary
+locals use `camelCase` even when the binding model prevents reassignment;
+uppercase communicates a named compile-time/runtime constant, not merely
+immutability.
 
 ## `using` style
 

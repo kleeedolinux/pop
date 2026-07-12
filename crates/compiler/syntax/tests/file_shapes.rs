@@ -82,7 +82,7 @@ fn class_blocks_include_nested_methods_and_control_flow() {
 }
 
 #[test]
-fn every_namespace_declaration_kind_requires_visibility() {
+fn namespace_declaration_kinds_default_to_internal_visibility() {
     let tree = parse(
         "namespace Broken\n\
          const VALUE = 1\n\
@@ -99,17 +99,15 @@ fn every_namespace_declaration_kind_requires_visibility() {
          enum Color\n\
          end\n",
     );
-    let codes: Vec<_> = tree
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| diagnostic.code().as_str())
-        .collect();
-
-    assert_eq!(codes, ["POP0005"; 8]);
+    assert!(
+        tree.diagnostics().is_empty(),
+        "{}",
+        tree.diagnostic_snapshot()
+    );
 }
 
 #[test]
-fn parser_recognizes_only_main_as_an_implicit_binary_entry_candidate() {
+fn parser_accepts_omitted_visibility_for_ordinary_and_entry_functions() {
     let entry = parse("namespace Application\nfunction main()\nend\n");
     assert!(
         entry.diagnostics().is_empty(),
@@ -118,7 +116,11 @@ fn parser_recognizes_only_main_as_an_implicit_binary_entry_candidate() {
     );
 
     let ordinary = parse("namespace Application\nfunction run()\nend\n");
-    assert_eq!(ordinary.diagnostic_snapshot(), "POP0005@22..30\n");
+    assert!(
+        ordinary.diagnostics().is_empty(),
+        "{}",
+        ordinary.diagnostic_snapshot()
+    );
 }
 
 #[test]

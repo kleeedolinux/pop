@@ -170,8 +170,9 @@ end
 
 The explicit full form remains
 `private function main(arguments: Array<String>): Int`. Entry visibility may be
-omitted or explicitly `private`; parameters may be absent or exactly
-`arguments: Array<String>`; the result may be absent or exactly `Int`. Normal
+omitted or explicitly `private`; an omitted binary-root entry remains private
+even though ordinary omitted visibility defaults to internal. Parameters may be
+absent or exactly `arguments: Array<String>`; the result may be absent or exactly `Int`. Normal
 completion of a no-result entry means status zero. `arguments` excludes the
 executable path. Every requested argument must be valid UTF-8 and is preserved
 exactly, including empty and non-ASCII strings. Invalid platform argument bytes

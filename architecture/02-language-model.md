@@ -190,8 +190,9 @@ The one reserved exception is the fixed `Pop` prelude: normal projects can use
 
 Module rules:
 
-- every namespace-scope declaration explicitly selects `public`, `internal`, or
-  `private` visibility;
+- every namespace-scope declaration resolves to `public`, `internal`, or
+  `private` visibility; omission defaults to `internal` except that an omitted
+  binary-root `main` is `private`;
 - `public` declarations enter Bubble reference metadata;
 - `internal` declarations are visible across Modules in the same Bubble;
 - `private` declarations are visible only in their Module;
@@ -203,6 +204,10 @@ Module rules:
 - compilation identity is separate from filesystem spelling.
 
 The complete hierarchy is `Item → Module → Bubble → Package → Workspace`.
+
+An omitted function result annotation denotes an empty result pack. It does not
+request return-type inference: valued returns require explicit result types, and
+parameters always require explicit types.
 
 The complete artifact/load model is defined in
 [Bubbles, namespaces, artifacts, and loading](./14-libraries-namespaces-and-loading.md).

@@ -165,6 +165,28 @@ fn reports_annotation_and_return_type_mismatches_without_dynamic_fallback() {
 }
 
 #[test]
+fn omitted_return_annotation_is_an_empty_result_pack_not_inference() {
+    let empty = check_function(
+        "namespace Example\n\
+         internal function log(value: Int)\n\
+             return\n\
+         end\n",
+        "log",
+    );
+    assert!(empty.result.diagnostics().is_empty());
+
+    let valued = check_function(
+        "namespace Example\n\
+         internal function add(left: Int, right: Int)\n\
+             return left + right\n\
+         end\n",
+        "add",
+    );
+    assert!(valued.result.body().is_none());
+    assert!(valued.result.diagnostic_snapshot().starts_with("POP2004"));
+}
+
+#[test]
 fn reports_unknown_values_wrong_call_arity_and_invalid_operands() {
     for (source, expected_code) in [
         (

@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-07-11
 - Supersedes: ADR 0025 exact entry-shape requirement
+- Clarified by: ADR 0029 default internal visibility and empty results
 
 ## Context
 
@@ -38,11 +39,12 @@ private function main(arguments: Array<String>): Int
 end
 ```
 
-Omitted visibility is a narrow binary-entry shorthand. The compiler assigns
+Omitted visibility is a narrow binary-entry exception. The compiler assigns
 `private` visibility only to the exact namespace-scope declaration named
-`main` in a binary root. It remains an error for every other namespace-scope
-declaration and for `main` in a library Bubble. Explicit `public` or `internal`
-visibility is invalid for a binary entry.
+`main` in a binary root. Under ADR 0029, other declarations that accept
+visibility default to `internal`, and a library `main` is an ordinary function
+that defaults to `internal`. Explicit `public` or `internal` visibility is
+invalid for a binary entry.
 
 A no-result `main` returns process status zero after its body completes. A
 result-bearing `main` returns its `Int` as process status. A no-parameter entry
@@ -64,8 +66,8 @@ rules remain accepted.
 
 - A print-only executable can use `function main()` with no artificial return.
 - Programs request process arguments only when their entry declares them.
-- Libraries and ordinary Modules do not gain implicit visibility or an entry
-  requirement.
+- Libraries and ordinary Modules retain the ADR 0029 default-internal rule and
+  do not gain an entry requirement.
 - The parser may recognize the shorthand before target selection, but semantic
   publication must reject it unless the declaration is the selected binary
   root entry.
@@ -79,8 +81,8 @@ rules remain accepted.
 - the argument adapter is called only for the argument-taking forms;
 - `public main`, `internal main`, extra parameters, other parameter types, and
   non-`Int` results are rejected;
-- omitted visibility remains rejected for every non-entry declaration and for
-  `main` in a library Bubble;
+- omitted binary-root `main` remains private while omitted ordinary
+  declarations, including library `main`, resolve to internal;
 - a Package containing `src/lib.pop` and `src/main.pop` compiles the library
   without an entry and applies the shorthand only to the binary root;
 - MIR interpreter and LLVM execution agree for every accepted logical entry

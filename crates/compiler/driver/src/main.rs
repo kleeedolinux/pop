@@ -572,7 +572,7 @@ fn lower_native_bubble(
         modules,
     );
     let input = if requires_entry {
-        input.with_implicit_main_entry()
+        input.with_implicit_main_entry(ModuleId::from_raw(0))
     } else {
         input
     };

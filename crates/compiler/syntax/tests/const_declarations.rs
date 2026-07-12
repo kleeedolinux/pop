@@ -46,6 +46,13 @@ fn parses_inferred_and_explicit_constant_initializers() {
 }
 
 #[test]
+fn omitted_constant_visibility_defaults_to_internal() {
+    let constant = parse("namespace Example\nconst ANSWER = 42\n");
+
+    assert_eq!(constant.visibility(), VisibilitySyntax::Internal);
+}
+
+#[test]
 fn rejects_missing_initializer_and_trailing_source() {
     for source_text in [
         "namespace Example\nprivate const ANSWER\n",

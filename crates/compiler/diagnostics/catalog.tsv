@@ -3,7 +3,6 @@ POP0001	Error	Syntax	-	syntax.invalidCharacter	-	Character	false	diagnostics/POP
 POP0002	Error	Syntax	-	syntax.unexpectedToken	-	SyntaxExpectation,Token	false	diagnostics/POP0002	syntax	-	1	-
 POP0003	Error	Syntax	-	syntax.missingNamespace	fix.addNamespace	-	false	diagnostics/POP0003	syntax	-	1	-
 POP0004	Error	Syntax	-	syntax.unsupportedExport	fix.replaceExportWithPublic	Identifier	false	diagnostics/POP0004	syntax	replaceExportWithPublic	1	-
-POP0005	Error	Syntax	-	syntax.missingVisibility	fix.addVisibility	-	false	diagnostics/POP0005	syntax	-	1	-
 POP0006	Error	Syntax	-	syntax.unterminatedString	-	-	false	diagnostics/POP0006	syntax	-	1	-
 POP1000	Error	Resolution	-	resolution.invalidDeclaration	-	-	false	diagnostics/POP1000	resolve	-	1	-
 POP1001	Error	Resolution	-	resolution.duplicateDeclaration	-	Identifier	false	diagnostics/POP1001	resolve	-	1	-
