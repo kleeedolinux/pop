@@ -128,26 +128,27 @@ fn standard_string_output_identity_requires_a_string_argument() {
 }
 
 #[test]
-fn table_allocations_carry_precise_logical_key_and_value_maps() {
+fn table_allocations_carry_homogeneous_key_and_value_maps() {
     let (mir, _) = lower(
         "namespace Main\n\
          public function scores(): {[String]: Int}\n\
              return { first = 1, second = 2 }\n\
          end\n",
     );
-    let map = mir.functions()[0]
+    let maps = mir.functions()[0]
         .blocks()
         .iter()
         .flat_map(pop_mir::MirBlock::instructions)
         .find_map(|instruction| match instruction.kind() {
-            MirInstructionKind::TableMake { object_map, .. } => Some(object_map),
+            MirInstructionKind::TableMake {
+                key_map, value_map, ..
+            } => Some((*key_map, *value_map)),
             _ => None,
         })
-        .expect("table object map");
-    assert_eq!(map.slot_count(), 4);
+        .expect("table element maps");
     assert_eq!(
-        map.reference_slots(),
-        &[ObjectSlot::new(0), ObjectSlot::new(2)]
+        maps,
+        (ArrayElementMap::ManagedReference, ArrayElementMap::Scalar,)
     );
 }
 
@@ -273,6 +274,46 @@ fn precise_liveness_translates_managed_block_arguments_across_cfg_edges() {
 }
 
 #[test]
+fn pin_handles_are_private_balanced_gc_transitions() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "function s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n",
+            "  b0():\n",
+            "    do v0 gcSafePoint sp0 roots ()\n",
+            "    v1:t{array} = arrayMake scalar ()\n",
+            "    do v2 pin v1\n",
+            "    do v3 unpin v2\n",
+            "    v4:t{integer} = const.integer Int64 0\n",
+            "    return (v4)\n",
+        ),
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("pin MIR");
+
+    assert!(mir.dump().contains("pin v1"));
+    assert!(mir.dump().contains("unpin v2"));
+    assert!(verify_mir_bubble(&mir, &types).is_ok());
+
+    let unbalanced = parse_mir_dump(&mir.dump().replace("    do v3 unpin v2\n", ""))
+        .expect("unbalanced pin MIR");
+    assert!(matches!(
+        verify_mir_bubble(&unbalanced, &types),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::UnreleasedPin { .. }
+        ))
+    ));
+}
+
+#[test]
 fn managed_field_writes_have_an_explicit_barrier_before_the_store() {
     let (mir, types) = lower(
         "namespace Main\n\
@@ -371,22 +412,29 @@ fn textual_trap_panic_unwind_and_root_actions_are_explicit_and_verified() {
         verify_mir_bubble(&unreleased, &types),
         Err(errors) if errors.iter().any(|error| matches!(
             error,
-            MirVerificationError::UnreleasedRoot { value, .. } if value.raw() == 0
+            MirVerificationError::UnreleasedRoot { value, .. } if value.raw() == 1
         ))
     ));
 
-    let duplicate = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{array}) -> () effects[Roots]\n  b0(v0:t{array}):\n    do v1 retainRoot v0\n    do v2 retainRoot v0\n    do v3 releaseRoot v0\n    return ()\n",
+    let duplicate_release = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{array}) -> () effects[Roots]\n  b0(v0:t{array}):\n    do v1 retainRoot v0\n    do v2 releaseRoot v1\n    do v3 releaseRoot v1\n    return ()\n",
         array = array.raw(),
     );
-    let duplicate = parse_mir_dump(&duplicate).expect("duplicate root MIR");
+    let duplicate_release = parse_mir_dump(&duplicate_release).expect("duplicate root MIR");
     assert!(matches!(
-        verify_mir_bubble(&duplicate, &types),
+        verify_mir_bubble(&duplicate_release, &types),
         Err(errors) if errors.iter().any(|error| matches!(
             error,
-            MirVerificationError::DuplicateRetain { value, .. } if value.raw() == 0
+            MirVerificationError::ReleaseWithoutRetain { .. }
         ))
     ));
+
+    let separately_retained = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{array}) -> () effects[Roots]\n  b0(v0:t{array}):\n    do v1 retainRoot v0\n    do v2 retainRoot v0\n    do v3 releaseRoot v1\n    do v4 releaseRoot v2\n    return ()\n",
+        array = array.raw(),
+    );
+    let separately_retained = parse_mir_dump(&separately_retained).expect("separate roots MIR");
+    assert!(verify_mir_bubble(&separately_retained, &types).is_ok());
 
     let balanced_edge = format!(
         concat!(
@@ -397,7 +445,7 @@ fn textual_trap_panic_unwind_and_root_actions_are_explicit_and_verified() {
             "    do v2 retainRoot v0\n",
             "    branch b1 (v0)\n",
             "  b1(v1:t{array}):\n",
-            "    do v3 releaseRoot v1\n",
+            "    do v3 releaseRoot v2\n",
             "    return ()\n",
         ),
         array = array.raw(),

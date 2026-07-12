@@ -7,7 +7,8 @@ use pop_mir::{lower_hir_bubble, parse_mir_dump};
 use pop_runtime_interface::{
     ArrayAllocationRequest, CollectionStatistics, GarbageCollectorContract, ManagedReference,
     ObjectAllocationRequest, PanicKind, PanicPayload, RootHandle, RootPublication, RuntimeAdapter,
-    RuntimeFailure, SafePointOutcome, Trap, TrapKind, UnwindReason, WriteBarrier,
+    RuntimeFailure, SafePointOutcome, TableAllocationRequest, Trap, TrapKind, UnwindReason,
+    WriteBarrier,
 };
 use pop_runtime_native::{BootstrapRuntime, HeapLimits};
 use pop_source::SourceFile;
@@ -58,6 +59,14 @@ impl RuntimeAdapter for RecordingRuntime {
     ) -> Result<ManagedReference, RuntimeFailure> {
         self.allocations += 1;
         self.inner.allocate_array(request)
+    }
+
+    fn allocate_table(
+        &mut self,
+        request: &TableAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocations += 1;
+        self.inner.allocate_table(request)
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
@@ -141,6 +150,32 @@ fn reference_runtime_records_canonical_allocation_and_precise_root_events() {
     assert!(matches!(
         runtime.events()[3],
         ReferenceRuntimeEvent::AllocateArray { length: 1, .. }
+    ));
+}
+
+#[test]
+fn reference_runtime_records_table_allocation_separately_from_objects() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function scores(): {[String]: Int}\n\
+             return { first = 1, second = 2 }\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+    interpreter
+        .call(mir.functions()[0].symbol(), &[])
+        .expect("execute table allocation trace");
+    assert!(matches!(
+        interpreter.runtime().events(),
+        [
+            ReferenceRuntimeEvent::SafePoint { .. },
+            ReferenceRuntimeEvent::AllocateTable {
+                entry_count: 2,
+                key_map: pop_runtime_interface::ArrayElementMap::ManagedReference,
+                value_map: pop_runtime_interface::ArrayElementMap::Scalar,
+                ..
+            }
+        ]
     ));
 }
 
@@ -255,7 +290,7 @@ fn explicit_root_actions_use_runtime_root_handles() {
         .intern(pop_types::SemanticType::Array(integer))
         .expect("array");
     let text = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 retainRoot v1\n    do v3 releaseRoot v1\n    return ()\n",
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 retainRoot v1\n    do v3 releaseRoot v2\n    return ()\n",
         array = array.raw(),
     );
     let mir = parse_mir_dump(&text).expect("root action MIR");
@@ -268,6 +303,26 @@ fn explicit_root_actions_use_runtime_root_handles() {
     let runtime = interpreter.runtime();
     assert_eq!(runtime.retained, 1);
     assert_eq!(runtime.released, 1);
+}
+
+#[test]
+fn explicit_pin_actions_use_runtime_pin_handles() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let text = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 pin v1\n    do v3 unpin v2\n    return ()\n",
+        array = array.raw(),
+    );
+    let mir = parse_mir_dump(&text).expect("pin action MIR");
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified pins");
+    assert_eq!(
+        interpreter.call(mir.functions()[0].symbol(), &[]),
+        Ok(Vec::new())
+    );
+    assert_eq!(interpreter.runtime().events().len(), 4);
 }
 
 struct ForcingBootstrap {
@@ -301,6 +356,13 @@ impl RuntimeAdapter for ForcingBootstrap {
         request: &ArrayAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
         self.inner.allocate_array(request)
+    }
+
+    fn allocate_table(
+        &mut self,
+        request: &TableAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.inner.allocate_table(request)
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {

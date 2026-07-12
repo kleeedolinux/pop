@@ -219,3 +219,43 @@ fn array_indexing_rejects_non_integer_indices_and_non_array_bases() {
         );
     }
 }
+
+#[test]
+fn indexed_array_assignment_is_statically_typed() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(): {Int}\n\
+             local values: {Int} = { 0 }\n\
+             values[1] = 42\n\
+             return values\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let body = fixture.result.body().expect("typed body");
+    assert!(matches!(
+        body.statements()[1].kind(),
+        TypedStatementKind::ArraySet { array, index, value }
+            if matches!(array.kind(), TypedExpressionKind::Local(_))
+                && index.type_id() == fixture.arena.source_type("Int").expect("Int")
+                && value.type_id() == fixture.arena.source_type("Int").expect("Int")
+    ));
+}
+
+#[test]
+fn indexed_array_assignment_rejects_the_wrong_element_type() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections()\n\
+             local values: {Int} = { 0 }\n\
+             values[1] = \"wrong\"\n\
+         end\n",
+    );
+
+    assert!(fixture.result.body().is_none());
+    assert!(fixture.result.diagnostic_snapshot().starts_with("POP2003"));
+}

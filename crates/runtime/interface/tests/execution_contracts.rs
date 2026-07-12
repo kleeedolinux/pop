@@ -2,7 +2,8 @@ use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, BarrierKind,
     GarbageCollectorContract, GarbageCollectorStage, ManagedReference, ObjectAllocationRequest,
     ObjectMap, ObjectMapError, ObjectSlot, PanicKind, PanicPayload, RootMapError, RootPublication,
-    RootSlot, RuntimeFailure, SafePointId, StackMap, Trap, TrapKind, UnwindReason, WriteBarrier,
+    RootSlot, RuntimeFailure, SafePointId, StackMap, TableAllocationRequest, Trap, TrapKind,
+    UnwindReason, WriteBarrier,
 };
 
 #[test]
@@ -103,6 +104,38 @@ fn allocation_and_barrier_requests_are_backend_neutral_and_typed() {
     );
     assert_eq!(array.length(), 8);
     assert_eq!(array.element_map(), ArrayElementMap::ManagedReference);
+
+    let table = TableAllocationRequest::new(
+        type_id,
+        AllocationClass::NurseryEligible,
+        4,
+        ArrayElementMap::ManagedReference,
+        ArrayElementMap::Scalar,
+    )
+    .expect("valid table layout");
+    assert_eq!(table.entry_count(), 4);
+    assert_eq!(table.key_map(), ArrayElementMap::ManagedReference);
+    assert_eq!(table.value_map(), ArrayElementMap::Scalar);
+    assert_eq!(table.object_map().slot_count(), 8);
+    assert_eq!(
+        table.object_map().reference_slots(),
+        &[
+            ObjectSlot::new(0),
+            ObjectSlot::new(2),
+            ObjectSlot::new(4),
+            ObjectSlot::new(6),
+        ]
+    );
+    assert!(
+        TableAllocationRequest::new(
+            type_id,
+            AllocationClass::NurseryEligible,
+            u32::MAX,
+            ArrayElementMap::Scalar,
+            ArrayElementMap::Scalar,
+        )
+        .is_err()
+    );
 
     let barrier = WriteBarrier::new(
         BarrierKind::CombinedSatbGenerational,

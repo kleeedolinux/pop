@@ -12,8 +12,8 @@ use std::sync::{Mutex, OnceLock};
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, CollectionStatistics,
     GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    PanicPayload, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
-    SafePointOutcome, WriteBarrier,
+    PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
+    RuntimeTypeId, SafePointOutcome, TableAllocationRequest, WriteBarrier,
 };
 
 static ABI_RUNTIME: OnceLock<Mutex<BootstrapRuntime>> = OnceLock::new();
@@ -33,7 +33,7 @@ pub extern "C" fn pop_rt_abi_major() -> u16 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_abi_minor() -> u16 {
-    1
+    3
 }
 
 #[allow(unsafe_code)]
@@ -143,13 +143,41 @@ fn abi_allocate_object(slot_count: u32) -> u64 {
         .map_or(0, ManagedReference::raw)
 }
 
+/// Allocates interleaved typed table storage with homogeneous key/value maps.
+/// Zero signals an invalid capacity or allocation failure.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn pop_rt_allocate_table(length: u64) -> u64 {
-    let Ok(length) = u32::try_from(length) else {
+pub extern "C" fn pop_rt_allocate_table(
+    entry_count: u64,
+    managed_keys: u8,
+    managed_values: u8,
+) -> u64 {
+    let Ok(entry_count) = u32::try_from(entry_count) else {
         return 0;
     };
-    abi_allocate_object(length)
+    let Ok(request) = TableAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        AllocationClass::Mature,
+        entry_count,
+        if managed_keys == 0 {
+            ArrayElementMap::Scalar
+        } else {
+            ArrayElementMap::ManagedReference
+        },
+        if managed_values == 0 {
+            ArrayElementMap::Scalar
+        } else {
+            ArrayElementMap::ManagedReference
+        },
+    ) else {
+        return 0;
+    };
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .allocate_table(&request)
+        .map_or(0, ManagedReference::raw)
 }
 
 #[allow(unsafe_code)]
@@ -453,6 +481,29 @@ pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
     u8::from(runtime.release_root(RootHandle::new(root)).is_ok())
 }
 
+/// Registers an opaque scoped pin for a managed handle. Zero signals an
+/// invalid reference or a runtime failure at this narrow C boundary.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_pin(reference: u64) -> u64 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .pin(ManagedReference::new(reference))
+        .map_or(0, PinHandle::raw)
+}
+
+/// Releases an opaque scoped pin. A pin handle is single-use.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_unpin(pin: u64) -> u8 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(runtime.unpin(PinHandle::new(pin)).is_ok())
+}
+
 #[must_use]
 pub fn request_abi_collection() -> bool {
     let Ok(mut runtime) = abi_runtime().lock() else {
@@ -587,8 +638,10 @@ struct Allocation {
 pub struct BootstrapRuntime {
     objects: BTreeMap<ManagedReference, Allocation>,
     roots: BTreeMap<RootHandle, ManagedReference>,
+    pins: BTreeMap<PinHandle, ManagedReference>,
     next_reference: u64,
     next_root: u64,
+    next_pin: u64,
     slot_count: usize,
     limits: HeapLimits,
     collection_requested: bool,
@@ -605,8 +658,10 @@ impl BootstrapRuntime {
         Self {
             objects: BTreeMap::new(),
             roots: BTreeMap::new(),
+            pins: BTreeMap::new(),
             next_reference: 1,
             next_root: 1,
+            next_pin: 1,
             slot_count: 0,
             limits,
             collection_requested: false,
@@ -812,6 +867,7 @@ impl BootstrapRuntime {
         stack_roots: &RootPublication,
     ) -> Result<CollectionStatistics, RuntimeFailure> {
         let mut roots: Vec<_> = self.roots.values().copied().collect();
+        roots.extend(self.pins.values().copied());
         roots.extend(stack_roots.managed_references());
         self.collect_references(&roots)
     }
@@ -858,7 +914,8 @@ impl BootstrapRuntime {
         if self.has_capacity(requested_slots) {
             return Ok(());
         }
-        let registered_roots: Vec<_> = self.roots.values().copied().collect();
+        let mut registered_roots: Vec<_> = self.roots.values().copied().collect();
+        registered_roots.extend(self.pins.values().copied());
         self.collect_references(&registered_roots)?;
         if self.has_capacity(requested_slots) {
             Ok(())
@@ -980,6 +1037,17 @@ impl RuntimeAdapter for BootstrapRuntime {
         self.allocate(request.type_id(), request.allocation_class(), object_map)
     }
 
+    fn allocate_table(
+        &mut self,
+        request: &TableAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate(
+            request.type_id(),
+            request.allocation_class(),
+            request.object_map().clone(),
+        )
+    }
+
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
         self.validate_reference(reference)?;
         let root = RootHandle::new(self.next_root);
@@ -994,6 +1062,24 @@ impl RuntimeAdapter for BootstrapRuntime {
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
         self.roots
             .remove(&root)
+            .map(|_| ())
+            .ok_or_else(RuntimeFailure::runtime_invariant)
+    }
+
+    fn pin(&mut self, reference: ManagedReference) -> Result<PinHandle, RuntimeFailure> {
+        self.validate_reference(reference)?;
+        let pin = PinHandle::new(self.next_pin);
+        self.next_pin = self
+            .next_pin
+            .checked_add(1)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.pins.insert(pin, reference);
+        Ok(pin)
+    }
+
+    fn unpin(&mut self, pin: PinHandle) -> Result<(), RuntimeFailure> {
+        self.pins
+            .remove(&pin)
             .map(|_| ())
             .ok_or_else(RuntimeFailure::runtime_invariant)
     }

@@ -1,11 +1,21 @@
 use pop_runtime_interface::{
-    ErrorContract, GarbageCollectorContract, InitializationState, PlriVersion, RuntimeOperation,
+    ErrorContract, GarbageCollectorContract, InitializationState, PinHandle, PlriVersion,
+    RuntimeOperation,
 };
 
 #[test]
 fn plri_version_is_explicit_and_ordered() {
     assert!(PlriVersion::new(1, 1) > PlriVersion::new(1, 0));
+    assert!(PlriVersion::new(1, 2) > PlriVersion::new(1, 1));
+    assert!(PlriVersion::new(1, 3) > PlriVersion::new(1, 2));
     assert!(PlriVersion::new(2, 0) > PlriVersion::new(1, 99));
+}
+
+#[test]
+fn pin_handles_are_runtime_private_opaque_tokens() {
+    let pin = PinHandle::new(7);
+
+    assert_eq!(pin.raw(), 7);
 }
 
 #[test]
@@ -26,6 +36,8 @@ fn native_runtime_operation_symbols_are_explicit_and_unique() {
         RuntimeOperation::DispatchCall,
         RuntimeOperation::RetainRoot,
         RuntimeOperation::ReleaseRoot,
+        RuntimeOperation::Pin,
+        RuntimeOperation::Unpin,
         RuntimeOperation::PublishRoots,
         RuntimeOperation::GcSafePoint,
         RuntimeOperation::SatbWriteBarrier,

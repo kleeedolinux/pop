@@ -81,6 +81,10 @@ pub enum TypedStatementKind {
         condition: TypedExpression,
         body: Vec<TypedStatement>,
     },
+    RepeatUntil {
+        body: Vec<TypedStatement>,
+        condition: TypedExpression,
+    },
     Match {
         scrutinee: TypedExpression,
         union: SymbolId,
@@ -89,6 +93,11 @@ pub enum TypedStatementKind {
     FieldSet {
         base: TypedExpression,
         field: FieldId,
+        value: TypedExpression,
+    },
+    ArraySet {
+        array: TypedExpression,
+        index: TypedExpression,
         value: TypedExpression,
     },
     Call(TypedCall),
@@ -873,6 +882,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 let body = self.check_nested_statements(signature, body);
                 TypedStatementKind::While { condition, body }
             }
+            StatementSyntaxKind::RepeatUntil { body, condition } => {
+                self.check_repeat_until(signature, body, condition)?
+            }
             StatementSyntaxKind::Match { scrutinee, arms } => {
                 self.check_match(signature, scrutinee, arms, statement.span())?
             }
@@ -1219,6 +1231,23 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
         let target = self.check_expression(target)?;
         let target_type = target.type_id();
+        if let TypedExpressionKind::ArrayGet { array, index } = target.kind {
+            let Some(SemanticType::Array(element_type)) =
+                self.resolver.arena().get(array.type_id()).cloned()
+            else {
+                return None;
+            };
+            let value = self.check_expression_expected(
+                value,
+                Some(ExpectedExpressionType::plain(element_type)),
+            )?;
+            self.require_same_type(element_type, value.type_id(), value.span(), span);
+            return Some(TypedStatementKind::ArraySet {
+                array: *array,
+                index: *index,
+                value,
+            });
+        }
         let TypedExpressionKind::Field { base, field } = target.kind else {
             self.diagnostics.push(type_diagnostics::invalid_operator(
                 span,
@@ -1263,6 +1292,24 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .pop()
             .expect("nested lexical scope was just pushed");
         typed
+    }
+
+    fn check_repeat_until(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        statements: &[StatementSyntax],
+        condition: &ExpressionSyntax,
+    ) -> Option<TypedStatementKind> {
+        self.scopes.push(BTreeMap::new());
+        let body = statements
+            .iter()
+            .filter_map(|statement| self.check_statement(signature, statement))
+            .collect();
+        let condition = self.check_condition(condition);
+        self.scopes
+            .pop()
+            .expect("repeat-until lexical scope was just pushed");
+        condition.map(|condition| TypedStatementKind::RepeatUntil { body, condition })
     }
 
     #[allow(clippy::single_match_else, clippy::too_many_lines)]
@@ -3140,8 +3187,10 @@ fn statements_definitely_return(statements: &[TypedStatement]) -> bool {
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::While { .. }
         | TypedStatementKind::FieldSet { .. }
+        | TypedStatementKind::ArraySet { .. }
         | TypedStatementKind::Call(_)
         | TypedStatementKind::Expression(_) => false,
+        TypedStatementKind::RepeatUntil { body, .. } => statements_definitely_return(body),
     })
 }
 
@@ -3203,6 +3252,12 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 finalize_statement_captures(statement, written);
             }
         }
+        TypedStatementKind::RepeatUntil { body, condition } => {
+            for statement in body {
+                finalize_statement_captures(statement, written);
+            }
+            finalize_expression_captures(condition, written);
+        }
         TypedStatementKind::Match {
             scrutinee, arms, ..
         } => {
@@ -3215,6 +3270,15 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
         }
         TypedStatementKind::FieldSet { base, value, .. } => {
             finalize_expression_captures(base, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedStatementKind::ArraySet {
+            array,
+            index,
+            value,
+        } => {
+            finalize_expression_captures(array, written);
+            finalize_expression_captures(index, written);
             finalize_expression_captures(value, written);
         }
         TypedStatementKind::Call(call) => finalize_call_captures(call, written),

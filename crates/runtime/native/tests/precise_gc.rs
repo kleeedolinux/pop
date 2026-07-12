@@ -62,6 +62,32 @@ fn precise_tracing_preserves_transitive_cycles_and_reclaims_them_after_root_rele
 }
 
 #[test]
+fn pins_remain_precise_strong_roots_until_each_handle_is_released() {
+    let mut runtime = BootstrapRuntime::new();
+    let target = runtime.allocate_object(&object(8, 0, &[])).expect("target");
+    let first = runtime.pin(target).expect("first pin");
+    let second = runtime.pin(target).expect("second pin");
+
+    runtime
+        .collect(&no_stack_roots(20))
+        .expect("pinned collection");
+    assert!(runtime.contains(target));
+
+    runtime.unpin(first).expect("release first pin");
+    runtime
+        .collect(&no_stack_roots(21))
+        .expect("remaining pin collection");
+    assert!(runtime.contains(target));
+
+    runtime.unpin(second).expect("release second pin");
+    runtime
+        .collect(&no_stack_roots(22))
+        .expect("unpin collection");
+    assert!(!runtime.contains(target));
+    assert!(runtime.unpin(second).is_err());
+}
+
+#[test]
 fn reference_arrays_trace_elements_and_scalar_slots_never_become_conservative_roots() {
     let mut runtime = BootstrapRuntime::new();
     let child = runtime.allocate_object(&object(2, 0, &[])).expect("child");

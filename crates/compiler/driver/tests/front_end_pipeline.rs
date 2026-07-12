@@ -443,7 +443,7 @@ fn private_class_members_stop_at_the_declaring_module() {
 }
 
 #[test]
-fn assignment_is_limited_to_typed_native_class_fields() {
+fn assignment_rejects_immutable_targets_and_wrong_value_types() {
     for (source_text, expected_code) in [
         (
             "namespace Main\n\

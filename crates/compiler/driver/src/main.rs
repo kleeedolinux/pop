@@ -369,19 +369,9 @@ fn transpile_source_to_c(source_path: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let NativeProgram { mir, types, entry } = program;
-    let optimized = match optimize_mir(mir, &types) {
-        Ok(mir) => mir,
-        Err(errors) => {
-            eprintln!("pop: internal compiler error: optimized MIR verification failed");
-            for error in errors {
-                eprintln!("  {error:?}");
-            }
-            return ExitCode::from(101);
-        }
-    };
     let options = CLoweringOptions::default()
         .with_entry_point(entry.expect("standalone transpilation has a verified entry"));
-    let translation = match lower_mir_to_c(&optimized, &types, options) {
+    let translation = match lower_mir_to_c(&mir, &types, options) {
         Ok(translation) => translation,
         Err(error) => {
             eprintln!("pop: C lowering failed: {error}");
@@ -655,6 +645,13 @@ fn lower_native_bubble(
             );
         })
         .ok()?;
+    let mir = optimize_mir(mir, result.types())
+        .map_err(|errors| {
+            eprintln!(
+                "pop: internal compiler error: optimized MIR verification failed: {errors:?}"
+            );
+        })
+        .ok()?;
     Some(NativeProgram {
         mir,
         types: result.types().clone(),
@@ -703,14 +700,23 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
         .ancestors()
         .nth(3)
         .expect("driver crate is under repository root");
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
 
-    let standard = root.join("target/debug/libpop_standard.a");
-    let runtime = root.join("target/debug/libpop_runtime_native.a");
+    let standard = root.join(format!("target/{profile}/libpop_standard.a"));
+    let runtime = root.join(format!("target/{profile}/libpop_runtime_native.a"));
 
-    let build = Command::new("cargo")
+    let mut command = Command::new("cargo");
+        command
         .current_dir(root)
-        .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"])
-        .status();
+        .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"]);
+        if profile == "release" {
+        command.arg("--release");
+        }
+        let build = command.status();
 
     if !matches!(build, Ok(status) if status.success()) {
         eprintln!("pop: could not build bootstrap foundation archives");
@@ -723,7 +729,13 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
     }
 
     let mut command = Command::new("clang");
-    command.args(object_paths).arg(&standard).arg(&runtime);
+    command
+        .args(object_paths)
+        .arg(&standard)
+        .arg(&runtime)
+        // Both Rust static libraries include identical copies of their shared
+        // runtime-interface dependency from the same Cargo build.
+        .arg("-Wl,--allow-multiple-definition");
 
     let link = command.arg("-o").arg(output_path).output();
 

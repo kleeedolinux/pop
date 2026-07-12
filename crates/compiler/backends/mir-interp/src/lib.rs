@@ -14,8 +14,8 @@ use pop_mir::{
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, BarrierKind,
     GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointId,
-    SafePointOutcome, Trap, TrapKind, WriteBarrier,
+    PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
+    SafePointId, SafePointOutcome, TableAllocationRequest, Trap, TrapKind, WriteBarrier,
 };
 use pop_types::{
     FloatKind, FloatValue, IntegerKind, IntegerValue, NumericError, PrimitiveType, SemanticType,
@@ -105,8 +105,16 @@ pub enum ReferenceRuntimeEvent {
         length: u32,
         element_map: ArrayElementMap,
     },
+    AllocateTable {
+        type_id: RuntimeTypeId,
+        entry_count: u32,
+        key_map: ArrayElementMap,
+        value_map: ArrayElementMap,
+    },
     RetainRoot(ManagedReference),
     ReleaseRoot(RootHandle),
+    Pin(ManagedReference),
+    Unpin(PinHandle),
     SafePoint {
         safe_point: SafePointId,
         roots: Vec<ManagedReference>,
@@ -120,8 +128,10 @@ pub enum ReferenceRuntimeEvent {
 pub struct ReferenceRuntimeAdapter {
     allocations: BTreeMap<ManagedReference, ObjectMap>,
     roots: BTreeMap<RootHandle, ManagedReference>,
+    pins: BTreeMap<PinHandle, ManagedReference>,
     next_reference: u64,
     next_root: u64,
+    next_pin: u64,
     events: Vec<ReferenceRuntimeEvent>,
 }
 
@@ -183,6 +193,19 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
         Ok(self.allocate_map(map))
     }
 
+    fn allocate_table(
+        &mut self,
+        request: &TableAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.events.push(ReferenceRuntimeEvent::AllocateTable {
+            type_id: request.type_id(),
+            entry_count: request.entry_count(),
+            key_map: request.key_map(),
+            value_map: request.value_map(),
+        });
+        Ok(self.allocate_map(request.object_map().clone()))
+    }
+
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
         self.valid_reference(reference)?;
         self.events
@@ -201,6 +224,27 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
             .ok_or_else(RuntimeFailure::runtime_invariant);
         if result.is_ok() {
             self.events.push(ReferenceRuntimeEvent::ReleaseRoot(root));
+        }
+        result
+    }
+
+    fn pin(&mut self, reference: ManagedReference) -> Result<PinHandle, RuntimeFailure> {
+        self.valid_reference(reference)?;
+        self.events.push(ReferenceRuntimeEvent::Pin(reference));
+        self.next_pin = self.next_pin.saturating_add(1).max(1);
+        let pin = PinHandle::new(self.next_pin);
+        self.pins.insert(pin, reference);
+        Ok(pin)
+    }
+
+    fn unpin(&mut self, pin: PinHandle) -> Result<(), RuntimeFailure> {
+        let result = self
+            .pins
+            .remove(&pin)
+            .map(|_| ())
+            .ok_or_else(RuntimeFailure::runtime_invariant);
+        if result.is_ok() {
+            self.events.push(ReferenceRuntimeEvent::Unpin(pin));
         }
         result
     }
@@ -376,7 +420,8 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             steps: 0,
             depth: 0,
             runtime: &mut *runtime,
-            retained_roots: BTreeMap::new(),
+            root_handles: BTreeMap::new(),
+            pin_handles: BTreeMap::new(),
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
             active_captures: None,
@@ -393,7 +438,8 @@ struct Engine<'mir, 'runtime, R> {
     steps: u64,
     depth: u32,
     runtime: &'runtime mut R,
-    retained_roots: BTreeMap<ManagedReference, Vec<RootHandle>>,
+    root_handles: BTreeMap<ValueId, RootHandle>,
+    pin_handles: BTreeMap<ValueId, PinHandle>,
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
     active_captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
@@ -476,9 +522,10 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             for instruction in block.instructions() {
                 self.step()?;
                 let evaluated = if instruction.has_result() {
-                    self.evaluate_instruction(instruction, &values).map(Some)
+                    self.evaluate_instruction(instruction, &mut values)
+                        .map(Some)
                 } else {
-                    self.evaluate_effect_instruction(instruction.kind(), &values)
+                    self.evaluate_effect_instruction(instruction, &values)
                         .map(|()| None)
                 };
                 match evaluated {
@@ -577,7 +624,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
     fn evaluate_instruction(
         &mut self,
         instruction: &MirInstruction,
-        values: &BTreeMap<ValueId, RuntimeValue>,
+        values: &mut BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<RuntimeValue, ExecutionError> {
         if let Some(result) = self.evaluate_structured_instruction(instruction, values)? {
             return Ok(result);
@@ -632,15 +679,21 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
             MirInstructionKind::TableMake {
                 entries,
-                object_map,
+                key_map,
+                value_map,
             } => {
                 let reference = self
                     .runtime
-                    .allocate_object(&ObjectAllocationRequest::new(
-                        RuntimeTypeId::new(instruction.result_type().raw()),
-                        AllocationClass::NurseryEligible,
-                        object_map.clone(),
-                    ))
+                    .allocate_table(
+                        &TableAllocationRequest::new(
+                            RuntimeTypeId::new(instruction.result_type().raw()),
+                            AllocationClass::NurseryEligible,
+                            u32::try_from(entries.len()).unwrap_or(u32::MAX),
+                            *key_map,
+                            *value_map,
+                        )
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                    )
                     .map_err(ExecutionError::Runtime)?;
                 let visible = MirValue::Table(
                     entries
@@ -677,6 +730,50 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 return Ok(RuntimeValue::visible(
                     elements.get(zero_based).cloned().unwrap_or(MirValue::Nil),
                 ));
+            }
+            MirInstructionKind::ArraySet {
+                array,
+                index,
+                value: stored,
+            } => {
+                let owner = value(values, *array)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let MirValue::Integer(index) = value(values, *index)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let Some(zero_based) = index
+                    .signed()
+                    .and_then(|value| value.checked_sub(1))
+                    .and_then(|value| usize::try_from(value).ok())
+                else {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::BoundsViolation)),
+                    ));
+                };
+                let stored = value(values, *stored)?.visible.clone();
+                let mut updated = false;
+                for candidate in values.values_mut() {
+                    if candidate.reference != Some(owner) {
+                        continue;
+                    }
+                    let MirValue::Array(elements) = &mut candidate.visible else {
+                        continue;
+                    };
+                    let Some(slot) = elements.get_mut(zero_based) else {
+                        return Err(ExecutionError::Runtime(
+                            self.runtime
+                                .raise_trap(Trap::new(TrapKind::BoundsViolation)),
+                        ));
+                    };
+                    *slot = stored.clone();
+                    updated = true;
+                }
+                if !updated {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                MirValue::Nil
             }
             MirInstructionKind::BooleanNot { operand } => match &value(values, *operand)?.visible {
                 MirValue::Boolean(value) => MirValue::Boolean(!value),
@@ -739,6 +836,8 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
+            | MirInstructionKind::Pin { .. }
+            | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. } => {
                 return Err(ExecutionError::InvalidControlFlow);
             }
@@ -748,10 +847,10 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
 
     fn evaluate_effect_instruction(
         &mut self,
-        instruction: &MirInstructionKind,
+        instruction: &pop_mir::MirInstruction,
         values: &BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<(), ExecutionError> {
-        let returned = match instruction {
+        let returned = match instruction.kind() {
             MirInstructionKind::CallStandard {
                 function,
                 arguments,
@@ -863,23 +962,37 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .runtime
                     .retain_root(reference)
                     .map_err(ExecutionError::Runtime)?;
-                self.retained_roots
-                    .entry(reference)
-                    .or_default()
-                    .push(handle);
+                self.root_handles.insert(instruction.result(), handle);
                 return Ok(());
             }
-            MirInstructionKind::ReleaseRoot { value: root } => {
-                let reference = value(values, *root)?
-                    .reference
-                    .ok_or(ExecutionError::TypeMismatch)?;
+            MirInstructionKind::ReleaseRoot { handle } => {
                 let handle = self
-                    .retained_roots
-                    .get_mut(&reference)
-                    .and_then(Vec::pop)
+                    .root_handles
+                    .remove(handle)
                     .ok_or(ExecutionError::InvalidControlFlow)?;
                 self.runtime
                     .release_root(handle)
+                    .map_err(ExecutionError::Runtime)?;
+                return Ok(());
+            }
+            MirInstructionKind::Pin { value: pinned } => {
+                let reference = value(values, *pinned)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let handle = self
+                    .runtime
+                    .pin(reference)
+                    .map_err(ExecutionError::Runtime)?;
+                self.pin_handles.insert(instruction.result(), handle);
+                return Ok(());
+            }
+            MirInstructionKind::Unpin { handle } => {
+                let handle = self
+                    .pin_handles
+                    .remove(handle)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.runtime
+                    .unpin(handle)
                     .map_err(ExecutionError::Runtime)?;
                 return Ok(());
             }

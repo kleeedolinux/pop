@@ -1,6 +1,12 @@
 namespace NativePrint
 
+
 function main()
-    local message = "Teste"
-    print(message)
+local value = 0
+local max = 15000000
+    repeat
+        value = value +1
+        local message = "Teste"
+        print(message)
+    until value == max
 end

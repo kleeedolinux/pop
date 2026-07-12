@@ -78,6 +78,8 @@ HIR invariants:
 - every namespace-scope declaration has resolved visibility; `publicSymbols` is
   derived from declarations and is not a source-level export list;
 - every item and source origin identifies its owning `ModuleId` and `BubbleId`.
+- a `repeat` statement retains its typed body and `Boolean` exit condition until
+  CFG lowering; its body-local scope includes that condition only.
 
 ## Compile-time HIR and values
 
@@ -144,6 +146,10 @@ MIR invariants:
 - every call and member/collection operation has statically known types;
 - no instruction performs name lookup or type discovery from a runtime string;
 - MIR verification runs after construction and every transforming pass.
+
+Body-first loops lower to ordinary CFG body, condition, exit, and backedge
+blocks. They do not introduce a backend-specific instruction; the verifier
+requires the same deterministic safe-point treatment as every other backedge.
 
 The initial portable failure/GC encoding is fixed by ADR 0022. Runtime traps
 are closed `TrapKind` values and are not ordinary exceptions. Panic uses a

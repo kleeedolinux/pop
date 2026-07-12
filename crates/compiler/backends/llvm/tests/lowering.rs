@@ -1,7 +1,7 @@
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::lower_hir_bubble;
+use pop_mir::{lower_hir_bubble, parse_mir_dump};
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
 use std::fs;
@@ -46,8 +46,91 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     assert!(text.contains("add i64"));
     assert!(text.contains("ret i64"));
     assert!(
+        text.contains("declare i64 @pop_rt_array_get(i64, i64) nounwind")
+            && text.contains("declare i8 @pop_rt_array_set(i64, i64, i64) nounwind")
+            && text.contains("declare i64 @pop_rt_field_get(i64, i64) nounwind")
+            && text.contains("declare i8 @pop_rt_field_set(i64, i64, i64) nounwind"),
+        "collection and field operations need exact optimizable ABI signatures: {text}"
+    );
+    assert!(
+        !text.contains("@pop_rt_array_get(...)") && !text.contains("@pop_rt_field_set(...)"),
+        "variadic runtime declarations hide optimizer-visible argument contracts: {text}"
+    );
+    assert!(
         !text.contains("pop_rt_semantic"),
         "runtime operations must use closed PLRI identities"
+    );
+}
+
+#[test]
+fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 retainRoot v1\n    do v3 releaseRoot v2\n    v4:t{integer} = const.integer Int64 0\n    return (v4)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("root handle MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+
+    assert!(text.contains("declare i64 @pop_rt_retain_root(i64)"));
+    assert!(text.contains("declare i8 @pop_rt_release_root(i64)"));
+    assert!(text.contains("%v2 = call i64 @pop_rt_retain_root(i64 %v1)"));
+    assert!(text.contains("call i8 @pop_rt_release_root(i64 %v2)"));
+
+    let result = link_with_runtime_and_run(&module, "root-handle");
+    assert!(
+        result.status.success(),
+        "native root-handle program failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn pin_transitions_preserve_the_native_abi_result_and_argument() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 pin v1\n    do v3 unpin v2\n    v4:t{integer} = const.integer Int64 0\n    return (v4)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("pin MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+
+    assert!(text.contains("declare i64 @pop_rt_pin(i64)"));
+    assert!(text.contains("declare i8 @pop_rt_unpin(i64)"));
+    assert!(text.contains("%v2 = call i64 @pop_rt_pin(i64 %v1)"));
+    assert!(text.contains("call i8 @pop_rt_unpin(i64 %v2)"));
+
+    let result = link_with_runtime_and_run(&module, "pin-handle");
+    assert!(
+        result.status.success(),
+        "native pin-handle program failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
     );
 }
 
@@ -219,6 +302,197 @@ end\n",
         "native executable misexecuted control flow: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_luau_shaped_repeat_until_control_flow() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local value = 0\n\
+    repeat\n\
+        value = value + 1\n\
+    until value == 42\n\
+    return value\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "repeat-until");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted repeat-until control flow: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn loop_safe_points_lower_to_an_llvm_promotable_function_local_poll() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local value = 0\n\
+    repeat\n\
+        value = value + 1\n\
+    until value == 42\n\
+    return value\n\
+end\n",
+    );
+    let text = module.to_string();
+
+    assert!(
+        text.contains("%pop_gc_poll_budget = alloca i32")
+            && text.contains("store i32 16384, ptr %pop_gc_poll_budget"),
+        "LLVM needs a function-local poll budget that mem2reg can promote:\n{text}"
+    );
+    assert!(
+        text.contains("load i32, ptr %pop_gc_poll_budget"),
+        "the loop backedge must use the cheap poll path:\n{text}"
+    );
+    assert!(
+        !text.contains("thread_local"),
+        "the hot loop must not perform a TLS load and store on every backedge:\n{text}"
+    );
+    assert!(
+        text.contains("_poll_slow:")
+            && text.contains("call i8 @pop_rt_gc_safe_point(i32 0, ptr null, i64 0)"),
+        "an expired budget must retain the precise runtime safe point:\n{text}"
+    );
+    assert!(
+        text.contains("call i1 @llvm.expect.i1")
+            && text.contains("declare i8 @pop_rt_gc_safe_point(i32, ptr, i64) cold nounwind"),
+        "LLVM must see the runtime poll as an unlikely cold path:\n{text}"
+    );
+}
+
+#[test]
+fn constant_bounded_integer_reductions_elide_proven_overflow_edges() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local index = 1\n\
+    local total = 0\n\
+    repeat\n\
+        total = total + index\n\
+        index = index + 1\n\
+    until index == 50000001\n\
+    return total\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s0()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered counted reduction");
+
+    assert_eq!(function.matches("add nsw i64").count(), 2, "{function}");
+    assert!(
+        !function.contains("with.overflow") && !function.contains("_overflow_expected"),
+        "range-proven adds must not retain impossible trap edges: {function}"
+    );
+    assert!(
+        function.contains("pop_rt_gc_safe_point"),
+        "range optimization must preserve the mandatory loop poll: {function}"
+    );
+}
+
+#[test]
+fn potentially_overflowing_integer_reductions_keep_checked_edges() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local index = 1\n\
+    local total = 9223372036854775800\n\
+    repeat\n\
+        total = total + index\n\
+        index = index + 1\n\
+    until index == 10\n\
+    return total\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s0()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered potentially overflowing reduction");
+
+    assert!(
+        function.contains("llvm.sadd.with.overflow.i64") && function.contains("_overflow_expected"),
+        "an unproven reduction must retain its checked overflow path: {function}"
+    );
+}
+
+#[test]
+fn executable_functions_use_internal_linkage_and_effect_derived_attributes() {
+    let module = native_module(
+        "namespace Main\n\
+private function fibonacci(value: Int): Int\n\
+    if value < 2 then\n\
+        return value\n\
+    end\n\
+    return fibonacci(value - 1) + fibonacci(value - 2)\n\
+end\n\
+private function main(): Int\n\
+    return fibonacci(10)\n\
+end\n",
+    );
+    let text = module.to_string();
+
+    assert!(
+        text.contains("define internal i64 @pop_b0_s0(i64 %v0) memory(none) nounwind"),
+        "a whole-program pure helper must expose optimization-safe attributes:\n{text}"
+    );
+    assert!(
+        text.contains("define internal i64 @pop_b0_s1() memory(none) nounwind"),
+        "the Pop entry implementation is module-private behind C main:\n{text}"
+    );
+    assert!(
+        text.contains("declare void @pop_rt_trap() cold noreturn nounwind"),
+        "checked arithmetic failure must be outlined as a cold terminal edge:\n{text}"
+    );
+}
+
+#[test]
+fn object_emission_runs_the_llvm_optimization_pipeline() {
+    let module = native_module(
+        "namespace Main\n\
+private function increment(value: Int): Int\n\
+    return value + 1\n\
+end\n\
+private function main(): Int\n\
+    return increment(41)\n\
+end\n",
+    );
+    let object = std::env::temp_dir().join(format!(
+        "pop-backend-llvm-optimized-object-{}.o",
+        std::process::id()
+    ));
+    module
+        .emit_object(&object)
+        .expect("optimized object emission");
+    let disassembly = Command::new("objdump")
+        .args(["-dr", "--no-show-raw-insn"])
+        .arg(&object)
+        .output()
+        .expect("objdump must be installed for LLVM object conformance");
+    let _ = fs::remove_file(object);
+    assert!(
+        disassembly.status.success(),
+        "objdump failed: {}",
+        String::from_utf8_lossy(&disassembly.stderr)
+    );
+    let disassembly = String::from_utf8(disassembly.stdout).expect("UTF-8 disassembly");
+    let main = disassembly
+        .split("<main>:\n")
+        .nth(1)
+        .and_then(|text| text.split("\n\n").next())
+        .expect("main disassembly");
+    assert!(
+        !main.contains("pop_b0_s0"),
+        "LLVM did not inline and fold the private helper:\n{main}"
     );
 }
 
@@ -575,12 +849,9 @@ end\n",
     );
     let text = module.to_string();
     assert!(
-        text.contains("call i64 @pop_rt_allocate_mapped_object(i64 4"),
-        "typed tables must retain all four key/value slots: {text}"
+        text.contains("call i64 @pop_rt_allocate_table(i64 2, i1 1, i1 0)"),
+        "typed tables must use specialized managed-key/scalar-value storage: {text}"
     );
-    assert!(text.contains("alloca [2 x i32]"));
-    assert!(text.contains("store i32 0"));
-    assert!(text.contains("store i32 2"));
     let result = link_with_runtime_and_run(&module, "scalar-aggregate-storage");
     assert_eq!(
         result.status.code(),

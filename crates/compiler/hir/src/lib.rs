@@ -1217,6 +1217,10 @@ pub enum HirStatementKind {
         condition: HirExpression,
         body: Vec<HirStatement>,
     },
+    RepeatUntil {
+        body: Vec<HirStatement>,
+        condition: HirExpression,
+    },
     Match {
         scrutinee: HirExpression,
         union: SymbolId,
@@ -1225,6 +1229,11 @@ pub enum HirStatementKind {
     FieldSet {
         base: HirExpression,
         field: FieldId,
+        value: HirExpression,
+    },
+    ArraySet {
+        array: HirExpression,
+        index: HirExpression,
         value: HirExpression,
     },
     Call(HirCall),
@@ -1918,6 +1927,13 @@ fn lower_statement(
                 .map(|statement| lower_statement(statement, interface_slots))
                 .collect(),
         },
+        TypedStatementKind::RepeatUntil { body, condition } => HirStatementKind::RepeatUntil {
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+            condition: lower_expression(condition, interface_slots),
+        },
         TypedStatementKind::Match {
             scrutinee,
             union,
@@ -1933,6 +1949,15 @@ fn lower_statement(
         TypedStatementKind::FieldSet { base, field, value } => HirStatementKind::FieldSet {
             base: lower_expression(base, interface_slots),
             field: *field,
+            value: lower_expression(value, interface_slots),
+        },
+        TypedStatementKind::ArraySet {
+            array,
+            index,
+            value,
+        } => HirStatementKind::ArraySet {
+            array: lower_expression(array, interface_slots),
+            index: lower_expression(index, interface_slots),
             value: lower_expression(value, interface_slots),
         },
         TypedStatementKind::Call(call) => HirStatementKind::Call(lower_call(call, interface_slots)),
@@ -2334,6 +2359,10 @@ fn first_unknown_interface_call(
                 first_unknown_interface_expression(condition, slots)
                     .or_else(|| first_unknown_interface_call(body, slots))
             }
+            TypedStatementKind::RepeatUntil { body, condition } => {
+                first_unknown_interface_call(body, slots)
+                    .or_else(|| first_unknown_interface_expression(condition, slots))
+            }
             TypedStatementKind::Match {
                 scrutinee, arms, ..
             } => first_unknown_interface_expression(scrutinee, slots).or_else(|| {
@@ -2344,6 +2373,13 @@ fn first_unknown_interface_call(
                 first_unknown_interface_expression(base, slots)
                     .or_else(|| first_unknown_interface_expression(value, slots))
             }
+            TypedStatementKind::ArraySet {
+                array,
+                index,
+                value,
+            } => first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+                .or_else(|| first_unknown_interface_expression(value, slots)),
             TypedStatementKind::Call(call) => {
                 if let TypedCallDispatch::InterfaceMethod {
                     interface, method, ..
@@ -2499,6 +2535,10 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 first_compile_time_only_expression(condition)
                     .or_else(|| first_compile_time_only_statement(body))
             }
+            TypedStatementKind::RepeatUntil { body, condition } => {
+                first_compile_time_only_statement(body)
+                    .or_else(|| first_compile_time_only_expression(condition))
+            }
             TypedStatementKind::Match {
                 scrutinee, arms, ..
             } => first_compile_time_only_expression(scrutinee).or_else(|| {
@@ -2509,6 +2549,13 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 first_compile_time_only_expression(base)
                     .or_else(|| first_compile_time_only_expression(value))
             }
+            TypedStatementKind::ArraySet {
+                array,
+                index,
+                value,
+            } => first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+                .or_else(|| first_compile_time_only_expression(value)),
             TypedStatementKind::Call(call) => first_compile_time_only_call(call),
         };
         if found.is_some() {
@@ -3719,6 +3766,17 @@ impl Verifier<'_> {
                     self.verify_condition(condition);
                     self.verify_statements(body, &visible);
                 }
+                HirStatementKind::RepeatUntil { body, condition } => {
+                    self.verify_statements(body, &visible);
+                    let mut condition_visible = visible.clone();
+                    for nested in body {
+                        if let HirStatementKind::Local { local, .. } = nested.kind() {
+                            condition_visible.insert(*local);
+                        }
+                    }
+                    self.verify_expression(condition, &condition_visible);
+                    self.verify_condition(condition);
+                }
                 HirStatementKind::Match {
                     scrutinee,
                     union,
@@ -3728,6 +3786,17 @@ impl Verifier<'_> {
                     self.verify_expression(base, &visible);
                     self.verify_expression(value, &visible);
                     self.verify_field_set(*field, base, value, statement.span());
+                }
+                HirStatementKind::ArraySet {
+                    array,
+                    index,
+                    value,
+                } => {
+                    self.verify_array_get(array, index, &visible);
+                    self.verify_expression(value, &visible);
+                    if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id()) {
+                        self.verify_expression_type(*element, value);
+                    }
                 }
                 HirStatementKind::Call(call) => {
                     self.verify_call(
@@ -5030,7 +5099,7 @@ fn collect_local_binding_map(
                 collect_local_binding_map(then_body, local_bindings);
                 collect_local_binding_map(else_body, local_bindings);
             }
-            HirStatementKind::While { body, .. } => {
+            HirStatementKind::While { body, .. } | HirStatementKind::RepeatUntil { body, .. } => {
                 collect_local_binding_map(body, local_bindings);
             }
             HirStatementKind::Match { arms, .. } => {
@@ -5048,6 +5117,7 @@ fn collect_local_binding_map(
             | HirStatementKind::CaptureSet { .. }
             | HirStatementKind::Return { .. }
             | HirStatementKind::FieldSet { .. }
+            | HirStatementKind::ArraySet { .. }
             | HirStatementKind::Call(_)
             | HirStatementKind::Expression(_) => {}
         }
@@ -5123,6 +5193,16 @@ fn collect_written_bindings(
                     written,
                 );
             }
+            HirStatementKind::RepeatUntil { body, condition } => {
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+                collect_cell_captures(condition, written);
+            }
             HirStatementKind::Match {
                 scrutinee, arms, ..
             } => {
@@ -5139,6 +5219,15 @@ fn collect_written_bindings(
             }
             HirStatementKind::FieldSet { base, value, .. } => {
                 collect_cell_captures(base, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::ArraySet {
+                array,
+                index,
+                value,
+            } => {
+                collect_cell_captures(array, written);
+                collect_cell_captures(index, written);
                 collect_cell_captures(value, written);
             }
             HirStatementKind::Call(call) => {
@@ -5508,6 +5597,14 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::RepeatUntil { body, condition } => {
+                output.push_str("repeat\n");
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("until ");
+                dump_expression(output, condition, arena);
+                output.push('\n');
+            }
             HirStatementKind::Match {
                 scrutinee,
                 union,
@@ -5548,6 +5645,19 @@ fn dump_statements(
                 output.push_str("field.set ");
                 dump_expression(output, base, arena);
                 let _ = write!(output, ".field#{} = ", field.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::ArraySet {
+                array,
+                index,
+                value,
+            } => {
+                output.push_str("array.set ");
+                dump_expression(output, array, arena);
+                output.push('[');
+                dump_expression(output, index, arena);
+                output.push_str("] = ");
                 dump_expression(output, value, arena);
                 output.push('\n');
             }

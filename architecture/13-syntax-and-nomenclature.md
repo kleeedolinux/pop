@@ -315,6 +315,23 @@ end
 Captured state is statically typed and converted to a native environment, never
 a table.
 
+### Loops
+
+The body-first loop stays close to Luau and avoids an extra `do`/`end` pair:
+
+```luau
+local value = 0
+
+repeat
+    value = value + 1
+until value == 3
+```
+
+The `until` expression must be `Boolean`. Its `true` result exits; `false`
+repeats after the body has executed. A local declared in the body remains
+visible to that condition but not after the statement. Version one deliberately
+does not add `break` or `continue` with this form. See ADR 0032.
+
 ### Tagged-union matching
 
 The initial exhaustive statement uses ordinary block words rather than arrows:

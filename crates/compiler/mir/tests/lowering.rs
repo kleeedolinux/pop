@@ -71,6 +71,69 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
 }
 
 #[test]
+fn repeat_until_lowers_to_portable_body_condition_exit_and_backedge_cfg() {
+    // ADR 0032 deliberately keeps repeat-until out of the MIR instruction set.
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/repeat_until.pop",
+        "namespace Main\n\
+         public function count(): Int\n\
+             local value = 0\n\
+             repeat\n\
+                 value = value + 1\n\
+             until value == 3\n\
+             return value\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("repeat-until HIR");
+    let hir_dump = hir.dump(front_end.types());
+    assert!(hir_dump.contains("repeat"), "{hir_dump}");
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified repeat-until MIR");
+
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+    let function = &mir.functions()[0];
+    let backedge = function
+        .blocks()
+        .iter()
+        .find(|block| {
+            matches!(
+                block.terminator(),
+                MirTerminator::Branch { target, .. } if *target <= block.block()
+            )
+        })
+        .expect("repeat condition reaches a CFG backedge");
+    assert!(
+        matches!(
+            backedge.instructions().last().map(MirInstruction::kind),
+            Some(MirInstructionKind::GcSafePoint { .. })
+        ),
+        "repeat backedge requires a GC safe point: {}",
+        mir.dump()
+    );
+
+    let dump = mir.dump();
+    assert!(dump.contains("condBranch"), "{dump}");
+    assert!(!dump.contains("repeat"), "{dump}");
+    assert!(!dump.contains("until"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("llvm"), "{dump}");
+    let reparsed = parse_mir_dump(&dump).expect("repeat-until MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+    assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
+}
+
+#[test]
 fn collections_lower_to_typed_portable_operations_and_round_trip() {
     let source = SourceFile::new(
         FileId::from_raw(0),
@@ -79,6 +142,7 @@ fn collections_lower_to_typed_portable_operations_and_round_trip() {
          public function collections(): ({String}, {[String]: Int})\n\
              local names: {String} = { \"first\", \"second\" }\n\
              local scores: {[String]: Int} = { first = 1, second = 2 }\n\
+             names[2] = \"updated\"\n\
              local firstName: String? = names[1]\n\
              return (names, scores)\n\
          end\n",
@@ -126,6 +190,7 @@ fn collections_lower_to_typed_portable_operations_and_round_trip() {
     assert!(dump.contains("arrayMake"));
     assert!(dump.contains("tableMake"));
     assert!(dump.contains("arrayGet"));
+    assert!(dump.contains("arraySet"));
     let reparsed = parse_mir_dump(&dump).expect("collection MIR parses");
     assert_eq!(reparsed.dump(), dump);
     assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
