@@ -360,6 +360,56 @@ fn parses_nested_if_else_and_while_blocks() {
 }
 
 #[test]
+fn accepts_nested_luau_shaped_repeat_until_without_extra_end_markers() {
+    // ADR 0032: `until`, rather than `end`, closes a body-first loop.
+    let body = parse_body(
+        "namespace Example\n\
+         public function count(): Int\n\
+             local value = 0\n\
+             repeat\n\
+                 value = value + 1\n\
+                 if value < 2 then\n\
+                     repeat\n\
+                         value = value + 1\n\
+                     until value == 2\n\
+                 end\n\
+             until value == 3\n\
+             return value\n\
+         end\n",
+    );
+
+    assert_eq!(body.statements().len(), 3);
+}
+
+#[test]
+fn repeat_until_requires_its_until_closer() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/body.pop",
+        "namespace Example\n\
+         public function invalid(): Int\n\
+             repeat\n\
+                 local value = 1\n\
+             end\n\
+             return 0\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let function = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+        .expect("function");
+    let signature = parse_function_signature(&source, &syntax, function).expect("signature");
+    let error = parse_function_body(&source, &syntax, function, &signature)
+        .expect_err("repeat requires `until`, not `end`");
+
+    assert_eq!(error.expectation(), "`until`");
+}
+
+#[test]
 fn rejects_if_without_then() {
     let source = SourceFile::new(
         FileId::from_raw(0),

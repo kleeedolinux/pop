@@ -37,6 +37,13 @@ This addition advances the bootstrap native ABI from version 1.0 to 1.1.
 spelling. This bootstrap service does not expose general object memory,
 reflection, or string mutation.
 
+Scoped pin handles advance the bootstrap native ABI to version 1.2. Distinct
+typed table allocation advances it to version 1.3: the allocation request and
+native entry carry the entry count plus homogeneous key/value managed-reference
+maps. Arrays retain their contiguous homogeneous element map, while tables use
+interleaved key/value slots without becoming generic objects or exposing their
+layout to MIR.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry

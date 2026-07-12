@@ -212,22 +212,35 @@ fn transpile_rejects_unknown_targets_and_runtime_features_without_partial_c() {
 }
 
 #[test]
-fn transpile_supports_runtime_free_native_math_and_print_examples() {
-    for name in ["nativeMath.pop", "nativePrint.pop"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_pop"))
-            .args(["transpile"])
-            .arg(example(name))
-            .args(["--to", "c"])
-            .output()
-            .expect("pop transpile example");
-        assert!(
-            output.status.success(),
-            "{name}: {}",
-            output_text(&output.stderr)
-        );
-        assert!(output.stderr.is_empty());
-        assert!(output_text(&output.stdout).contains("int main(void)"));
-    }
+fn transpile_supports_the_runtime_free_native_math_example() {
+    let name = "nativeMath.pop";
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["transpile"])
+        .arg(example(name))
+        .args(["--to", "c"])
+        .output()
+        .expect("pop transpile example");
+    assert!(
+        output.status.success(),
+        "{name}: {}",
+        output_text(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(output_text(&output.stdout).contains("int main(void)"));
+}
+
+#[test]
+fn transpile_rejects_the_looping_print_example_without_a_runtime_fallback() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["transpile"])
+        .arg(example("nativePrint.pop"))
+        .args(["--to", "c"])
+        .output()
+        .expect("pop transpile capability error");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output_text(&output.stderr).contains("unsupported MIR instruction"));
 }
 
 #[test]

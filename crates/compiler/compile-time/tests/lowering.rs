@@ -376,6 +376,11 @@ fn restricted_lowering_rejects_state_loops_mutation_and_non_direct_dispatch() {
              end\n\
              return 1\n\
          end\n\
+         public function repeatLoop(): Int\n\
+             repeat\n\
+             until true\n\
+             return 1\n\
+         end\n\
          public function mutation(counter: Counter): Int\n\
              counter.value = 1\n\
              return 1\n\
@@ -390,6 +395,7 @@ fn restricted_lowering_rejects_state_loops_mutation_and_non_direct_dispatch() {
 
     for (name, expected) in [
         ("loop", UnsupportedCompileTimeConstruct::Loop),
+        ("repeatLoop", UnsupportedCompileTimeConstruct::Loop),
         ("mutation", UnsupportedCompileTimeConstruct::Mutation),
         ("method", UnsupportedCompileTimeConstruct::MethodCall),
         ("indirect", UnsupportedCompileTimeConstruct::IndirectCall),

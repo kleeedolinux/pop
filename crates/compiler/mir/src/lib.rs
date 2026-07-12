@@ -693,11 +693,17 @@ pub enum MirInstructionKind {
     },
     TableMake {
         entries: Vec<(ValueId, ValueId)>,
-        object_map: ObjectMap,
+        key_map: ArrayElementMap,
+        value_map: ArrayElementMap,
     },
     ArrayGet {
         array: ValueId,
         index: ValueId,
+    },
+    ArraySet {
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
     },
     CheckedIntegerAdd {
         kind: IntegerKind,
@@ -896,7 +902,13 @@ pub enum MirInstructionKind {
         value: ValueId,
     },
     ReleaseRoot {
+        handle: ValueId,
+    },
+    Pin {
         value: ValueId,
+    },
+    Unpin {
+        handle: ValueId,
     },
     WriteBarrier {
         owner: ValueId,
@@ -1179,6 +1191,19 @@ pub enum MirVerificationError {
         value: ValueId,
     },
     RootStateMismatch(BlockId),
+    InvalidPinnedReference {
+        instruction: ValueId,
+        value: ValueId,
+    },
+    UnpinWithoutPin {
+        instruction: ValueId,
+        value: ValueId,
+    },
+    UnreleasedPin {
+        block: BlockId,
+        value: ValueId,
+    },
+    PinStateMismatch(BlockId),
     InvalidObjectMap {
         instruction: ValueId,
     },
@@ -1498,6 +1523,12 @@ fn visit_statement_closures(
                 visit_statement_closures(nested, parameters, locals);
             }
         }
+        HirStatementKind::RepeatUntil { body, condition } => {
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
+            }
+            visit_expression_closures(condition, parameters, locals);
+        }
         HirStatementKind::Match {
             scrutinee, arms, ..
         } => {
@@ -1510,6 +1541,15 @@ fn visit_statement_closures(
         }
         HirStatementKind::FieldSet { base, value, .. } => {
             visit_expression_closures(base, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirStatementKind::ArraySet {
+            array,
+            index,
+            value,
+        } => {
+            visit_expression_closures(array, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
         HirStatementKind::Call(call) => {
@@ -1850,6 +1890,9 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::While { condition, body } => {
                     self.lower_while(condition, body);
                 }
+                HirStatementKind::RepeatUntil { body, condition } => {
+                    self.lower_repeat_until(body, condition);
+                }
                 HirStatementKind::Match {
                     scrutinee,
                     union,
@@ -1889,6 +1932,28 @@ impl<'hir> FunctionBuilder<'hir> {
                         MirInstructionKind::FieldSet {
                             base,
                             field: *field,
+                            value,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::ArraySet {
+                    array,
+                    index,
+                    value,
+                } => {
+                    let array = self.lower_expression(array);
+                    let index = self.lower_expression(index);
+                    let value = self.lower_expression(value);
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::ArraySet {
+                            array,
+                            index,
                             value,
                         },
                         nil,
@@ -2000,6 +2065,41 @@ impl<'hir> FunctionBuilder<'hir> {
         self.install_state(&state, &exit_arguments);
     }
 
+    fn lower_repeat_until(&mut self, body: &[HirStatement], condition: &HirExpression) {
+        let state = self.live_state(condition.span());
+        let initial_values = self.state_values(&state);
+        let outer_locals = self.locals.clone();
+        let (body_block, body_arguments) = self.new_block_with_arguments(&state.specs);
+        let condition_block = self.new_block();
+        let repeat_edge = self.new_block();
+        let exit_edge = self.new_block();
+        let (exit_block, exit_arguments) = self.new_block_with_arguments(&state.specs);
+
+        self.branch_with_arguments_if_open(body_block, initial_values);
+        self.current = body_block;
+        self.install_state(&state, &body_arguments);
+        self.lower_statements(body);
+        self.branch_if_open(condition_block);
+
+        self.current = condition_block;
+        let condition = self.lower_expression(condition);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition,
+            when_true: exit_edge,
+            when_false: repeat_edge,
+        });
+
+        self.current = repeat_edge;
+        self.branch_with_state_if_open(body_block, &state);
+
+        self.current = exit_edge;
+        self.branch_with_state_if_open(exit_block, &state);
+
+        self.current = exit_block;
+        self.locals = outer_locals;
+        self.install_state(&state, &exit_arguments);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn lower_expression(&mut self, expression: &HirExpression) -> ValueId {
         let kind = match expression.kind() {
@@ -2059,10 +2159,14 @@ impl<'hir> FunctionBuilder<'hir> {
                     .collect(),
                 element_map: array_element_map(self.arena, expression.type_id()),
             },
-            HirExpressionKind::Table(entries) => MirInstructionKind::TableMake {
-                object_map: table_object_map(self.arena, expression.type_id(), entries.len()),
-                entries: self.lower_table_entries(entries),
-            },
+            HirExpressionKind::Table(entries) => {
+                let (key_map, value_map) = table_element_maps(self.arena, expression.type_id());
+                MirInstructionKind::TableMake {
+                    key_map,
+                    value_map,
+                    entries: self.lower_table_entries(entries),
+                }
+            }
             HirExpressionKind::Unary { operator, operand } => {
                 let operand = self.lower_expression(operand);
                 match operator {
@@ -2717,28 +2821,21 @@ fn array_element_map(arena: &TypeArena, type_id: TypeId) -> ArrayElementMap {
     }
 }
 
-fn table_object_map(arena: &TypeArena, type_id: TypeId, entries: usize) -> ObjectMap {
-    let (key_is_reference, value_is_reference) = match arena.get(type_id) {
-        Some(SemanticType::Table { key, value }) => (
-            is_managed_reference_type_id(*key, Some(arena)),
-            is_managed_reference_type_id(*value, Some(arena)),
-        ),
-        _ => (false, false),
-    };
-    let mut references = Vec::new();
-    for entry in 0..entries {
-        let key = entry.saturating_mul(2);
-        let value = key.saturating_add(1);
-        if key_is_reference {
-            references.push(ObjectSlot::new(u32::try_from(key).unwrap_or(u32::MAX)));
+fn table_element_maps(arena: &TypeArena, type_id: TypeId) -> (ArrayElementMap, ArrayElementMap) {
+    match arena.get(type_id) {
+        Some(SemanticType::Table { key, value }) => {
+            (element_map(arena, *key), element_map(arena, *value))
         }
-        if value_is_reference {
-            references.push(ObjectSlot::new(u32::try_from(value).unwrap_or(u32::MAX)));
-        }
+        _ => (ArrayElementMap::Scalar, ArrayElementMap::Scalar),
     }
-    let slot_count = entries.saturating_mul(2);
-    ObjectMap::new(u32::try_from(slot_count).unwrap_or(u32::MAX), references)
-        .expect("table entries form a valid logical object map")
+}
+
+fn element_map(arena: &TypeArena, type_id: TypeId) -> ArrayElementMap {
+    if is_managed_reference_type_id(type_id, Some(arena)) {
+        ArrayElementMap::ManagedReference
+    } else {
+        ArrayElementMap::Scalar
+    }
 }
 
 fn capture_cell_object_map(arena: &TypeArena, value_type: TypeId) -> ObjectMap {
@@ -2806,9 +2903,10 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         MirInstructionKind::GcSafePoint { .. } => {
             MirEffectSummary::empty().with(MirEffect::GcSafePoint)
         }
-        MirInstructionKind::RetainRoot { .. } | MirInstructionKind::ReleaseRoot { .. } => {
-            MirEffectSummary::empty().with(MirEffect::Roots)
-        }
+        MirInstructionKind::RetainRoot { .. }
+        | MirInstructionKind::ReleaseRoot { .. }
+        | MirInstructionKind::Pin { .. }
+        | MirInstructionKind::Unpin { .. } => MirEffectSummary::empty().with(MirEffect::Roots),
         MirInstructionKind::WriteBarrier { .. } => {
             MirEffectSummary::empty().with(MirEffect::WritesManagedReference)
         }
@@ -2838,6 +2936,7 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleMake(_)
         | MirInstructionKind::ArrayGet { .. }
+        | MirInstructionKind::ArraySet { .. }
         | MirInstructionKind::FloatAdd { .. }
         | MirInstructionKind::FloatSubtract { .. }
         | MirInstructionKind::FloatMultiply { .. }
@@ -3486,6 +3585,24 @@ fn verify_function(
                     arena,
                     errors,
                 );
+            } else if matches!(instruction.kind, MirInstructionKind::RetainRoot { .. }) {
+                definitions.collect_root_handle(
+                    instruction.result,
+                    DefinitionSite {
+                        block: block.block,
+                        instruction: Some(index),
+                    },
+                    errors,
+                );
+            } else if matches!(instruction.kind, MirInstructionKind::Pin { .. }) {
+                definitions.collect_pin_handle(
+                    instruction.result,
+                    DefinitionSite {
+                        block: block.block,
+                        instruction: Some(index),
+                    },
+                    errors,
+                );
             } else if !definitions.seen.insert(instruction.result) {
                 errors.push(MirVerificationError::DuplicateValue(instruction.result));
             }
@@ -3494,6 +3611,8 @@ fn verify_function(
     let dominators = compute_dominators(function, &blocks);
     let facts = ControlFlowFacts {
         values: &definitions.values,
+        root_handles: &definitions.root_handles,
+        pin_handles: &definitions.pin_handles,
         definitions: &definitions.sites,
         dominators: &dominators,
         blocks: &blocks,
@@ -3678,11 +3797,10 @@ fn verify_gc_contracts(
                     }
                 }
                 MirInstructionKind::TableMake {
-                    entries,
-                    object_map,
+                    key_map, value_map, ..
                 } => {
-                    if *object_map
-                        != table_object_map(arena, instruction.result_type(), entries.len())
+                    if (*key_map, *value_map)
+                        != table_element_maps(arena, instruction.result_type())
                     {
                         errors.push(MirVerificationError::InvalidObjectMap {
                             instruction: instruction.result(),
@@ -3738,8 +3856,7 @@ fn verify_gc_contracts(
                         });
                     }
                 }
-                MirInstructionKind::RetainRoot { value }
-                | MirInstructionKind::ReleaseRoot { value } => {
+                MirInstructionKind::RetainRoot { value } => {
                     if !facts
                         .values
                         .get(value)
@@ -3748,6 +3865,34 @@ fn verify_gc_contracts(
                         errors.push(MirVerificationError::InvalidStackMapRoot {
                             instruction: instruction.result(),
                             root: *value,
+                        });
+                    }
+                }
+                MirInstructionKind::ReleaseRoot { handle } => {
+                    if !facts.root_handles.contains(handle) {
+                        errors.push(MirVerificationError::ReleaseWithoutRetain {
+                            instruction: instruction.result(),
+                            value: *handle,
+                        });
+                    }
+                }
+                MirInstructionKind::Pin { value } => {
+                    if !facts
+                        .values
+                        .get(value)
+                        .is_some_and(|type_id| is_managed_reference_type_id(*type_id, Some(arena)))
+                    {
+                        errors.push(MirVerificationError::InvalidPinnedReference {
+                            instruction: instruction.result(),
+                            value: *value,
+                        });
+                    }
+                }
+                MirInstructionKind::Unpin { handle } => {
+                    if !facts.pin_handles.contains(handle) {
+                        errors.push(MirVerificationError::UnpinWithoutPin {
+                            instruction: instruction.result(),
+                            value: *handle,
                         });
                     }
                 }
@@ -3823,6 +3968,7 @@ fn verify_gc_contracts(
         }
     }
     verify_root_balance(function, errors);
+    verify_pin_balance(function, errors);
 }
 
 fn expected_class_object_map(declaration: &MirClassDeclaration, arena: &TypeArena) -> ObjectMap {
@@ -3924,6 +4070,67 @@ fn verify_field_store_barrier(
 }
 
 fn verify_root_balance(function: &MirFunction, errors: &mut Vec<MirVerificationError>) {
+    verify_handle_balance(function, HandleKind::Root, errors);
+}
+
+fn verify_pin_balance(function: &MirFunction, errors: &mut Vec<MirVerificationError>) {
+    verify_handle_balance(function, HandleKind::Pin, errors);
+}
+
+#[derive(Clone, Copy)]
+enum HandleKind {
+    Root,
+    Pin,
+}
+
+impl HandleKind {
+    const fn acquires(self, instruction: &MirInstructionKind) -> bool {
+        matches!(
+            (self, instruction),
+            (Self::Root, MirInstructionKind::RetainRoot { .. })
+                | (Self::Pin, MirInstructionKind::Pin { .. })
+        )
+    }
+
+    const fn released_handle(self, instruction: &MirInstructionKind) -> Option<ValueId> {
+        match (self, instruction) {
+            (Self::Root, MirInstructionKind::ReleaseRoot { handle })
+            | (Self::Pin, MirInstructionKind::Unpin { handle }) => Some(*handle),
+            _ => None,
+        }
+    }
+
+    const fn release_without_acquire(
+        self,
+        instruction: ValueId,
+        value: ValueId,
+    ) -> MirVerificationError {
+        match self {
+            Self::Root => MirVerificationError::ReleaseWithoutRetain { instruction, value },
+            Self::Pin => MirVerificationError::UnpinWithoutPin { instruction, value },
+        }
+    }
+
+    const fn unreleased(self, block: BlockId, value: ValueId) -> MirVerificationError {
+        match self {
+            Self::Root => MirVerificationError::UnreleasedRoot { block, value },
+            Self::Pin => MirVerificationError::UnreleasedPin { block, value },
+        }
+    }
+
+    const fn state_mismatch(self, target: BlockId) -> MirVerificationError {
+        match self {
+            Self::Root => MirVerificationError::RootStateMismatch(target),
+            Self::Pin => MirVerificationError::PinStateMismatch(target),
+        }
+    }
+}
+
+fn verify_handle_balance(
+    function: &MirFunction,
+    kind: HandleKind,
+    errors: &mut Vec<MirVerificationError>,
+) {
     let Some(entry) = function.blocks.first() else {
         return;
     };
@@ -3941,21 +4148,13 @@ fn verify_root_balance(function: &MirFunction, errors: &mut Vec<MirVerificationE
         };
         let mut retained = incoming.get(&block_id).cloned().unwrap_or_default();
         for instruction in block.instructions() {
-            match instruction.kind() {
-                MirInstructionKind::RetainRoot { value } => {
-                    if !retained.insert(*value) {
-                        errors.push(MirVerificationError::DuplicateRetain {
-                            instruction: instruction.result(),
-                            value: *value,
-                        });
-                    }
-                }
-                MirInstructionKind::ReleaseRoot { value } if !retained.remove(value) => errors
-                    .push(MirVerificationError::ReleaseWithoutRetain {
-                        instruction: instruction.result(),
-                        value: *value,
-                    }),
-                _ => {}
+            if kind.acquires(instruction.kind()) {
+                retained.insert(instruction.result());
+            }
+            if let Some(handle) = kind.released_handle(instruction.kind())
+                && !retained.remove(&handle)
+            {
+                errors.push(kind.release_without_acquire(instruction.result(), handle));
             }
             let catches_unwind = matches!(
                 instruction.kind(),
@@ -3974,39 +4173,40 @@ fn verify_root_balance(function: &MirFunction, errors: &mut Vec<MirVerificationE
                 instruction.effects().contains(MirEffect::MayUnwind) && !catches_unwind;
             if instruction.effects().contains(MirEffect::MayTrap) || propagates_unwind {
                 for value in &retained {
-                    errors.push(MirVerificationError::UnreleasedRoot {
-                        block: block_id,
-                        value: *value,
-                    });
+                    errors.push(kind.unreleased(block_id, *value));
                 }
             }
             if let Some(target) = instruction_unwind_target(instruction.kind()) {
-                merge_root_state(target, &retained, &mut incoming, &mut pending, errors);
+                merge_handle_state(target, &retained, &mut incoming, &mut pending, kind, errors);
             }
         }
         let targets = terminator_targets(block.terminator());
         if targets.is_empty() {
             for value in retained {
-                errors.push(MirVerificationError::UnreleasedRoot {
-                    block: block_id,
-                    value,
-                });
+                errors.push(kind.unreleased(block_id, value));
             }
             continue;
         }
         for target in targets {
             let edge_state = match block.terminator() {
                 MirTerminator::Branch { arguments, .. } => {
-                    translate_root_state(target, arguments, &retained, &blocks)
+                    translate_handle_state(target, arguments, &retained, &blocks)
                 }
                 _ => retained.clone(),
             };
-            merge_root_state(target, &edge_state, &mut incoming, &mut pending, errors);
+            merge_handle_state(
+                target,
+                &edge_state,
+                &mut incoming,
+                &mut pending,
+                kind,
+                errors,
+            );
         }
     }
 }
 
-fn translate_root_state(
+fn translate_handle_state(
     target: BlockId,
     arguments: &[ValueId],
     retained: &BTreeSet<ValueId>,
@@ -4024,16 +4224,17 @@ fn translate_root_state(
     translated
 }
 
-fn merge_root_state(
+fn merge_handle_state(
     target: BlockId,
     retained: &BTreeSet<ValueId>,
     incoming: &mut BTreeMap<BlockId, BTreeSet<ValueId>>,
     pending: &mut Vec<BlockId>,
+    kind: HandleKind,
     errors: &mut Vec<MirVerificationError>,
 ) {
     match incoming.get(&target) {
         Some(existing) if existing != retained => {
-            errors.push(MirVerificationError::RootStateMismatch(target));
+            errors.push(kind.state_mismatch(target));
         }
         Some(_) => {}
         None => {
@@ -4052,6 +4253,8 @@ struct DefinitionSite {
 #[derive(Default)]
 struct DefinitionTables {
     values: BTreeMap<ValueId, TypeId>,
+    root_handles: BTreeSet<ValueId>,
+    pin_handles: BTreeSet<ValueId>,
     sites: BTreeMap<ValueId, DefinitionSite>,
     seen: BTreeSet<ValueId>,
 }
@@ -4075,10 +4278,40 @@ impl DefinitionTables {
         self.values.insert(value, type_id);
         self.sites.insert(value, site);
     }
+
+    fn collect_root_handle(
+        &mut self,
+        value: ValueId,
+        site: DefinitionSite,
+        errors: &mut Vec<MirVerificationError>,
+    ) {
+        if !self.seen.insert(value) {
+            errors.push(MirVerificationError::DuplicateValue(value));
+            return;
+        }
+        self.root_handles.insert(value);
+        self.sites.insert(value, site);
+    }
+
+    fn collect_pin_handle(
+        &mut self,
+        value: ValueId,
+        site: DefinitionSite,
+        errors: &mut Vec<MirVerificationError>,
+    ) {
+        if !self.seen.insert(value) {
+            errors.push(MirVerificationError::DuplicateValue(value));
+            return;
+        }
+        self.pin_handles.insert(value);
+        self.sites.insert(value, site);
+    }
 }
 
 struct ControlFlowFacts<'facts, 'function> {
     values: &'facts BTreeMap<ValueId, TypeId>,
+    root_handles: &'facts BTreeSet<ValueId>,
+    pin_handles: &'facts BTreeSet<ValueId>,
     definitions: &'facts BTreeMap<ValueId, DefinitionSite>,
     dominators: &'facts BTreeMap<BlockId, BTreeSet<BlockId>>,
     blocks: &'facts BTreeMap<BlockId, &'function MirBlock>,
@@ -4251,6 +4484,8 @@ fn verify_instruction_types(
         MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
+            | MirInstructionKind::Pin { .. }
+            | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. }
     );
     if requires_effect_form && instruction.has_result() {
@@ -4326,6 +4561,33 @@ fn verify_instruction_types(
                 verify_operand_type(instruction.result(), *index, integer, values, errors);
             }
             if !is_optional_of(arena, instruction.result_type(), element_type) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ArraySet {
+            array,
+            index,
+            value,
+        } => {
+            let Some(array_type) = values.get(array).copied() else {
+                return;
+            };
+            let Some(SemanticType::Array(element_type)) = arena.get(array_type).cloned() else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *array,
+                    found: array_type,
+                });
+                return;
+            };
+            if let Some(integer) = arena.source_type("Int") {
+                verify_operand_type(instruction.result(), *index, integer, values, errors);
+            }
+            verify_operand_type(instruction.result(), *value, element_type, values, errors);
+            if arena.source_type("nil") != Some(instruction.result_type()) {
                 errors.push(MirVerificationError::InvalidInstructionType {
                     instruction: instruction.result(),
                     result_type: instruction.result_type(),
@@ -5268,6 +5530,11 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. } => vec![*operand],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
+        MirInstructionKind::ArraySet {
+            array,
+            index,
+            value,
+        } => vec![*array, *index, *value],
         MirInstructionKind::RecordMake { fields, .. } => {
             fields.iter().map(|(_, value)| *value).collect()
         }
@@ -5295,9 +5562,10 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         MirInstructionKind::CaptureLoad { .. }
         | MirInstructionKind::CaptureCellReference { .. } => Vec::new(),
         MirInstructionKind::FieldSet { base, value, .. } => vec![*base, *value],
-        MirInstructionKind::RetainRoot { value } | MirInstructionKind::ReleaseRoot { value } => {
-            vec![*value]
-        }
+        MirInstructionKind::RetainRoot { value } => vec![*value],
+        MirInstructionKind::ReleaseRoot { handle } => vec![*handle],
+        MirInstructionKind::Pin { value } => vec![*value],
+        MirInstructionKind::Unpin { handle } => vec![*handle],
         MirInstructionKind::WriteBarrier {
             owner,
             previous,
@@ -5590,24 +5858,35 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             elements,
             element_map,
         } => {
-            let map = match element_map {
-                ArrayElementMap::Scalar => "scalar",
-                ArrayElementMap::ManagedReference => "managed",
-            };
+            let map = array_element_map_name(*element_map);
             let _ = write!(output, "arrayMake {map} ");
             dump_value_list(output, elements);
         }
         MirInstructionKind::TableMake {
             entries,
-            object_map,
+            key_map,
+            value_map,
         } => {
-            output.push_str("tableMake ");
-            dump_object_map(output, object_map);
-            output.push(' ');
+            let key_map = array_element_map_name(*key_map);
+            let value_map = array_element_map_name(*value_map);
+            let _ = write!(output, "tableMake {key_map} {value_map} ");
             dump_table_entries(output, entries);
         }
         MirInstructionKind::ArrayGet { array, index } => {
             dump_binary(output, "arrayGet", *array, *index);
+        }
+        MirInstructionKind::ArraySet {
+            array,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                output,
+                "arraySet v{} v{} v{}",
+                array.raw(),
+                index.raw(),
+                value.raw()
+            );
         }
         binary @ (MirInstructionKind::BooleanAnd { .. }
         | MirInstructionKind::BooleanOr { .. }
@@ -5623,8 +5902,14 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::RetainRoot { value } => {
             let _ = write!(output, "retainRoot v{}", value.raw());
         }
-        MirInstructionKind::ReleaseRoot { value } => {
-            let _ = write!(output, "releaseRoot v{}", value.raw());
+        MirInstructionKind::ReleaseRoot { handle } => {
+            let _ = write!(output, "releaseRoot v{}", handle.raw());
+        }
+        MirInstructionKind::Pin { value } => {
+            let _ = write!(output, "pin v{}", value.raw());
+        }
+        MirInstructionKind::Unpin { handle } => {
+            let _ = write!(output, "unpin v{}", handle.raw());
         }
         MirInstructionKind::WriteBarrier {
             owner,
@@ -5643,6 +5928,13 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             dump_optional_value(output, *value);
         }
         _ => unreachable!("specialized MIR dumper accepts every remaining instruction"),
+    }
+}
+
+const fn array_element_map_name(map: ArrayElementMap) -> &'static str {
+    match map {
+        ArrayElementMap::Scalar => "scalar",
+        ArrayElementMap::ManagedReference => "managed",
     }
 }
 

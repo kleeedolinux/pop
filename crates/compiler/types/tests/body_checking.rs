@@ -263,6 +263,72 @@ fn types_structured_control_flow_and_proves_returns_on_both_branches() {
 }
 
 #[test]
+fn repeat_until_requires_boolean_conditions_and_keeps_body_locals_scoped_to_the_loop() {
+    // ADR 0032: the body scope includes its corresponding `until` condition,
+    // but does not escape the completed repeat-until statement.
+    let accepted = check_function(
+        "namespace Example\n\
+         public function count(): Int\n\
+             local value = 0\n\
+             repeat\n\
+                 local limit = 3\n\
+                 value = value + 1\n\
+             until value == limit\n\
+             return value\n\
+         end\n",
+        "count",
+    );
+    assert!(
+        accepted.result.diagnostics().is_empty(),
+        "{}",
+        accepted.result.diagnostic_snapshot()
+    );
+    assert_eq!(
+        accepted
+            .result
+            .body()
+            .expect("typed repeat-until body")
+            .statements()
+            .len(),
+        3
+    );
+
+    for (source, expected_code) in [
+        (
+            "namespace Example\n\
+             public function invalid(): Int\n\
+                 repeat\n\
+                     local value = 1\n\
+                 until value\n\
+                 return 0\n\
+             end\n",
+            "POP2003",
+        ),
+        (
+            "namespace Example\n\
+             public function invalid(): Int\n\
+                 repeat\n\
+                     local limit = 1\n\
+                 until limit == 1\n\
+                 return limit\n\
+             end\n",
+            "POP1002",
+        ),
+    ] {
+        let rejected = check_function(source, "invalid");
+        assert!(rejected.result.body().is_none());
+        assert!(
+            rejected
+                .result
+                .diagnostic_snapshot()
+                .starts_with(expected_code),
+            "{}",
+            rejected.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
 fn rejects_non_boolean_conditions_and_missing_return_paths() {
     for (source, expected_code) in [
         (

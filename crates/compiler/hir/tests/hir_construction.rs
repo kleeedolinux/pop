@@ -411,6 +411,7 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
          public function collections(): ({String}, {[String]: Int})\n\
              local names: {String} = { \"first\", \"second\" }\n\
              local scores: {[String]: Int} = { first = 1, second = 2 }\n\
+             names[2] = \"updated\"\n\
              local firstName: String? = names[1]\n\
              return (names, scores)\n\
          end\n",
@@ -468,7 +469,14 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
             if matches!(entries[0].key().kind(), HirExpressionKind::String(value) if value == "\"first\"")
                 && matches!(entries[1].value().kind(), HirExpressionKind::Integer(value) if value.to_string() == "2")
     ));
-    let HirStatementKind::Local { initializer, .. } = hir.body()[2].kind() else {
+    assert!(matches!(
+        hir.body()[2].kind(),
+        HirStatementKind::ArraySet { array, index, value }
+            if matches!(array.kind(), HirExpressionKind::Local(_))
+                && matches!(index.kind(), HirExpressionKind::Integer(value) if value.to_string() == "2")
+                && matches!(value.kind(), HirExpressionKind::String(value) if value == "\"updated\"")
+    ));
+    let HirStatementKind::Local { initializer, .. } = hir.body()[3].kind() else {
         panic!("indexed local");
     };
     assert!(matches!(

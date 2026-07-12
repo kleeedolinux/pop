@@ -217,6 +217,30 @@ fn strict_c11_preserves_block_arguments_and_conditional_control_flow() {
 }
 
 #[test]
+fn runtime_free_c_rejects_repeat_until_safe_points_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local value = 0\n\
+             repeat\n\
+                 value = value + 1\n\
+             until value == 42\n\
+             return value\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect_err("runtime-free C cannot erase a repeat-until safe point");
+    assert!(matches!(
+        error,
+        CBackendError::UnsupportedInstruction { .. }
+    ));
+}
+
+#[test]
 fn checked_addition_traps_for_every_fixed_integer_width() {
     for (name, maximum) in [
         ("Int8", "127"),

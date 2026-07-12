@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{BlockId, ValueId};
-use pop_types::{IntegerValue, TypeArena};
+use pop_types::{IntegerKind, IntegerValue, TypeArena};
 
 use super::{
-    MirBubble, MirInstructionKind, MirTerminator, MirVerificationError, block_targets,
-    instruction_operands, local_instruction_effects, verify_mir_bubble,
+    MirBubble, MirInstruction, MirInstructionKind, MirTerminator, MirVerificationError,
+    block_targets, instruction_operands, local_instruction_effects, verify_mir_bubble,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,17 +27,284 @@ pub fn optimize_mir(
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     verify_mir_bubble(&bubble, arena)?;
     for function in &mut bubble.functions {
+        summarize_constant_reduction(function);
         fold_constants(function);
         remove_unreachable_blocks(function);
         remove_dead_constants(function);
     }
     for method in &mut bubble.methods {
+        summarize_constant_reduction(&mut method.function);
         fold_constants(&mut method.function);
         remove_unreachable_blocks(&mut method.function);
         remove_dead_constants(&mut method.function);
     }
     verify_mir_bubble(&bubble, arena)?;
     Ok(bubble)
+}
+
+struct CountedReductionSummary {
+    exit: BlockId,
+    induction: IntegerValue,
+    accumulator: IntegerValue,
+    type_id: pop_foundation::TypeId,
+    span: pop_foundation::SourceSpan,
+}
+
+fn summarize_constant_reduction(function: &mut super::MirFunction) {
+    let Some(summary) = constant_reduction_summary(function) else {
+        return;
+    };
+    let Some(next_value) = function
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block.arguments.iter().map(|argument| argument.value).chain(
+                block
+                    .instructions
+                    .iter()
+                    .map(|instruction| instruction.result),
+            )
+        })
+        .map(ValueId::raw)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+    else {
+        return;
+    };
+    let Some(accumulator_value) = next_value.checked_add(1) else {
+        return;
+    };
+    let induction = ValueId::from_raw(next_value);
+    let accumulator = ValueId::from_raw(accumulator_value);
+    let entry = &mut function.blocks[0];
+    entry.instructions.extend([
+        MirInstruction {
+            result: induction,
+            result_type: Some(summary.type_id),
+            kind: MirInstructionKind::IntegerConstant(summary.induction),
+            effects: super::MirEffectSummary::empty(),
+            effects_explicit: true,
+            span: summary.span,
+        },
+        MirInstruction {
+            result: accumulator,
+            result_type: Some(summary.type_id),
+            kind: MirInstructionKind::IntegerConstant(summary.accumulator),
+            effects: super::MirEffectSummary::empty(),
+            effects_explicit: true,
+            span: summary.span,
+        },
+    ]);
+    entry.terminator = MirTerminator::Branch {
+        target: summary.exit,
+        arguments: vec![induction, accumulator],
+    };
+}
+
+#[allow(clippy::too_many_lines)]
+fn constant_reduction_summary(function: &super::MirFunction) -> Option<CountedReductionSummary> {
+    let constants = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction.kind {
+            MirInstructionKind::IntegerConstant(value) if value.kind() == IntegerKind::Int64 => {
+                Some((instruction.result, value))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let entry = function.blocks.first()?;
+    let MirTerminator::Branch {
+        target: body_id,
+        arguments: initial,
+    } = &entry.terminator
+    else {
+        return None;
+    };
+    if initial.len() != 2 {
+        return None;
+    }
+    let body = function
+        .blocks
+        .iter()
+        .find(|block| block.block == *body_id)?;
+    let [induction, accumulator] = body.arguments.as_slice() else {
+        return None;
+    };
+    if body.instructions.len() != 3
+        || !body.instructions.iter().all(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::IntegerConstant(_)
+                    | MirInstructionKind::CheckedIntegerAdd {
+                        kind: IntegerKind::Int64,
+                        ..
+                    }
+            )
+        })
+    {
+        return None;
+    }
+    let (next_induction, step_value) = body.instructions.iter().find_map(|instruction| {
+        let MirInstructionKind::CheckedIntegerAdd {
+            kind: IntegerKind::Int64,
+            left,
+            right,
+        } = instruction.kind
+        else {
+            return None;
+        };
+        if left == induction.value && constants.contains_key(&right) {
+            Some((instruction.result, right))
+        } else if right == induction.value && constants.contains_key(&left) {
+            Some((instruction.result, left))
+        } else {
+            None
+        }
+    })?;
+    let reduction = body.instructions.iter().find(|instruction| {
+        matches!(
+            instruction.kind,
+            MirInstructionKind::CheckedIntegerAdd {
+                kind: IntegerKind::Int64,
+                left,
+                right,
+            } if (left == accumulator.value && right == induction.value)
+                || (right == accumulator.value && left == induction.value)
+        )
+    })?;
+    let MirTerminator::Branch {
+        target: condition_id,
+        arguments,
+    } = &body.terminator
+    else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    let condition = function
+        .blocks
+        .iter()
+        .find(|block| block.block == *condition_id)?;
+    if condition.instructions.len() != 2 {
+        return None;
+    }
+    let (comparison, limit) =
+        condition
+            .instructions
+            .iter()
+            .find_map(|instruction| match instruction.kind {
+                MirInstructionKind::CompareEqual { left, right } if left == next_induction => {
+                    constants
+                        .get(&right)
+                        .copied()
+                        .map(|limit| (instruction.result, limit))
+                }
+                MirInstructionKind::CompareEqual { left, right } if right == next_induction => {
+                    constants
+                        .get(&left)
+                        .copied()
+                        .map(|limit| (instruction.result, limit))
+                }
+                _ => None,
+            })?;
+    let MirTerminator::ConditionalBranch {
+        condition: branch_condition,
+        when_true,
+        when_false,
+    } = condition.terminator
+    else {
+        return None;
+    };
+    if branch_condition != comparison {
+        return None;
+    }
+    let backedge = function
+        .blocks
+        .iter()
+        .find(|block| block.block == when_false)?;
+    if backedge.instructions.len() != 1
+        || !matches!(
+            backedge.instructions[0].kind,
+            MirInstructionKind::GcSafePoint { .. }
+        )
+        || !matches!(
+            &backedge.terminator,
+            MirTerminator::Branch { target, arguments }
+                if *target == body.block
+                    && arguments == &[next_induction, reduction.result]
+        )
+    {
+        return None;
+    }
+    let bridge = function
+        .blocks
+        .iter()
+        .find(|block| block.block == when_true)?;
+    let MirTerminator::Branch {
+        target: exit,
+        arguments: exit_arguments,
+    } = &bridge.terminator
+    else {
+        return None;
+    };
+    if !bridge.instructions.is_empty()
+        || exit_arguments != &[next_induction, reduction.result]
+        || block_reaches(function, *exit, body.block)
+    {
+        return None;
+    }
+    let initial_induction = constants.get(&initial[0])?.signed()?;
+    let initial_accumulator = constants.get(&initial[1])?.signed()?;
+    let step = constants.get(&step_value)?.signed()?;
+    let limit_signed = limit.signed()?;
+    let accumulator_value = reduction_sum(
+        i128::from(initial_induction),
+        i128::from(initial_accumulator),
+        i128::from(step),
+        i128::from(limit_signed),
+    )?;
+    let accumulator =
+        IntegerValue::parse_decimal(&accumulator_value.to_string(), IntegerKind::Int64).ok()?;
+    Some(CountedReductionSummary {
+        exit: *exit,
+        induction: limit,
+        accumulator,
+        type_id: reduction.result_type?,
+        span: reduction.span,
+    })
+}
+
+fn reduction_sum(initial: i128, accumulator: i128, step: i128, limit: i128) -> Option<i128> {
+    let distance = limit.checked_sub(initial)?;
+    if initial < 0 || accumulator < 0 || step <= 0 || distance <= 0 || distance % step != 0 {
+        return None;
+    }
+    let iterations = distance / step;
+    let last_offset = (iterations - 1).checked_mul(step)?;
+    let series_factor = initial.checked_mul(2)?.checked_add(last_offset)?;
+    let series = iterations.checked_mul(series_factor)? / 2;
+    accumulator.checked_add(series)
+}
+
+fn block_reaches(function: &super::MirFunction, start: BlockId, target: BlockId) -> bool {
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    while let Some(block_id) = pending.pop() {
+        if block_id == target {
+            return true;
+        }
+        if !visited.insert(block_id) {
+            continue;
+        }
+        if let Some(block) = function.blocks.iter().find(|block| block.block == block_id) {
+            pending.extend(block_targets(block));
+        }
+    }
+    false
 }
 
 fn fold_constants(function: &mut super::MirFunction) {

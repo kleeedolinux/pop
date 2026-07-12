@@ -214,6 +214,8 @@ pub enum RuntimeOperation {
     DispatchCall,
     RetainRoot,
     ReleaseRoot,
+    Pin,
+    Unpin,
     PublishRoots,
     GcSafePoint,
     SatbWriteBarrier,
@@ -248,6 +250,8 @@ impl RuntimeOperation {
             Self::DispatchCall => "pop_rt_dispatch_call",
             Self::RetainRoot => "pop_rt_retain_root",
             Self::ReleaseRoot => "pop_rt_release_root",
+            Self::Pin => "pop_rt_pin",
+            Self::Unpin => "pop_rt_unpin",
             Self::PublishRoots => "pop_rt_publish_roots",
             Self::GcSafePoint => "pop_rt_gc_safe_point",
             Self::SatbWriteBarrier => "pop_rt_satb_write_barrier",
@@ -297,6 +301,25 @@ impl ManagedReference {
 pub struct RootHandle(u64);
 
 impl RootHandle {
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// A runtime-private opaque token for one scoped managed-object pin.
+///
+/// Pins are distinct from ordinary strong-root handles because they carry the
+/// additional stable-address contract required by an unsafe foreign boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PinHandle(u64);
+
+impl PinHandle {
     #[must_use]
     pub const fn new(raw: u64) -> Self {
         Self(raw)
@@ -550,6 +573,100 @@ pub struct ArrayAllocationRequest {
     allocation_class: AllocationClass,
     length: u32,
     element_map: ArrayElementMap,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableAllocationError {
+    EntryCapacityOverflow(u32),
+    InvalidObjectMap(ObjectMapError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableAllocationRequest {
+    type_id: RuntimeTypeId,
+    allocation_class: AllocationClass,
+    entry_count: u32,
+    key_map: ArrayElementMap,
+    value_map: ArrayElementMap,
+    object_map: ObjectMap,
+}
+
+impl TableAllocationRequest {
+    /// Constructs the homogeneous interleaved key/value layout for a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when twice the entry capacity cannot be represented by
+    /// the portable logical-slot index.
+    pub fn new(
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        entry_count: u32,
+        key_map: ArrayElementMap,
+        value_map: ArrayElementMap,
+    ) -> Result<Self, TableAllocationError> {
+        let slot_count = entry_count
+            .checked_mul(2)
+            .ok_or(TableAllocationError::EntryCapacityOverflow(entry_count))?;
+        let reference_capacity = usize::try_from(entry_count)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(usize::from(key_map == ArrayElementMap::ManagedReference))
+            .saturating_add(
+                usize::try_from(entry_count)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(usize::from(value_map == ArrayElementMap::ManagedReference)),
+            );
+        let mut reference_slots = Vec::with_capacity(reference_capacity);
+        for entry in 0..entry_count {
+            let key_slot = entry * 2;
+            if key_map == ArrayElementMap::ManagedReference {
+                reference_slots.push(ObjectSlot::new(key_slot));
+            }
+            if value_map == ArrayElementMap::ManagedReference {
+                reference_slots.push(ObjectSlot::new(key_slot + 1));
+            }
+        }
+        let object_map = ObjectMap::new(slot_count, reference_slots)
+            .map_err(TableAllocationError::InvalidObjectMap)?;
+        Ok(Self {
+            type_id,
+            allocation_class,
+            entry_count,
+            key_map,
+            value_map,
+            object_map,
+        })
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> RuntimeTypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn allocation_class(&self) -> AllocationClass {
+        self.allocation_class
+    }
+
+    #[must_use]
+    pub const fn entry_count(&self) -> u32 {
+        self.entry_count
+    }
+
+    #[must_use]
+    pub const fn key_map(&self) -> ArrayElementMap {
+        self.key_map
+    }
+
+    #[must_use]
+    pub const fn value_map(&self) -> ArrayElementMap {
+        self.value_map
+    }
+
+    #[must_use]
+    pub const fn object_map(&self) -> &ObjectMap {
+        &self.object_map
+    }
 }
 
 impl ArrayAllocationRequest {
@@ -814,6 +931,17 @@ pub trait RuntimeAdapter {
         request: &ArrayAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure>;
 
+    /// Allocates typed associative storage with homogeneous interleaved key and
+    /// value pointer maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable runtime failure when allocation cannot complete.
+    fn allocate_table(
+        &mut self,
+        request: &TableAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure>;
+
     /// Registers a strong runtime root.
     ///
     /// # Errors
@@ -827,6 +955,32 @@ pub trait RuntimeAdapter {
     ///
     /// Returns an invariant panic when the root handle is invalid.
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure>;
+
+    /// Registers a scoped strong pin for a managed reference at an unsafe
+    /// foreign boundary.
+    ///
+    /// Adapters without a native pinning boundary reject this operation until
+    /// they implement the same semantic contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic when the reference is invalid or pinning is
+    /// unavailable.
+    fn pin(&mut self, reference: ManagedReference) -> Result<PinHandle, RuntimeFailure> {
+        let _ = reference;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Releases a previously registered scoped pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic when the pin handle is invalid or pinning is
+    /// unavailable.
+    fn unpin(&mut self, pin: PinHandle) -> Result<(), RuntimeFailure> {
+        let _ = pin;
+        Err(RuntimeFailure::runtime_invariant())
+    }
 
     /// Publishes precise stack roots and services a requested collection.
     ///

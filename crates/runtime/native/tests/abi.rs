@@ -2,8 +2,9 @@ use pop_runtime_native::{
     abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
     allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
     pop_rt_allocate_array, pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_get,
-    pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage, pop_rt_release_root,
-    pop_rt_retain_root, pop_rt_string_equal, pop_rt_string_read, request_abi_collection,
+    pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage, pop_rt_pin,
+    pop_rt_release_root, pop_rt_retain_root, pop_rt_string_equal, pop_rt_string_read, pop_rt_unpin,
+    request_abi_collection,
 };
 use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -19,8 +20,29 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 1);
+    assert_eq!(pop_rt_abi_minor(), 3);
     assert_eq!(pop_rt_gc_stage(), 1);
+}
+
+#[test]
+fn bootstrap_abi_pins_keep_handles_alive_until_explicit_unpin() {
+    let _guard = abi_test_lock();
+    let reference = pop_rt_allocate_object(0);
+    let pin = pop_rt_pin(reference);
+    assert_ne!(reference, 0);
+    assert_ne!(pin, 0);
+
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(20, &[]), 1);
+    let root = pop_rt_retain_root(reference);
+    assert_ne!(root, 0, "pin must retain the managed object");
+    assert_eq!(pop_rt_release_root(root), 1);
+
+    assert_eq!(pop_rt_unpin(pin), 1);
+    assert_eq!(pop_rt_unpin(pin), 0, "pin handles are single-use");
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(21, &[]), 1);
+    assert_eq!(pop_rt_retain_root(reference), 0);
 }
 
 #[test]
@@ -139,7 +161,7 @@ fn bootstrap_abi_allocates_and_tracks_opaque_handles() {
     let root = pop_rt_retain_root(reference);
     assert_ne!(root, 0);
     assert_eq!(pop_rt_release_root(root), 1);
-    assert_ne!(pop_rt_allocate_table(3), 0);
+    assert_ne!(pop_rt_allocate_table(3, 1, 0), 0);
     assert_eq!(pop_rt_array_set(reference, 1, 41), 1);
     assert_eq!(pop_rt_array_get(reference, 1), 41);
     assert_eq!(pop_rt_array_get(reference, 3), 0);
@@ -170,6 +192,22 @@ fn mapped_object_abi_preserves_precise_reference_slots() {
     assert_eq!(pop_rt_field_get(parent, 1), 77);
     assert_eq!(pop_rt_field_get(parent, 2), child);
     assert_eq!(pop_rt_field_set(parent, 2, u64::MAX), 0);
+}
+
+#[test]
+fn typed_table_abi_traces_managed_keys_without_marking_scalar_values() {
+    let _guard = abi_test_lock();
+    let table = pop_rt_allocate_table(1, 1, 0);
+    let key = pop_rt_allocate_object(0);
+    assert_ne!(table, 0);
+    assert_ne!(key, 0);
+    assert_eq!(pop_rt_field_set(table, 1, key), 1);
+    assert_eq!(pop_rt_field_set(table, 2, 42), 1);
+
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(20, &[table]), 1);
+    assert_eq!(abi_safe_point(21, &[key]), 1);
+    assert_eq!(pop_rt_field_get(table, 2), 42);
 }
 
 #[test]

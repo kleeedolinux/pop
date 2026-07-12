@@ -65,6 +65,10 @@ pub enum StatementSyntaxKind {
         condition: ExpressionSyntax,
         body: Vec<StatementSyntax>,
     },
+    RepeatUntil {
+        body: Vec<StatementSyntax>,
+        condition: ExpressionSyntax,
+    },
     Match {
         scrutinee: ExpressionSyntax,
         arms: Vec<MatchArmSyntax>,
@@ -429,6 +433,7 @@ impl BodyParser<'_> {
             Some(TokenKind::Return) => self.parse_return(),
             Some(TokenKind::If) => self.parse_if(),
             Some(TokenKind::While) => self.parse_while(),
+            Some(TokenKind::Repeat) => self.parse_repeat_until(),
             Some(TokenKind::Match) => self.parse_match(),
             _ => {
                 let expression = self.parse_expression(0)?;
@@ -589,6 +594,19 @@ impl BodyParser<'_> {
         let end = self.expect(TokenKind::End, "`end`")?.range().end();
         Ok(StatementSyntax {
             kind: StatementSyntaxKind::While { condition, body },
+            span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
+    }
+
+    fn parse_repeat_until(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+        let start = self.expect(TokenKind::Repeat, "`repeat`")?.range().start();
+        self.expect(TokenKind::Newline, "line break after `repeat`")?;
+        let body = self.parse_statement_list(&[TokenKind::Until, TokenKind::End])?;
+        self.expect(TokenKind::Until, "`until`")?;
+        let condition = self.parse_expression(0)?;
+        let end = condition.span().range().end();
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::RepeatUntil { body, condition },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
     }

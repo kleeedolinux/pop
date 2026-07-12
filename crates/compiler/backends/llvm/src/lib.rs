@@ -13,16 +13,22 @@ use std::path::Path;
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
+use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 use pop_foundation::{BlockId, BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
 use pop_mir::{
-    MirBubble, MirDeclarationKind, MirInstructionKind, MirTerminator, verify_mir_bubble,
+    MirBubble, MirDeclarationKind, MirEffect, MirEffectSummary, MirInstructionKind, MirTerminator,
+    verify_mir_bubble,
 };
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
 use pop_target::TargetSpec;
 use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
+
+const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
+const GC_POLL_INTERVAL: u32 = 16_384;
+const GC_POLL_BUDGET: &str = "%pop_gc_poll_budget";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LlvmLoweringOptions {
@@ -72,25 +78,40 @@ impl LlvmModule {
         let module = context
             .create_module_from_ir(buffer)
             .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
-        module
-            .verify()
-            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
-
         let triple = TargetTriple::create(&self.triple);
         module.set_triple(&triple);
         let target = Target::from_triple(&triple)
             .map_err(|error| LlvmEmissionError::UnsupportedTarget(error.to_string()))?;
+        let cpu = TargetMachine::get_host_cpu_name().to_string();
+        let features = TargetMachine::get_host_cpu_features().to_string();
         let machine = target
             .create_target_machine(
                 &triple,
-                "generic",
-                "",
-                OptimizationLevel::Default,
+                &cpu,
+                &features,
+                OptimizationLevel::Aggressive,
                 RelocMode::PIC,
                 CodeModel::Default,
             )
             .ok_or_else(|| LlvmEmissionError::UnsupportedTarget(self.triple.clone()))?;
         module.set_data_layout(&machine.get_target_data().get_data_layout());
+        module
+            .verify()
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
+
+        let pass_options = PassBuilderOptions::create();
+        pass_options.set_verify_each(true);
+        pass_options.set_loop_interleaving(true);
+        pass_options.set_loop_vectorization(true);
+        pass_options.set_loop_slp_vectorization(true);
+        pass_options.set_loop_unrolling(true);
+        pass_options.set_merge_functions(true);
+        module
+            .run_passes(LLVM_OPTIMIZATION_PIPELINE, &machine, pass_options)
+            .map_err(|error| LlvmEmissionError::Optimization(error.to_string()))?;
+        module
+            .verify()
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
         machine
             .write_to_file(&module, FileType::Object, path)
             .map_err(|error| LlvmEmissionError::ObjectEmission(error.to_string()))
@@ -102,6 +123,7 @@ pub enum LlvmEmissionError {
     TargetInitialization(String),
     UnsupportedTarget(String),
     InvalidModule(String),
+    Optimization(String),
     ObjectEmission(String),
 }
 
@@ -113,6 +135,9 @@ impl fmt::Display for LlvmEmissionError {
             }
             Self::UnsupportedTarget(error) => write!(formatter, "unsupported LLVM target: {error}"),
             Self::InvalidModule(error) => write!(formatter, "LLVM rejected generated IR: {error}"),
+            Self::Optimization(error) => {
+                write!(formatter, "LLVM optimization failed: {error}")
+            }
             Self::ObjectEmission(error) => {
                 write!(formatter, "LLVM object emission failed: {error}")
             }
@@ -196,6 +221,7 @@ pub fn lower_mir_to_llvm_ir(
     let record_field_types = collect_record_field_types(bubble);
     let string_literals = collect_string_literals(bubble);
     let self_capture_slots = collect_self_capture_slots(bubble);
+    let memory_none_functions = analyze_memory_none_functions(bubble);
     let mut functions = bubble
         .functions()
         .iter()
@@ -205,6 +231,7 @@ pub fn lower_mir_to_llvm_ir(
                 function,
                 types,
                 options,
+                memory_none_functions.contains(&function.symbol()),
                 &field_layout,
                 &record_fields,
                 &record_field_types,
@@ -218,6 +245,7 @@ pub fn lower_mir_to_llvm_ir(
             method.function(),
             types,
             options,
+            false,
             &field_layout,
             &record_fields,
             &record_field_types,
@@ -236,6 +264,8 @@ pub fn lower_mir_to_llvm_ir(
             nested_name(bubble.bubble(), nested.owner(), nested.function()),
             nested.parameters(),
             nested.results(),
+            nested.effects(),
+            false,
             nested.blocks(),
             Some(("%environment", &self_slots)),
             types,
@@ -263,22 +293,31 @@ pub fn lower_mir_to_llvm_ir(
             RuntimeOperation::AllocateArray.abi_symbol()
         ),
         format!(
-            "declare i8 @{}(i32, ptr, i64)",
+            "declare i64 @{}(i64, i1, i1)",
+            RuntimeOperation::AllocateTable.abi_symbol()
+        ),
+        format!(
+            "declare i8 @{}(i32, ptr, i64) cold nounwind",
             RuntimeOperation::GcSafePoint.abi_symbol()
         ),
         format!(
-            "declare void @{}(i64)",
+            "declare i64 @{}(i64)",
             RuntimeOperation::RetainRoot.abi_symbol()
         ),
         format!(
-            "declare void @{}(i64)",
+            "declare i8 @{}(i64)",
             RuntimeOperation::ReleaseRoot.abi_symbol()
         ),
+        format!("declare i64 @{}(i64)", RuntimeOperation::Pin.abi_symbol()),
+        format!("declare i8 @{}(i64)", RuntimeOperation::Unpin.abi_symbol()),
         format!(
             "declare void @{}(i64)",
             RuntimeOperation::SatbWriteBarrier.abi_symbol()
         ),
-        format!("declare void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "declare void @{}() cold noreturn nounwind",
+            RuntimeOperation::Trap.abi_symbol()
+        ),
         format!(
             "declare void @{}()",
             RuntimeOperation::ContinueUnwind.abi_symbol()
@@ -286,6 +325,7 @@ pub fn lower_mir_to_llvm_ir(
         "declare i64 @pop_rt_string_literal(ptr, i64)".to_owned(),
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
+        "declare i1 @llvm.expect.i1(i1, i1)".to_owned(),
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
@@ -298,6 +338,7 @@ pub fn lower_mir_to_llvm_ir(
             declarations,
             entry_point,
             functions,
+            functions_internal: options.entry_point.is_some(),
         },
     })
 }
@@ -345,6 +386,54 @@ fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {
         .enumerate()
         .map(|(index, value)| (value, format!("@pop_string_{index}")))
         .collect()
+}
+
+fn analyze_memory_none_functions(bubble: &MirBubble) -> BTreeSet<SymbolId> {
+    let mut candidates = bubble
+        .functions()
+        .iter()
+        .filter(|function| {
+            function
+                .effects()
+                .is_subset_of(MirEffectSummary::empty().with(MirEffect::MayTrap))
+                && function
+                    .blocks()
+                    .iter()
+                    .flat_map(pop_mir::MirBlock::instructions)
+                    .all(|instruction| {
+                        matches!(instruction.kind(), MirInstructionKind::CallDirect { .. })
+                            || llvm_memory_none_instruction(instruction.kind())
+                    })
+        })
+        .map(pop_mir::MirFunction::symbol)
+        .collect::<BTreeSet<_>>();
+    loop {
+        let rejected = bubble
+            .functions()
+            .iter()
+            .filter(|function| candidates.contains(&function.symbol()))
+            .filter(|function| {
+                function
+                    .blocks()
+                    .iter()
+                    .flat_map(pop_mir::MirBlock::instructions)
+                    .any(|instruction| {
+                        matches!(
+                            instruction.kind(),
+                            MirInstructionKind::CallDirect { function, .. }
+                                if !candidates.contains(function)
+                        )
+                    })
+            })
+            .map(pop_mir::MirFunction::symbol)
+            .collect::<Vec<_>>();
+        if rejected.is_empty() {
+            return candidates;
+        }
+        for function in rejected {
+            candidates.remove(&function);
+        }
+    }
 }
 
 fn collect_self_capture_slots(
@@ -411,19 +500,24 @@ fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec<String> {
 }
 
 fn runtime_declarations() -> Vec<String> {
-    [
-        RuntimeOperation::AllocateTable,
-        RuntimeOperation::ArrayGet,
-        RuntimeOperation::FieldGet,
+    vec![
+        format!(
+            "declare i64 @{}(i64, i64) nounwind",
+            RuntimeOperation::ArrayGet.abi_symbol()
+        ),
+        format!(
+            "declare i64 @{}(i64, i64) nounwind",
+            RuntimeOperation::FieldGet.abi_symbol()
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64) nounwind",
+            RuntimeOperation::ArraySet.abi_symbol()
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64) nounwind",
+            RuntimeOperation::FieldSet.abi_symbol()
+        ),
     ]
-    .into_iter()
-    .map(|operation| format!("declare i64 @{}(...)", operation.abi_symbol()))
-    .chain(
-        [RuntimeOperation::ArraySet, RuntimeOperation::FieldSet]
-            .into_iter()
-            .map(|operation| format!("declare i8 @{}(...)", operation.abi_symbol())),
-    )
-    .collect()
 }
 
 fn collect_field_layout(bubble: &MirBubble) -> BTreeMap<FieldId, u32> {
@@ -612,6 +706,7 @@ fn lower_interface_dispatcher(
         parameters,
         result: result_type,
         blocks,
+        attributes: Vec::new(),
     })
 }
 
@@ -801,6 +896,7 @@ fn lower_indirect_dispatcher(
         parameters,
         result: result_type,
         blocks,
+        attributes: Vec::new(),
     })
 }
 
@@ -834,6 +930,7 @@ struct PrivateModule {
     declarations: Vec<String>,
     entry_point: Option<String>,
     functions: Vec<PrivateFunction>,
+    functions_internal: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -842,6 +939,7 @@ struct PrivateFunction {
     parameters: Vec<String>,
     result: String,
     blocks: Vec<PrivateBlock>,
+    attributes: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -866,7 +964,7 @@ impl PrivateModule {
             writeln!(formatter)?;
         }
         for function in &self.functions {
-            function.render(formatter)?;
+            function.render(formatter, self.functions_internal)?;
             writeln!(formatter)?;
         }
         if let Some(entry_point) = &self.entry_point {
@@ -966,10 +1064,16 @@ fn indirect_name(bubble: BubbleId, function_type: TypeId) -> String {
 }
 
 impl PrivateFunction {
-    fn render(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn render(&self, formatter: &mut fmt::Formatter<'_>, internal: bool) -> fmt::Result {
+        let linkage = if internal { "internal " } else { "" };
+        let attributes = if self.attributes.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.attributes.join(" "))
+        };
         writeln!(
             formatter,
-            "define {} @{}({}) {{",
+            "define {linkage}{} @{}({}){attributes} {{",
             self.result,
             self.name,
             self.parameters.join(", ")
@@ -991,6 +1095,7 @@ fn lower_function(
     function: &pop_mir::MirFunction,
     types: &TypeArena,
     options: LlvmLoweringOptions,
+    memory_none: bool,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
@@ -1001,6 +1106,8 @@ fn lower_function(
         function_name(bubble, function.symbol()),
         function.parameters(),
         function.results(),
+        function.effects(),
+        memory_none,
         function.blocks(),
         None,
         types,
@@ -1018,6 +1125,8 @@ fn lower_function_parts(
     name: String,
     parameter_types: &[TypeId],
     result_types: &[TypeId],
+    effects: MirEffectSummary,
+    memory_none: bool,
     function_blocks: &[pop_mir::MirBlock],
     environment: Option<(&str, &BTreeSet<u32>)>,
     types: &TypeArena,
@@ -1027,6 +1136,11 @@ fn lower_function_parts(
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
+    let proven_non_overflow_adds = proven_counted_reduction_adds(function_blocks);
+    let has_gc_safe_point = function_blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .any(|instruction| matches!(instruction.kind(), MirInstructionKind::GcSafePoint { .. }));
     let mut value_types = BTreeMap::new();
     for block in function_blocks {
         for argument in block.arguments() {
@@ -1061,13 +1175,16 @@ fn lower_function_parts(
         }
     }
     let mut blocks = Vec::new();
-    for block in function_blocks {
+    for (block_index, block) in function_blocks.iter().enumerate() {
         let mut instructions = lower_block_arguments(
             block,
             incoming_edges.get(&block.block()).map(Vec::as_slice),
             union_payload_sources.get(&block.block()).copied(),
             types,
         )?;
+        if block_index == 0 {
+            instructions.splice(0..0, initialize_gc_poll(has_gc_safe_point));
+        }
         for instruction in block.instructions() {
             if options.emit_comments {
                 instructions.push(format!("; mir v{}", instruction.result().raw()));
@@ -1082,6 +1199,7 @@ fn lower_function_parts(
                 record_field_types,
                 string_literals,
                 environment,
+                &proven_non_overflow_adds,
             )?);
         }
         blocks.push(PrivateBlock {
@@ -1115,7 +1233,255 @@ fn lower_function_parts(
         parameters,
         result: llvm_results(result_types, types)?,
         blocks,
+        attributes: llvm_function_attributes(effects, memory_none),
     })
+}
+
+fn proven_counted_reduction_adds(blocks: &[pop_mir::MirBlock]) -> BTreeSet<ValueId> {
+    let constants = blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::IntegerConstant(value) if value.kind() == IntegerKind::Int64 => {
+                value
+                    .signed()
+                    .map(|value| (instruction.result(), i128::from(value)))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    blocks
+        .iter()
+        .find_map(|body| prove_counted_reduction(body, blocks, &constants))
+        .map_or_else(BTreeSet::new, BTreeSet::from)
+}
+
+fn prove_counted_reduction(
+    body: &pop_mir::MirBlock,
+    blocks: &[pop_mir::MirBlock],
+    constants: &BTreeMap<ValueId, i128>,
+) -> Option<[ValueId; 2]> {
+    let [induction, accumulator, ..] = body.arguments() else {
+        return None;
+    };
+    let (next_induction, step_value) = body.instructions().iter().find_map(|instruction| {
+        let MirInstructionKind::CheckedIntegerAdd {
+            kind: IntegerKind::Int64,
+            left,
+            right,
+        } = instruction.kind()
+        else {
+            return None;
+        };
+        if *left == induction.value() && constants.contains_key(right) {
+            Some((instruction.result(), *right))
+        } else if *right == induction.value() && constants.contains_key(left) {
+            Some((instruction.result(), *left))
+        } else {
+            None
+        }
+    })?;
+    let next_accumulator = body.instructions().iter().find_map(|instruction| {
+        let MirInstructionKind::CheckedIntegerAdd {
+            kind: IntegerKind::Int64,
+            left,
+            right,
+        } = instruction.kind()
+        else {
+            return None;
+        };
+        ((*left == accumulator.value() && *right == induction.value())
+            || (*right == accumulator.value() && *left == induction.value()))
+        .then_some(instruction.result())
+    })?;
+    let step = *constants.get(&step_value)?;
+    let entry = blocks.first()?;
+    let MirTerminator::Branch { target, arguments } = entry.terminator() else {
+        return None;
+    };
+    if *target != body.block() || arguments.len() != 2 {
+        return None;
+    }
+    let initial_induction = *constants.get(&arguments[0])?;
+    let initial_accumulator = *constants.get(&arguments[1])?;
+    let MirTerminator::Branch {
+        target: condition_block,
+        arguments,
+    } = body.terminator()
+    else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    let condition_block = blocks
+        .iter()
+        .find(|block| block.block() == *condition_block)?;
+    let (comparison, limit) = counted_loop_limit(condition_block, next_induction, constants)?;
+    let MirTerminator::ConditionalBranch {
+        condition,
+        when_true,
+        when_false,
+    } = condition_block.terminator()
+    else {
+        return None;
+    };
+    if *condition != comparison || can_reach_block(blocks, *when_true, body.block()) {
+        return None;
+    }
+    let backedge = blocks.iter().find(|block| block.block() == *when_false)?;
+    if !backedge
+        .instructions()
+        .iter()
+        .any(|instruction| matches!(instruction.kind(), MirInstructionKind::GcSafePoint { .. }))
+        || !matches!(
+            backedge.terminator(),
+            MirTerminator::Branch { target, arguments }
+                if *target == body.block()
+                    && arguments == &[next_induction, next_accumulator]
+        )
+    {
+        return None;
+    }
+    prove_reduction_range(initial_induction, initial_accumulator, step, limit)
+        .then_some([next_induction, next_accumulator])
+}
+
+fn can_reach_block(blocks: &[pop_mir::MirBlock], start: BlockId, target: BlockId) -> bool {
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    while let Some(block_id) = pending.pop() {
+        if block_id == target {
+            return true;
+        }
+        if !visited.insert(block_id) {
+            continue;
+        }
+        let Some(block) = blocks.iter().find(|block| block.block() == block_id) else {
+            continue;
+        };
+        match block.terminator() {
+            MirTerminator::Branch { target, .. } => pending.push(*target),
+            MirTerminator::ConditionalBranch {
+                when_true,
+                when_false,
+                ..
+            } => pending.extend([*when_true, *when_false]),
+            MirTerminator::UnionSwitch { arms, .. } => {
+                pending.extend(arms.iter().map(|arm| arm.target()));
+            }
+            MirTerminator::Missing
+            | MirTerminator::Return { .. }
+            | MirTerminator::Trap(_)
+            | MirTerminator::Panic(_)
+            | MirTerminator::ContinueUnwind(_)
+            | MirTerminator::Unreachable => {}
+        }
+    }
+    false
+}
+
+fn counted_loop_limit(
+    condition_block: &pop_mir::MirBlock,
+    next_induction: ValueId,
+    constants: &BTreeMap<ValueId, i128>,
+) -> Option<(ValueId, i128)> {
+    condition_block
+        .instructions()
+        .iter()
+        .find_map(|instruction| match instruction.kind() {
+            MirInstructionKind::CompareEqual { left, right } if *left == next_induction => {
+                constants
+                    .get(right)
+                    .copied()
+                    .map(|limit| (instruction.result(), limit))
+            }
+            MirInstructionKind::CompareEqual { left, right } if *right == next_induction => {
+                constants
+                    .get(left)
+                    .copied()
+                    .map(|limit| (instruction.result(), limit))
+            }
+            _ => None,
+        })
+}
+
+fn prove_reduction_range(
+    initial_induction: i128,
+    initial_accumulator: i128,
+    step: i128,
+    limit: i128,
+) -> bool {
+    let Some(distance) = limit.checked_sub(initial_induction) else {
+        return false;
+    };
+    if initial_induction < 0
+        || initial_accumulator < 0
+        || step <= 0
+        || distance <= 0
+        || distance % step != 0
+    {
+        return false;
+    }
+    let iterations = distance / step;
+    let final_accumulator = (|| {
+        let last_offset = (iterations - 1).checked_mul(step)?;
+        let series_factor = initial_induction.checked_mul(2)?.checked_add(last_offset)?;
+        let series = iterations.checked_mul(series_factor)? / 2;
+        initial_accumulator.checked_add(series)
+    })();
+    limit <= i128::from(i64::MAX)
+        && final_accumulator.is_some_and(|value| value <= i128::from(i64::MAX))
+}
+
+fn llvm_function_attributes(effects: MirEffectSummary, memory_none: bool) -> Vec<&'static str> {
+    let mut attributes = Vec::new();
+    if memory_none {
+        attributes.push("memory(none)");
+    }
+    if !effects.contains(MirEffect::MayUnwind) {
+        attributes.push("nounwind");
+    }
+    attributes
+}
+
+fn llvm_memory_none_instruction(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::IntegerConstant(_)
+            | MirInstructionKind::FloatConstant(_)
+            | MirInstructionKind::BooleanConstant(_)
+            | MirInstructionKind::NilConstant
+            | MirInstructionKind::FunctionReference(_)
+            | MirInstructionKind::CheckedIntegerAdd { .. }
+            | MirInstructionKind::CheckedIntegerSubtract { .. }
+            | MirInstructionKind::CheckedIntegerMultiply { .. }
+            | MirInstructionKind::CheckedIntegerDivide { .. }
+            | MirInstructionKind::CheckedIntegerRemainder { .. }
+            | MirInstructionKind::IntegerNegate { .. }
+            | MirInstructionKind::FloatAdd { .. }
+            | MirInstructionKind::FloatSubtract { .. }
+            | MirInstructionKind::FloatMultiply { .. }
+            | MirInstructionKind::FloatDivide { .. }
+            | MirInstructionKind::FloatNegate { .. }
+            | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::BooleanNot { .. }
+            | MirInstructionKind::BooleanAnd { .. }
+            | MirInstructionKind::BooleanOr { .. }
+    )
+}
+
+fn initialize_gc_poll(has_gc_safe_point: bool) -> Vec<String> {
+    if !has_gc_safe_point {
+        return Vec::new();
+    }
+    vec![
+        format!("{GC_POLL_BUDGET} = alloca i32, align 4"),
+        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
+    ]
 }
 
 fn llvm_block_exit_label(block: &pop_mir::MirBlock) -> String {
@@ -1132,11 +1498,18 @@ fn llvm_block_exit_label(block: &pop_mir::MirBlock) -> String {
                     | MirInstructionKind::CheckedIntegerDivide { .. }
                     | MirInstructionKind::CheckedIntegerRemainder { .. }
                     | MirInstructionKind::IntegerNegate { .. }
+                    | MirInstructionKind::GcSafePoint { .. }
             )
         })
         .map_or_else(
             || format!("b{}", block.block().raw()),
-            |instruction| format!("v{}_continue", instruction.result().raw()),
+            |instruction| {
+                if matches!(instruction.kind(), MirInstructionKind::GcSafePoint { .. }) {
+                    format!("v{}_poll_continue", instruction.result().raw())
+                } else {
+                    format!("v{}_continue", instruction.result().raw())
+                }
+            },
         )
 }
 
@@ -1198,6 +1571,7 @@ fn lower_instruction(
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
     environment: Option<(&str, &BTreeSet<u32>)>,
+    proven_non_overflow_adds: &BTreeSet<ValueId>,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
@@ -1226,7 +1600,16 @@ fn lower_instruction(
             )
         }
         MirInstructionKind::CheckedIntegerAdd { kind, left, right } => {
-            lower_checked_integer_binary(&result, "add", *kind, *left, *right)
+            if proven_non_overflow_adds.contains(&instruction.result()) {
+                format!(
+                    "{result} = add nsw i{} %v{}, %v{}",
+                    kind.bit_width(),
+                    left.raw(),
+                    right.raw()
+                )
+            } else {
+                lower_checked_integer_binary(&result, "add", *kind, *left, *right)
+            }
         }
         MirInstructionKind::CheckedIntegerSubtract { kind, left, right } => {
             lower_checked_integer_binary(&result, "sub", *kind, *left, *right)
@@ -1367,14 +1750,24 @@ fn lower_instruction(
             safe_point, roots, ..
         } => lower_gc_safe_point(&result, safe_point.raw(), roots),
         MirInstructionKind::RetainRoot { value } => format!(
-            "call void @{}(i64 %v{})",
+            "{result} = call i64 @{}(i64 %v{})",
             RuntimeOperation::RetainRoot.abi_symbol(),
             value.raw()
         ),
-        MirInstructionKind::ReleaseRoot { value } => format!(
-            "call void @{}(i64 %v{})",
+        MirInstructionKind::ReleaseRoot { handle } => format!(
+            "call i8 @{}(i64 %v{})",
             RuntimeOperation::ReleaseRoot.abi_symbol(),
+            handle.raw()
+        ),
+        MirInstructionKind::Pin { value } => format!(
+            "{result} = call i64 @{}(i64 %v{})",
+            RuntimeOperation::Pin.abi_symbol(),
             value.raw()
+        ),
+        MirInstructionKind::Unpin { handle } => format!(
+            "call i8 @{}(i64 %v{})",
+            RuntimeOperation::Unpin.abi_symbol(),
+            handle.raw()
         ),
         MirInstructionKind::WriteBarrier { owner, .. } => format!(
             "call void @{}(i64 %v{})",
@@ -1403,8 +1796,9 @@ fn lower_instruction(
         } => lower_array_make(&result, elements, *element_map, value_types, types)?,
         MirInstructionKind::TableMake {
             entries,
-            object_map,
-        } => lower_table_make(&result, entries, object_map, value_types, types)?,
+            key_map,
+            value_map,
+        } => lower_table_make(&result, entries, *key_map, *value_map, value_types, types)?,
         MirInstructionKind::RecordMake { fields, .. } => {
             let slot_count = u32::try_from(fields.len())
                 .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
@@ -1483,6 +1877,11 @@ fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::ArraySet {
+            array,
+            index,
+            value,
+        } => lower_array_set(&result, *array, *index, *value, value_types, types)?,
         MirInstructionKind::RecordUpdate {
             record,
             base,
@@ -1715,8 +2114,9 @@ fn lower_checked_integer_negate(result: &str, kind: IntegerKind, operand: ValueI
 
 fn lower_trap_edge(result: &str, condition: &str) -> String {
     let label = result.trim_start_matches('%');
+    let expected = format!("{condition}_expected");
     format!(
-        "br i1 {condition}, label %{label}_trap, label %{label}_continue\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_continue:",
+        "{expected} = call i1 @llvm.expect.i1(i1 {condition}, i1 false)\nbr i1 {expected}, label %{label}_trap, label %{label}_continue\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_continue:",
         RuntimeOperation::Trap.abi_symbol()
     )
 }
@@ -1963,6 +2363,41 @@ fn runtime_call(
     ))
 }
 
+fn lower_array_set(
+    result: &str,
+    array: ValueId,
+    index: ValueId,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_stored = call i8 @{}(i64 %v{}, i64 %v{}, i64 {stored})",
+            RuntimeOperation::ArraySet.abi_symbol(),
+            array.raw(),
+            index.raw()
+        ),
+        format!("{result}_in_bounds = icmp ne i8 {result}_stored, 0"),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
 fn lower_object_make(
     result: &str,
     fields: &[(FieldId, ValueId)],
@@ -2028,14 +2463,36 @@ fn lower_mapped_allocation(result: &str, slot_count: u32, reference_slots: &[u32
 }
 
 fn lower_gc_safe_point(result: &str, safe_point: u32, roots: &[ValueId]) -> String {
+    let label = result.trim_start_matches('%');
+    let budget = format!("{result}_poll_budget");
+    let remaining = format!("{result}_poll_remaining");
+    let expired = format!("{result}_poll_expired");
+    let expected = format!("{result}_poll_expired_expected");
+    let slow = format!("{label}_poll_slow");
+    let continuation = format!("{label}_poll_continue");
+    let mut lines = vec![
+        format!("{budget} = load i32, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("{remaining} = sub i32 {budget}, 1"),
+        format!("store i32 {remaining}, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("{expired} = icmp eq i32 {remaining}, 0"),
+        format!("{expected} = call i1 @llvm.expect.i1(i1 {expired}, i1 false)"),
+        format!("br i1 {expected}, label %{slow}, label %{continuation}"),
+        format!("{slow}:"),
+        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
+    ];
     if roots.is_empty() {
-        return format!(
-            "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
-            RuntimeOperation::GcSafePoint.abi_symbol()
-        );
+        lines.extend([
+            format!(
+                "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
+                RuntimeOperation::GcSafePoint.abi_symbol()
+            ),
+            format!("br label %{continuation}"),
+            format!("{continuation}:"),
+        ]);
+        return lines.join("\n");
     }
     let root_array = format!("{result}_roots");
-    let mut lines = vec![format!("{root_array} = alloca [{} x i64]", roots.len())];
+    lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
     for (index, root) in roots.iter().enumerate() {
         let entry = format!("{root_array}_{index}");
         lines.extend([
@@ -2051,6 +2508,10 @@ fn lower_gc_safe_point(result: &str, safe_point: u32, roots: &[ValueId]) -> Stri
         RuntimeOperation::GcSafePoint.abi_symbol(),
         roots.len()
     ));
+    lines.extend([
+        format!("br label %{continuation}"),
+        format!("{continuation}:"),
+    ]);
     lines.join("\n")
 }
 
@@ -2568,16 +3029,18 @@ fn lower_array_make(
 fn lower_table_make(
     result: &str,
     entries: &[(ValueId, ValueId)],
-    object_map: &pop_runtime_interface::ObjectMap,
+    key_map: ArrayElementMap,
+    value_map: ArrayElementMap,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
 ) -> Result<String, LlvmLoweringError> {
-    let reference_slots = object_map
-        .reference_slots()
-        .iter()
-        .map(|slot| slot.raw())
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(result, object_map.slot_count(), &reference_slots);
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {}, i1 {}, i1 {})",
+        RuntimeOperation::AllocateTable.abi_symbol(),
+        entries.len(),
+        u8::from(key_map == ArrayElementMap::ManagedReference),
+        u8::from(value_map == ArrayElementMap::ManagedReference),
+    )];
     for (entry, (key, value)) in entries.iter().enumerate() {
         for (offset, item) in [*key, *value].into_iter().enumerate() {
             let type_id = *values

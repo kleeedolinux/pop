@@ -862,11 +862,14 @@ fn lower_compile_time_literal(expression: &TypedExpression) -> CompileTimeExpres
 
 fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTimeLoweringError> {
     let construct = match statement.kind() {
-        TypedStatementKind::While { .. } => UnsupportedCompileTimeConstruct::Loop,
+        TypedStatementKind::While { .. } | TypedStatementKind::RepeatUntil { .. } => {
+            UnsupportedCompileTimeConstruct::Loop
+        }
         TypedStatementKind::LocalSet { .. }
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
-        | TypedStatementKind::FieldSet { .. } => UnsupportedCompileTimeConstruct::Mutation,
+        | TypedStatementKind::FieldSet { .. }
+        | TypedStatementKind::ArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {

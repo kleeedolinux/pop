@@ -94,6 +94,44 @@ fn mutable_locals_flow_through_loop_backedges_and_branch_joins() {
 }
 
 #[test]
+fn repeat_until_executes_once_and_repeats_through_its_false_backedge() {
+    // ADR 0032: the body runs before the first condition check, and `false`
+    // returns to the body while `true` exits.
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function countToThree(): Int\n\
+             local value = 0\n\
+             repeat\n\
+                 local nextValue = value + 1\n\
+                 value = nextValue\n\
+             until nextValue == 3\n\
+             return value\n\
+         end\n\
+         public function runOnce(): Int\n\
+             local value = 0\n\
+             repeat\n\
+                 value = value + 1\n\
+             until true\n\
+             return value\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified repeat-until MIR");
+
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[])
+            .expect("repeat backedge execution"),
+        vec![int(3)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[])
+            .expect("at-least-once execution"),
+        vec![int(1)]
+    );
+}
+
+#[test]
 fn standard_print_overloads_execute_by_trusted_identity_and_return_no_value() {
     let (mir, types) = executable_source(
         "namespace Main\n\
@@ -325,6 +363,7 @@ fn arrays_and_tables_execute_identically_before_and_after_mir_optimization() {
          public function collections(): ({String}, {[String]: Int})\n\
              local names: {String} = { \"first\", \"second\" }\n\
              local scores: {[String]: Int} = { first = 1, second = 2 }\n\
+             names[2] = \"updated\"\n\
              return (names, scores)\n\
          end\n",
     );
@@ -333,7 +372,7 @@ fn arrays_and_tables_execute_identically_before_and_after_mir_optimization() {
     let expected = vec![MirValue::Tuple(vec![
         MirValue::Array(vec![
             MirValue::String("first".to_owned()),
-            MirValue::String("second".to_owned()),
+            MirValue::String("updated".to_owned()),
         ]),
         MirValue::Table(vec![
             (MirValue::String("first".to_owned()), int(1)),

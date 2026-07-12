@@ -154,6 +154,7 @@ local scores: {[String]: Int} = {
 }
 
 local names: {String} = { "Alice", "Bruno" }
+names[1] = "Aline"
 ```
 
 `{T}` denotes an array type and `{[K]: V}` denotes a typed associative table.
@@ -165,6 +166,27 @@ Tables do not define lexical namespaces, class identity, ordinary method
 lookup, module initialization, records, or tuples. Pop Lang does not inherit the
 full Lua metamethod system. Operator customization and iteration use explicit
 typed protocols.
+
+Indexed array assignment uses the same one-based indexing model as reads. The
+assigned value must have the array's element type, and an out-of-bounds write
+traps rather than growing the array or falling back to table semantics.
+
+## Control flow and loops
+
+`while` remains the pre-condition loop. Pop Lang also has the Luau-shaped
+body-first form:
+
+```luau
+repeat
+    value = value + 1
+until value == 3
+```
+
+The body executes once before each `Boolean` `until` condition. `true` exits
+and `false` repeats. The body and condition share one lexical scope, so a body
+local can contribute to the condition without escaping after the loop. The
+first loop slice has no `break` or `continue`; generalized iteration remains a
+separate typed-protocol feature. See ADR 0032.
 
 ## Namespaces, using directives, Modules, and Bubbles
 

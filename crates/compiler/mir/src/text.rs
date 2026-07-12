@@ -586,6 +586,8 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::GcSafePoint { .. }
                 | MirInstructionKind::RetainRoot { .. }
                 | MirInstructionKind::ReleaseRoot { .. }
+                | MirInstructionKind::Pin { .. }
+                | MirInstructionKind::Unpin { .. }
                 | MirInstructionKind::WriteBarrier { .. }
                 | MirInstructionKind::CaptureCellStore { .. }
                 | MirInstructionKind::CaptureStore { .. }
@@ -643,17 +645,29 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         });
     }
     if let Some(rest) = text.strip_prefix("tableMake ") {
-        let (object_map, entries) = rest
+        let (key_map, rest) = rest
             .split_once(' ')
-            .ok_or_else(|| error(line, "table allocation map"))?;
+            .ok_or_else(|| error(line, "table key allocation map"))?;
+        let (value_map, entries) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "table value allocation map"))?;
         return Ok(MirInstructionKind::TableMake {
             entries: parse_table_entries(entries, line)?,
-            object_map: parse_object_map(object_map, line)?,
+            key_map: parse_array_element_map(key_map, line)?,
+            value_map: parse_array_element_map(value_map, line)?,
         });
     }
     if let Some(operands) = text.strip_prefix("arrayGet ") {
         let (array, index) = parse_two_values(operands, line)?;
         return Ok(MirInstructionKind::ArrayGet { array, index });
+    }
+    if let Some(operands) = text.strip_prefix("arraySet ") {
+        let (array, index, value) = parse_three_values(operands, line)?;
+        return Ok(MirInstructionKind::ArraySet {
+            array,
+            index,
+            value,
+        });
     }
     if let Some(operation) = parse_numeric_operation(text, line)? {
         return Ok(operation);
@@ -721,7 +735,17 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     }
     if let Some(value) = text.strip_prefix("releaseRoot ") {
         return Ok(MirInstructionKind::ReleaseRoot {
+            handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(value) = text.strip_prefix("pin ") {
+        return Ok(MirInstructionKind::Pin {
             value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(value) = text.strip_prefix("unpin ") {
+        return Ok(MirInstructionKind::Unpin {
+            handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
         });
     }
     if let Some(rest) = text.strip_prefix("writeBarrier ") {
@@ -1406,6 +1430,21 @@ fn parse_two_values(text: &str, line: usize) -> Result<(ValueId, ValueId), MirPa
     Ok((
         ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?),
         ValueId::from_raw(parse_prefixed(parts[1], 'v', line)?),
+    ))
+}
+
+fn parse_three_values(
+    text: &str,
+    line: usize,
+) -> Result<(ValueId, ValueId, ValueId), MirParseError> {
+    let parts: Vec<_> = text.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err(error(line, "expected three operands"));
+    }
+    Ok((
+        ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?),
+        ValueId::from_raw(parse_prefixed(parts[1], 'v', line)?),
+        ValueId::from_raw(parse_prefixed(parts[2], 'v', line)?),
     ))
 }
 

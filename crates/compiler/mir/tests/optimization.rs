@@ -68,6 +68,74 @@ fn portable_optimization_folds_typed_primitive_equality() {
 }
 
 #[test]
+fn portable_optimization_summarizes_constant_bounded_integer_reductions() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/countedReduction.pop",
+        "namespace Main\n\
+         public function countedReduction(): Int\n\
+             local index = 1\n\
+             local total = 0\n\
+             repeat\n\
+                 total = total + index\n\
+                 index = index + 1\n\
+             until index == 50000001\n\
+             return total\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let construction =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(construction, front_end.types()).expect("optimized MIR");
+    let dump = optimized.dump();
+
+    assert!(dump.contains("const.integer Int64 1250000025000000"));
+    assert!(!dump.contains("integer.checkedAdd"));
+    assert!(!dump.contains("gcSafePoint"));
+    assert!(!dump.contains("condBranch"));
+    assert!(optimized.functions()[0].blocks().len() <= 2);
+}
+
+#[test]
+fn portable_optimization_preserves_unbounded_integer_reductions() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/unboundedReduction.pop",
+        "namespace Main\n\
+         public function unboundedReduction(limit: Int): Int\n\
+             local index = 1\n\
+             local total = 0\n\
+             repeat\n\
+                 total = total + index\n\
+                 index = index + 1\n\
+             until index == limit\n\
+             return total\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let construction =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(construction, front_end.types()).expect("optimized MIR");
+    let dump = optimized.dump();
+
+    assert!(dump.contains("integer.checkedAdd Int64"));
+    assert!(dump.contains("gcSafePoint"));
+    assert!(dump.contains("condBranch"));
+}
+
+#[test]
 fn portable_optimization_preserves_zero_result_calls() {
     let source = SourceFile::new(
         FileId::from_raw(0),
