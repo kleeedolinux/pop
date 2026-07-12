@@ -94,15 +94,19 @@ fn mutable_locals_flow_through_loop_backedges_and_branch_joins() {
 }
 
 #[test]
-fn standard_print_executes_by_trusted_identity_and_returns_no_value() {
+fn standard_print_overloads_execute_by_trusted_identity_and_return_no_value() {
     let (mir, types) = executable_source(
         "namespace Main\n\
          public function run(): Int\n\
              print(42)\n\
+             print(\"teste\")\n\
+             print(\"\")\n\
+             print(\"Pop 🫧\")\n\
              return 0\n\
          end\n",
     );
     assert!(mir.dump().contains("callStandard sf0"));
+    assert!(mir.dump().contains("callStandard sf1"));
     assert_eq!(
         MirInterpreter::new(&mir, &types)
             .expect("verified MIR")

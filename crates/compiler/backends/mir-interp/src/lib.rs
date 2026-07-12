@@ -757,14 +757,18 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => {
-                if function.raw() != 0 || arguments.len() != 1 {
+                if arguments.len() != 1 {
                     return Err(ExecutionError::InvalidControlFlow);
                 }
-                let MirValue::Integer(value) = &value(values, arguments[0])?.visible else {
-                    return Err(ExecutionError::TypeMismatch);
-                };
-                let value = value.signed().ok_or(ExecutionError::TypeMismatch)?;
-                pop_standard::pop_std_print_int(value);
+                match (function.raw(), &value(values, arguments[0])?.visible) {
+                    (0, MirValue::Integer(value)) => {
+                        let value = value.signed().ok_or(ExecutionError::TypeMismatch)?;
+                        pop_standard::pop_std_print_int(value);
+                    }
+                    (1, MirValue::String(value)) => pop_standard::print_string(value),
+                    (0 | 1, _) => return Err(ExecutionError::TypeMismatch),
+                    _ => return Err(ExecutionError::InvalidControlFlow),
+                }
                 return Ok(());
             }
             MirInstructionKind::CallDirect {

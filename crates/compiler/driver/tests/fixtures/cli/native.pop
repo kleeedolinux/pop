@@ -13,7 +13,9 @@ end
 
 function main(arguments: Array<String>)
     idle()
-    helperText()
+    print(helperText())
+    print("")
+    print("Pop 🫧")
     local result = add(20, 22)
     print(result)
 end

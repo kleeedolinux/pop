@@ -288,6 +288,7 @@ pub fn lower_mir_to_llvm_ir(
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
+    declarations.push("declare void @pop_std_print_string(i64)".to_owned());
     declarations.extend(runtime_declarations());
     declarations.extend(checked_integer_declarations());
     Ok(LlvmModule {
@@ -1342,13 +1343,25 @@ fn lower_instruction(
             arguments,
             ..
         } => {
-            if function.raw() != 0 || arguments.len() != 1 {
+            if arguments.len() != 1 {
                 return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
                 });
             }
-            format!("call void @pop_std_print_int(i64 %v{})", arguments[0].raw())
+            match function.raw() {
+                0 => format!("call void @pop_std_print_int(i64 %v{})", arguments[0].raw()),
+                1 => format!(
+                    "call void @pop_std_print_string(i64 %v{})",
+                    arguments[0].raw()
+                ),
+                _ => {
+                    return Err(LlvmLoweringError::UnsupportedInstruction {
+                        function: FunctionId::from_raw(u32::MAX),
+                        value: instruction.result(),
+                    });
+                }
+            }
         }
         MirInstructionKind::GcSafePoint {
             safe_point, roots, ..

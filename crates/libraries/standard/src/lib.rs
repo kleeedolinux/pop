@@ -16,6 +16,30 @@ pub extern "C" fn pop_std_print_int(value: i64) {
     let _ = writeln!(std::io::stdout().lock(), "{value}");
 }
 
+/// Prints one already validated Pop `String` followed by a newline.
+pub fn print_string(value: &str) {
+    let mut output = std::io::stdout().lock();
+    let _ = output.write_all(value.as_bytes());
+    let _ = output.write_all(b"\n");
+}
+
+/// Prints one managed Pop `String` followed by a newline for the native
+/// bootstrap host.
+///
+/// This fixed ABI adapter is linked by the toolchain and is not resolved from
+/// user source by symbol spelling.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_std_print_string(reference: u64) {
+    let Some(bytes) = pop_internal::runtime::string_bytes(reference) else {
+        return;
+    };
+    let Ok(value) = std::str::from_utf8(&bytes) else {
+        return;
+    };
+    print_string(value);
+}
+
 pub mod math {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum MathError {

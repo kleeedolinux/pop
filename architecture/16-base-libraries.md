@@ -231,11 +231,15 @@ and user-library namespaces still require `using`. `pop build
 --no-standard-library` exists only for runtime/toolchain development and
 freestanding targets.
 
-During the ADR 0024 standalone native bootstrap, verified bootstrap metadata
-exposes the source-level prelude function `print(Int) -> ()` by a stable
-standard-function identity. HIR and MIR retain that identity, and the LLVM
-backend lowers it to a fixed Rust `Pop.Standard` adapter. The adapter's ABI
-spelling is never resolved from user source.
+During the ADR 0024/0030 standalone native bootstrap, verified bootstrap
+metadata exposes source-level `print(Int) -> ()` and `print(String) -> ()`
+overloads by distinct stable standard-function identities. Static argument
+types select one exact overload after nearer declarations have had the chance
+to shadow the prelude name. HIR and MIR retain the selected identity, and the
+LLVM backend lowers it to a fixed Rust `Pop.Standard` adapter. Adapter ABI
+spellings are never resolved from user source. There is no catch-all printable
+value; further types require typed overloads or a separately accepted static
+formatting protocol.
 
 ### Namespace catalog
 

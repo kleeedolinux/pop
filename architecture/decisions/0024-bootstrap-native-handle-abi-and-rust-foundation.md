@@ -4,6 +4,7 @@
 - Date: 2026-07-11
 - Supersedes: none
 - Superseded in part by: ADR 0025 canonical native entry and process arguments
+- Superseded in part by: ADR 0030 typed string output overload
 
 ## Context
 
@@ -44,11 +45,14 @@ function-first Math, Text, and Sequence foundation. Neither crate changes Pop
 source syntax or introduces dynamic values.
 
 Until complete `.poplib` reference loading is available, the verified
-`Pop.Standard` bootstrap metadata publishes one prelude function identity:
-`print(Int) -> ()`. Name lookup selects that identity only at prelude priority;
-ordinary lexical and declaration bindings still shadow it. Typed AST, HIR, and
-MIR carry its stable standard-function identity rather than a source spelling,
-and the LLVM backend maps it to the Rust `Pop.Standard` integer-output adapter.
+`Pop.Standard` bootstrap metadata publishes the first prelude function identity:
+`print(Int) -> ()`. ADR 0030 extends this bootstrap surface with the typed
+`print(String) -> ()` overload while preserving the integer identity. Name
+lookup selects these identities only at prelude priority; ordinary lexical and
+declaration bindings still shadow the overload set. Typed AST, HIR, and MIR
+carry the selected stable standard-function identity rather than a source
+spelling, and the LLVM backend maps it to the corresponding Rust
+`Pop.Standard` output adapter.
 Standalone `pop build <source.pop>` and `pop run <source.pop>` accept one
 unambiguous `() -> Int` entry, whose return value is only the process status.
 ADR 0025 supersedes this temporary entry clause with the canonical private
@@ -87,7 +91,7 @@ remains accepted.
   arithmetic example calling `print` through `Pop.Standard` and an
   allocating class example exercising the linked Rust runtime;
 - `pop-standard` APIs remain typed and `pop-internal` never depends on it;
-- source `print(Int)` resolves to the trusted prelude identity, rejects wrong
+- source `print(Int)` resolves to its trusted prelude identity, rejects wrong
   arity/types, yields no value, and is shadowed by an ordinary nearer binding;
 - HIR/MIR dumps and MIR round trips retain `StandardFunctionId` rather than the
   source name or host ABI symbol;

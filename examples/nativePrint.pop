@@ -1,0 +1,6 @@
+namespace NativePrint
+
+function main()
+    local message = "Teste"
+    print(message)
+end

@@ -181,7 +181,10 @@ fn build_and_run_emit_and_execute_a_native_pop_program_with_standard_output() {
         .output()
         .expect("built Pop executable runs");
     assert!(executable.status.success());
-    assert_eq!(output_text(&executable.stdout), "42\n");
+    assert_eq!(
+        output_text(&executable.stdout),
+        "typed helper result\n\nPop 🫧\n42\n"
+    );
 
     let run = Command::new(env!("CARGO_BIN_EXE_pop"))
         .arg("run")
@@ -194,7 +197,10 @@ fn build_and_run_emit_and_execute_a_native_pop_program_with_standard_output() {
         "stderr:\n{}",
         output_text(&run.stderr)
     );
-    assert_eq!(output_text(&run.stdout), "42\n");
+    assert_eq!(
+        output_text(&run.stdout),
+        "typed helper result\n\nPop 🫧\n42\n"
+    );
 
     #[cfg(unix)]
     {
