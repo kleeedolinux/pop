@@ -81,12 +81,17 @@ not table or runtime-name lookup.
 - target layout and Inkwell-confined LLVM lowering through backend-private IR;
 - deterministic verified `pop check <source.pop> --dump ll` inspection;
 - PLRI native ABI and runtime library;
+- modular runtime ownership from ADR 0038: pure PLRI, reusable collector,
+  native-ABI vocabulary, and thin native facade;
 - `.poplib` Bubble manifests/reference metadata, object emission, and platform linking;
 - standalone bootstrap `pop build`/`pop run` examples that exercise Rust
   `Pop.Standard` output, canonical process arguments, and allocating
   Rust-runtime operations;
 - `BubbleContext` default loading and initialization;
 - moving nursery, card barriers, and GC stress tests;
+- mutable typed root updates, runtime-profile/backend capability negotiation,
+  and a real single-mutator relocation conformance collector before production
+  TLAB/parallel-evacuation claims (ADR 0039);
 - `Pop.Standard` I/O, time, tasks, and platform adapters;
 - debug locations and stack traces;
 - differential tests against the MIR interpreter.

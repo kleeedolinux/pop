@@ -262,6 +262,11 @@ Architecture CI should eventually verify:
 - exact `Pop.Standard` prelude/API baselines;
 - `Pop.Internal`/`Pop.Standard` dependency direction;
 - modular base-library module/test ownership and thin crate-root inventories;
+- modular runtime ownership, pure PLRI boundaries, and collector/native-ABI/
+  native-facade dependency direction;
+- mutable typed root relocation, runtime-profile/backend capability rejection,
+  honest relocation-conformance stage labeling, and no bootstrap-handle
+  substitution for the moving nursery;
 - typed public-function reference metadata and Bubble-scoped symbol identities;
 - naming/PascalCase/no-lower-snake rules;
 - default-internal visibility, private binary-entry shorthand, and absence of

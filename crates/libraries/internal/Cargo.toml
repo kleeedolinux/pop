@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 pop-library-bridge.workspace = true
 pop-runtime-interface.workspace = true
+pop-runtime-native-abi.workspace = true
 
 [lints]
 workspace = true

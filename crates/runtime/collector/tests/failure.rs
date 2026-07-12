@@ -1,8 +1,8 @@
+use pop_runtime_collector::{BootstrapRuntime, HeapLimits};
 use pop_runtime_interface::{
     AllocationClass, ObjectAllocationRequest, ObjectMap, PanicKind, RootPublication,
     RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointId, StackMap, UnwindReason,
 };
-use pop_runtime_native::{BootstrapRuntime, HeapLimits};
 
 fn empty_object() -> ObjectAllocationRequest {
     ObjectAllocationRequest::new(

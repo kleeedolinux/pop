@@ -94,6 +94,20 @@ impl RuntimeValue {
             reference: Some(reference),
         }
     }
+
+    fn install_relocated_reference(
+        &mut self,
+        relocated: Option<ManagedReference>,
+    ) -> Result<(), ExecutionError> {
+        if self.reference.is_some() != relocated.is_some() {
+            return Err(ExecutionError::Runtime(RuntimeFailure::runtime_invariant()));
+        }
+        self.reference = relocated;
+        if let (MirValue::Class(class), Some(reference)) = (&mut self.visible, relocated) {
+            class.reference = reference;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -251,7 +265,10 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
         result
     }
 
-    fn safe_point(&mut self, roots: &RootPublication) -> Result<SafePointOutcome, RuntimeFailure> {
+    fn safe_point(
+        &mut self,
+        roots: &mut RootPublication,
+    ) -> Result<SafePointOutcome, RuntimeFailure> {
         for reference in roots.managed_references() {
             self.valid_reference(reference)?;
         }
@@ -528,7 +545,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     self.evaluate_instruction(instruction, &mut values)
                         .map(Some)
                 } else {
-                    self.evaluate_effect_instruction(instruction, &values)
+                    self.evaluate_effect_instruction(instruction, &mut values)
                         .map(|()| None)
                 };
                 match evaluated {
@@ -947,7 +964,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
     fn evaluate_effect_instruction(
         &mut self,
         instruction: &pop_mir::MirInstruction,
-        values: &BTreeMap<ValueId, RuntimeValue>,
+        values: &mut BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<(), ExecutionError> {
         let returned = match instruction.kind() {
             MirInstructionKind::CallStandard {
@@ -1045,15 +1062,21 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             MirInstructionKind::GcSafePoint {
                 roots, stack_map, ..
             } => {
-                let roots = roots
+                let published_values = roots
                     .iter()
                     .map(|root| value(values, *root).map(|value| value.reference))
                     .collect::<Result<_, _>>()?;
-                let publication = RootPublication::new(stack_map.clone(), roots)
+                let mut publication = RootPublication::new(stack_map.clone(), published_values)
                     .map_err(|_| ExecutionError::InvalidControlFlow)?;
                 self.runtime
-                    .safe_point(&publication)
+                    .safe_point(&mut publication)
                     .map_err(ExecutionError::Runtime)?;
+                for (root, (_, relocated)) in roots.iter().copied().zip(publication.root_values()) {
+                    values
+                        .get_mut(&root)
+                        .ok_or(ExecutionError::MissingValue(root))?
+                        .install_relocated_reference(relocated)?;
+                }
                 return Ok(());
             }
             MirInstructionKind::RetainRoot { value: root } => {

@@ -33,6 +33,13 @@ Backends advertise capabilities such as:
 A missing capability results in an earlier portable lowering, a runtime fallback,
 or a clear diagnostic. HIR/MIR must not test “is this LLVM?”
 
+ADR 0039 separates target feasibility from backend implementation capability.
+Selecting `ProductionGenerational` requires both target relocation support and
+a backend declaration proving precise roots plus relocating managed-reference
+lowering. `BootstrapStableHandles` is a separate profile. A missing production
+capability is a pre-emission error, never a silent stable-handle downgrade or
+no-op barrier.
+
 ## LLVM backend
 
 The LLVM backend performs:
@@ -77,6 +84,12 @@ and is not read by semantic compiler stages.
 Compile-time execution never runs through LLVM. This keeps editor analysis,
 cross-compilation, cache behavior, and the future VM deterministic and aligned.
 
+The current LLVM bootstrap spills stable handles before safe-point calls but
+does not reload relocated values, so it cannot advertise production relocation.
+Production support begins only after statepoint/relocate or equivalent writable-
+root lowering updates every live value across control-flow merges and passes
+emitted-metadata plus forced-relocation execution tests.
+
 ## Experimental C backend
 
 The experimental C backend lowers optimized verified canonical MIR to one
@@ -117,6 +130,11 @@ Expected VM components:
 - runtime operation adapter;
 - stack maps and coroutine frames;
 - optional profiling/JIT interface.
+
+At a collecting safe point the VM updates the exact typed managed-reference
+register/frame slots from the mutable PLRI root publication before executing the
+next bytecode. It advertises relocation only after verification and forced-minor
+tests prove this postcondition.
 
 The VM is an architectural acceptance test: if implementing it would require
 recovering class, closure, error, or lifetime semantics from LLVM-shaped MIR,

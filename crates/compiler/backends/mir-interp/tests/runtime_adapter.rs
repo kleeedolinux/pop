@@ -4,13 +4,13 @@ use pop_backend_mir_interp::{
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{lower_hir_bubble, parse_mir_dump};
+use pop_runtime_collector::{BootstrapRuntime, HeapLimits};
 use pop_runtime_interface::{
     ArrayAllocationRequest, CollectionStatistics, GarbageCollectorContract, ManagedReference,
     ObjectAllocationRequest, PanicKind, PanicPayload, RootHandle, RootPublication, RuntimeAdapter,
     RuntimeFailure, SafePointOutcome, TableAllocationRequest, Trap, TrapKind, UnwindReason,
     WriteBarrier,
 };
-use pop_runtime_native::{BootstrapRuntime, HeapLimits};
 use pop_source::SourceFile;
 
 fn lower(text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
@@ -79,7 +79,10 @@ impl RuntimeAdapter for RecordingRuntime {
         self.inner.release_root(root)
     }
 
-    fn safe_point(&mut self, roots: &RootPublication) -> Result<SafePointOutcome, RuntimeFailure> {
+    fn safe_point(
+        &mut self,
+        roots: &mut RootPublication,
+    ) -> Result<SafePointOutcome, RuntimeFailure> {
         self.safe_points += 1;
         self.inner.safe_point(roots)
     }
@@ -305,6 +308,103 @@ fn explicit_root_actions_use_runtime_root_handles() {
     assert_eq!(runtime.released, 1);
 }
 
+struct RelocatingTestRuntime {
+    allocated: ManagedReference,
+    relocated: ManagedReference,
+    retained: Vec<ManagedReference>,
+}
+
+impl RelocatingTestRuntime {
+    const fn new() -> Self {
+        Self {
+            allocated: ManagedReference::new(41),
+            relocated: ManagedReference::new(84),
+            retained: Vec::new(),
+        }
+    }
+}
+
+impl RuntimeAdapter for RelocatingTestRuntime {
+    fn contract(&self) -> GarbageCollectorContract {
+        GarbageCollectorContract::pop_v1()
+    }
+
+    fn allocate_object(
+        &mut self,
+        _request: &ObjectAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    fn allocate_array(
+        &mut self,
+        _request: &ArrayAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        Ok(self.allocated)
+    }
+
+    fn allocate_table(
+        &mut self,
+        _request: &TableAllocationRequest,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
+        self.retained.push(reference);
+        Ok(RootHandle::new(1))
+    }
+
+    fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
+        if root == RootHandle::new(1) {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
+    }
+
+    fn safe_point(
+        &mut self,
+        roots: &mut RootPublication,
+    ) -> Result<SafePointOutcome, RuntimeFailure> {
+        for (_, value) in roots.root_values_mut() {
+            if *value == Some(self.allocated) {
+                *value = Some(self.relocated);
+            }
+        }
+        Ok(SafePointOutcome::no_collection())
+    }
+
+    fn write_barrier(&mut self, _barrier: WriteBarrier) -> Result<(), RuntimeFailure> {
+        Err(RuntimeFailure::runtime_invariant())
+    }
+}
+
+#[test]
+fn interpreter_installs_relocated_root_tokens_before_the_next_instruction() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let text = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 gcSafePoint sp1 roots (v1)\n    do v3 retainRoot v1\n    do v4 releaseRoot v3\n    return ()\n",
+        array = array.raw(),
+    );
+    let mir = parse_mir_dump(&text).expect("relocation MIR");
+    let interpreter = MirInterpreter::with_runtime(&mir, &types, RelocatingTestRuntime::new())
+        .expect("verified relocation MIR");
+
+    assert_eq!(
+        interpreter.call(mir.functions()[0].symbol(), &[]),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        interpreter.runtime().retained,
+        vec![ManagedReference::new(84)]
+    );
+}
+
 #[test]
 fn explicit_pin_actions_use_runtime_pin_handles() {
     let mut types = pop_types::TypeArena::new();
@@ -373,7 +473,10 @@ impl RuntimeAdapter for ForcingBootstrap {
         self.inner.release_root(root)
     }
 
-    fn safe_point(&mut self, roots: &RootPublication) -> Result<SafePointOutcome, RuntimeFailure> {
+    fn safe_point(
+        &mut self,
+        roots: &mut RootPublication,
+    ) -> Result<SafePointOutcome, RuntimeFailure> {
         self.inner.request_collection();
         let outcome = self.inner.safe_point(roots)?;
         if let Some(statistics) = outcome.collection() {

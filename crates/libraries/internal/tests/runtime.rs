@@ -11,6 +11,7 @@ fn internal_runtime_adapter_exposes_only_typed_contract_facts() {
     );
     assert_eq!(
         runtime_symbol(RuntimeOperation::GcSafePoint),
-        "pop_rt_gc_safe_point"
+        Some("pop_rt_gc_safe_point")
     );
+    assert_eq!(runtime_symbol(RuntimeOperation::DispatchCall), None);
 }

@@ -100,6 +100,7 @@ dependencies = [
 name = "pop-backend-c"
 version = "0.1.0"
 dependencies = [
+ "pop-backend-api",
  "pop-driver",
  "pop-foundation",
  "pop-mir",
@@ -118,6 +119,7 @@ dependencies = [
  "pop-mir",
  "pop-runtime-interface",
  "pop-runtime-native",
+ "pop-runtime-native-abi",
  "pop-source",
  "pop-target",
  "pop-types",
@@ -133,8 +135,8 @@ dependencies = [
  "pop-foundation",
  "pop-mir",
  "pop-query",
+ "pop-runtime-collector",
  "pop-runtime-interface",
- "pop-runtime-native",
  "pop-source",
  "pop-standard",
  "pop-target",
@@ -272,6 +274,7 @@ version = "0.1.0"
 dependencies = [
  "pop-library-bridge",
  "pop-runtime-interface",
+ "pop-runtime-native-abi",
 ]
 
 [[package]]
@@ -335,11 +338,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pop-runtime-collector"
+version = "0.1.0"
+dependencies = [
+ "pop-runtime-interface",
+]
+
+[[package]]
 name = "pop-runtime-interface"
 version = "0.1.0"
 
 [[package]]
 name = "pop-runtime-native"
+version = "0.1.0"
+dependencies = [
+ "pop-runtime-collector",
+ "pop-runtime-interface",
+ "pop-runtime-native-abi",
+]
+
+[[package]]
+name = "pop-runtime-native-abi"
 version = "0.1.0"
 dependencies = [
  "pop-runtime-interface",

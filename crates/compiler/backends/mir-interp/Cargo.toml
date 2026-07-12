@@ -21,7 +21,7 @@ pop-types.workspace = true
 pop-compile-time.workspace = true
 pop-driver.workspace = true
 pop-query.workspace = true
-pop-runtime-native.workspace = true
+pop-runtime-collector.workspace = true
 pop-source.workspace = true
 
 [lints]

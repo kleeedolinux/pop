@@ -1,6 +1,5 @@
 use pop_runtime_interface::{
     ErrorContract, GarbageCollectorContract, InitializationState, PinHandle, PlriVersion,
-    RuntimeOperation,
 };
 
 #[test]
@@ -17,50 +16,6 @@ fn pin_handles_are_runtime_private_opaque_tokens() {
     let pin = PinHandle::new(7);
 
     assert_eq!(pin.raw(), 7);
-}
-
-#[test]
-fn native_runtime_operation_symbols_are_explicit_and_unique() {
-    let operations = [
-        RuntimeOperation::AllocateObject,
-        RuntimeOperation::AllocateArray,
-        RuntimeOperation::AllocateArrayFilled,
-        RuntimeOperation::AllocateTable,
-        RuntimeOperation::TupleMake,
-        RuntimeOperation::ArrayGet,
-        RuntimeOperation::ArrayLength,
-        RuntimeOperation::ArrayGetChecked,
-        RuntimeOperation::ArraySet,
-        RuntimeOperation::ArrayFill,
-        RuntimeOperation::FieldGet,
-        RuntimeOperation::FieldSet,
-        RuntimeOperation::RecordUpdate,
-        RuntimeOperation::UnionMake,
-        RuntimeOperation::CaptureLoad,
-        RuntimeOperation::CaptureStore,
-        RuntimeOperation::DispatchCall,
-        RuntimeOperation::RetainRoot,
-        RuntimeOperation::ReleaseRoot,
-        RuntimeOperation::Pin,
-        RuntimeOperation::Unpin,
-        RuntimeOperation::PublishRoots,
-        RuntimeOperation::GcSafePoint,
-        RuntimeOperation::SatbWriteBarrier,
-        RuntimeOperation::GenerationalWriteBarrier,
-        RuntimeOperation::Trap,
-        RuntimeOperation::Panic,
-        RuntimeOperation::ContinueUnwind,
-        RuntimeOperation::Suspend,
-        RuntimeOperation::Resume,
-        RuntimeOperation::InitializeModule,
-        RuntimeOperation::InitializeBubble,
-    ];
-    let symbols: std::collections::BTreeSet<_> = operations
-        .into_iter()
-        .map(RuntimeOperation::abi_symbol)
-        .collect();
-    assert_eq!(symbols.len(), operations.len());
-    assert!(symbols.iter().all(|symbol| symbol.starts_with("pop_rt_")));
 }
 
 #[test]

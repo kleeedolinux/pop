@@ -54,6 +54,12 @@ Repository architecture tests validate the member inventory, manifest
 inheritance, required source targets, and forbidden dependency directions. New
 feature work follows architecture, then failing tests, then implementation.
 
+ADR 0038 later refines the original `runtime/interface` and `runtime/native`
+inventory with separate portable-collector and native-ABI ownership crates. Its
+dependency graph supersedes only the two-crate runtime implementation shape;
+the Rust workspace, naming, central dependency, and isolation rules here remain
+active.
+
 ## Consequences
 
 - Contributors can locate behavior by compiler phase and review dependency

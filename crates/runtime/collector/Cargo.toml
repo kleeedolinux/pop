@@ -1,0 +1,23 @@
+[package]
+name = "pop-runtime-collector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "bootstrap"
+harness = false
+
+[[bench]]
+name = "relocation"
+harness = false
+
+[dependencies]
+pop-runtime-interface.workspace = true
+
+[lints]
+workspace = true

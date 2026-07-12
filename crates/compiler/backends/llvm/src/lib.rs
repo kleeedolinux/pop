@@ -30,6 +30,11 @@ const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
 const GC_POLL_INTERVAL: u32 = 16_384;
 const GC_POLL_BUDGET: &str = "%pop_gc_poll_budget";
 
+fn native_runtime_symbol(operation: RuntimeOperation) -> &'static str {
+    pop_runtime_native_abi::symbol(operation)
+        .expect("LLVM lowering must validate native runtime capabilities")
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LlvmLoweringOptions {
     emit_comments: bool,
@@ -306,46 +311,52 @@ pub fn lower_mir_to_llvm_ir(
     let mut declarations = vec![
         format!(
             "declare i64 @{}(i64)",
-            RuntimeOperation::AllocateObject.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::AllocateObject)
         ),
         "declare i64 @pop_rt_allocate_mapped_object(i64, ptr, i64)".to_owned(),
         format!(
             "declare i64 @{}(i64, i1)",
-            RuntimeOperation::AllocateArray.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::AllocateArray)
         ),
         format!(
             "declare i64 @{}(i64, i1, i64)",
-            RuntimeOperation::AllocateArrayFilled.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::AllocateArrayFilled)
         ),
         format!(
             "declare i64 @{}(i64, i1, i1)",
-            RuntimeOperation::AllocateTable.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::AllocateTable)
         ),
         format!(
             "declare i8 @{}(i32, ptr, i64) cold nounwind",
-            RuntimeOperation::GcSafePoint.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::GcSafePoint)
         ),
         format!(
             "declare i64 @{}(i64)",
-            RuntimeOperation::RetainRoot.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::RetainRoot)
         ),
         format!(
             "declare i8 @{}(i64)",
-            RuntimeOperation::ReleaseRoot.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ReleaseRoot)
         ),
-        format!("declare i64 @{}(i64)", RuntimeOperation::Pin.abi_symbol()),
-        format!("declare i8 @{}(i64)", RuntimeOperation::Unpin.abi_symbol()),
+        format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::Pin)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::Unpin)
+        ),
         format!(
             "declare void @{}(i64)",
-            RuntimeOperation::SatbWriteBarrier.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::SatbWriteBarrier)
         ),
         format!(
             "declare void @{}() cold noreturn nounwind",
-            RuntimeOperation::Trap.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::Trap)
         ),
         format!(
             "declare void @{}()",
-            RuntimeOperation::ContinueUnwind.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
         "declare i64 @pop_rt_string_literal(ptr, i64)".to_owned(),
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
@@ -579,31 +590,31 @@ fn runtime_declarations() -> Vec<String> {
     vec![
         format!(
             "declare i64 @{}(i64, i64) nounwind",
-            RuntimeOperation::ArrayGet.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ArrayGet)
         ),
         format!(
             "declare i8 @{}(i64, ptr) nounwind",
-            RuntimeOperation::ArrayLength.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ArrayLength)
         ),
         format!(
             "declare i8 @{}(i64, i64, ptr) nounwind",
-            RuntimeOperation::ArrayGetChecked.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ArrayGetChecked)
         ),
         format!(
             "declare i64 @{}(i64, i64) nounwind",
-            RuntimeOperation::FieldGet.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::FieldGet)
         ),
         format!(
             "declare i8 @{}(i64, i64, i64) nounwind",
-            RuntimeOperation::ArraySet.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ArraySet)
         ),
         format!(
             "declare i8 @{}(i64, i64) nounwind",
-            RuntimeOperation::ArrayFill.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ArrayFill)
         ),
         format!(
             "declare i8 @{}(i64, i64, i64) nounwind",
-            RuntimeOperation::FieldSet.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::FieldSet)
         ),
     ]
 }
@@ -739,7 +750,7 @@ fn lower_interface_dispatcher(
         label: "dispatch".to_owned(),
         instructions: vec![format!(
             "%dispatch_tag = call i64 @{}(i64 %v0, i64 1)",
-            RuntimeOperation::FieldGet.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::FieldGet)
         )],
         terminator: format!("switch i64 %dispatch_tag, label %invalid_dispatch [\n{cases}\n  ]"),
     }];
@@ -786,7 +797,7 @@ fn lower_interface_dispatcher(
         instructions: Vec::new(),
         terminator: format!(
             "call void @{}()\n  unreachable",
-            RuntimeOperation::Trap.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::Trap)
         ),
     });
     Ok(PrivateFunction {
@@ -934,7 +945,7 @@ fn lower_indirect_dispatcher(
             label: "closure".to_owned(),
             instructions: vec![format!(
                 "%closure_tag = call i64 @{}(i64 %v0, i64 1)",
-                RuntimeOperation::FieldGet.abi_symbol()
+                native_runtime_symbol(RuntimeOperation::FieldGet)
             )],
             terminator: format!(
                 "switch i64 %closure_tag, label %invalid_indirect [\n{nested_cases}\n  ]"
@@ -976,7 +987,7 @@ fn lower_indirect_dispatcher(
         instructions: Vec::new(),
         terminator: format!(
             "call void @{}()\n  unreachable",
-            RuntimeOperation::Trap.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::Trap)
         ),
     });
     Ok(PrivateFunction {
@@ -1520,7 +1531,7 @@ fn lower_function_parts(
             instructions: Vec::new(),
             terminator: format!(
                 "call void @{}()\n  unreachable",
-                RuntimeOperation::Trap.abi_symbol()
+                native_runtime_symbol(RuntimeOperation::Trap)
             ),
         });
     }
@@ -2102,27 +2113,27 @@ fn lower_instruction(
         } => lower_gc_safe_point(&result, safe_point.raw(), roots, direct_scalar_arrays),
         MirInstructionKind::RetainRoot { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
-            RuntimeOperation::RetainRoot.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::RetainRoot),
             value.raw()
         ),
         MirInstructionKind::ReleaseRoot { handle } => format!(
             "call i8 @{}(i64 %v{})",
-            RuntimeOperation::ReleaseRoot.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::ReleaseRoot),
             handle.raw()
         ),
         MirInstructionKind::Pin { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
-            RuntimeOperation::Pin.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::Pin),
             value.raw()
         ),
         MirInstructionKind::Unpin { handle } => format!(
             "call i8 @{}(i64 %v{})",
-            RuntimeOperation::Unpin.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::Unpin),
             handle.raw()
         ),
         MirInstructionKind::WriteBarrier { owner, .. } => format!(
             "call void @{}(i64 %v{})",
-            RuntimeOperation::SatbWriteBarrier.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::SatbWriteBarrier),
             owner.raw()
         ),
         MirInstructionKind::CaptureCellAllocate { initial, .. } => {
@@ -2437,11 +2448,11 @@ fn lower_terminator(
         }
         MirTerminator::Trap(_) => format!(
             "call void @{}()\n  unreachable",
-            RuntimeOperation::Trap.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::Trap)
         ),
         MirTerminator::Panic(_) | MirTerminator::ContinueUnwind(_) => format!(
             "call void @{}()\n  unreachable",
-            RuntimeOperation::ContinueUnwind.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
         MirTerminator::Unreachable | MirTerminator::Missing => "unreachable".to_owned(),
         MirTerminator::UnionSwitch {
@@ -2461,7 +2472,7 @@ fn lower_terminator(
                 .join("\n");
             format!(
                 "{tag} = call i64 @{}(i64 %v{}, i64 1)\n  switch i64 {tag}, label %pop_invalid_union [\n{cases}\n  ]",
-                RuntimeOperation::FieldGet.abi_symbol(),
+                native_runtime_symbol(RuntimeOperation::FieldGet),
                 scrutinee.raw()
             )
         }
@@ -2567,7 +2578,7 @@ fn lower_trap_edge(result: &str, condition: &str) -> String {
     let expected = format!("{condition}_expected");
     format!(
         "{expected} = call i1 @llvm.expect.i1(i1 {condition}, i1 false)\nbr i1 {expected}, label %{label}_trap, label %{label}_continue\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_continue:",
-        RuntimeOperation::Trap.abi_symbol()
+        native_runtime_symbol(RuntimeOperation::Trap)
     )
 }
 
@@ -2674,12 +2685,12 @@ fn emit_aggregate_equality(
         lines.extend([
             format!(
                 "{left_field} = call i64 @{}(i64 {left}, i64 {})",
-                RuntimeOperation::FieldGet.abi_symbol(),
+                native_runtime_symbol(RuntimeOperation::FieldGet),
                 index + 1
             ),
             format!(
                 "{right_field} = call i64 @{}(i64 {right}, i64 {})",
-                RuntimeOperation::FieldGet.abi_symbol(),
+                native_runtime_symbol(RuntimeOperation::FieldGet),
                 index + 1
             ),
         ]);
@@ -2808,7 +2819,7 @@ fn runtime_call(
     let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
     Ok(format!(
         "{assignment}call {return_type} @{}({})",
-        operation.abi_symbol(),
+        native_runtime_symbol(operation),
         args.join(", ")
     ))
 }
@@ -2839,12 +2850,15 @@ fn lower_array_create(
             "br i1 {result}_length_expected, label %{label}_create, label %{label}_length_trap"
         ),
         format!("{label}_length_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
         "  unreachable".to_owned(),
         format!("{label}_create:"),
         format!(
             "  {result} = call i64 @{}(i64 %v{}, i1 {}, i64 {stored})",
-            RuntimeOperation::AllocateArrayFilled.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::AllocateArrayFilled),
             length.raw(),
             u8::from(element_map == ArrayElementMap::ManagedReference)
         ),
@@ -2892,7 +2906,7 @@ fn lower_direct_array_create(
             "br i1 {result}_shape_expected, label %{label}_allocate, label %{label}_length_trap"
         ),
         format!("{label}_length_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
         "  unreachable".to_owned(),
         format!("{label}_allocate:"),
         format!("  {result}_storage = call noalias ptr @malloc(i64 {result}_size)"),
@@ -2911,7 +2925,7 @@ fn lower_direct_array_create(
             "  br i1 {result}_allocation_expected, label %{label}_initialize, label %{label}_allocation_trap"
         ),
         format!("{label}_allocation_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
         "  unreachable".to_owned(),
         format!("{label}_initialize:"),
         format!(
@@ -2958,7 +2972,10 @@ fn lower_direct_array_get(
         ),
         format!("br i1 {result}_in_bounds_expected, label %{label}_load, label %{label}_trap"),
         format!("{label}_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
         "  unreachable".to_owned(),
         format!("{label}_load:"),
         format!(
@@ -3008,7 +3025,10 @@ fn lower_direct_array_set(
         ),
         format!("br i1 {result}_in_bounds_expected, label %{label}_continue, label %{label}_trap"),
         format!("{label}_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
         "  unreachable".to_owned(),
         format!("{label}_continue:"),
         format!(
@@ -3076,14 +3096,17 @@ fn lower_array_output_call(
     lines.extend([
         format!(
             "{success} = call i8 @{}({}, ptr {output})",
-            operation.abi_symbol(),
+            native_runtime_symbol(operation),
             arguments.join(", ")
         ),
         format!("{success}_condition = icmp ne i8 {success}, 0"),
         format!("{expected} = call i1 @llvm.expect.i1(i1 {success}_condition, i1 true)"),
         format!("br i1 {expected}, label %{label}_load, label %{label}_trap"),
         format!("{label}_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
         "  unreachable".to_owned(),
         format!("{label}_load:"),
     ]);
@@ -3143,14 +3166,17 @@ fn lower_array_fill(
     lines.extend([
         format!(
             "{result}_filled = call i8 @{}(i64 %v{}, i64 {stored})",
-            RuntimeOperation::ArrayFill.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::ArrayFill),
             array.raw()
         ),
         format!("{result}_success = icmp ne i8 {result}_filled, 0"),
         format!("{result}_expected = call i1 @llvm.expect.i1(i1 {result}_success, i1 true)"),
         format!("br i1 {result}_expected, label %{label}_continue, label %{label}_trap"),
         format!("{label}_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
         "  unreachable".to_owned(),
         format!("{label}_continue:"),
         format!("  {result} = add i64 0, 0"),
@@ -3175,7 +3201,7 @@ fn lower_array_set(
     lines.extend([
         format!(
             "{result}_stored = call i8 @{}(i64 %v{}, i64 %v{}, i64 {stored})",
-            RuntimeOperation::ArraySet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::ArraySet),
             array.raw(),
             index.raw()
         ),
@@ -3185,7 +3211,10 @@ fn lower_array_set(
         ),
         format!("br i1 {result}_in_bounds_expected, label %{label}_continue, label %{label}_trap"),
         format!("{label}_trap:"),
-        format!("  call void @{}()", RuntimeOperation::Trap.abi_symbol()),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
         "  unreachable".to_owned(),
         format!("{label}_continue:"),
         format!("  {result} = add i64 0, 0"),
@@ -3225,7 +3254,7 @@ fn lower_object_make(
         lines.extend(conversions);
         lines.push(format!(
             "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            RuntimeOperation::FieldSet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::FieldSet),
             slot
         ));
     }
@@ -3289,7 +3318,7 @@ fn lower_gc_safe_point(
         lines.extend([
             format!(
                 "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
-                RuntimeOperation::GcSafePoint.abi_symbol()
+                native_runtime_symbol(RuntimeOperation::GcSafePoint)
             ),
             format!("br label %{continuation}"),
             format!("{continuation}:"),
@@ -3310,7 +3339,7 @@ fn lower_gc_safe_point(
     }
     lines.push(format!(
         "call i8 @{}(i32 {safe_point}, ptr {root_array}, i64 {})",
-        RuntimeOperation::GcSafePoint.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::GcSafePoint),
         roots.len()
     ));
     lines.extend([
@@ -3368,7 +3397,7 @@ fn lower_tuple_make(
         lines.extend(conversions);
         lines.push(format!(
             "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            RuntimeOperation::FieldSet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::FieldSet),
             index + 1
         ));
     }
@@ -3426,14 +3455,14 @@ fn lower_record_update(
             let loaded = format!("{result}_field_{slot}");
             lines.push(format!(
                 "{loaded} = call i64 @{}(i64 %v{}, i64 {slot})",
-                RuntimeOperation::FieldGet.abi_symbol(),
+                native_runtime_symbol(RuntimeOperation::FieldGet),
                 base.raw()
             ));
             loaded
         };
         lines.push(format!(
             "call i8 @{}(i64 {result}, i64 {slot}, i64 {stored})",
-            RuntimeOperation::FieldSet.abi_symbol()
+            native_runtime_symbol(RuntimeOperation::FieldSet)
         ));
     }
     Ok(lines.join("\n"))
@@ -3454,7 +3483,7 @@ fn lower_class_make(
         1,
         format!(
             "call i8 @{}(i64 {result}, i64 1, i64 {})",
-            RuntimeOperation::FieldSet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::FieldSet),
             class.raw()
         ),
     );
@@ -3487,7 +3516,7 @@ fn lower_union_make(
     );
     lines.push(format!(
         "call i8 @{}(i64 {result}, i64 1, i64 {})",
-        RuntimeOperation::FieldSet.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::FieldSet),
         case.raw()
     ));
     for (index, value) in arguments.iter().enumerate() {
@@ -3499,7 +3528,7 @@ fn lower_union_make(
         lines.extend(conversions);
         lines.push(format!(
             "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            RuntimeOperation::FieldSet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::FieldSet),
             index + 2
         ));
     }
@@ -3533,7 +3562,7 @@ fn lower_capture_cell_allocate(
     lines.extend(conversions);
     lines.push(format!(
         "call i8 @{}(i64 {result}, i64 1, i64 {stored})",
-        RuntimeOperation::FieldSet.abi_symbol()
+        native_runtime_symbol(RuntimeOperation::FieldSet)
     ));
     Ok(lines.join("\n"))
 }
@@ -3563,7 +3592,7 @@ fn lower_closure_environment_allocate(
     );
     lines.push(format!(
         "call i8 @{}(i64 {result}, i64 1, i64 {})",
-        RuntimeOperation::FieldSet.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::FieldSet),
         nested_function_tag(owner, function)
     ));
     for capture in captures {
@@ -3579,7 +3608,7 @@ fn lower_closure_environment_allocate(
         lines.extend(conversions);
         lines.push(format!(
             "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            RuntimeOperation::FieldSet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::FieldSet),
             capture.slot() + 2
         ));
     }
@@ -3599,7 +3628,7 @@ fn lower_capture_store(
         lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
     lines.push(format!(
         "call i8 @{}(i64 {owner}, i64 1, i64 {stored})",
-        RuntimeOperation::FieldSet.abi_symbol()
+        native_runtime_symbol(RuntimeOperation::FieldSet)
     ));
     Ok(lines.join("\n"))
 }
@@ -3626,7 +3655,7 @@ fn lower_capture_load(
     let cell = format!("%v{}_cell", result.raw());
     let mut lines = vec![format!(
         "{cell} = call i64 @{}(i64 {environment}, i64 {})",
-        RuntimeOperation::FieldGet.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::FieldGet),
         slot + 2
     )];
     lines.extend(lower_runtime_slot_load_from(
@@ -3649,7 +3678,7 @@ fn lower_nested_capture_store(
     let cell = format!("%capture_cell_{}", value.raw());
     let mut lines = vec![format!(
         "{cell} = call i64 @{}(i64 {environment}, i64 {})",
-        RuntimeOperation::FieldGet.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::FieldGet),
         slot + 2
     )];
     lines.push(lower_capture_store(&cell, value, values, types)?);
@@ -3726,7 +3755,7 @@ fn lower_runtime_slot_load_named(
     let loaded = format!("{result}_slot");
     let call = format!(
         "call i64 @{}(i64 {owner}, i64 {slot})",
-        RuntimeOperation::FieldGet.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::FieldGet),
     );
     Ok(match ty.as_str() {
         "i64" => vec![format!("{result} = {call}")],
@@ -3780,7 +3809,7 @@ fn runtime_field_call(
             lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
         lines.push(format!(
             "call i8 @{}(i64 %v{}, i64 {}, i64 {stored})",
-            operation.abi_symbol(),
+            native_runtime_symbol(operation),
             base.raw(),
             slot
         ));
@@ -3807,7 +3836,7 @@ fn lower_array_make(
 ) -> Result<String, LlvmLoweringError> {
     let mut lines = vec![format!(
         "{result} = call i64 @{}(i64 {}, {})",
-        RuntimeOperation::AllocateArray.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::AllocateArray),
         elements.len(),
         if matches!(element_map, ArrayElementMap::ManagedReference) {
             "i1 1"
@@ -3824,7 +3853,7 @@ fn lower_array_make(
         lines.extend(conversions);
         lines.push(format!(
             "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            RuntimeOperation::ArraySet.abi_symbol(),
+            native_runtime_symbol(RuntimeOperation::ArraySet),
             index + 1
         ));
     }
@@ -3841,7 +3870,7 @@ fn lower_table_make(
 ) -> Result<String, LlvmLoweringError> {
     let mut lines = vec![format!(
         "{result} = call i64 @{}(i64 {}, i1 {}, i1 {})",
-        RuntimeOperation::AllocateTable.abi_symbol(),
+        native_runtime_symbol(RuntimeOperation::AllocateTable),
         entries.len(),
         u8::from(key_map == ArrayElementMap::ManagedReference),
         u8::from(value_map == ArrayElementMap::ManagedReference),
@@ -3856,7 +3885,7 @@ fn lower_table_make(
             lines.extend(conversions);
             lines.push(format!(
                 "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-                RuntimeOperation::FieldSet.abi_symbol(),
+                native_runtime_symbol(RuntimeOperation::FieldSet),
                 entry * 2 + offset + 1
             ));
         }

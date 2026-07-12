@@ -1,9 +1,9 @@
+use pop_runtime_collector::{BootstrapRuntime, HeapLimits};
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, GarbageCollectorStage,
     ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, RootPublication, RootSlot,
     RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
 };
-use pop_runtime_native::{BootstrapRuntime, HeapLimits};
 
 fn object(type_id: u32, slots: u32, references: &[u32]) -> ObjectAllocationRequest {
     ObjectAllocationRequest::new(
@@ -138,16 +138,21 @@ fn requested_collection_runs_at_a_safe_point_with_published_stack_roots() {
         .allocate_object(&object(6, 0, &[]))
         .expect("stack live");
     let stack_map = StackMap::new(SafePointId::new(10), vec![RootSlot::new(0)]).expect("stack map");
-    let roots = RootPublication::new(stack_map, vec![Some(stack_live)]).expect("roots");
+    let mut roots = RootPublication::new(stack_map, vec![Some(stack_live)]).expect("roots");
 
     runtime.request_collection();
-    let outcome = RuntimeAdapter::safe_point(&mut runtime, &roots).expect("safe point");
+    let outcome = RuntimeAdapter::safe_point(&mut runtime, &mut roots).expect("safe point");
     assert!(outcome.collection().is_some());
     assert!(runtime.contains(stack_live));
+    assert_eq!(
+        roots.root_values().collect::<Vec<_>>(),
+        vec![(RootSlot::new(0), Some(stack_live))]
+    );
 
     runtime.request_collection();
+    let mut no_roots = no_stack_roots(11);
     let outcome =
-        RuntimeAdapter::safe_point(&mut runtime, &no_stack_roots(11)).expect("second safe point");
+        RuntimeAdapter::safe_point(&mut runtime, &mut no_roots).expect("second safe point");
     assert_eq!(
         outcome
             .collection()

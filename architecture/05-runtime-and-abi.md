@@ -10,6 +10,24 @@ LLVM-generated native code may call a C-compatible runtime ABI. A future VM may
 implement the same operations directly in its interpreter. MIR refers to PLRI
 operations, never to C symbol names.
 
+[ADR 0038](./decisions/0038-modular-portable-runtime-implementation.md)
+separates the Rust implementation into four ownership boundaries:
+
+- `pop-runtime-interface` owns only backend-neutral PLRI values, operations,
+  maps, failures, and adapter traits;
+- `pop-runtime-collector` owns the reusable collector engine and has no C ABI,
+  platform entry, or process-global runtime responsibility;
+- `pop-runtime-native-abi` owns the versioned C spelling and physical sentinel
+  vocabulary used by native adapters;
+- `pop-runtime-native` owns exported symbols, process-global bootstrap state,
+  UTF-8/process-entry adaptation, and native termination behavior.
+
+The Cargo dependency direction is native facade → collector/native-ABI → PLRI.
+The collector and native-ABI crates depend on PLRI independently; neither
+depends on the other. A VM can therefore compose the collector without linking
+the native C ABI, while LLVM can select native ABI symbols without importing
+collector storage or tracing policy.
+
 The bootstrap native ABI uses nonzero `u64` opaque managed/root handles and
 zero as the invalid/null sentinel. The LLVM backend chooses this physical
 representation in its private lowering; MIR remains expressed in abstract
@@ -17,6 +35,18 @@ managed references and `RuntimeOperation` identities. Exported `pop_rt_*`
 symbols are versioned and cover only operations with a defined bootstrap
 failure sentinel; richer failures remain typed `RuntimeFailure` values in PLRI
 and Rust adapters.
+
+ADR 0039 fixes this as the `BootstrapStableHandles` profile only. A PLRI
+`ManagedReference` is the current opaque physical token, not source-visible
+identity or a stable address. Collecting safe points receive a mutable typed
+`RootPublication`; a moving collector replaces relocated tokens in their exact
+`RootSlot`s before returning. Strong root/pin handles remain distinct stable
+runtime tokens whose targets are updated internally.
+
+The first production moving native runtime uses ABI major version 2 and requires
+a backend with verified relocating-root support. ABI 1.x, immutable root spills,
+or a target capability alone cannot satisfy the production profile. Profile/
+ABI mismatch fails before link or load; there is no silent bootstrap fallback.
 
 `Pop.Internal` supplies the trusted managed/intrinsic side of these contracts;
 `Pop.Standard` calls public typed adapters rather than PLRI entries directly.
@@ -138,6 +168,23 @@ maps, safe-point/stack-map descriptors, managed handles, root and pin
 transitions, reference-store barriers, trap kinds, and panic/unwind records. It
 does not expose compiler arenas, LLVM values, C symbol names, or raw managed
 pointers.
+
+Root publications preserve canonical sorted `RootSlot` order. A safe point
+validates all roots and either completes every root/object/handle update or
+fails without exposing a partial relocation. Bootstrap adapters leave tokens
+unchanged; relocating adapters invalidate evacuated tokens after rewriting all
+live locations.
+
+Collector implementation stages are explicit. `RelocationConformance` provides
+the first single-mutator moving nursery and generational card barrier, but no
+mature-heap collection, concurrent marking, or SATB barrier; mature objects are
+retained. It is therefore test infrastructure for relocation correctness, not
+the selectable `ProductionGenerational` runtime profile.
+
+The collector implementation consumes these contracts. It does not redefine
+them, and native exports remain a delegating facade over a concrete collector.
+Crate separation adds no runtime registry, string lookup, or hot-path dynamic
+dispatch.
 
 The Milestone 3 bootstrap runtime implements a safe precise stop-the-world
 handle-table mark/sweep heap. It is the executable proof for allocation, object
