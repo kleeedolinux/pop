@@ -1,49 +1,33 @@
-<p align="center"><img src="assets/pop.png" alt="pop" width="140"></p>
 <p align="center">
-  <a href="#status">Status</a> •
+  <img src="assets/pop.png" alt="Pop Lang logo" width="140">
+</p>
+
+<p align="center">
+  <strong>A statically typed, general-purpose language with the lightweight feel of Luau.</strong>
+</p>
+
+<p align="center">
+  <a href="#why-pop">Why Pop?</a> •
+  <a href="#why-not-luau">Why not Luau?</a> •
+  <a href="#language-tour">Language tour</a> •
+  <a href="#runtime">Runtime</a> •
+  <a href="#project-status">Status</a>
 </p>
 
 # Pop Lang
 
-Pop Lang is a native, strongly and statically typed programming language
-inspired directly by Luau. It keeps Luau's lightweight syntax, readable
-`end`-delimited blocks, local inference, first-class functions, closures,
-coroutines, and table/array literal ergonomics while giving every language
-abstraction explicit static semantics.
+Pop Lang is a native, strongly and statically typed programming language inspired by Luau.
 
-Pop Lang is designed for fast tooling, predictable compilation, portable
-backends, and APIs built from data, functions, composition, and small nominal
-interfaces. It is not a dynamically typed Lua compatibility layer and it is not
-an object-oriented-first language.
+It keeps the parts that make Luau pleasant to read and write: `end`-based blocks, lightweight syntax, local inference, first-class functions, closures, coroutines, and convenient collection literals.
 
-## Status
-
-This repository is architecture-first. The documents under [`architecture/`](architecture/)
-are the binding project contract, and the Rust workspace contains the compiler,
-runtime, tooling, and conformance-test foundations described there. The language
-and its implementation are being developed in vertical, testable milestones;
-the implementation roadmap is in [`architecture/07-implementation-roadmap.md`](architecture/07-implementation-roadmap.md).
-
-The accepted architecture is deliberately evolvable, but implementation
-convenience does not override it. A cross-cutting semantic change requires an
-accepted Architecture Decision Record, synchronized documentation, and
-conformance tests.
-
-Pop Lang is released under the [MIT License](LICENSE).
-
-## A small example
-
-Pop Lang preserves a familiar Luau shape while making data and visibility
-explicit:
+The difference is in the foundation. Pop is designed from the beginning for general-purpose software, predictable native runtimes, portable backends, explicit APIs, and static guarantees without a dynamic fallback.
 
 ```luau
 namespace Game.Players
 
-private const INITIAL_SCORE = 0
-
 public record Player
     name: String
-    score: Int = INITIAL_SCORE
+    score: Int = 0
 end
 
 public function award(player: Player, points: Int): Player
@@ -53,219 +37,291 @@ public function award(player: Player, points: Int): Player
 end
 ```
 
-A tagged union and exhaustive match use resolved type and case identities:
+Pop is not a Lua compatibility layer and does not treat tables as the hidden implementation of every language feature. Records, classes, interfaces, modules, namespaces, arrays, and typed tables are separate concepts with separate semantics.
+
+> [!IMPORTANT]
+> Pop Lang is under active development and is not yet ready for production use.
+
+## Why Pop?
+
+Languages with lightweight syntax are often built around a dynamic runtime. Languages with strong static guarantees often introduce more syntax, more punctuation, and more ceremony.
+
+Pop explores another direction:
+
+- source code that stays visually close to Luau;
+- every usable value and operation checked before execution;
+- native records, classes, interfaces, closures, and collections;
+- explicit integer and floating-point types;
+- typed errors instead of exceptions as the normal failure path;
+- a runtime designed for standalone applications, libraries, tools, services, games, and embedding;
+- one language model that can be implemented by native compilers, interpreters, virtual machines, or transpilers.
+
+The goal is not to remove complexity by hiding it at runtime. The goal is to give common programs a small, readable surface while keeping their behavior explicit enough for compilers, editors, runtimes, and developers to agree.
+
+## Why not Luau?
+
+Luau is an excellent language for its primary environment. It improves Lua with a fast type checker, inference, modern syntax, and a strong developer experience for embedded and game-oriented scripting.
+
+Pop has a different goal.
+
+A standalone Luau runtime can change where Luau executes, but it cannot remove the compatibility constraints of the language itself. General-purpose Luau implementations still need to account for features such as gradual typing, `any`, dynamic tables, metatables, Lua-style module values, and behavior inherited from Lua compatibility.
+
+Those features are useful for scripting and migration, but they make it harder to guarantee that every operation has one statically known meaning across native compilation, embedded runtimes, tooling, and alternative backends.
+
+This is also a risk seen in the JavaScript ecosystem. Better runtimes and TypeScript greatly improve the experience, but they cannot replace JavaScript's dynamic core. Large applications often accumulate extra layers for types, modules, builds, validation, packaging, and runtime compatibility, while dynamic escape hatches remain part of the system.
+
+Pop starts on the other side of that trade-off:
+
+- inference is preserved, but gradual fallback is rejected;
+- table literals remain convenient, but tables are not records, classes, modules, or namespaces;
+- metatable use cases become native language features or explicit typed protocols;
+- modules and dependencies are statically analyzable;
+- classes and closures use native runtime representations rather than hidden tables;
+- foreign or unstructured data must cross an explicit typed boundary;
+- new runtimes do not need to preserve Lua's dynamic object model.
+
+Pop does not aim to clone Luau and then slowly remove its constraints. Each Luau feature is deliberately adopted, adapted, replaced, rejected, or deferred.
+
+The architecture documentation maintains the complete, versioned Luau feature inventory.
+
+## Language tour
+
+### Static without constant annotation noise
+
+Every expression, local, field, parameter, return value, collection element, and call target has a type before the program is executed.
+
+Inference removes repetition:
 
 ```luau
-namespace Game.Results
+local name = "Ana"
+local score = 10
+local active = true
+```
 
+But inference never becomes a dynamic fallback. Pop has no source-visible value like `any` or `dynamic` on which arbitrary operations are allowed.
+
+External and unstructured data must be decoded into a known shape:
+
+```luau
+public record User
+    id: UInt64
+    displayName: String
+end
+
+public function decodeUser(json: JsonValue): Result<User, DecodeError>
+    -- Validate the input and return a typed value.
+end
+```
+
+### Familiar syntax, explicit semantics
+
+Pop follows Luau's visual language:
+
+- blocks end with `end`;
+- functions use `function`;
+- locals use `local`;
+- annotations use `name: Type`;
+- methods keep colon-call ergonomics;
+- braces represent data and initializers, not executable declaration blocks;
+- semicolons are not part of canonical source;
+- namespace imports use `using`, not JavaScript-style destructuring.
+
+```luau
+namespace Studio.Gameplay
+
+using Physics = Studio.Simulation.Physics
+
+public function updatePlayer(player: Player, deltaTime: Float)
+    Physics.step(player, deltaTime)
+end
+```
+
+`using` only affects name resolution. It does not execute code, load a file, or create a runtime object.
+
+### Records and tagged unions
+
+Records are typed data, not tables with a convention:
+
+```luau
+public record Request
+    path: String
+    retryCount: Int = 0
+end
+
+local nextRequest = request with {
+    retryCount = request.retryCount + 1,
+}
+```
+
+Tagged unions represent states that must be handled explicitly:
+
+```luau
 public union LoadResult
     Ready(value: String)
     Missing
+    Failed(message: String)
 end
 
-public function message(result: LoadResult): String
+public function printResult(result: LoadResult)
     match result
     when LoadResult.Ready(value) then
-        return value
+        Io.print(value)
     when LoadResult.Missing then
-        return "missing"
+        Io.print("missing")
+    when LoadResult.Failed(message) then
+        Io.print(message)
     end
 end
 ```
 
-The syntax is intentionally low-ceremony: braces are data or initializer
-literals, not executable declaration blocks; semicolons and JavaScript-style
-`import`/`export` syntax are not part of canonical Pop Lang source.
+The initial `match` form is exhaustive. Adding a new union case requires callers to decide how it should be handled.
 
-## Core principles
+### Native classes when identity matters
 
-- Every runtime value and operation has a compiler-proven static type.
-- Inference fills in types; it never becomes a dynamic fallback.
-- There is no source-visible `Any`, `Dynamic`, unchecked member lookup, or
-  runtime call-by-name operation.
-- Records, tagged unions, tuples, arrays, typed tables, modules, namespaces,
-  classes, Bubbles, and Packages are distinct concepts.
-- HIR and MIR are backend-neutral. LLVM is a backend, not the compiler's
-  semantic source of truth.
-- Conforming backends must agree on language behavior.
-- Runtime services are reached through the versioned Pop Lang Runtime
-  Interface (PLRI).
-- Compile-time execution is deterministic, budgeted, capability-limited, and
-  unable to parse or inject source text.
-- Runtime reflection is absent by default; retained metadata requires an
-  explicit typed adapter boundary.
-- Reintroducing Lua's dynamic/table-centered architecture is a release-blocking
-  Lua regression.
+Pop is data-first, not object-oriented-first. Records, unions, functions, and composition should handle most application code.
 
-The full rationale and invariant list are maintained in the
-[architecture overview](architecture/README.md) and the
-[architecture conformance policy](architecture/19-architecture-conformance-and-regression-policy.md).
-
-## Language model
-
-### Static types
-
-The initial type system includes fixed-width integers (`Int8` through `Int64`
-and `UInt8` through `UInt64`), IEEE floating-point types (`Float32` and
-`Float64`), `Boolean`, `String`, `nil` through optional types, tuples, arrays,
-typed tables, records, tagged unions, classes, interfaces, and fully typed
-function values.
-
-`Int` is the platform-independent `Int64` alias. `Float` is `Float64`, and
-`Byte` is `UInt8`. Integer overflow and division by zero are checked/default
-traps; explicit wrapping operations are separate semantics.
-
-Expected recoverable failures use typed `Result<T, E>`-style values. `panic`
-represents an invariant failure and unwinds through verified cleanup edges;
-exceptions are not the ordinary error API.
-
-### Data-first abstractions
-
-Pop Lang encourages the following order of design:
-
-1. local values and plain functions;
-2. records and tagged unions;
-3. arrays, typed tables, and generic algorithms;
-4. namespaces and Modules;
-5. composition and function/capability values;
-6. small nominal interfaces at real polymorphic boundaries;
-7. classes where identity, mutable lifecycle, or runtime dispatch is required.
-
-Classes support deliberate single implementation inheritance and multiple
-interface implementation, but inheritance is not the default way to organize
-an API. Ordinary modules do not return public symbol tables, and classes,
-records, and namespaces are not secretly universal runtime tables.
-
-### Naming and visibility
-
-Canonical Pop Lang naming is part of the language contract:
-
-| Entity | Convention | Example |
-| --- | --- | --- |
-| Namespace, type, interface, Package, Bubble | `PascalCase` | `Game.Players`, `Player` |
-| Function, method, field, local, parameter, Module filename | `camelCase` | `loadPlayer`, `displayName` |
-| Constant | `UPPER_SNAKE_CASE` | `MAX_RETRIES` |
-| Attribute | `PascalCase` | `@Serializable` |
-
-Every namespace-scope declaration resolves to `public`, `internal`, or
-`private`. Omitted visibility defaults to `internal`; the binary-root `main`
-shorthand remains `private`. `public` crosses a Bubble boundary through
-reference metadata; `internal` is visible inside one Bubble; `private` stops at
-the declaring Module. There is no `export` prefix, export list, or implicit
-public visibility.
-
-An omitted function return annotation denotes an empty result pack. It is not
-return-type inference: functions that return values and all parameters require
-explicit types.
-
-`using` changes compile-time name lookup only. It does not load code, create a
-runtime value, forward visibility, or create a dependency by itself.
-
-## Compile-time programming and UDAs
-
-User-defined attributes (UDAs) are nominal, typed, immutable compile-time
-values. Their arguments are checked like constant constructor arguments, and
-their attachments are validated against explicit target permissions and
-repeatability rules.
+Classes are available when a value needs identity, encapsulated mutable state, a lifecycle, or runtime polymorphism:
 
 ```luau
-@AttributeUsage(
-    targets = { AttributeTarget.Record, AttributeTarget.Field },
-    repeatable = false,
-)
-public attribute Serializable(version: UInt32 = 1)
+public class Connection
+    private closed: Boolean = false
+
+    public function Connection:close()
+        if not self.closed then
+            self.closed = true
+            -- Release the owned transport.
+        end
+    end
+end
 ```
 
-Typed queries use compiler-owned identities rather than strings:
+A class is not a table with a metatable. Its fields, visibility, layout, methods, and implemented interfaces are known by the compiler and runtime.
+
+### Typed collections
+
+Pop keeps Luau-like collection syntax while giving each collection a real type:
 
 ```luau
-private const HAS_SERIALIZABLE = hasAttribute<<Serializable>>(Player)
-private const PLAYER_METADATA = attribute<<Serializable>>(Player)
+local names: {String} = { "Ana", "Bruno" }
+
+local scores: {[String]: Int} = {
+    ana = 10,
+    bruno = 12,
+}
 ```
 
-Compile-time values may contain immutable scalars, tuples, records,
-homogeneous arrays, enum/union values, and resolved compiler-owned handles.
-Compile-time evaluation cannot access ambient files, network, environment,
-clock, process state, randomness, backend objects, or source parsing APIs.
+`{T}` is an array type. `{[K]: V}` is a typed associative table. Heterogeneous collections require an explicit union or shared interface.
 
-See [UDAs, compile time, and reflection](architecture/10-udas-compile-time-and-reflection.md)
-and [ADR 0023](architecture/decisions/0023-source-integrated-uda-contract.md).
+Tables do not double as modules, records, classes, namespaces, tuples, or universal objects.
 
-## Compiler architecture
+### Explicit numeric types
 
-The required semantic pipeline is:
+Pop does not use one universal IEEE-754 `number` type.
 
-```text
-Source
-  → tokens
-  → lossless syntax tree
-  → declaration index
-  → resolved AST
-  → typed / compile-time analysis
-  → HIR
-  → canonical MIR
-  → backend
+The language includes fixed-width signed and unsigned integers, `Float32`, and `Float64`. Common aliases include:
+
+| Alias | Type |
+| --- | --- |
+| `Int` | `Int64` |
+| `Float` | `Float64` |
+| `Byte` | `UInt8` |
+
+This makes storage, arithmetic, overflow behavior, foreign interfaces, and cross-platform execution easier to reason about.
+
+### Typed failures
+
+Expected failures use typed values similar to `Result<T, E>`:
+
+```luau
+public function loadConfiguration(path: String): Result<Configuration, LoadError>
+    -- ...
+end
 ```
 
-HIR preserves typed language concepts, resolved stable IDs, closures,
-interfaces, matches, calls, and source origins. MIR makes control flow,
-evaluation order, calls, effects, failure edges, safe points, roots, barriers,
-allocation, and runtime operations explicit.
+`panic` is reserved for broken invariants or unrecoverable internal failures. It is not the ordinary application error API.
 
-The MIR interpreter and native LLVM backend consume canonical MIR. A backend
-does not call back into parsing, name resolution, type checking, or compile-time
-evaluation. The HIR/MIR boundary is what permits a future VM backend without
-reconstructing source-level meaning.
+## Runtime
 
-The principal compiler crates are:
+Pop is designed as a general-purpose language, so the runtime is part of the language model rather than an afterthought attached to a scripting host.
 
-- `pop-syntax`: lossless syntax and source parsing;
-- `pop-resolve`: declaration indexing, names, namespaces, and visibility;
-- `pop-types`: semantic types, body checking, interfaces, matches, effects, and
-  source-integrated attribute contracts;
-- `pop-compile-time`: restricted typed compile-time lowering and evaluation;
-- `pop-hir`: resolved, typed, backend-neutral HIR;
-- `pop-mir`: canonical MIR, verification, text form, and portable optimization;
-- `pop-backend-mir-interp`: reference execution and differential behavior;
-- `pop-backend-llvm`: native backend boundary;
-- runtime crates: PLRI, native bootstrap services, allocation, roots, barriers,
-  and precise GC contracts.
+The runtime is responsible for consistent behavior across implementations, including:
 
-## Effects, failures, and memory
+- memory management;
+- strings and collections;
+- closures and captured state;
+- classes and interface dispatch;
+- coroutines, suspension, and task integration;
+- panic, cleanup, and runtime traps;
+- foreign-function boundaries;
+- platform and standard-library services.
 
-Function types, HIR functions, MIR functions, and call sites carry closed effect
-summaries. The initial summary records allocation, managed-reference mutation,
-traps, panic/unwind, suspension, unsafe memory, FFI, ambient I/O, compiler
-queries, GC safe points, and root operations. There is no unknown or dynamic
-effect fallback.
+### Managed memory
 
-Calls through function values consume the function type's closed summary.
-Interface implementations must satisfy the exact declared member summary and
-cannot widen it. Recursive call-graph components are solved to a least fixed
-point.
+The production runtime design uses a precise concurrent generational garbage collector.
 
-The production GC design is a precise concurrent generational collector with a
-moving nursery, mostly non-moving mature heap, precise roots and stack maps,
-SATB and generational barriers, and bounded pause work. The bootstrap runtime
-is intentionally smaller but preserves the same precise map/root/barrier
-contracts needed by the later collector.
+In practical terms:
 
-## Packages, Bubbles, and Workspaces
+- short-lived allocations can be collected efficiently in a moving nursery;
+- mature objects remain mostly non-moving;
+- the collector knows the exact location of managed references;
+- native stack frames and runtime structures use precise roots and stack maps;
+- write barriers preserve correctness across generations and concurrent work.
 
-Pop Lang uses the ownership hierarchy:
+Pop does not expose collector-specific object headers as part of the language. Resource cleanup should use explicit ownership and lifecycle APIs rather than depending on when garbage collection happens.
+
+### Native runtime values
+
+Language features use runtime representations that match their semantics:
+
+- records are records;
+- classes have declared layouts and native method dispatch;
+- closures use typed environments;
+- arrays and tables are distinct collection types;
+- interfaces expose only their declared operations;
+- namespaces and modules do not become runtime tables.
+
+This gives runtimes freedom to optimize without preserving a universal dynamic table representation.
+
+### Portable backends
+
+Pop's canonical MIR is backend-agnostic. It describes typed control flow and runtime operations without tying the language to LLVM, a specific virtual machine, or one garbage collector.
+
+That allows implementations to consume the same semantics for different execution strategies, including:
+
+- native machine-code compilation;
+- a reference interpreter;
+- a virtual machine or JIT;
+- transpiling backends;
+- sandboxed embedded runtimes;
+- specialized platform backends.
+
+A backend may choose a different execution strategy, but it must not silently redefine language behavior.
+
+## Modules, packages, and workspaces
+
+Each `.pop` source file is a Module inside one file-scoped namespace.
+
+```luau
+namespace Game.Players
+```
+
+Declarations have explicit visibility:
+
+- `public` is available to dependent libraries;
+- `internal` is available inside the same independently compiled unit;
+- `private` is limited to the current file.
+
+Omitted namespace-level visibility defaults to `internal`.
+
+Projects use `bubble.toml` for package metadata and dependencies. Pop's ownership model is:
 
 ```text
 Item → Module → Bubble → Package → Workspace
 ```
 
-- An **Item** is a declaration or member with a stable identity.
-- A **Module** is one `.pop` file and the `private` boundary.
-- A **Bubble** is an independently compiled dependency and `internal` boundary.
-- A **Package** is a publishable, versioned directory containing `bubble.toml`.
-- A **Workspace** groups Packages under one resolver, lockfile, cache, and
-  policy root without merging their visibility.
+A **Bubble** is an independently compiled dependency and the boundary for `internal` visibility. A **Package** is a versioned, publishable directory. A **Workspace** groups packages under one resolver, lockfile, cache, and policy root.
 
-The conventional layout is:
+A conventional project layout is:
 
 ```text
 bubble.toml
@@ -278,146 +334,89 @@ examples/
 benchmarks/
 ```
 
-Workspaces share a deterministic `bubble.lock` and `target/` output/cache root.
-Paths are resolution inputs, never semantic identity. Library Bubbles emit
-self-describing `.poplib` artifacts with manifests, public reference metadata,
-documentation, hashes, target capabilities, and exact Bubble dependencies.
+Modules and namespaces are compile-time concepts. They are not values returned from `require`, and dependency loading cannot be computed from arbitrary runtime strings.
 
-The detailed unit and loading contract is in
-[CLI, tooling, and units of code](architecture/21-cli-tooling-and-code-units.md)
-and [Bubbles, namespaces, artifacts, and loading](architecture/14-libraries-namespaces-and-loading.md).
+## Tooling direction
 
-## Tooling
-
-The unified user-facing command is `pop`. Canonical commands include:
+Pop is designed around one coherent toolchain for common development tasks:
 
 ```text
 pop check
 pop build
 pop run
 pop test
-pop benchmark
-pop documentation
 pop format
 pop lint
-pop fix
 pop add
 pop remove
-pop update
-pop tree
-pop metadata
-pop package
-pop publish
-pop install
-pop clean
 ```
 
-`pop` remains the language, Workspace, Package, Bubble, documentation, and
-package-manager command. `pop install` builds and installs a Package's public
-binary Bubble. The narrowly separate `popup` command manages complete Pop Lang
-compiler/runtime toolchain distributions; it never edits `bubble.toml` or
-`bubble.lock` and is not a second Package manager.
+Diagnostics, symbols, metadata, documentation, and automated fixes are intended to be available through stable structured formats, so editors and build tools do not need to scrape terminal output.
 
-The accepted `popup` workflow includes deterministic noninteractive commands
-for listing, installing, selecting, updating, diagnosing, and removing exact
-toolchains, plus an optional Ratatui view over the same typed operations:
+The language formatter owns canonical whitespace and layout. Pop source uses four-space indentation, avoids mandatory semicolons, and aims for one obvious readable shape.
 
-```text
-popup list --available
-popup install stable
-popup default stable
-popup run --toolchain 1.0.0 -- pop check
-popup doctor
-```
+## Relationship to Luau
 
-Each toolchain is an immutable relocatable host distribution containing one
-compatible compiler, runtime/PLRI, first-party tools, `Pop.Internal`,
-`Pop.Standard`, target support, licenses, and versioned file inventory. The
-managed `pop` shim selects an already installed exact distribution using an
-explicit `popup run`, `POPUP_TOOLCHAIN`, the nearest exact
-`pop-toolchain.toml`, then the global default. Checked-in pins record an exact
-version and distribution digest; selection never downloads implicitly.
+Pop prefers familiar Luau syntax whenever the semantics truly match. Familiarity does not override the language model.
 
-`popup` discovers releases through a canonical versioned release index signed
-by the trusted distribution root, not by scraping repository tags, pages,
-branches, or filenames. Signature, digest, expiry, rollback, target, archive,
-and inventory checks fail closed. Installation and self-update stage and verify
-complete content before atomic activation, preserving the previous usable state
-after interruption or concurrent access.
+Examples of the current direction:
 
-The one-script Bash bootstrap is only a narrow path to an exact pinned `popup`:
-it verifies the documented host, size, and embedded SHA-256 digest before
-execution, and does not evaluate downloaded text, build the repository, invoke
-Cargo, request `sudo`, or silently edit shell startup files. The release gate
-requires reproducible relocatable archives, signed metadata,
-licenses/SBOM/provenance, cross-backend/runtime/foundational-Bubble checks, and
-an empty-root smoke installation outside the checkout before a signed channel
-is published. See
-[ADR 0028](architecture/decisions/0028-toolchain-distribution-and-popup-management.md).
+| Luau area | Pop direction |
+| --- | --- |
+| Local inference | Adopt, without gradual fallback |
+| Type annotations and narrowing | Adopt and strengthen |
+| First-class functions and closures | Adopt with native typed environments |
+| Coroutines | Adapt to backend-neutral runtime operations |
+| Arrays and table literals | Adopt the ergonomics with static element types |
+| Tables as records or objects | Replace with records, classes, interfaces, arrays, and typed tables |
+| Metatables and metamethods | Replace common cases with native constructs and typed protocols |
+| `require`-style module values | Replace with namespaces, package dependencies, and analyzable initialization |
+| Implicit globals | Reject |
+| One universal `number` type | Replace with explicit integer and floating-point types |
+| `any` and dynamic escape behavior | Reject |
+| Sandboxed embedding | Preserve as a deployment capability |
 
-Machine tooling consumes versioned structured diagnostics, metadata, symbols,
-build events, and workspace edits. It does not scrape human CLI output.
-Diagnostics use stable `POP####` codes, typed arguments, typed
-source/manifest/path/artifact/toolchain-state/no-location locations, labels,
-notes, origins, severity/category, warning waves, and semantic quick fixes.
-Toolchain failures use non-suppressible `POP9xxx` codes without fabricated
-source spans. Plain, versioned JSON, and Ratatui presentation preserve the same
-typed facts; color and widget layout are not machine APIs. Safe fix-all
-operations are atomic, version-checked, composable, formatted, and
-postcondition-verified.
+The full feature inventory is versioned because Luau continues to evolve. A feature is not silently forgotten: it must be adopted, adapted, replaced, rejected with a reason, or deliberately deferred.
 
-Public documentation uses Lua-shaped `---` comments with checked XML concepts.
-Documentation parameters, type parameters, returns, typed errors, effects,
-allocation, thread safety, complexity, and `cref` links are validated and
-emitted separately from runtime metadata.
+## Design principles
+
+- Keep the common case small and readable.
+- Prefer data and functions before classes and inheritance.
+- Preserve Luau-shaped syntax when its meaning remains accurate.
+- Give every usable value and operation a static type.
+- Keep dynamic or foreign data behind explicit typed boundaries.
+- Make modules, packages, and visibility analyzable before execution.
+- Keep runtime behavior consistent across conforming backends.
+- Do not reintroduce Lua's table-centered semantics through compatibility shortcuts.
+
+## Project status
+
+Pop Lang is under active development and is not yet a stable production language.
+
+The repository currently contains the language design, accepted architecture decisions, compiler and runtime foundations, tooling work, and conformance tests. Syntax and runtime behavior may still change as implementation milestones are completed.
+
+The architecture documents are the current source of truth:
+
+- [Architecture overview](architecture/README.md)
+- [Syntax and nomenclature](architecture/13-syntax-and-nomenclature.md)
+- [Implementation roadmap](architecture/07-implementation-roadmap.md)
+- [Accepted decisions](architecture/decisions/README.md)
 
 ## Repository layout
 
 ```text
-architecture/       Accepted language, compiler, runtime, and tooling contract
+architecture/       Language, runtime, compiler, and tooling design
 architecture/decisions/
                     Accepted Architecture Decision Records
-crates/compiler/    Syntax, resolution, types, compile time, HIR, MIR, drivers
-crates/runtime/     PLRI and bootstrap/native runtime contracts
-crates/tools/       Architecture tests, formatter, documentation, CLI tooling
-libraries/internal/ Pop.Internal bootstrap foundations
-libraries/standard/ Pop.Standard bootstrap foundations
+crates/compiler/    Compiler implementation
+crates/runtime/     Runtime and memory-management implementation
+crates/tools/       CLI, formatter, documentation, and conformance tools
+libraries/internal/ Bootstrap implementation libraries
+libraries/standard/ Standard library
 ```
 
-The workspace uses Rust edition 2024 for the implementation. Rust is the
-host language of the toolchain; it does not define Pop Lang's source syntax or
-replace Pop Lang's Package/Bubble model.
+The compiler and runtime are implemented in Rust. Rust is the implementation language of the toolchain; it does not define Pop source syntax or its package model.
 
-## Roadmap
+## License
 
-The implementation roadmap proceeds through vertical slices:
-
-1. decisions, workspace skeleton, syntax, diagnostics, and bootstrap metadata;
-2. typed front end, HIR, UDAs, compile-time evaluation, and project discovery;
-3. canonical MIR, interpreter, native classes, collections, interfaces,
-   exhaustive matches, closures, and precise bootstrap GC;
-4. LLVM native code generation, PLRI integration, artifacts, and differential
-   backend testing;
-5. generics, error handling, coroutines/async, FFI, retained metadata, mature
-   concurrent GC, and broader standard-library profiles.
-
-Every milestone requires deterministic positive and negative tests, textual IR
-fixtures, architecture traceability, documentation updates, and permanent
-regressions for forbidden dynamic/table-based behavior.
-
-## Architecture reference
-
-Start with these documents when changing or extending the project:
-
-- [Architecture overview](architecture/README.md)
-- [Compiler pipeline](architecture/03-compiler-pipeline.md)
-- [Intermediate representations](architecture/04-intermediate-representations.md)
-- [Type-system architecture](architecture/12-type-system-architecture.md)
-- [Syntax and nomenclature](architecture/13-syntax-and-nomenclature.md)
-- [Architecture conformance and regression policy](architecture/19-architecture-conformance-and-regression-policy.md)
-- [Toolchain distribution and `popup` management](architecture/decisions/0028-toolchain-distribution-and-popup-management.md)
-- [Accepted decisions](architecture/decisions/README.md)
-
-The project treats those documents, accepted ADRs, specifications, conformance
-tests, and implementation as one traceable contract. When they disagree, the
-disagreement must be repaired; code does not silently redefine the language.
+Pop Lang is released under the [MIT License](LICENSE).
