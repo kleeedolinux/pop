@@ -1,6 +1,6 @@
 # ADR 0028: Toolchain Distribution and `popup` Management
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-11
 - Amends on acceptance: ADR 0017, ADR 0018
 
