@@ -13,13 +13,14 @@ use pop_diagnostics::compile_time as compile_time_diagnostics;
 use pop_diagnostics::syntax as syntax_diagnostics;
 use pop_foundation::{
     BubbleId, Diagnostic, DiagnosticOrigin, DiagnosticOriginKind, FunctionId, MethodId, ModuleId,
-    NamespaceId, SourceSpan, SymbolId, TypeId,
+    NamespaceId, SourceSpan, SymbolId, SymbolIdentity, TypeId,
 };
 use pop_hir::{
     HirBubble, HirDeclaration, HirDeclarationKind, HirFunction, HirFunctionContext,
     HirKnownCallables, HirMethod, build_hir_function_with_known_callables_and_attributes,
     build_hir_method,
 };
+use pop_library_bridge::{FoundationBubble, NativeEffect, NativeExport, PopAbiType};
 use pop_query::{BudgetError, QueryBudget};
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
 use pop_source::SourceFile;
@@ -34,8 +35,8 @@ use pop_types::{
     AttributeAttachmentError, AttributeConstant, AttributeQueryIndex, AttributeTarget,
     AttributeUsage, AttributeValidator, BodyChecker, BootstrapSchema, ClassDefinition,
     ClassMethodDefinition, CompilerAttributeRole, FieldDefault, PendingConstantExpression,
-    ResolvedAttribute, ResolvedFunctionSignature, SignatureResolver, TypeArena, TypedBody,
-    embedded_bootstrap_schema,
+    PrimitiveType, ResolvedAttribute, ResolvedFunctionSignature, SemanticType, SignatureResolver,
+    TypeArena, TypedBody, embedded_bootstrap_schema,
 };
 
 #[derive(Clone, Debug)]
@@ -68,6 +69,7 @@ pub struct FrontEndBubbleInput {
     dependencies: Vec<BubbleId>,
     modules: Vec<FrontEndModule>,
     implicit_main_module: Option<ModuleId>,
+    reference_metadata: Vec<ReferenceMetadata>,
 }
 
 impl FrontEndBubbleInput {
@@ -87,6 +89,7 @@ impl FrontEndBubbleInput {
             dependencies,
             modules,
             implicit_main_module: None,
+            reference_metadata: Vec::new(),
         }
     }
 
@@ -95,6 +98,14 @@ impl FrontEndBubbleInput {
     #[must_use]
     pub const fn with_implicit_main_entry(mut self, module: ModuleId) -> Self {
         self.implicit_main_module = Some(module);
+        self
+    }
+
+    /// Supplies verified public metadata for direct dependency Bubbles.
+    #[must_use]
+    pub fn with_reference_metadata(mut self, mut metadata: Vec<ReferenceMetadata>) -> Self {
+        metadata.sort_by_key(ReferenceMetadata::bubble);
+        self.reference_metadata = metadata;
         self
     }
 }
@@ -107,6 +118,251 @@ pub struct FrontEndResult {
     compile_time_evaluations: Vec<FrontEndCompileTimeEvaluation>,
     constants: Vec<FrontEndConstant>,
     diagnostics: Vec<Diagnostic>,
+    reference_metadata: Result<ReferenceMetadata, ReferenceMetadataError>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ReferenceType {
+    Primitive(PrimitiveType),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceFunctionParameter {
+    name: String,
+    parameter_type: ReferenceType,
+}
+
+impl ReferenceFunctionParameter {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn parameter_type(&self) -> ReferenceType {
+        self.parameter_type
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceFunction {
+    identity: SymbolIdentity,
+    module: ModuleId,
+    namespace: String,
+    name: String,
+    parameters: Vec<ReferenceFunctionParameter>,
+    results: Vec<ReferenceType>,
+    effects: pop_types::EffectSummary,
+    span: SourceSpan,
+}
+
+impl ReferenceFunction {
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[ReferenceFunctionParameter] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[ReferenceType] {
+        &self.results
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> pop_types::EffectSummary {
+        self.effects
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceMetadata {
+    bubble: BubbleId,
+    functions: Vec<ReferenceFunction>,
+}
+
+impl ReferenceMetadata {
+    #[must_use]
+    pub const fn bubble(&self) -> BubbleId {
+        self.bubble
+    }
+
+    #[must_use]
+    pub fn functions(&self) -> &[ReferenceFunction] {
+        &self.functions
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceMetadataError {
+    AnalysisUnavailable,
+    MissingDeclaration(SymbolIdentity),
+    UnsupportedPublicType {
+        function: SymbolIdentity,
+        type_id: TypeId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeExportValidationError {
+    ExportCount {
+        expected: usize,
+        actual: usize,
+    },
+    WrongBubble {
+        native_symbol: &'static str,
+    },
+    WrongNamespace {
+        native_symbol: &'static str,
+        namespace: &'static str,
+    },
+    DuplicateBinding {
+        namespace: &'static str,
+        name: &'static str,
+    },
+    DuplicateNativeSymbol {
+        native_symbol: &'static str,
+    },
+    MissingBinding {
+        name: &'static str,
+        parameter_types: Vec<&'static str>,
+    },
+}
+
+/// Verifies that native Standard adapters bind exactly to trusted bootstrap
+/// metadata before either contract is used for analysis or linking.
+///
+/// # Errors
+///
+/// Returns a closed validation error for a missing, duplicate, or mismatched
+/// adapter binding.
+pub fn validate_standard_native_exports(
+    bootstrap: &BootstrapSchema,
+    exports: &[NativeExport],
+) -> Result<(), NativeExportValidationError> {
+    let entries = bootstrap.standard_functions();
+    if entries.len() != exports.len() {
+        return Err(NativeExportValidationError::ExportCount {
+            expected: entries.len(),
+            actual: exports.len(),
+        });
+    }
+
+    let mut bindings = BTreeSet::new();
+    let mut native_symbols = BTreeSet::new();
+    for export in exports {
+        if export.bubble() != FoundationBubble::Standard {
+            return Err(NativeExportValidationError::WrongBubble {
+                native_symbol: export.native_symbol(),
+            });
+        }
+        if export.namespace() != "Pop" {
+            return Err(NativeExportValidationError::WrongNamespace {
+                native_symbol: export.native_symbol(),
+                namespace: export.namespace(),
+            });
+        }
+        let binding = (
+            export.namespace(),
+            export.name(),
+            export.parameters(),
+            export.results(),
+        );
+        if !bindings.insert(binding) {
+            return Err(NativeExportValidationError::DuplicateBinding {
+                namespace: export.namespace(),
+                name: export.name(),
+            });
+        }
+        if !native_symbols.insert(export.native_symbol()) {
+            return Err(NativeExportValidationError::DuplicateNativeSymbol {
+                native_symbol: export.native_symbol(),
+            });
+        }
+    }
+
+    for entry in entries {
+        let matching = exports.iter().any(|export| {
+            export.name() == entry.source_name()
+                && export
+                    .parameters()
+                    .iter()
+                    .copied()
+                    .map(pop_abi_type_name)
+                    .eq(entry.parameter_types().iter().copied())
+                && export
+                    .results()
+                    .iter()
+                    .copied()
+                    .map(pop_abi_type_name)
+                    .eq(entry.result_types().iter().copied())
+                && export
+                    .effects()
+                    .iter()
+                    .copied()
+                    .map(native_effect_name)
+                    .eq(entry.effects().iter().copied())
+        });
+        if !matching {
+            return Err(NativeExportValidationError::MissingBinding {
+                name: entry.source_name(),
+                parameter_types: entry.parameter_types().to_vec(),
+            });
+        }
+    }
+    Ok(())
+}
+
+const fn pop_abi_type_name(value: PopAbiType) -> &'static str {
+    match value {
+        PopAbiType::Int => "Int",
+        PopAbiType::Int64 => "Int64",
+        PopAbiType::UInt64 => "UInt64",
+        PopAbiType::Float => "Float",
+        PopAbiType::Boolean => "Boolean",
+        PopAbiType::Byte => "Byte",
+        PopAbiType::String => "String",
+        PopAbiType::ManagedReference => "ManagedReference",
+    }
+}
+
+const fn native_effect_name(value: NativeEffect) -> &'static str {
+    match value {
+        NativeEffect::Allocates => "Allocates",
+        NativeEffect::WritesManagedReference => "WritesManagedReference",
+        NativeEffect::MayTrap => "MayTrap",
+        NativeEffect::MayUnwind => "MayUnwind",
+        NativeEffect::Suspends => "Suspends",
+        NativeEffect::UnsafeMemory => "UnsafeMemory",
+        NativeEffect::ForeignFunction => "ForeignFunction",
+        NativeEffect::AmbientIo => "AmbientIo",
+        NativeEffect::CompilerQuery => "CompilerQuery",
+        NativeEffect::GcSafePoint => "GcSafePoint",
+        NativeEffect::Roots => "Roots",
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,6 +453,19 @@ impl FrontEndResult {
     pub fn diagnostic_snapshot(&self) -> String {
         diagnostic_snapshot(&self.diagnostics)
     }
+
+    /// Returns the verified public-function projection for dependent Bubbles.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when analysis did not publish HIR or a public signature
+    /// contains a type outside the current metadata schema.
+    pub const fn reference_metadata(&self) -> Result<&ReferenceMetadata, ReferenceMetadataError> {
+        match &self.reference_metadata {
+            Ok(metadata) => Ok(metadata),
+            Err(error) => Err(*error),
+        }
+    }
 }
 
 struct ParsedModule {
@@ -278,8 +547,34 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let indexed = build_declaration_index(&module_inputs);
     let mut diagnostics = indexed.diagnostics().to_vec();
     validate_source_attribute_targets(&parsed, &mut diagnostics);
-    let database = ResolutionDatabase::new(indexed.into_index());
+    let referenced_declarations = input
+        .reference_metadata
+        .iter()
+        .flat_map(ReferenceMetadata::functions)
+        .map(|function| {
+            pop_resolve::ReferencedDeclaration::function(
+                function.identity(),
+                function.module(),
+                function.namespace(),
+                function.name(),
+                function.span(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for metadata in &input.reference_metadata {
+        assert!(
+            input.dependencies.contains(&metadata.bubble()),
+            "reference metadata must belong to a direct Bubble dependency"
+        );
+    }
+    let index = indexed
+        .into_index()
+        .with_referenced_declarations(referenced_declarations)
+        .expect("reference metadata identities are verified before analysis");
+    let database = ResolutionDatabase::new(index);
     let bootstrap = embedded_bootstrap_schema().expect("repository-validated bootstrap schema");
+    validate_standard_native_exports(&bootstrap, pop_standard::NATIVE_EXPORTS)
+        .expect("repository-validated native Standard adapters");
     let mut resolver = SignatureResolver::new(&database, bootstrap.clone());
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,
@@ -299,10 +594,13 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
-    let signatures: BTreeMap<_, _> = functions
-        .iter()
-        .map(|function| (function.signature.symbol(), function.signature.clone()))
-        .collect();
+    let mut signatures =
+        reference_signatures(&input.reference_metadata, &database, resolver.arena());
+    signatures.extend(
+        functions
+            .iter()
+            .map(|function| (function.signature.symbol(), function.signature.clone())),
+    );
     let preliminary_bodies = check_compile_time_function_bodies(
         &functions,
         &signatures,
@@ -365,10 +663,21 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             hir_functions,
             hir_methods,
         )
+        .and_then(|bubble| {
+            bubble.with_function_references(hir_function_references(
+                &input.reference_metadata,
+                resolver.arena(),
+            ))
+        })
         .ok()
     } else {
         None
     };
+    let reference_metadata = hir
+        .as_ref()
+        .map_or(Err(ReferenceMetadataError::AnalysisUnavailable), |hir| {
+            emit_reference_metadata(hir, database.index(), resolver.arena())
+        });
     FrontEndResult {
         hir,
         types: resolver.into_arena(),
@@ -376,7 +685,154 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         compile_time_evaluations,
         constants,
         diagnostics,
+        reference_metadata,
     }
+}
+
+fn emit_reference_metadata(
+    hir: &HirBubble,
+    index: &pop_resolve::DeclarationIndex,
+    arena: &TypeArena,
+) -> Result<ReferenceMetadata, ReferenceMetadataError> {
+    let mut functions = Vec::new();
+    for function in hir
+        .functions()
+        .iter()
+        .filter(|function| function.visibility() == pop_resolve::Visibility::Public)
+    {
+        let identity = SymbolIdentity::new(hir.bubble(), function.symbol());
+        let declaration = index
+            .declaration(function.symbol())
+            .ok_or(ReferenceMetadataError::MissingDeclaration(identity))?;
+        let parameters = function
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                reference_type(identity, parameter.type_id(), arena).map(|parameter_type| {
+                    ReferenceFunctionParameter {
+                        name: parameter.name().to_owned(),
+                        parameter_type,
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let results = function
+            .results()
+            .iter()
+            .map(|type_id| reference_type(identity, *type_id, arena))
+            .collect::<Result<Vec<_>, _>>()?;
+        functions.push(ReferenceFunction {
+            identity,
+            module: function.module(),
+            namespace: declaration.namespace().to_owned(),
+            name: function.name().to_owned(),
+            parameters,
+            results,
+            effects: function.effects(),
+            span: function
+                .parameters()
+                .first()
+                .map_or(declaration.span(), pop_hir::HirParameter::span),
+        });
+    }
+    functions.sort_by_key(ReferenceFunction::identity);
+    Ok(ReferenceMetadata {
+        bubble: hir.bubble(),
+        functions,
+    })
+}
+
+fn reference_type(
+    function: SymbolIdentity,
+    type_id: TypeId,
+    arena: &TypeArena,
+) -> Result<ReferenceType, ReferenceMetadataError> {
+    match arena.get(type_id) {
+        Some(SemanticType::Primitive(primitive)) => Ok(ReferenceType::Primitive(*primitive)),
+        _ => Err(ReferenceMetadataError::UnsupportedPublicType { function, type_id }),
+    }
+}
+
+fn reference_signatures(
+    metadata: &[ReferenceMetadata],
+    database: &ResolutionDatabase,
+    arena: &TypeArena,
+) -> BTreeMap<SymbolId, ResolvedFunctionSignature> {
+    metadata
+        .iter()
+        .flat_map(ReferenceMetadata::functions)
+        .map(|function| {
+            let declaration = database
+                .index()
+                .declaration_by_reference_identity(function.identity())
+                .expect("indexed reference identity");
+            let parameters = function
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    (
+                        parameter.name().to_owned(),
+                        reference_type_id(parameter.parameter_type(), arena),
+                        function.span(),
+                    )
+                })
+                .collect();
+            let results = function
+                .results()
+                .iter()
+                .map(|result| (reference_type_id(*result, arena), function.span()))
+                .collect();
+            (
+                declaration.symbol(),
+                ResolvedFunctionSignature::referenced(
+                    declaration.symbol(),
+                    function.name(),
+                    parameters,
+                    results,
+                    function.effects(),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn hir_function_references(
+    metadata: &[ReferenceMetadata],
+    arena: &TypeArena,
+) -> Vec<pop_hir::HirFunctionReference> {
+    metadata
+        .iter()
+        .flat_map(ReferenceMetadata::functions)
+        .map(|function| {
+            pop_hir::HirFunctionReference::new(
+                function.identity(),
+                function
+                    .parameters()
+                    .iter()
+                    .map(|parameter| reference_type_id(parameter.parameter_type(), arena))
+                    .collect(),
+                function
+                    .results()
+                    .iter()
+                    .map(|result| reference_type_id(*result, arena))
+                    .collect(),
+                function.effects(),
+            )
+        })
+        .collect()
+}
+
+fn reference_type_id(reference: ReferenceType, arena: &TypeArena) -> TypeId {
+    let ReferenceType::Primitive(primitive) = reference;
+    let source_name = PrimitiveType::source_schema()
+        .iter()
+        .copied()
+        .find(|entry| entry.primitive() == primitive && !entry.is_alias())
+        .map(pop_types::PrimitiveSchemaEntry::source_name)
+        .expect("every primitive metadata type has one canonical source name");
+    arena
+        .source_type(source_name)
+        .expect("consumer primitive arena matches metadata schema")
 }
 
 fn parse_modules(modules: Vec<FrontEndModule>) -> Vec<ParsedModule> {

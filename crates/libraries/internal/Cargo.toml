@@ -9,6 +9,7 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+pop-library-bridge.workspace = true
 pop-runtime-interface.workspace = true
 
 [lints]

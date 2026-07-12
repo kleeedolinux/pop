@@ -10,6 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 pop-driver.workspace = true
+pop-foundation.workspace = true
+pop-mir.workspace = true
+pop-projects.workspace = true
+pop-source.workspace = true
 
 [lints]
 workspace = true

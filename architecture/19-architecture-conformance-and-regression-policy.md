@@ -226,6 +226,7 @@ Minimum traceability matrix:
 | Restricted reflection | compiler/runtime/base libraries | no runtime enumerate/get-by-name tests |
 | Non-OOP default | examples, public library, analyzers | API baseline and `ApiDesign` tests |
 | Native public library tiers | package resolver, public library, documentation | tier graph, namespace, capability, and forbidden-pattern tests |
+| Rust foundation adapters | library bridge/macro, base libraries, bootstrap verifier | closed `#[poplib]` descriptors, exact ABI checks, explicit inventories, no runtime registration |
 | Concise APIs and explicit costs | public libraries, docs, analyzers, benchmarks | call-site, allocation/copy/dispatch, effect, and measured-budget tests |
 | Independent official extensions | package resolver, extension builds, tooling | manifest/version/dependency/namespace/standard-exclusion tests |
 | Compact prelude | resolver, `Pop.Standard` | exact prelude snapshot/collision tests |
@@ -260,6 +261,8 @@ Architecture CI should eventually verify:
 - forbidden HIR/MIR dynamic/LLVM-leak operations;
 - exact `Pop.Standard` prelude/API baselines;
 - `Pop.Internal`/`Pop.Standard` dependency direction;
+- modular base-library module/test ownership and thin crate-root inventories;
+- typed public-function reference metadata and Bubble-scoped symbol identities;
 - naming/PascalCase/no-lower-snake rules;
 - default-internal visibility, private binary-entry shorthand, and absence of
   export/re-export syntax;

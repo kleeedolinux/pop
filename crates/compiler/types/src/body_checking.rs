@@ -4,7 +4,8 @@ use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagno
 use pop_foundation::{
     AttributeId, BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan,
-    StandardFunctionId, SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
+    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -136,6 +137,9 @@ pub enum TypedCallDispatch {
     Direct {
         function: SymbolId,
     },
+    Referenced {
+        function: SymbolIdentity,
+    },
     DirectMethod {
         method: MethodId,
         receiver: Option<Box<TypedExpression>>,
@@ -252,6 +256,10 @@ pub enum TypedExpressionKind {
     },
     DirectCall {
         function: SymbolId,
+        arguments: Vec<TypedExpression>,
+    },
+    ReferencedCall {
+        function: SymbolIdentity,
         arguments: Vec<TypedExpression>,
     },
     StandardCall {
@@ -2069,15 +2077,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             self.require_same_type(parameter_type, typed.type_id(), typed.span(), callee.span());
             typed_arguments.push(typed);
         }
-        let dispatch = if let TypedExpressionKind::Function(function) = callee.kind() {
-            TypedCallDispatch::Direct {
-                function: *function,
-            }
-        } else {
-            TypedCallDispatch::Indirect {
-                callee: Box::new(callee),
-            }
-        };
+        let dispatch = self.call_dispatch(callee);
         Some(CheckedInvocation::Call(CheckedCall {
             call: TypedCall {
                 dispatch,
@@ -2086,6 +2086,23 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn call_dispatch(&self, callee: TypedExpression) -> TypedCallDispatch {
+        let TypedExpressionKind::Function(function) = callee.kind() else {
+            return TypedCallDispatch::Indirect {
+                callee: Box::new(callee),
+            };
+        };
+        let function = *function;
+        self.resolver
+            .database()
+            .index()
+            .declaration(function)
+            .and_then(pop_resolve::Declaration::reference_identity)
+            .map_or(TypedCallDispatch::Direct { function }, |identity| {
+                TypedCallDispatch::Referenced { function: identity }
+            })
     }
 
     fn check_array_create(
@@ -2556,6 +2573,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 arguments,
             },
             TypedCallDispatch::Direct { function } => TypedExpressionKind::DirectCall {
+                function,
+                arguments,
+            },
+            TypedCallDispatch::Referenced { function } => TypedExpressionKind::ReferencedCall {
                 function,
                 arguments,
             },
@@ -3462,7 +3483,9 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
 
 fn finalize_call_captures(call: &mut TypedCall, written: &BTreeSet<BindingId>) {
     match &mut call.dispatch {
-        TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {}
+        TypedCallDispatch::Standard { .. }
+        | TypedCallDispatch::Direct { .. }
+        | TypedCallDispatch::Referenced { .. } => {}
         TypedCallDispatch::DirectMethod { receiver, .. } => {
             if let Some(receiver) = receiver {
                 finalize_expression_captures(receiver, written);
@@ -3547,6 +3570,7 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         }
         TypedExpressionKind::UnionCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
+        | TypedExpressionKind::ReferencedCall { arguments, .. }
         | TypedExpressionKind::StandardCall { arguments, .. } => {
             for argument in arguments {
                 finalize_expression_captures(argument, written);

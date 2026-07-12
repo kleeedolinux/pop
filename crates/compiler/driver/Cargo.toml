@@ -16,6 +16,7 @@ pop-compile-time.workspace = true
 pop-diagnostics.workspace = true
 pop-foundation.workspace = true
 pop-hir.workspace = true
+pop-library-bridge.workspace = true
 pop-mir.workspace = true
 pop-runtime-native.workspace = true
 pop-standard.workspace = true

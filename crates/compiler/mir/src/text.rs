@@ -4,7 +4,7 @@ use std::fmt;
 use pop_foundation::{
     BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
     InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
-    SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -15,7 +15,7 @@ use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 use super::{
     MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
     MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary, MirField,
-    MirFunction, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
+    MirFunction, MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
     MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod,
     MirNestedFunction, MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration,
     MirUnionSwitchArm, MirUnwindAction, local_instruction_effects,
@@ -72,8 +72,12 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
     let mut functions = Vec::new();
     let mut methods = Vec::new();
     let mut nested_functions = Vec::new();
+    let mut function_references = Vec::new();
     while position < lines.len() {
-        if lines[position].starts_with("type.") {
+        if lines[position].starts_with("reference ") {
+            function_references.push(parse_function_reference(lines[position], position + 1)?);
+            position += 1;
+        } else if lines[position].starts_with("type.") {
             declarations.push(parse_declaration(lines[position], position + 1)?);
             position += 1;
         } else if lines[position].starts_with("method ") {
@@ -108,6 +112,34 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
         functions,
         methods,
         nested_functions,
+        function_references,
+    })
+}
+
+fn parse_function_reference(
+    line: &str,
+    number: usize,
+) -> Result<MirFunctionReference, MirParseError> {
+    let parts: Vec<_> = line.split_whitespace().collect();
+    if parts.len() != 5 || parts[0] != "reference" {
+        return Err(error(number, "malformed function reference"));
+    }
+    let identity = parts[1]
+        .strip_prefix('b')
+        .and_then(|identity| identity.split_once(":s"))
+        .ok_or_else(|| error(number, "function reference identity"))?;
+    let effects = parts[4]
+        .strip_prefix("effects[")
+        .and_then(|effects| effects.strip_suffix(']'))
+        .ok_or_else(|| error(number, "function reference effects"))?;
+    Ok(MirFunctionReference {
+        identity: SymbolIdentity::new(
+            BubbleId::from_raw(parse_u32(identity.0, number)?),
+            SymbolId::from_raw(parse_u32(identity.1, number)?),
+        ),
+        parameters: parse_wrapped_types(parts[2], "params(", number)?,
+        results: parse_wrapped_types(parts[3], "results(", number)?,
+        effects: parse_effects(effects, number)?,
     })
 }
 
@@ -580,6 +612,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
             kind,
             MirInstructionKind::CallStandard { .. }
                 | MirInstructionKind::CallDirect { .. }
+                | MirInstructionKind::CallReferenced { .. }
                 | MirInstructionKind::CallDirectMethod { .. }
                 | MirInstructionKind::CallInterface { .. }
                 | MirInstructionKind::CallIndirect { .. }
@@ -728,6 +761,7 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     }
     if text.starts_with("callStandard")
         || text.starts_with("callDirect")
+        || text.starts_with("callReference")
         || text.starts_with("callIndirect")
         || text.starts_with("call.interface")
     {
@@ -993,6 +1027,23 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
             .ok_or_else(|| error(line, "malformed direct call"))?;
         return Ok(MirInstructionKind::CallDirect {
             function: SymbolId::from_raw(parse_u32(function, line)?),
+            arguments: parse_values(values, line)?,
+            declared_effects,
+            unwind,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("callReference b") {
+        let (identity, values) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "malformed referenced call"))?;
+        let (bubble, symbol) = identity
+            .split_once(":s")
+            .ok_or_else(|| error(line, "referenced call identity"))?;
+        return Ok(MirInstructionKind::CallReferenced {
+            function: SymbolIdentity::new(
+                BubbleId::from_raw(parse_u32(bubble, line)?),
+                SymbolId::from_raw(parse_u32(symbol, line)?),
+            ),
             arguments: parse_values(values, line)?,
             declared_effects,
             unwind,

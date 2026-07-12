@@ -67,7 +67,11 @@ Exit criterion: core language tests execute through MIR without LLVM.
 - exhaustive tagged-union matching and missing-case quick fixes;
 - closure conversion and captured variables;
 - allocation, precise stack/object maps, and bootstrap stop-the-world GC.
-- initial `Pop.Standard` collections, text, result, and iteration conformance.
+- initial `Pop.Standard` collections, text, result, and iteration conformance;
+- modular base-library source and focused test ownership under ADR 0035, so
+  ordinary API-family work stays outside compiler and backend crates;
+- conventional reserved source-root discovery and verified HIR/MIR contribution
+  probes before `.poplib` emission/loading completes the source-library build.
 
 Exit criterion: tests prove that normal class fields use resolved member access,
 not table or runtime-name lookup.

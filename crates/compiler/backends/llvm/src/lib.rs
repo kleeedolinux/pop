@@ -356,6 +356,19 @@ pub fn lower_mir_to_llvm_ir(
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
+    for reference in bubble.function_references() {
+        let result = llvm_results(reference.results(), types)?;
+        let parameters = reference
+            .parameters()
+            .iter()
+            .map(|type_id| llvm_type(*type_id, types))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        declarations.push(format!(
+            "declare {result} @{}({parameters})",
+            function_name(reference.identity().bubble(), reference.identity().symbol())
+        ));
+    }
     declarations.extend(runtime_declarations());
     declarations.extend(checked_integer_declarations());
     Ok(LlvmModule {
@@ -2043,6 +2056,18 @@ fn lower_instruction(
             &result,
             result_type,
             &format!("@{}", function_name(bubble, *callee)),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::CallReferenced {
+            function: callee,
+            arguments,
+            ..
+        } => call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(callee.bubble(), callee.symbol())),
             arguments,
             value_types,
             types,
