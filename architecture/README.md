@@ -47,6 +47,13 @@ compile-time evaluator, or portable optimizer.
 20. [Architecture conformance and regression policy](./19-architecture-conformance-and-regression-policy.md)
 21. [XML documentation comments](./20-xml-documentation-comments.md)
 22. [CLI, tooling, and units of code](./21-cli-tooling-and-code-units.md)
+23. [Public standard-library architecture](./22-public-standard-library-architecture.md)
+24. [Core and portable library catalog](./22.1-core-and-portable-library-catalog.md)
+25. [System, network, and security catalog](./22.2-system-network-security-catalog.md)
+26. [Data, observability, and tooling catalog](./22.3-data-observability-tooling-catalog.md)
+27. [Application, media, and science catalog](./22.4-application-media-science-catalog.md)
+28. [Public library API examples](./22.5-standard-library-api-examples.md)
+29. [Public library implementation plan](./22.6-standard-library-implementation-plan.md)
 
 The examples define the canonical syntax direction. The full grammar will grow
 with implementation, but `.pop`, the `pop` command, naming rules, namespace/
@@ -88,7 +95,10 @@ transplanted into a Luau-shaped file.
 - Source-visible built-in types and attributes use `PascalCase`, including
   `String`, `Int`, `Boolean`, `UInt32`, and `@Serializable`.
 - `Pop.Internal` is the trusted private compiler/runtime library;
-  `Pop.Standard` is the public compact BCL-inspired foundation.
+  `Pop.Standard` is the native Pop portable public foundation.
+- Public-library APIs optimize for short direct call sites and explicit cost;
+  convenience cannot hide allocation, copying, dispatch, authority, or native
+  transitions.
 - The `Pop` prelude is fixed, curated, and automatically available; ordinary
   standard-library use requires no `using` directives.
 - Namespace declarations use explicit `public`, `internal`, or `private`

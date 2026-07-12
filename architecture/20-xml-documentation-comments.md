@@ -92,6 +92,12 @@ Pop does not center `<exception>` because expected failure uses typed
 fix to `<error>` or `<panic>` unless a future FFI boundary has an explicit mapped
 exception contract.
 
+Public-library documentation also records allocation, ownership/copying,
+iteration/materialization, blocking/suspension, buffering/backpressure,
+dispatch, native/runtime transitions, target availability, and complexity when
+relevant. ADR 0032 requires these facts before an API stabilizes; numeric
+performance claims require linked reproducible benchmark baselines.
+
 ## Pop-specific contract tags
 
 ### Typed errors

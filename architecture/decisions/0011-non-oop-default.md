@@ -2,11 +2,12 @@
 
 - Status: accepted
 - Date: 2026-07-10
+- Related: ADR 0030 (native public standard-library architecture)
 
 ## Context
 
 Pop Lang needs native classes to replace Lua/Luau table conventions, but native
-classes could accidentally turn the language and BCL into an OOP-first ecosystem
+classes could accidentally turn the language and public library into an OOP-first ecosystem
 with deep hierarchies, static utility classes, method chains, and universal
 object assumptions.
 
@@ -46,4 +47,3 @@ and encourages hierarchy/dispatch where data/functions are clearer.
 
 Rejected because identity, encapsulated mutable state, native/foreign resources,
 and runtime polymorphism benefit from a real nominal class model.
-

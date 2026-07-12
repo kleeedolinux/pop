@@ -107,8 +107,9 @@ is a bug.
 naming, prelude, strong typing, non-OOP API style, error, reflection, allocation,
 or cross-backend contracts.
 
-Copying a .NET BCL API without adapting it to Pop Lang is library drift even if
-the .NET design is good in its original ecosystem.
+Treating a foreign platform library as Pop Lang's API or object-model template
+is library drift. Mature libraries may only inform coverage checklists; ADR 0030
+and the public standard-library architecture define the public contract.
 
 ### Documentation drift
 
@@ -223,7 +224,10 @@ Minimum traceability matrix:
 | Backend-neutral MIR | MIR, interpreter, LLVM, VM | verifier plus cross-backend conformance |
 | Restricted UDAs/compile time | compile-time engine | capability/string-injection negative tests |
 | Restricted reflection | compiler/runtime/base libraries | no runtime enumerate/get-by-name tests |
-| Non-OOP default | examples, BCL, analyzers | API baseline and `ApiDesign` tests |
+| Non-OOP default | examples, public library, analyzers | API baseline and `ApiDesign` tests |
+| Native public library tiers | package resolver, public library, documentation | tier graph, namespace, capability, and forbidden-pattern tests |
+| Concise APIs and explicit costs | public libraries, docs, analyzers, benchmarks | call-site, allocation/copy/dispatch, effect, and measured-budget tests |
+| Independent official extensions | package resolver, extension builds, tooling | manifest/version/dependency/namespace/standard-exclusion tests |
 | Compact prelude | resolver, `Pop.Standard` | exact prelude snapshot/collision tests |
 | Pop GC | compiler/runtime/backends | root/barrier/stress/latency correctness tests |
 | Diagnostic fixes | compiler/tooling | applicability, atomicity, postcondition tests |
@@ -261,6 +265,10 @@ Architecture CI should eventually verify:
   export/re-export syntax;
 - complete-word API rules, including `Iterable`/`Iterator`/`Sequence` baselines;
 - non-OOP standard API analyzer checks;
+- complete public root inventory with unique ownership/tier/status;
+- concise default/advanced/efficient call-site examples for each API family;
+- allocation, copying, view, dispatch, blocking/suspension, and native-boundary
+  contract checks;
 - compile-time/reflection capability negative tests;
 - native class field/method lowering without table/metatable lookup;
 - Module/Bubble behavior without `require` value tables;

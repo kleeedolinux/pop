@@ -408,11 +408,12 @@ The architecture documents are the current source of truth:
 architecture/       Language, runtime, compiler, and tooling design
 architecture/decisions/
                     Accepted Architecture Decision Records
-crates/compiler/    Compiler implementation
-crates/runtime/     Runtime and memory-management implementation
-crates/tools/       CLI, formatter, documentation, and conformance tools
-libraries/internal/ Bootstrap implementation libraries
-libraries/standard/ Standard library
+crates/compiler/    Syntax, resolution, types, compile time, HIR, MIR, drivers
+crates/extensions/  Independent Pop.Data/Ai/Cli/Rpc/Syntax/Lsp package builds
+crates/runtime/     PLRI and bootstrap/native runtime contracts
+crates/tools/       Architecture tests, formatter, documentation, CLI tooling
+libraries/internal/ Pop.Internal bootstrap foundations
+libraries/standard/ Pop.Standard bootstrap foundations
 ```
 
 The compiler and runtime are implemented in Rust. Rust is the implementation language of the toolchain; it does not define Pop source syntax or its package model.

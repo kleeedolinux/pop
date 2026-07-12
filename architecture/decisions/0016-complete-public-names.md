@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-10
+- Superseded in part by: ADR 0031 and ADR 0032 (illustrative public names and call-site policy)
 
 ## Context
 
@@ -13,6 +14,10 @@ an algorithm namespace.
 
 ## Decision
 
+> **Supersession note:** Complete-word and casing rules remain accepted. ADRs
+> 0031 and 0032 replace the illustrative `Http.Client`/`Text.Builder` examples
+> and add direct call-site and cost requirements.
+
 Public language and library identifiers use complete words. The sequence
 protocols are `Iterable<T>` and `Iterator<T>`; algorithms live under
 `Sequence.map`, `Sequence.filter`, and `Sequence.fold`. `Iter` and `iter.map`
@@ -23,8 +28,8 @@ in canonical/public APIs. Established technical initialisms and conventional
 domain words remain permitted and are cased as words: `Json`, `Http`, `Io`,
 `Utf8`, `Ffi`, `Gc`, `Guid`, and `Async`.
 
-Namespaces provide the brevity: prefer `Json.Value`, `Http.Client`, and
-`Text.Builder` rather than repeating context in long type names. Types,
+Namespaces provide the brevity: prefer `Json.Value`, `Http.Request`, and
+`Bytes.Buffer` rather than repeating context in long type names. Types,
 namespaces, and attributes use `PascalCase`; values and functions use
 `camelCase`; only constants use `UPPER_SNAKE_CASE`.
 

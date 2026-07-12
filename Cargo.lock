@@ -83,6 +83,9 @@ dependencies = [
 [[package]]
 name = "pop-architecture-tests"
 version = "0.1.0"
+dependencies = [
+ "pop-projects",
+]
 
 [[package]]
 name = "pop-backend-api"
@@ -209,6 +212,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "pop-extension-ai"
+version = "0.1.0"
+dependencies = [
+ "pop-extension-data",
+]
+
+[[package]]
+name = "pop-extension-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pop-extension-data"
+version = "0.1.0"
+
+[[package]]
+name = "pop-extension-lsp"
+version = "0.1.0"
+dependencies = [
+ "pop-extension-rpc",
+ "pop-extension-syntax",
+]
+
+[[package]]
+name = "pop-extension-rpc"
+version = "0.1.0"
+
+[[package]]
+name = "pop-extension-syntax"
+version = "0.1.0"
+
+[[package]]
 name = "pop-formatter"
 version = "0.1.0"
 dependencies = [
@@ -243,6 +277,7 @@ name = "pop-language-server"
 version = "0.1.0"
 dependencies = [
  "pop-diagnostics",
+ "pop-extension-lsp",
  "pop-projects",
  "pop-query",
  "pop-source",

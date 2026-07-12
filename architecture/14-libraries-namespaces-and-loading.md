@@ -82,6 +82,13 @@ not an open namespace search.
 `Pop.Standard` is the sole normal implicit Bubble reference. Its fixed trusted
 `@Prelude` surface supplies root types/functions and selected namespace names.
 
+Official extensions are ordinary explicit Package dependencies. ADR 0033 starts
+with `Pop.Data`, `Pop.Ai`, `Pop.Cli`, `Pop.Rpc`, `Pop.Syntax`, and `Pop.Lsp`.
+They have independent manifests, versions, dependency graphs, and library
+Bubbles even when developed in this repository. No toolchain installation or
+application receives them through the implicit `Pop.Standard` reference; normal
+manifest resolution is always required.
+
 ## Modules, Bubbles, Packages, and Workspaces
 
 | Term | Meaning |

@@ -511,11 +511,20 @@ The toolchain supplies exactly two reserved foundational library Bubbles:
 
 - `Pop.Internal`: trusted compiler/runtime primitives, intrinsics, GC/ABI
   bridges, and platform adapters; never directly referenced by user code;
-- `Pop.Standard`: public compact BCL-inspired APIs and the fixed curated prelude.
+- `Pop.Standard`: native Pop portable public APIs and the fixed curated prelude.
 
-`Pop.Standard` depends on `Pop.Internal`; the inverse is forbidden. Do not copy
-.NET BCL APIs unchanged. Adapt them to Pop's static, typed-error, UTF-8,
-restricted-reflection, function/data-first, compact-namespace design.
+`Pop.Standard` depends on `Pop.Internal`; the inverse is forbidden. Its public
+tiers, naming, usability, cost, and capability boundaries are defined by ADR
+0030, ADR 0031, ADR 0032, and
+`architecture/22-public-standard-library-architecture.md`. Mature platform
+libraries are capability checklists, never API/object-model templates. Common
+calls stay short and direct; advanced control exposes typed options, views,
+buffers, streams, and scopes without hiding allocation or dispatch.
+
+Official extensions such as `Pop.Data`, `Pop.Ai`, `Pop.Cli`, `Pop.Rpc`,
+`Pop.Syntax`, and `Pop.Lsp` are normal independently versioned Packages under
+ADR 0033. They never enter the fixed prelude or become implicit
+`Pop.Standard` dependencies.
 
 Library Bubbles emit self-describing `.poplib` artifacts with
 `bubble.manifest`, public `reference.metadata`, separate `documentation.xml`,

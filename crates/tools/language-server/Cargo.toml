@@ -9,6 +9,7 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+pop-extension-lsp.workspace = true
 pop-diagnostics.workspace = true
 pop-projects.workspace = true
 pop-query.workspace = true
