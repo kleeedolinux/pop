@@ -3,7 +3,7 @@ use pop_runtime_native::{
     allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
     pop_rt_allocate_array, pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_get,
     pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage, pop_rt_release_root,
-    pop_rt_retain_root, pop_rt_string_equal, request_abi_collection,
+    pop_rt_retain_root, pop_rt_string_equal, pop_rt_string_read, request_abi_collection,
 };
 use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -19,7 +19,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 0);
+    assert_eq!(pop_rt_abi_minor(), 1);
     assert_eq!(pop_rt_gc_stage(), 1);
 }
 
@@ -39,6 +39,49 @@ fn bootstrap_strings_preserve_valid_utf8_and_compare_by_value() {
 
     let invalid = [0xff_u8];
     assert_eq!(allocate_utf8_string_literal(&invalid), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn bootstrap_string_read_preserves_empty_ascii_and_non_ascii_utf8() {
+    let _guard = abi_test_lock();
+    for expected in ["", "teste", "Pop 🫧"] {
+        let reference = allocate_utf8_string_literal(expected.as_bytes());
+        let encoded_length = unsafe { pop_rt_string_read(reference, std::ptr::null_mut(), 0) };
+        assert_eq!(
+            encoded_length,
+            u64::try_from(expected.len()).expect("portable test length") + 1
+        );
+
+        let mut bytes = vec![0_u8; expected.len()];
+        let copied = unsafe {
+            pop_rt_string_read(
+                reference,
+                bytes.as_mut_ptr(),
+                u64::try_from(bytes.len()).expect("portable test length"),
+            )
+        };
+        assert_eq!(copied, encoded_length);
+        assert_eq!(bytes, expected.as_bytes());
+    }
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn bootstrap_string_read_rejects_invalid_handles_and_small_buffers() {
+    let _guard = abi_test_lock();
+    let string = allocate_utf8_string_literal(b"teste");
+    let non_string = pop_rt_allocate_object(1);
+    let mut bytes = [0xAA_u8; 4];
+
+    assert_eq!(unsafe { pop_rt_string_read(0, std::ptr::null_mut(), 0) }, 0);
+    assert_eq!(
+        unsafe { pop_rt_string_read(non_string, std::ptr::null_mut(), 0) },
+        0
+    );
+    let copied = unsafe { pop_rt_string_read(string, bytes.as_mut_ptr(), 4) };
+    assert_eq!(copied, 0);
+    assert_eq!(bytes, [0xAA; 4]);
 }
 
 #[test]

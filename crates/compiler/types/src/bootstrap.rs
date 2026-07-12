@@ -307,14 +307,13 @@ impl BootstrapSchema {
         &self.standard_functions
     }
 
-    #[must_use]
-    pub fn standard_function_by_source_name(
-        &self,
-        name: &str,
-    ) -> Option<&BootstrapStandardFunctionEntry> {
+    pub fn standard_functions_by_source_name<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a BootstrapStandardFunctionEntry> + 'a {
         self.standard_functions
             .iter()
-            .find(|entry| entry.prelude && entry.source_name == name)
+            .filter(move |entry| entry.prelude && entry.source_name == name)
     }
 
     /// Finds a trusted prelude compiler-attribute candidate by source name.
@@ -802,27 +801,28 @@ fn validate_compiler_attributes(
 fn validate_standard_functions(
     entries: &[BootstrapStandardFunctionEntry],
 ) -> Result<(), BootstrapSchemaError> {
-    if entries.len() != 1 {
+    if entries.len() != 2 {
         return Err(error(
             "standard function",
             2,
-            "bootstrap requires exactly one standard function",
+            "bootstrap requires exactly two standard functions",
         ));
     }
-    let entry = &entries[0];
-    if entry.id.raw() != 0
-        || entry.source_name != "print"
-        || entry.owner_bubble != "Pop.Standard"
-        || entry.parameter_types != ["Int"]
-        || !entry.result_types.is_empty()
-        || entry.effects != ["AmbientIo"]
-        || !entry.prelude
-    {
-        return Err(error(
-            "standard function",
-            2,
-            "invalid trusted print contract",
-        ));
+    for (index, (entry, parameter_type)) in entries.iter().zip(["Int", "String"]).enumerate() {
+        if entry.id.raw() != u32::try_from(index).unwrap_or(u32::MAX)
+            || entry.source_name != "print"
+            || entry.owner_bubble != "Pop.Standard"
+            || entry.parameter_types != [parameter_type]
+            || !entry.result_types.is_empty()
+            || entry.effects != ["AmbientIo"]
+            || !entry.prelude
+        {
+            return Err(error(
+                "standard function",
+                index + 3,
+                "invalid trusted print contract",
+            ));
+        }
     }
     Ok(())
 }

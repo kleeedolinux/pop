@@ -55,19 +55,31 @@ fn intrinsic_ids_are_unique_typed_and_backend_neutral() {
 }
 
 #[test]
-fn standard_print_has_a_stable_typed_prelude_identity() {
+fn standard_print_overloads_have_stable_typed_prelude_identities() {
     let schema = embedded_bootstrap_schema().expect("valid embedded bootstrap schema");
-    let print = schema
-        .standard_function_by_source_name("print")
-        .expect("trusted print function");
+    let print: Vec<_> = schema
+        .standard_functions()
+        .iter()
+        .filter(|entry| entry.source_name() == "print")
+        .collect();
 
-    assert_eq!(print.id().raw(), 0);
-    assert_eq!(print.owner_bubble(), "Pop.Standard");
-    assert_eq!(print.parameter_types(), ["Int"]);
-    assert!(print.result_types().is_empty());
-    assert_eq!(print.effects(), ["AmbientIo"]);
-    assert!(print.is_in_prelude());
-    assert!(schema.standard_function_by_source_name("Print").is_none());
+    assert_eq!(print.len(), 2);
+    assert_eq!(print[0].id().raw(), 0);
+    assert_eq!(print[0].parameter_types(), ["Int"]);
+    assert_eq!(print[1].id().raw(), 1);
+    assert_eq!(print[1].parameter_types(), ["String"]);
+    assert!(print.iter().all(|entry| {
+        entry.owner_bubble() == "Pop.Standard"
+            && entry.result_types().is_empty()
+            && entry.effects() == ["AmbientIo"]
+            && entry.is_in_prelude()
+    }));
+    assert!(
+        schema
+            .standard_functions_by_source_name("Print")
+            .next()
+            .is_none()
+    );
 }
 
 #[test]

@@ -23,10 +23,19 @@ and Rust adapters.
 See [Base libraries](./16-base-libraries.md).
 
 The standalone native bootstrap links Rust static archives for both foundation
-libraries. A trusted `Pop.Standard` prelude-function identity maps the typed
-source call `print(Int)` to a fixed integer-output adapter. This adapter is not
-a PLRI operation, and its host ABI spelling never participates in source name
-resolution.
+libraries. Trusted `Pop.Standard` prelude-function identities map the typed
+source calls `print(Int)` and `print(String)` to fixed output adapters. These
+adapters are not PLRI operations, and their host ABI spellings never
+participate in source name resolution.
+
+The bootstrap runtime supplies a versioned, read-only UTF-8 string-copy ABI for
+the trusted string-output adapter. It validates the managed `String` identity,
+distinguishes an empty string from failure, and rejects undersized buffers.
+This addition advances the bootstrap native ABI from version 1.0 to 1.1.
+`Pop.Internal` contains the unsafe ABI call and exposes a checked adapter to
+`Pop.Standard`; generated MIR cannot inspect string storage or call the ABI by
+spelling. This bootstrap service does not expose general object memory,
+reflection, or string mutation.
 
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and

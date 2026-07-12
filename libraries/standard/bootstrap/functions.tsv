@@ -1,3 +1,4 @@
 schemaVersion	1
 functionId	sourceName	ownerBubble	parameterTypes	resultTypes	effects	prelude
 0	print	Pop.Standard	Int	-	AmbientIo	true
+1	print	Pop.Standard	String	-	AmbientIo	true

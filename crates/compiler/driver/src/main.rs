@@ -7,10 +7,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
-use pop_mir::lower_hir_bubble;
+use pop_mir::{lower_hir_bubble, optimize_mir};
 use pop_projects::{BubbleKind, discover_conventional_bubbles, parse_package_manifest};
 use pop_resolve::Visibility;
 use pop_source::SourceFile;
@@ -21,6 +22,7 @@ const USAGE: &str = "\
 Usage:
     pop check <source.pop> [--dump <hir|mir>]...
     pop build <source.pop> --output <executable>
+    pop transpile <source.pop> --to c
     pop run <source.pop> [-- <arguments>...]
     pop run --manifestPath <bubble.toml> [-- <arguments>...]
 
@@ -46,6 +48,9 @@ enum CommandLine {
         source_path: PathBuf,
         output_path: PathBuf,
     },
+    TranspileToC {
+        source_path: PathBuf,
+    },
     Run {
         source_path: PathBuf,
         arguments: Vec<OsString>,
@@ -64,6 +69,7 @@ fn main() -> ExitCode {
             source_path,
             output_path,
         }) => build_source(&source_path, &output_path),
+        Ok(CommandLine::TranspileToC { source_path }) => transpile_source_to_c(&source_path),
         Ok(CommandLine::Run {
             source_path,
             arguments,
@@ -89,6 +95,9 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Comm
     }
     if command == "build" {
         return parse_build_arguments(arguments);
+    }
+    if command == "transpile" {
+        return parse_transpile_arguments(arguments);
     }
     if command == "run" {
         return parse_run_arguments(arguments);
@@ -133,6 +142,31 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Comm
         return Err("`pop check` requires a source path with the .pop extension".to_owned());
     }
     Ok(CommandLine::Check { source_path, dumps })
+}
+
+fn parse_transpile_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, String> {
+    let source_path = required_source_path(arguments.next(), "transpile")?;
+    let Some(option) = arguments.next() else {
+        return Err("`pop transpile` requires `--to c`".to_owned());
+    };
+    if option != "--to" {
+        return Err(format!("unsupported option `{}`", option.to_string_lossy()));
+    }
+    let Some(target) = arguments.next() else {
+        return Err("`--to` requires a backend source format; expected c".to_owned());
+    };
+    if target != "c" {
+        return Err(format!(
+            "unsupported transpilation target `{}`; expected c",
+            target.to_string_lossy()
+        ));
+    }
+    if arguments.next().is_some() {
+        return Err("`pop transpile` received unexpected arguments".to_owned());
+    }
+    Ok(CommandLine::TranspileToC { source_path })
 }
 
 fn parse_build_arguments(
@@ -328,6 +362,33 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let result = link_native_executable(std::slice::from_ref(&object_path), output_path);
     let _ = fs::remove_file(object_path);
     result
+}
+
+fn transpile_source_to_c(source_path: &Path) -> ExitCode {
+    let Some(program) = lower_native_source(source_path) else {
+        return ExitCode::FAILURE;
+    };
+    let NativeProgram { mir, types, entry } = program;
+    let optimized = match optimize_mir(mir, &types) {
+        Ok(mir) => mir,
+        Err(errors) => {
+            eprintln!("pop: internal compiler error: optimized MIR verification failed");
+            for error in errors {
+                eprintln!("  {error:?}");
+            }
+            return ExitCode::from(101);
+        }
+    };
+    let options = CLoweringOptions::default()
+        .with_entry_point(entry.expect("standalone transpilation has a verified entry"));
+    let translation = match lower_mir_to_c(&optimized, &types, options) {
+        Ok(translation) => translation,
+        Err(error) => {
+            eprintln!("pop: C lowering failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    write_output(translation.as_str())
 }
 
 fn run_source(source_path: &Path, arguments: &[OsString]) -> ExitCode {

@@ -2022,6 +2022,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let [name] = path else {
             return None;
         };
+        if self.binding_by_name(name).is_some() {
+            return None;
+        }
         if self
             .resolver
             .database()
@@ -2031,46 +2034,74 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         {
             return None;
         }
-        let entry = self
+        let entries: Vec<_> = self
             .resolver
             .schema()
-            .standard_function_by_source_name(name)?;
-        let function = entry.id();
-        let parameter_names = entry.parameter_types().to_vec();
-        let result_names = entry.result_types().to_vec();
-        if arguments.len() != parameter_names.len() {
+            .standard_functions_by_source_name(name)
+            .map(|entry| {
+                (
+                    entry.id(),
+                    entry.parameter_types().to_vec(),
+                    entry.result_types().to_vec(),
+                )
+            })
+            .collect();
+        let first = entries.first()?;
+        let arity_candidates: Vec<_> = entries
+            .iter()
+            .filter(|(_, parameters, _)| parameters.len() == arguments.len())
+            .collect();
+        if arity_candidates.is_empty() {
             self.diagnostics.push(type_diagnostics::wrong_value_arity(
                 span,
                 "call",
-                parameter_names.len(),
+                first.1.len(),
                 arguments.len(),
             ));
             return None;
         }
-        let parameter_types = parameter_names
-            .iter()
-            .map(|name| self.resolver.arena().source_type(name))
-            .collect::<Option<Vec<_>>>()?;
-        let result_types = result_names
-            .iter()
-            .map(|name| self.resolver.arena().source_type(name))
-            .collect::<Option<Vec<_>>>()?;
         let mut typed_arguments = Vec::with_capacity(arguments.len());
-        for (argument, expected) in arguments.iter().zip(parameter_types) {
-            let typed = self.check_expression_expected(
-                argument,
-                Some(ExpectedExpressionType::plain(expected)),
-            )?;
-            self.require_same_type(expected, typed.type_id(), typed.span(), span);
-            typed_arguments.push(typed);
+        for argument in arguments {
+            typed_arguments.push(self.check_expression(argument)?);
         }
+        let argument_types: Vec<_> = typed_arguments
+            .iter()
+            .map(TypedExpression::type_id)
+            .collect();
+        let candidates: Vec<_> = arity_candidates
+            .into_iter()
+            .filter_map(|(function, parameter_names, result_names)| {
+                let parameter_types = parameter_names
+                    .iter()
+                    .map(|name| self.resolver.arena().source_type(name))
+                    .collect::<Option<Vec<_>>>()?;
+                let result_types = result_names
+                    .iter()
+                    .map(|name| self.resolver.arena().source_type(name))
+                    .collect::<Option<Vec<_>>>()?;
+                Some((*function, parameter_types, result_types))
+            })
+            .collect();
+        let Some((function, _, result_types)) = candidates
+            .iter()
+            .find(|(_, parameter_types, _)| *parameter_types == argument_types)
+        else {
+            if let Some((_, expected_types, _)) = candidates.first() {
+                for (argument, expected) in typed_arguments.iter().zip(expected_types) {
+                    self.require_same_type(*expected, argument.type_id(), argument.span(), span);
+                }
+            }
+            return None;
+        };
         Some(CheckedCall {
             call: TypedCall {
-                dispatch: TypedCallDispatch::Standard { function },
+                dispatch: TypedCallDispatch::Standard {
+                    function: *function,
+                },
                 arguments: typed_arguments,
                 span,
             },
-            results: result_types,
+            results: result_types.clone(),
         })
     }
 

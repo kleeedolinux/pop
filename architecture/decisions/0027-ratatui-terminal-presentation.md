@@ -1,6 +1,6 @@
 # ADR 0027: Ratatui Terminal Presentation
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-07-11
 - Amends: ADR 0018 if accepted
 - Relates to: ADR 0010, ADR 0017

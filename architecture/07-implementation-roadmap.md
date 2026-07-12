@@ -89,6 +89,14 @@ not table or runtime-name lookup.
 Exit criterion: representative multi-module programs produce native executables
 whose behavior matches the interpreter.
 
+Alongside this milestone,
+[ADR 0031](./decisions/0031-experimental-secure-c-transpilation-backend.md)
+authorizes an isolated experimental C11 source backend. Its first runtime-free
+slice consumes optimized verified MIR, supports scalar control flow, direct
+calls, and typed integer/literal-string output, preserves checked numeric
+semantics without C undefined behavior, and is invoked through `pop transpile
+<source.pop> --to c`. It is not a replacement for LLVM or a runtime milestone.
+
 ## Milestone 5 — Language depth
 
 - generics and specialization strategy;

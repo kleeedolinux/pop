@@ -14,6 +14,7 @@ flowchart LR
     M --> O[Optimized MIR]
     O --> L[LLVM backend]
     L --> N[Native object]
+    O -. experimental .-> C[C11 source backend]
     O -. future .-> V[VM bytecode backend]
     O -. tools .-> I[MIR interpreter / verifier]
 ```
@@ -149,6 +150,11 @@ A backend receives:
 It returns an artifact plus structured diagnostics. It cannot mutate compiler
 global state or call back into parsing, resolution, type checking, or compile-
 time evaluation.
+
+The experimental C backend follows the same handoff after portable MIR
+optimization. It emits deterministic C11 for its declared runtime-free
+capability subset and rejects unsupported MIR before publishing source; it never
+reconstructs semantics from Pop source text.
 
 ## Tooling and incremental queries
 

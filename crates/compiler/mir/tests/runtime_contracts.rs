@@ -109,6 +109,25 @@ fn checked_operations_name_every_portable_trap_kind() {
 }
 
 #[test]
+fn standard_string_output_identity_requires_a_string_argument() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function write()\n\
+             print(\"teste\")\n\
+         end\n",
+    );
+    let invalid_dump = mir.dump().replace("callStandard sf1", "callStandard sf0");
+    let invalid = parse_mir_dump(&invalid_dump).expect("structurally valid MIR");
+    let errors = verify_mir_bubble(&invalid, &types).expect_err("identity mismatch");
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error, MirVerificationError::WrongOperandType { .. }))
+    );
+}
+
+#[test]
 fn table_allocations_carry_precise_logical_key_and_value_maps() {
     let (mir, _) = lower(
         "namespace Main\n\

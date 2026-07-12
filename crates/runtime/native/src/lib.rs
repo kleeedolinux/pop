@@ -33,7 +33,7 @@ pub extern "C" fn pop_rt_abi_major() -> u16 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_abi_minor() -> u16 {
-    0
+    1
 }
 
 #[allow(unsafe_code)]
@@ -248,6 +248,60 @@ pub fn allocate_utf8_string_literal(bytes: &[u8]) -> u64 {
         return 0;
     };
     allocate_utf8_string(&mut runtime, bytes).map_or(0, ManagedReference::raw)
+}
+
+/// Reads one immutable UTF-8 string through the bootstrap handle boundary.
+///
+/// The return value is the byte length plus one, reserving zero as failure.
+/// Passing a null target queries the required length without copying. A
+/// non-null target must provide at least the complete byte length; failures do
+/// not write partial data.
+///
+/// # Safety
+///
+/// When `target` is non-null, it must address `capacity` writable bytes for the
+/// duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_string_read(reference: u64, target: *mut u8, capacity: u64) -> u64 {
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Some(allocation) = runtime.objects.get(&ManagedReference::new(reference)) else {
+        return 0;
+    };
+    if allocation.type_id != RuntimeTypeId::new(1) {
+        return 0;
+    }
+    let mut bytes = Vec::with_capacity(allocation.slots.len());
+    for slot in &allocation.slots {
+        let SlotValue::Scalar(value) = slot else {
+            return 0;
+        };
+        let Ok(byte) = u8::try_from(*value) else {
+            return 0;
+        };
+        bytes.push(byte);
+    }
+    if std::str::from_utf8(&bytes).is_err() {
+        return 0;
+    }
+    let Ok(length) = u64::try_from(bytes.len()) else {
+        return 0;
+    };
+    let Some(encoded_length) = length.checked_add(1) else {
+        return 0;
+    };
+    if target.is_null() {
+        return encoded_length;
+    }
+    if capacity < length {
+        return 0;
+    }
+    // SAFETY: The caller contract guarantees a writable buffer of at least
+    // `length` bytes, and `bytes` owns exactly that many initialized bytes.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len()) };
+    encoded_length
 }
 
 fn allocate_utf8_string(

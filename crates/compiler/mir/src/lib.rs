@@ -4894,12 +4894,16 @@ fn verify_callable_instruction(
             arguments,
             ..
         } => {
-            if function.raw() == 0 {
-                if let Some(int) = arena.source_type("Int") {
-                    verify_call_signature(instruction, arguments, &[int], &[], values, errors);
+            let parameter = match function.raw() {
+                0 => arena.source_type("Int"),
+                1 => arena.source_type("String"),
+                _ => {
+                    errors.push(MirVerificationError::UnknownStandardFunction(*function));
+                    None
                 }
-            } else {
-                errors.push(MirVerificationError::UnknownStandardFunction(*function));
+            };
+            if let Some(parameter) = parameter {
+                verify_call_signature(instruction, arguments, &[parameter], &[], values, errors);
             }
         }
         MirInstructionKind::CallDirectMethod {

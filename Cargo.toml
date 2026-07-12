@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/compiler/backend-api",
+    "crates/compiler/backends/c",
     "crates/compiler/backends/llvm",
     "crates/compiler/backends/mir-interp",
     "crates/compiler/backends/vm",
@@ -52,6 +53,7 @@ pop-hir = { path = "crates/compiler/hir" }
 pop-mir = { path = "crates/compiler/mir" }
 pop-target = { path = "crates/compiler/target" }
 pop-backend-api = { path = "crates/compiler/backend-api" }
+pop-backend-c = { path = "crates/compiler/backends/c" }
 pop-backend-llvm = { path = "crates/compiler/backends/llvm" }
 pop-backend-mir-interp = { path = "crates/compiler/backends/mir-interp" }
 pop-backend-vm = { path = "crates/compiler/backends/vm" }

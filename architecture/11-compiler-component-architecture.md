@@ -51,6 +51,7 @@ compiler/
   target/           backend-neutral capability and layout requests
   backend-api/      canonical MIR/backend contract and artifact diagnostics
   backends/
+    c/              experimental optimized MIR-to-C11 source lowering
     llvm/           LLVM lowering and emission only
     mir-interp/      reference MIR interpreter
     vm/             future VM-private bytecode/lowering
@@ -282,6 +283,7 @@ The driver may emit:
 - syntax/HIR/MIR textual dumps for debugging;
 - dependency metadata;
 - retained metadata projections;
+- deterministic C11 source as an experimental backend artifact;
 - LLVM IR/bitcode as optional backend artifacts;
 - native object, library, or executable files;
 - future VM bytecode.
@@ -298,7 +300,7 @@ The default debug/testing pipeline verifies:
 3. type substitution and typed HIR invariants;
 4. compile-time value canonicality and capability isolation;
 5. MIR after construction and every transform;
-6. LLVM IR or VM bytecode after backend lowering;
+6. C11 source, LLVM IR, or VM bytecode after backend lowering;
 7. artifact/runtime ABI version compatibility;
 8. architecture traceability and forbidden Lua-regression invariants.
 

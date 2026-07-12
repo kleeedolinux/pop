@@ -77,6 +77,30 @@ and is not read by semantic compiler stages.
 Compile-time execution never runs through LLVM. This keeps editor analysis,
 cross-compilation, cache behavior, and the future VM deterministic and aligned.
 
+## Experimental C backend
+
+The experimental C backend lowers optimized verified canonical MIR to one
+deterministic ISO C11 translation unit. It uses exact-width scalar types,
+backend-private checked arithmetic helpers, ID-derived symbols, and explicit
+control flow. The generated source is shaped for normal C compiler inlining and
+optimization, but optimization can never remove an observable Pop Lang trap or
+depend on C undefined behavior.
+
+The initial runtime-free capability set covers scalar constants and operations,
+direct calls, branches, returns, and the stable typed integer/string output
+identities. Literal strings lower to private byte slices and C standard I/O;
+their bytes are emitted numerically rather than injected as C text. Managed
+allocation, PLRI, other standard calls, aggregate object layouts, dispatch,
+closures, panic and unwinding, coroutines, unsafe memory, and FFI are rejected
+during backend validation. The backend does not invent a placeholder runtime or
+expose a raw pointer fallback.
+
+The bootstrap driver exposes this experiment as `pop transpile <source.pop>
+--to c`. Successful output is C source on standard output; failure publishes no
+partial artifact. C text is disposable output and is not a stable ABI, cache,
+or semantic contract. See
+[ADR 0031](./decisions/0031-experimental-secure-c-transpilation-backend.md).
+
 ## Future VM backend
 
 The VM backend should lower canonical MIR to typed or register-based bytecode.

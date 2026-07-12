@@ -1,0 +1,9 @@
+namespace Main
+
+private function answer(left: Int, right: Int): Int
+    return left + right
+end
+
+function main(): Int
+    return answer(19, 23)
+end
