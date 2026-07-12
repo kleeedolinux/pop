@@ -1,4 +1,4 @@
-# Pop Lang
+# Pop Language
 
 Pop Lang is a native, strongly and statically typed programming language
 inspired directly by Luau. It keeps Luau's lightweight syntax, readable
