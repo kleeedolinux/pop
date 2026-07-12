@@ -1,0 +1,11 @@
+namespace BenchmarkIntegerLoop
+
+function main()
+    local index = 1
+    local value = 0
+    repeat
+        value = value + index
+        index = index + 1
+    until index == 50000001
+    print(value)
+end

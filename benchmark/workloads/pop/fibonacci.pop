@@ -1,0 +1,18 @@
+namespace BenchmarkFibonacci
+
+private function fibonacci(value: Int): Int
+    if value < 2 then
+        return value
+    end
+    return fibonacci(value - 1) + fibonacci(value - 2)
+end
+
+function main()
+    local index = 0
+    local total = 0
+    repeat
+        total = total + fibonacci(28)
+        index = index + 1
+    until index == 30
+    print(total)
+end

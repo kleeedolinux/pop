@@ -1,0 +1,14 @@
+namespace BenchmarkArrayLoop
+
+function main()
+    local values: {Int} = { 0 }
+    local index = 1
+    local total = 0
+    repeat
+        values[1] = index
+        local current: Int? = values[1]
+        total = total + index
+        index = index + 1
+    until index == 1000001
+    print(total)
+end

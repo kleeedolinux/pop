@@ -1,0 +1,574 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "benchmark"
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "optparse"
+require "rbconfig"
+require "shellwords"
+require "time"
+
+# A small DSL keeps the benchmark matrix declarative while the runner owns the
+# common provisioning, timing, result, and report behavior.
+module PopBenchmark
+  ROOT = File.expand_path("../..", __dir__)
+  DIRECTORY = File.join(ROOT, "benchmark")
+  TOOL_DIRECTORY = File.join(DIRECTORY, ".tools")
+  RESULT_DIRECTORY = File.join(DIRECTORY, "results")
+  LDC_VERSION = "1.42.0"
+  LDC_LINUX_SHA256 = "a7bc9c956138f558cadf9c962352f59d41c80df6eb3ae3f8039f25be14a69303"
+
+  Runtime = Data.define(:id, :name, :source_directory, :source_extension, :command, :provisioner, :builder, :mode)
+  Workload = Data.define(:id, :name, :description)
+
+  class Registry
+    attr_reader :runtimes, :workloads
+
+    def initialize
+      @runtimes = []
+      @workloads = []
+    end
+
+    def runtime(id, name:, extension:, command:, provisioner:, builder: nil, mode: "interpreted", directory: extension)
+      @runtimes << Runtime.new(id, name, directory, extension, command, provisioner, builder, mode)
+    end
+
+    def workload(id, name:, description:)
+      @workloads << Workload.new(id, name, description)
+    end
+  end
+
+  REGISTRY = Registry.new
+  REGISTRY.instance_eval do
+    runtime "lua", name: "Lua 5.5.0", extension: "lua", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "lua", "bin", "lua"), source] }, provisioner: :lua
+    runtime "luajit", name: "LuaJIT 2.1", extension: "lua", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "luajit", "bin", "luajit-2.1.0-beta3"), source] }, provisioner: :luajit, mode: "JIT"
+    runtime "luau", name: "Luau 0.729", extension: "luau", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "luau", "luau"), source] }, provisioner: :luau
+    runtime "luaujit", name: "Luau 0.729 native codegen", extension: "luau", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "luaujit", "luau"), "--codegen", source] }, provisioner: :luaujit, mode: "native JIT"
+    runtime "ruby", name: "Ruby 3.4", extension: "rb", directory: "ruby", command: ->(source, _) { [RbConfig.ruby, source] }, provisioner: :ruby
+    runtime "go", name: "Go 1.26", extension: "go", command: ->(_, artifact) { [artifact] }, provisioner: :go, builder: :go, mode: "ahead of time"
+    runtime "c", name: "C · Clang 22 -O3", extension: "c", command: ->(_, artifact) { [artifact] }, provisioner: :c, builder: :c, mode: "ahead of time"
+    runtime "d", name: "D · LDC 1.42 -O3", extension: "d", command: ->(_, artifact) { [artifact] }, provisioner: :ldc, builder: :d, mode: "ahead of time"
+    runtime "csharp", name: "C# · .NET 10", extension: "cs", directory: "csharp", command: ->(_, artifact) { [artifact] }, provisioner: :csharp, builder: :csharp, mode: "tiered JIT"
+    runtime "crystal", name: "Crystal 1.20 · release", extension: "cr", directory: "crystal", command: ->(_, artifact) { [artifact] }, provisioner: :crystal, builder: :crystal, mode: "ahead of time"
+    runtime "poplang", name: "Pop Lang · LLVM O3", extension: "pop", command: ->(_, artifact) { [artifact] }, provisioner: :poplang, builder: :poplang, mode: "ahead of time"
+
+    workload "fibonacci", name: "Recursive Fibonacci", description: "Repeated recursive integer calls; prints a checksum."
+    workload "integerLoop", name: "Integer loop", description: "Integer arithmetic in a counted loop; prints a checksum."
+    workload "tableLoop", name: "Array loop", description: "Builds and sums a numeric collection; prints a checksum."
+  end
+
+  module Command
+    module_function
+
+    def run(*arguments, chdir: ROOT, environment: {})
+      output, status = Open3.capture2e(environment, *arguments, chdir: chdir)
+      raise "command failed (#{Shellwords.join(arguments)}):\n#{output}" unless status.success?
+      output
+    end
+
+    def download(url, output)
+      FileUtils.mkdir_p(File.dirname(output))
+      run("curl", "--fail", "--location", "--retry", "3", "--output", output, url)
+    end
+  end
+
+  module Provision
+    module_function
+
+    def runtime(runtime)
+      send(runtime.provisioner)
+    end
+
+    def host
+      @host ||= begin
+        cpu = RbConfig::CONFIG.fetch("host_cpu")
+        os = RbConfig::CONFIG.fetch("host_os")
+        raise "only x86_64 hosts are currently supported" unless cpu.match?(/x86_64|amd64/)
+        os.match?(/darwin/) ? :macos : (os.match?(/linux/) ? :linux : raise("unsupported host #{os}"))
+      end
+    end
+
+    def archive(url, name)
+      path = File.join(TOOL_DIRECTORY, "downloads", name)
+      Command.download(url, path) unless File.file?(path)
+      path
+    end
+
+    def lua
+      executable = File.join(TOOL_DIRECTORY, "lua", "bin", "lua")
+      return if File.executable?(executable)
+      source = archive("https://www.lua.org/ftp/lua-5.5.0.tar.gz", "lua-5.5.0.tar.gz")
+      build_source("lua", source, "lua-5.5.0") do |directory, prefix|
+        target = host == :macos ? "macosx" : "linux"
+        Command.run("make", target, "MYCFLAGS=-O3 -fPIC", "INSTALL_TOP=#{prefix}", chdir: directory)
+        Command.run("make", "install", "INSTALL_TOP=#{prefix}", chdir: directory)
+      end
+    end
+
+    def luajit
+      executable = File.join(TOOL_DIRECTORY, "luajit", "bin", "luajit-2.1.0-beta3")
+      return if File.executable?(executable)
+      source = archive("https://github.com/LuaJIT/LuaJIT/archive/refs/tags/v2.1.0-beta3.tar.gz", "luajit-2.1.0-beta3.tar.gz")
+      build_source("luajit", source, "LuaJIT-2.1.0-beta3") do |directory, prefix|
+        Command.run("make", "amalg", "XCFLAGS=-O3 -fPIC", chdir: directory)
+        Command.run("make", "install", "PREFIX=#{prefix}", chdir: directory)
+      end
+    end
+
+    def luau
+      luau_release("luau", codegen: false)
+    end
+
+    def luaujit
+      luau_release("luaujit", codegen: true)
+    end
+
+    def luau_release(name, codegen:)
+      executable = File.join(TOOL_DIRECTORY, name, "luau")
+      return if File.executable?(executable)
+      asset = host == :macos ? "luau-macos.zip" : "luau-ubuntu.zip"
+      source = archive("https://github.com/luau-lang/luau/releases/download/0.729/#{asset}", "luau-0.729-#{asset}")
+      stage = File.join(TOOL_DIRECTORY, ".stage-#{name}")
+      FileUtils.rm_rf(stage)
+      FileUtils.mkdir_p(stage)
+      Command.run("unzip", "-q", source, "-d", stage)
+      found = Dir.glob(File.join(stage, "**", "luau")).find { |path| File.file?(path) }
+      raise "Luau archive does not contain a luau executable" unless found
+      FileUtils.mkdir_p(File.dirname(executable))
+      FileUtils.cp(found, executable)
+      FileUtils.chmod("u+x", executable)
+      return unless codegen
+      help = Command.run(executable, "--help")
+      raise "Luau 0.729 does not expose --codegen on this host" unless help.include?("--codegen")
+    ensure
+      FileUtils.rm_rf(stage) if defined?(stage) && stage
+    end
+
+    def poplang
+      executable = File.join(ROOT, "target", "release", "pop")
+      return if File.executable?(executable)
+      Command.run("cargo", "build", "--release", "--package", "pop-driver", "--bin", "pop")
+    end
+
+    def ruby
+      require_tool(RbConfig.ruby, "--version")
+    end
+
+    def go
+      require_tool("go", "version")
+    end
+
+    def c
+      require_tool("clang", "--version")
+    end
+
+    def csharp
+      require_tool("dotnet", "--version")
+    end
+
+    def crystal
+      require_tool("crystal", "--version")
+    end
+
+    def ldc
+      executable = File.join(TOOL_DIRECTORY, "ldc", "bin", "ldc2")
+      return if File.executable?(executable)
+      raise "automatic LDC provisioning currently supports Linux x86_64" unless host == :linux
+
+      filename = "ldc2-#{LDC_VERSION}-linux-x86_64.tar.xz"
+      source = archive(
+        "https://github.com/ldc-developers/ldc/releases/download/v#{LDC_VERSION}/#{filename}",
+        filename
+      )
+      actual = Digest::SHA256.file(source).hexdigest
+      raise "LDC archive checksum mismatch: #{actual}" unless actual == LDC_LINUX_SHA256
+
+      stage = File.join(TOOL_DIRECTORY, ".stage-ldc")
+      FileUtils.rm_rf(stage)
+      FileUtils.mkdir_p(stage)
+      Command.run("tar", "-xJf", source, "-C", stage)
+      root = File.join(stage, "ldc2-#{LDC_VERSION}-linux-x86_64")
+      raise "LDC archive has an unexpected layout" unless File.executable?(File.join(root, "bin", "ldc2"))
+      FileUtils.rm_rf(File.join(TOOL_DIRECTORY, "ldc"))
+      FileUtils.cp_r(root, File.join(TOOL_DIRECTORY, "ldc"))
+    ensure
+      FileUtils.rm_rf(stage) if defined?(stage) && stage
+    end
+
+    def require_tool(command, *arguments)
+      Command.run(command, *arguments)
+    rescue Errno::ENOENT
+      raise "required tool is not installed: #{command}"
+    end
+
+    def build_source(name, archive_path, source_directory)
+      prefix = File.join(TOOL_DIRECTORY, name)
+      stage = File.join(TOOL_DIRECTORY, ".stage-#{name}")
+      FileUtils.rm_rf(stage)
+      FileUtils.mkdir_p(stage)
+      Command.run("tar", "-xzf", archive_path, "-C", stage)
+      yield File.join(stage, source_directory), prefix
+    ensure
+      FileUtils.rm_rf(stage) if defined?(stage) && stage
+    end
+  end
+
+  module Build
+    module_function
+
+    def prepare(runtime, workload, source)
+      return unless runtime.builder
+
+      directory = File.join(TOOL_DIRECTORY, "artifacts", runtime.id, workload.id)
+      FileUtils.mkdir_p(directory)
+      send(runtime.builder, source, directory)
+    end
+
+    def poplang(source, directory)
+      executable = File.join(directory, "benchmark")
+      Command.run(File.join(ROOT, "target", "release", "pop"), "build", source, "--output", executable)
+      executable
+    end
+
+    def go(source, directory)
+      executable = File.join(directory, "benchmark")
+      Command.run("go", "build", "-trimpath", "-ldflags=-s -w", "-o", executable, source)
+      executable
+    end
+
+    def c(source, directory)
+      executable = File.join(directory, "benchmark")
+      Command.run("clang", "-std=c17", "-O3", "-march=native", source, "-o", executable)
+      executable
+    end
+
+    def d(source, directory)
+      executable = File.join(directory, "benchmark")
+      compiler = File.join(TOOL_DIRECTORY, "ldc", "bin", "ldc2")
+      Command.run(compiler, "-O3", "-release", "-mcpu=native", source, "-of=#{executable}")
+      executable
+    end
+
+    def csharp(source, directory)
+      project = File.join(DIRECTORY, "workloads", "csharp", "Benchmark.csproj")
+      intermediate = File.join(TOOL_DIRECTORY, "csharp", "obj", File.basename(source, ".cs"))
+      Command.run(
+        "dotnet", "build", project,
+        "--configuration", "Release",
+        "--output", directory,
+        "-p:BenchmarkSource=#{source}",
+        "-p:BaseIntermediateOutputPath=#{intermediate}/"
+      )
+      executable = File.join(directory, "PopBenchmark")
+      raise "C# build did not emit an executable" unless File.executable?(executable)
+      executable
+    end
+
+    def crystal(source, directory)
+      executable = File.join(directory, "benchmark")
+      cache = File.join(TOOL_DIRECTORY, "crystal", "cache")
+      FileUtils.mkdir_p(cache)
+      Command.run(
+        "crystal", "build", "--release", "--mcpu", "native", source, "-o", executable,
+        environment: { "CRYSTAL_CACHE_DIR" => cache }
+      )
+      executable
+    end
+  end
+
+  class Runner
+    def initialize(samples:, warmups:, selected_runtimes:, selected_workloads:)
+      @samples, @warmups = samples, warmups
+      @runtimes = filter(REGISTRY.runtimes, selected_runtimes)
+      @workloads = filter(REGISTRY.workloads, selected_workloads)
+    end
+
+    def run
+      available = @runtimes.select { |runtime| provision(runtime) }
+      prepared = available.product(@workloads).filter_map do |runtime, workload|
+        begin
+          [runtime, workload, prepare_command(runtime, workload)]
+        rescue StandardError => error
+          warn "benchmark: skipping #{runtime.id}/#{workload.id}: #{error.message.lines.first.strip}"
+          nil
+        end
+      end
+      measurements = prepared.flat_map do |runtime, workload, command|
+        begin
+          @warmups.times { execute(command) }
+          times = @samples.times.map { execute(command) }
+          result(runtime, workload, times)
+        rescue StandardError => error
+          warn "benchmark: skipping #{runtime.id}/#{workload.id}: #{error.message.lines.first.strip}"
+          []
+        end
+      end
+      {
+        "schemaVersion" => 2,
+        "createdAt" => Time.now.utc.iso8601,
+        "samples" => @samples,
+        "warmups" => @warmups,
+        "timing" => "execution only; provisioning and compilation are excluded",
+        "workloads" => @workloads.map { |workload| { "id" => workload.id, "name" => workload.name, "description" => workload.description } },
+        "results" => measurements
+      }
+    end
+
+    private
+
+    def filter(items, selected)
+      return items if selected.empty?
+      items.select { |item| selected.include?(item.id) }.tap { |value| raise "nothing matched #{selected.join(", ")}" if value.empty? }
+    end
+
+    def source_path(runtime, workload)
+      path = File.join(DIRECTORY, "workloads", runtime.source_directory, "#{workload.id}.#{runtime.source_extension}")
+      raise "missing workload #{path}" unless File.file?(path)
+      path
+    end
+
+    def prepare_command(runtime, workload)
+      source = source_path(runtime, workload)
+      artifact = Build.prepare(runtime, workload, source)
+      runtime.command.call(source, artifact)
+    end
+
+    def provision(runtime)
+      @workloads.each { |workload| source_path(runtime, workload) }
+      Provision.runtime(runtime)
+      true
+    rescue StandardError => error
+      warn "benchmark: skipping #{runtime.id}: #{error.message.lines.first.strip}"
+      false
+    end
+
+    def execute(command)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Command.run(*command)
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    end
+
+    def result(runtime, workload, times)
+      sorted = times.sort
+      comparable = true
+
+      result = {
+        "runtime" => runtime.id,
+        "runtimeName" => runtime.name,
+        "executionModel" => runtime.mode,
+        "workload" => workload.id,
+        "workloadName" => workload.name,
+        "samplesSeconds" => times,
+        "medianSeconds" => sorted[times.length / 2],
+        "minimumSeconds" => sorted.first,
+        "comparable" => comparable
+      }
+
+      result
+    end
+  end
+
+  module Report
+    module_function
+
+    def render(document)
+      document = document.merge("icons" => embedded_icons(document))
+      payload = JSON.generate(document)
+        .gsub("<", "\\u003c")
+        .gsub("\u2028", "\\u2028")
+        .gsub("\u2029", "\\u2029")
+      <<~HTML
+        <!doctype html>
+        <html lang="en" data-theme="dark">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta name="color-scheme" content="dark light">
+          <title>Pop Lang performance lab</title>
+          <style>
+            :root{--bg:#070b16;--panel:#101827;--panel2:#151f31;--text:#f3f7ff;--muted:#91a0b8;--line:#2b3850;--grid:rgba(155,174,204,.12);--accent:#42d8f5;--good:#59e6a7;--shadow:0 24px 70px rgba(0,0,0,.34)}
+            :root[data-theme="light"]{--bg:#eef3f9;--panel:#fff;--panel2:#f5f8fc;--text:#101827;--muted:#5d6b80;--line:#d7e0ec;--grid:rgba(36,54,78,.10);--shadow:0 20px 55px rgba(46,67,96,.15)}
+            *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,rgba(66,216,245,.11),transparent 30rem),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
+            button,select{font:inherit;color:inherit}.dashboard{width:min(1180px,calc(100% - 32px));margin:auto;padding:44px 0 64px}.hero{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:start;margin-bottom:26px}.eyebrow{color:var(--accent);font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase;margin:0 0 9px}.hero h1{font-size:clamp(32px,5vw,58px);line-height:1.02;letter-spacing:-.045em;margin:0;max-width:760px}.hero-copy{color:var(--muted);font-size:17px;max-width:760px;margin:16px 0 0}.theme-button{border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:10px 14px;cursor:pointer;box-shadow:var(--shadow)}
+            .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}.pill{border:1px solid var(--line);border-radius:999px;background:color-mix(in srgb,var(--panel) 84%,transparent);padding:6px 10px;color:var(--muted);font-size:12px}.pill strong{color:var(--text)}
+            .controls{display:grid;grid-template-columns:minmax(220px,1fr) minmax(170px,.42fr);gap:12px;padding:14px;border:1px solid var(--line);border-radius:18px;background:var(--panel);box-shadow:var(--shadow);margin-bottom:16px}.control{display:grid;gap:6px}.control span{font-size:11px;color:var(--muted);font-weight:800;letter-spacing:.11em;text-transform:uppercase}.control select{width:100%;border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:11px 12px;outline:none}.control select:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+            .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}.kpi,.panel{border:1px solid var(--line);border-radius:18px;background:var(--panel);box-shadow:var(--shadow)}.kpi{padding:18px}.kpi-label{color:var(--muted);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.kpi-value{font-size:25px;font-weight:850;letter-spacing:-.03em;margin-top:6px}.kpi-detail{color:var(--muted);font-size:12px;margin-top:2px}
+            .panel{padding:20px;margin-top:16px;overflow:hidden}.panel-head{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:18px}.panel h2{font-size:20px;letter-spacing:-.02em;margin:0}.panel-head p{color:var(--muted);margin:4px 0 0}.axis-note{font-size:12px;color:var(--muted);text-align:right}.comparison-chart{position:relative;padding:2px 0}
+            .bar-row{--language:#7dd3fc;display:grid;grid-template-columns:minmax(135px,1fr) minmax(300px,2.6fr) minmax(92px,.7fr);gap:16px;align-items:center;padding:10px 0;border-bottom:1px solid var(--grid)}.bar-row:last-child{border-bottom:0}.language{display:flex;align-items:center;gap:10px;min-width:0}.language-icon{width:31px;height:31px;border-radius:9px;background:#0b1020;border:1px solid color-mix(in srgb,var(--language) 35%,var(--line));padding:5px;object-fit:contain;flex:none}.language-name{font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.language-mode{display:block;color:var(--muted);font-size:11px;font-weight:500}.race-track{height:42px;position:relative;border:1px solid var(--line);border-radius:999px;background:repeating-linear-gradient(90deg,var(--panel2) 0,var(--panel2) calc(25% - 1px),var(--grid) 25%);overflow:hidden}.race-track::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:2px;background:color-mix(in srgb,var(--text) 38%,transparent);z-index:3}.race-track::after{content:"";position:absolute;right:10px;top:0;bottom:0;width:6px;background:repeating-linear-gradient(0deg,#fff 0 5px,#111 5px 10px);opacity:.72}.race-progress{--race-duration:2s;--finish:100%;position:absolute;left:0;top:0;bottom:0;width:0;border-radius:999px;background:linear-gradient(90deg,color-mix(in srgb,var(--language) 8%,transparent),color-mix(in srgb,var(--language) 42%,transparent));animation:lane-race var(--race-duration) linear infinite alternate}.race-progress::after{content:"";position:absolute;left:0;right:0;bottom:3px;height:2px;background:var(--language);opacity:.65}.racer{position:absolute;right:-18px;top:3px;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#0a1020;border:2px solid var(--language);box-shadow:0 0 20px color-mix(in srgb,var(--language) 56%,transparent);z-index:4}.racer .language-icon{width:27px;height:27px;border:0;border-radius:50%;padding:4px}.bar-row.winner .racer{box-shadow:0 0 24px color-mix(in srgb,var(--good) 72%,transparent)}.bar-row.winner .language-name::after{content:" FASTEST";color:var(--good);font-size:9px;letter-spacing:.1em;margin-left:7px}.bar-value{text-align:right}.bar-value strong{font-size:16px}.bar-value small{display:block;color:var(--muted)}@keyframes lane-race{from{width:0}to{width:calc(100% - 22px)}}
+            .excluded{display:grid;gap:8px;margin-top:14px}.excluded:empty{display:none}.excluded-item{padding:11px 13px;border:1px dashed #f0a45d;border-radius:12px;color:#f5bd84;background:rgba(240,164,93,.07);font-size:13px}
+            .table-wrap{overflow-x:auto}.distribution-table{width:100%;border-collapse:collapse;min-width:700px}.distribution-table th{text-align:left;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:0 10px 10px}.distribution-table td{border-top:1px solid var(--grid);padding:12px 10px}.distribution-table td:nth-child(n+2){font-variant-numeric:tabular-nums}.sample-line{height:22px;min-width:170px;position:relative;background:linear-gradient(transparent 10px,var(--line) 10px,var(--line) 11px,transparent 11px)}.sample-dot{position:absolute;top:6px;width:9px;height:9px;border-radius:50%;background:var(--dot);border:2px solid var(--panel);transform:translateX(-50%)}.footnote{color:var(--muted);font-size:12px;margin:18px 2px 0}.empty{padding:40px;text-align:center;color:var(--muted)}
+            @media(max-width:760px){.dashboard{width:min(100% - 20px,1180px);padding-top:24px}.hero{grid-template-columns:1fr}.theme-button{position:absolute;right:12px;top:12px}.controls,.kpis{grid-template-columns:1fr}.bar-row{grid-template-columns:minmax(110px,.9fr) minmax(170px,1.5fr);gap:9px}.bar-value{grid-column:2}.panel{padding:14px}.axis-note{display:none}.language-mode{display:none}}
+            @media(prefers-reduced-motion:reduce){*{transition:none!important}.race-progress{animation:none;width:var(--finish)}}
+          </style>
+        </head>
+        <body>
+          <main class="dashboard">
+            <header class="hero">
+              <div>
+                <p class="eyebrow">Pop Lang · Performance Lab</p>
+                <h1>Runtime performance, without the guesswork.</h1>
+                <p class="hero-copy">Execution-only results across interpreters, JITs, and ahead-of-time compilers. Shorter time means more work completed per second.</p>
+                <div class="meta">
+                  <span class="pill"><strong id="run-date">—</strong> run</span>
+                  <span class="pill"><strong id="sample-count">—</strong> measured samples</span>
+                  <span class="pill">Execution-only · builds excluded</span>
+                  <span class="pill">schema <strong id="schema">—</strong></span>
+                </div>
+              </div>
+              <button class="theme-button" id="theme" type="button" aria-label="Toggle color theme">◐ Theme</button>
+            </header>
+
+            <section class="controls" aria-label="Report controls">
+              <label class="control"><span>Workload</span><select id="workload"></select></label>
+              <label class="control"><span>Metric</span><select id="metric"><option value="medianSeconds">Median time</option><option value="minimumSeconds">Best time</option></select></label>
+            </section>
+
+            <section class="kpis" aria-label="Summary">
+              <article class="kpi"><div class="kpi-label">Fastest</div><div class="kpi-value" id="winner">—</div><div class="kpi-detail" id="winner-time">—</div></article>
+              <article class="kpi"><div class="kpi-label">Pop vs fastest rival</div><div class="kpi-value" id="pop-speedup">—</div><div class="kpi-detail" id="pop-detail">—</div></article>
+              <article class="kpi"><div class="kpi-label">Measured spread</div><div class="kpi-value" id="spread">—</div><div class="kpi-detail">slowest comparable median ÷ fastest</div></article>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><div><h2>Live speed lanes</h2><p id="workload-description">Choose a workload to compare runtimes.</p></div><div class="axis-note">middle line = halfway · logarithmic timing keeps wide gaps readable</div></div>
+              <div class="comparison-chart" id="ranking" aria-live="polite"></div>
+              <div class="excluded" id="excluded"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><div><h2>Sample distribution</h2><p>Every measured process execution, not just one flattering number.</p></div></div>
+              <div class="table-wrap"><table class="distribution-table"><thead><tr><th>Runtime</th><th>Minimum</th><th>Median</th><th>Maximum</th><th>Variation</th><th>Samples</th></tr></thead><tbody id="distribution"></tbody></table></div>
+            </section>
+            <p class="footnote">Compilation and provisioning happen before timing. Results include process startup and output. Entries marked non-comparable are shown as diagnostics but never ranked.</p>
+          </main>
+          <script>
+            const documentData=#{payload};
+            const colors={poplang:'#42d8f5',ruby:'#cc342d',go:'#00add8',c:'#a8b9cc',d:'#b03931',csharp:'#8b5cf6',crystal:'#d8dee9',lua:'#4c66d6',luajit:'#7656df',luau:'#38bdf8',luaujit:'#22d3ee'};
+            const $=selector=>document.querySelector(selector);
+            const element=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node};
+            const resultWorkloads=[...new Map(documentData.results.map(row=>[row.workload,{id:row.workload,name:row.workloadName,description:''}])).values()];
+            const workloads=(documentData.workloads?.length?documentData.workloads:resultWorkloads);
+            const workloadById=new Map(workloads.map(workload=>[workload.id,workload]));
+            const chooser=$('#workload'),metric=$('#metric');
+            workloads.forEach(workload=>chooser.add(new Option(workload.name,workload.id)));
+            $('#run-date').textContent=new Date(documentData.createdAt).toLocaleString();
+            $('#sample-count').textContent=String(documentData.samples);
+            $('#schema').textContent=String(documentData.schemaVersion);
+
+            function time(seconds){if(seconds<.001)return `${(seconds*1e6).toFixed(1)} µs`;if(seconds<1)return `${(seconds*1e3).toFixed(seconds<.01?2:1)} ms`;return `${seconds.toFixed(3)} s`}
+            function icon(row){const image=element('img','language-icon');image.alt='';image.src=documentData.icons?.[row.runtime]||'';return image}
+            function languageCell(row){const wrap=element('div','language');wrap.append(icon(row));const copy=element('div');copy.append(element('div','language-name',row.runtimeName));copy.append(element('small','language-mode',row.executionModel||'runtime'));wrap.append(copy);return wrap}
+            function comparable(row){return row.comparable!==false}
+
+            function draw(){
+              const key=metric.value;
+              const all=documentData.results.filter(row=>row.workload===chooser.value);
+              const rows=all.filter(comparable).sort((left,right)=>left[key]-right[key]);
+              const skipped=all.filter(row=>!comparable(row));
+              const ranking=$('#ranking'),excluded=$('#excluded'),distribution=$('#distribution');
+              ranking.replaceChildren();excluded.replaceChildren();distribution.replaceChildren();
+              const metadata=workloadById.get(chooser.value);
+              $('#workload-description').textContent=metadata?.description||'';
+              if(!rows.length){ranking.append(element('div','empty','No comparable results for this workload.'));return}
+              const fastest=rows[0][key],slowest=rows.at(-1)[key];
+              rows.forEach((row,index)=>{
+                const item=element('article',`bar-row${index===0?' winner':''}`);item.style.setProperty('--language',colors[row.runtime]||'#94a3b8');
+                item.append(languageCell(row));
+                const zone=element('div','race-track'),progress=element('div','race-progress'),runner=element('div','racer');const ratio=row[key]/fastest;progress.style.setProperty('--race-duration',`${(.85+Math.log2(Math.max(1,ratio))*1.15).toFixed(2)}s`);progress.style.setProperty('--finish',`${Math.max(2,fastest/row[key]*100)}%`);progress.title=`${ratio.toFixed(2)}× the fastest time`;runner.append(icon(row));progress.append(runner);zone.append(progress);item.append(zone);
+                const value=element('div','bar-value');value.append(element('strong','',time(row[key])));value.append(element('small','',index===0?'baseline':`${(row[key]/fastest).toFixed(2)}× time`));item.append(value);ranking.append(item);
+              });
+              skipped.forEach(row=>excluded.append(element('div','excluded-item',`${row.runtimeName}: ${row.comparisonNote||'excluded from this ranking'}`)));
+
+              $('#winner').textContent=rows[0].runtimeName;$('#winner-time').textContent=`${time(fastest)} ${key==='medianSeconds'?'median':'minimum'}`;$('#spread').textContent=`${(slowest/fastest).toFixed(1)}×`;
+              const pop=rows.find(row=>row.runtime==='poplang'),rival=rows.find(row=>row.runtime!=='poplang');
+              if(pop&&rival){const ratio=rival[key]/pop[key];$('#pop-speedup').textContent=ratio>=1?`${ratio.toFixed(2)}× faster`:`${(1/ratio).toFixed(2)}× slower`;$('#pop-detail').textContent=`against ${rival.runtimeName}`}
+              else{$('#pop-speedup').textContent='—';$('#pop-detail').textContent='Pop or a rival is missing'}
+
+              rows.forEach(row=>{
+                const samples=row.samplesSeconds||[];const minimum=Math.min(...samples),maximum=Math.max(...samples),median=row.medianSeconds;const tr=element('tr');
+                const runtime=element('td');runtime.append(languageCell(row));tr.append(runtime);
+                [time(minimum),time(median),time(maximum),`${median?((maximum-minimum)/median*100).toFixed(1):'0.0'}%`].forEach(value=>tr.append(element('td','',value)));
+                const plotCell=element('td'),plot=element('div','sample-line');plot.style.setProperty('--dot',colors[row.runtime]||'#94a3b8');const range=maximum-minimum||1;
+                samples.forEach(sample=>{const dot=element('span','sample-dot');dot.style.left=`${(sample-minimum)/range*100}%`;dot.title=time(sample);plot.append(dot)});plotCell.append(plot);tr.append(plotCell);distribution.append(tr);
+              });
+            }
+            chooser.addEventListener('change',draw);metric.addEventListener('change',draw);
+            $('#theme').addEventListener('click',()=>{const root=document.documentElement;root.dataset.theme=root.dataset.theme==='light'?'dark':'light'});
+            draw();
+          </script>
+        </body>
+        </html>
+      HTML
+    end
+
+    def embedded_icons(document)
+      document.fetch("results", []).to_h do |result|
+        runtime = result.fetch("runtime")
+        [runtime, icon_data(runtime)]
+      end
+    end
+
+    def icon_data(runtime)
+      filename = case runtime
+      when "poplang" then File.join(ROOT, "assets", "pop.svg")
+      when "ruby" then File.join(DIRECTORY, "assets", "icons", "ruby.svg")
+      when "go" then File.join(DIRECTORY, "assets", "icons", "go.svg")
+      when "c" then File.join(DIRECTORY, "assets", "icons", "c.svg")
+      when "d" then File.join(DIRECTORY, "assets", "icons", "d.svg")
+      when "csharp" then File.join(DIRECTORY, "assets", "icons", "dotnet.svg")
+      when "crystal" then File.join(DIRECTORY, "assets", "icons", "crystal.svg")
+      when "lua", "luajit", "luau", "luaujit" then File.join(DIRECTORY, "assets", "icons", "lua.svg")
+      end
+      return "" unless filename && File.file?(filename)
+
+      "data:image/svg+xml;base64,#{[File.binread(filename)].pack("m0")}"
+    end
+  end
+
+  module Cli
+    module_function
+
+    def call(arguments)
+      command = arguments.shift || "run"
+      case command
+      when "list" then puts JSON.pretty_generate("runtimes" => REGISTRY.runtimes.map { |item| { "id" => item.id, "name" => item.name } }, "workloads" => REGISTRY.workloads.map { |item| { "id" => item.id, "name" => item.name } })
+      when "provision" then provision(arguments)
+      when "run" then run(arguments)
+      when "render" then render(arguments)
+      else raise "usage: benchmark [list|provision|run|render]"
+      end
+    rescue StandardError => error
+      warn "benchmark: #{error.message}"
+      exit 1
+    end
+
+    def provision(arguments)
+      selected = arguments.empty? ? REGISTRY.runtimes : REGISTRY.runtimes.select { |runtime| arguments.include?(runtime.id) }
+      raise "unknown runtime" if selected.empty?
+      selected.each { |runtime| Provision.runtime(runtime); puts "ready: #{runtime.id}" }
+    end
+
+    def run(arguments)
+      options = { samples: 7, warmups: 2, runtimes: [], workloads: [], output: File.join(RESULT_DIRECTORY, "latest.json") }
+      OptionParser.new { |parser| parser.on("--samples NUMBER", Integer) { |value| options[:samples] = value }; parser.on("--warmups NUMBER", Integer) { |value| options[:warmups] = value }; parser.on("--runtime NAME") { |value| options[:runtimes] << value }; parser.on("--workload NAME") { |value| options[:workloads] << value }; parser.on("--output PATH") { |value| options[:output] = value } }.parse!(arguments)
+      document = Runner.new(samples: options[:samples], warmups: options[:warmups], selected_runtimes: options[:runtimes], selected_workloads: options[:workloads]).run
+      FileUtils.mkdir_p(File.dirname(options[:output]))
+      File.write(options[:output], JSON.pretty_generate(document) + "\n")
+      puts options[:output]
+    end
+
+    def render(arguments)
+      options = { output: File.join(RESULT_DIRECTORY, "latest.html") }
+      OptionParser.new { |parser| parser.on("--input PATH") { |value| options[:input] = value }; parser.on("--output PATH") { |value| options[:output] = value } }.parse!(arguments)
+      raise "render requires --input RESULTS.json" unless options[:input]
+      FileUtils.mkdir_p(File.dirname(options[:output]))
+      File.write(options[:output], Report.render(JSON.parse(File.read(options[:input]))))
+      puts options[:output]
+    end
+  end
+end
+
+PopBenchmark::Cli.call(ARGV) if $PROGRAM_NAME == __FILE__
