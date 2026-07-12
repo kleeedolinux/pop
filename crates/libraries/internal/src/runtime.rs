@@ -1,5 +1,6 @@
 use pop_library_bridge::NativeExport;
 use pop_runtime_interface::{GarbageCollectorContract, GarbageCollectorStage, RuntimeOperation};
+use pop_runtime_native_abi::symbol;
 
 /// Trusted native adapters owned by this runtime-service module.
 ///
@@ -13,8 +14,8 @@ pub const fn garbage_collector_stage() -> GarbageCollectorStage {
 }
 
 #[must_use]
-pub const fn runtime_symbol(operation: RuntimeOperation) -> &'static str {
-    operation.abi_symbol()
+pub const fn runtime_symbol(operation: RuntimeOperation) -> Option<&'static str> {
+    symbol(operation)
 }
 
 #[allow(unsafe_code)]

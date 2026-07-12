@@ -180,6 +180,13 @@ Safe points occur at:
 The compiler verifies that no managed derived/interior pointer survives a safe
 point without a recoverable base and offset representation.
 
+Under ADR 0039, the published root set is mutable and keyed by canonical
+`RootSlot`. A collecting safe point returns only after every relocated stack/
+register root has been rewritten; object fields and runtime handles are updated
+inside the collector. Pop object identity remains stable, but old evacuated
+physical tokens become invalid. The bootstrap stable-handle profile exercises
+the same API without changing tokens.
+
 ## Minor collection
 
 Minor GC is parallel stop-the-world because copying a small bounded nursery is
@@ -452,6 +459,12 @@ Runtime metrics include:
 - fragmentation and returned-to-OS bytes;
 - root counts/scan time by stack/module/handle category.
 
+The Stage-1 collector currently exposes saturating per-instance logical counters
+for successful allocations, actual collection cycles (including capacity-
+triggered cycles), reclaimed objects, and scanned objects. These counters make
+benchmark work deterministic without claiming production byte, pause, worker,
+or resident-memory telemetry that has not been implemented.
+
 An execution trace correlates GC phases, safe-point handshakes, scheduler delays,
 allocation assists, and user tasks. Tuning APIs expose `heapGrowthPercent`,
 `memoryLimit`, and latency profile presets without making program correctness
@@ -476,6 +489,27 @@ depend on them.
 
 ## Implementation stages
 
+### Implementation ownership
+
+[ADR 0038](./decisions/0038-modular-portable-runtime-implementation.md)
+places collector storage, tracing, roots, pins, collection requests, and
+statistics in `pop-runtime-collector`. The crate depends only on the
+backend-neutral PLRI contract and owns no native C exports, process-global
+singleton, platform arguments, or linker behavior. The native facade delegates
+to a concrete collector; the MIR interpreter and future VM can compose the same
+collector without importing the native ABI.
+
+This boundary is also a performance contract: separation adds no runtime
+registry, string lookup, heap allocation, or virtual dispatch to native
+allocation/barrier fast paths. Production TLAB, region, statepoint, and barrier
+fast paths may remain concrete and statically dispatched while preserving the
+same PLRI semantics. Comparative claims still require the benchmark suite below.
+
+The Stage-1 implementation separates `heap`, typed `access`, precise `trace`,
+and PLRI `adapter` responsibilities inside the collector crate. The native
+facade separately groups identity, allocation, storage, text/process adapters,
+roots/safe points, failure termination, and private global composition state.
+
 ### Stage 1: precise stop-the-world collector
 
 Build object/stack maps, TLAB allocation, regions, handles, and a simple precise
@@ -494,6 +528,17 @@ stages. See ADR 0022.
 Add card marking, parallel evacuation, promotion, adaptive nursery sizing, and
 forced-minor stress tests.
 
+The first Stage-2 deliverable is a single-mutator relocation conformance
+collector: it really copies survivors, rewrites typed roots/object edges/handles,
+invalidates old tokens, and proves remembered-card behavior. It is not the
+production TLAB/parallel collector. Production selection also requires backend
+and target relocation capability plus native ABI major version 2.
+
+PLRI labels this implementation stage `RelocationConformance`: precise roots,
+a moving nursery, and a generational card barrier are active; mature collection,
+concurrent marking, and SATB are not. Mature objects are retained until later
+stages. This stage cannot satisfy the `ProductionGenerational` runtime profile.
+
 ### Stage 3: concurrent mature marking
 
 Add SATB barriers/buffers, concurrent work stealing, remark, concurrent sweep,
@@ -510,6 +555,21 @@ Share collector services with VM frames, validate backend conformance, and add
 Bubble ownership/unload proof machinery if required.
 
 ## Benchmark suite
+
+The implemented bootstrap harness emits versioned
+`pop-runtime-benchmark-v1` tab-separated records. Each record names the
+collector stage and workload, graph shape, root count, sample count, operations,
+logical peak objects/slots, collections, reclaimed objects, elapsed nanoseconds,
+per-operation nanoseconds, a named profile, target architecture/operating
+system, build profile, and available parallelism. Workload tests verify the
+logical counters deterministically; timing values are compared only on a named
+hardware/toolchain profile.
+
+The current Stage-1 workload inventory measures isolated scalar-object churn,
+rooted reference-chain tracing, precise managed-reference arrays, scoped pins,
+and capacity-triggered allocation pressure. These are regression baselines for
+the stable-handle collector, not evidence for TLAB allocation, a moving nursery,
+concurrency, or the release latency targets.
 
 The suite includes:
 

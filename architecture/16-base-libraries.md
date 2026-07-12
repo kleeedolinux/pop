@@ -62,6 +62,14 @@ The loader verifies:
 
 A mismatch is a toolchain incident, not a suppressible user diagnostic.
 
+The Rust native-bootstrap adapter is narrower than the semantic Bubble
+relationship shown above. Under
+[ADR 0038](./decisions/0038-modular-portable-runtime-implementation.md), it may
+depend on the closed native-ABI vocabulary for reviewed C adapters. Pop source,
+HIR, and MIR continue to use PLRI operations and semantic identities only; the
+portable collector and native process-global facade do not become
+`Pop.Internal` dependencies.
+
 ### Responsibilities
 
 `Pop.Internal` owns only trusted mechanisms:

@@ -32,6 +32,22 @@ fn bootstrap_contract_is_precise_without_claiming_production_gc_features() {
 }
 
 #[test]
+fn relocation_conformance_contract_does_not_claim_production_mature_gc() {
+    let relocation = GarbageCollectorContract::relocation_conformance_stage2();
+
+    assert_eq!(
+        relocation.stage(),
+        GarbageCollectorStage::RelocationConformance
+    );
+    assert!(relocation.precise_roots());
+    assert!(relocation.moving_nursery());
+    assert!(relocation.generational_card_barrier());
+    assert!(!relocation.mostly_non_moving_mature_heap());
+    assert!(!relocation.concurrent_mature_marking());
+    assert!(!relocation.satb_barrier());
+}
+
+#[test]
 fn object_and_stack_maps_are_canonical_precise_contracts() {
     let object_map =
         ObjectMap::new(4, vec![ObjectSlot::new(3), ObjectSlot::new(1)]).expect("valid object map");
@@ -80,6 +96,49 @@ fn object_and_stack_maps_are_canonical_precise_contracts() {
             expected: 2,
             found: 1,
         })
+    );
+}
+
+#[test]
+fn root_publication_mutation_preserves_canonical_slots_and_stack_map() {
+    let stack_map = StackMap::new(
+        SafePointId::new(12),
+        vec![RootSlot::new(7), RootSlot::new(2)],
+    )
+    .expect("valid stack map");
+    let mut publication = RootPublication::new(
+        stack_map.clone(),
+        vec![
+            Some(ManagedReference::new(20)),
+            Some(ManagedReference::new(70)),
+        ],
+    )
+    .expect("matching root values");
+
+    assert_eq!(
+        publication.root_values().collect::<Vec<_>>(),
+        vec![
+            (RootSlot::new(2), Some(ManagedReference::new(20))),
+            (RootSlot::new(7), Some(ManagedReference::new(70))),
+        ]
+    );
+
+    for (slot, value) in publication.root_values_mut() {
+        *value = match slot {
+            slot if slot == RootSlot::new(2) => Some(ManagedReference::new(200)),
+            slot if slot == RootSlot::new(7) => None,
+            _ => unreachable!("stack map contains only the declared root slots"),
+        };
+    }
+
+    assert_eq!(publication.stack_map(), &stack_map);
+    assert_eq!(publication.stack_map().root_slots().len(), 2);
+    assert_eq!(
+        publication.root_values().collect::<Vec<_>>(),
+        vec![
+            (RootSlot::new(2), Some(ManagedReference::new(200))),
+            (RootSlot::new(7), None),
+        ]
     );
 }
 

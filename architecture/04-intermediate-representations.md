@@ -146,6 +146,9 @@ MIR invariants:
 - a panic-capable call explicitly propagates unwind or names a cleanup block;
 - stack maps contain exactly the live managed values at each safe point and
   logical object maps contain exactly the managed fields of allocations;
+- a collecting safe point may change the physical token for every live managed
+  value; backends/VMs install the typed `RootSlot` updates before subsequent
+  uses without adding backend relocation instructions to canonical MIR;
 - root scopes dominate their uses and are balanced on normal and unwind exits;
 - evaluation order matches Pop Lang semantics;
 - all target assumptions come from target queries;

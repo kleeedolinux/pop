@@ -10,7 +10,9 @@ path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
+pop-runtime-collector.workspace = true
 pop-runtime-interface.workspace = true
+pop-runtime-native-abi.workspace = true
 
 [lints]
 workspace = true

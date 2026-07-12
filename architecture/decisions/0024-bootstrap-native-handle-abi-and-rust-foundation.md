@@ -24,6 +24,10 @@ allocation, scalar/reference array load/store, and root retain/release operation
 symbols. Failures at this narrow C boundary return the documented failure
 sentinel; typed PLRI and Rust adapters retain the full `RuntimeFailure` value.
 
+ADR 0039 later names this representation `BootstrapStableHandles`. ABI 1.x
+cannot satisfy the production moving-nursery profile; production root relocation
+uses mutable typed publications and native ABI major version 2.
+
 Canonical MIR continues to carry `RuntimeOperation` identities, not symbol
 strings. The LLVM backend selects the ABI spelling and lowers managed values to
 the target representation only inside its private IR.

@@ -36,7 +36,9 @@ const MEMBERS: &[&str] = &[
     "crates/libraries/internal",
     "crates/libraries/macros",
     "crates/libraries/standard",
+    "crates/runtime/collector",
     "crates/runtime/interface",
+    "crates/runtime/native-abi",
     "crates/runtime/native",
     "crates/tools/architecture-tests",
     "crates/tools/documentation-generator",
@@ -366,6 +368,7 @@ fn portable_crates_do_not_name_backend_packages() {
         "crates/compiler/hir",
         "crates/compiler/mir",
         "crates/compiler/target",
+        "crates/runtime/collector",
         "crates/runtime/interface",
     ];
 
@@ -385,6 +388,333 @@ fn portable_crates_do_not_name_backend_packages() {
                 manifest_path.display()
             );
         }
+    }
+}
+
+#[test]
+fn runtime_crates_enforce_adr_0038_ownership() {
+    let root = repository_root();
+    let runtime = root.join("crates/runtime");
+
+    assert_plri_boundary(&runtime);
+    assert_collector_boundary(&runtime);
+    assert_native_abi_boundary(&runtime);
+    assert_native_facade_boundary(&runtime);
+    assert_runtime_benchmark_contract(&runtime);
+    assert_runtime_consumer_dependencies(&root);
+    assert_runtime_documentation(&runtime);
+}
+
+fn assert_plri_boundary(runtime: &Path) {
+    let interface_manifest = read_required(runtime.join("interface/Cargo.toml"));
+    let interface_source = read_rust_sources(&runtime.join("interface/src"));
+    assert!(
+        !interface_manifest.contains("[dependencies]"),
+        "PLRI must remain an implementation-independent leaf contract"
+    );
+    for forbidden in [
+        "pop_rt_",
+        "extern \"C\"",
+        "OnceLock",
+        "BootstrapRuntime",
+        "std::ffi",
+    ] {
+        assert!(
+            !interface_source.contains(forbidden),
+            "PLRI source must not contain native/implementation detail `{forbidden}`"
+        );
+    }
+    for required in [
+        "root_values_mut",
+        "roots: &mut RootPublication",
+        "RelocationConformance",
+        "relocation_conformance_stage2",
+    ] {
+        assert!(
+            interface_source.contains(required),
+            "PLRI must preserve relocation contract `{required}`"
+        );
+    }
+}
+
+fn assert_collector_boundary(runtime: &Path) {
+    let collector_manifest = read_required(runtime.join("collector/Cargo.toml"));
+    let collector_source = read_rust_sources(&runtime.join("collector/src"));
+    let relocation_source = read_rust_sources(&runtime.join("collector/src/relocation"));
+    assert!(collector_manifest.contains("pop-runtime-interface.workspace = true"));
+    assert!(!collector_manifest.contains("pop-runtime-native-abi.workspace = true"));
+    assert!(!collector_manifest.contains("pop-runtime-native.workspace = true"));
+    assert!(collector_source.contains("impl RuntimeAdapter for BootstrapRuntime"));
+    assert!(relocation_source.contains("impl RuntimeAdapter for RelocationRuntime"));
+    for forbidden in ["pop_rt_", "extern \"C\"", "OnceLock", "std::ffi"] {
+        assert!(
+            !collector_source.contains(forbidden),
+            "portable collector must not contain native detail `{forbidden}`"
+        );
+    }
+    let collector_root = read_required(runtime.join("collector/src/lib.rs"));
+    for declaration in [
+        "mod access;",
+        "mod adapter;",
+        "mod heap;",
+        "mod relocation;",
+        "mod trace;",
+    ] {
+        assert!(
+            collector_root
+                .lines()
+                .any(|line| line.trim() == declaration),
+            "collector root must explicitly inventory `{declaration}`"
+        );
+    }
+    assert!(!collector_root.contains("mod bootstrap;"));
+    assert!(!runtime.join("collector/src/bootstrap.rs").exists());
+    let relocation_root = read_required(runtime.join("collector/src/relocation/mod.rs"));
+    for declaration in ["mod adapter;", "mod collect;", "mod heap;"] {
+        assert!(
+            relocation_root
+                .lines()
+                .any(|line| line.trim() == declaration),
+            "relocation collector root must explicitly inventory `{declaration}`"
+        );
+    }
+    assert_runtime_modules_are_focused(&runtime.join("collector/src"), 320);
+    assert_runtime_modules_are_focused(&runtime.join("collector/src/relocation"), 320);
+}
+
+fn assert_native_abi_boundary(runtime: &Path) {
+    let native_abi_manifest = read_required(runtime.join("native-abi/Cargo.toml"));
+    let native_abi_source = read_rust_sources(&runtime.join("native-abi/src"));
+    assert!(native_abi_manifest.contains("pop-runtime-interface.workspace = true"));
+    assert!(!native_abi_manifest.contains("pop-runtime-collector.workspace = true"));
+    assert!(native_abi_source.contains("pop_rt_"));
+    assert!(native_abi_source.contains("RuntimeOperation"));
+    assert!(native_abi_source.contains("Option<&'static str>"));
+    assert!(!native_abi_source.contains("_ => Some("));
+}
+
+fn assert_native_facade_boundary(runtime: &Path) {
+    let native_manifest = read_required(runtime.join("native/Cargo.toml"));
+    for dependency in [
+        "pop-runtime-interface.workspace = true",
+        "pop-runtime-collector.workspace = true",
+        "pop-runtime-native-abi.workspace = true",
+    ] {
+        assert!(
+            native_manifest.contains(dependency),
+            "native facade must depend on `{dependency}`"
+        );
+    }
+    let native_root = read_required(runtime.join("native/src/lib.rs"));
+    for declaration in [
+        "mod allocation;",
+        "mod failure;",
+        "mod identity;",
+        "mod roots;",
+        "mod state;",
+        "mod storage;",
+        "mod text;",
+    ] {
+        assert!(
+            native_root.lines().any(|line| line.trim() == declaration),
+            "native facade root must explicitly inventory `{declaration}`"
+        );
+    }
+    assert!(!native_root.contains("mod abi;"));
+    assert!(!runtime.join("native/src/abi.rs").exists());
+    assert_runtime_modules_are_focused(&runtime.join("native/src"), 320);
+}
+
+fn assert_runtime_benchmark_contract(runtime: &Path) {
+    let collector_manifest = read_required(runtime.join("collector/Cargo.toml"));
+    for path in [
+        "collector/benches/bootstrap.rs",
+        "collector/benches/relocation.rs",
+        "collector/benches/relocation_workload.rs",
+        "collector/benches/workload.rs",
+        "collector/benches/workload/array.rs",
+        "collector/benches/workload/model.rs",
+        "collector/benches/workload/pin.rs",
+        "collector/benches/workload/pressure.rs",
+        "collector/benches/workload/rooted.rs",
+        "collector/benches/workload/tiny.rs",
+        "collector/tests/benchmark_contract.rs",
+        "collector/tests/metrics.rs",
+        "collector/tests/relocating_nursery.rs",
+        "collector/tests/relocation_benchmark_contract.rs",
+    ] {
+        assert!(
+            runtime.join(path).is_file(),
+            "ADR 0038 runtime benchmark file `{path}` is missing"
+        );
+    }
+    for required in [
+        "[[bench]]",
+        "name = \"bootstrap\"",
+        "name = \"relocation\"",
+        "harness = false",
+    ] {
+        assert!(
+            collector_manifest.contains(required),
+            "collector manifest must contain benchmark contract `{required}`"
+        );
+    }
+    let workload_root = read_required(runtime.join("collector/benches/workload.rs"));
+    for declaration in [
+        "mod array;",
+        "mod model;",
+        "mod pin;",
+        "mod pressure;",
+        "mod rooted;",
+        "mod tiny;",
+    ] {
+        assert!(
+            workload_root.contains(declaration),
+            "benchmark workload root must inventory `{declaration}`"
+        );
+    }
+    assert_runtime_modules_are_focused(&runtime.join("collector/benches/workload"), 250);
+    let benchmark = read_required(runtime.join("collector/benches/bootstrap.rs"));
+    for field in [
+        "schema",
+        "profile",
+        "target_architecture",
+        "target_operating_system",
+        "build_profile",
+        "collector_stage",
+        "workload",
+        "samples",
+        "operations",
+        "allocations",
+        "reference_stores",
+        "root_transitions",
+        "pin_transitions",
+        "elapsed_nanoseconds",
+        "nanoseconds_per_operation",
+        "available_parallelism",
+        "logical_peak_objects",
+        "logical_peak_slots",
+        "collections",
+        "reclaimed_objects",
+        "scanned_objects",
+    ] {
+        assert!(
+            benchmark.contains(field),
+            "bootstrap benchmark must report `{field}`"
+        );
+    }
+    assert!(benchmark.contains("BootstrapPreciseStopTheWorld"));
+    let relocation_benchmark = read_required(runtime.join("collector/benches/relocation.rs"));
+    for required in [
+        "pop-runtime-benchmark-v1",
+        "collector_stage=RelocationConformance",
+        "relocated_roots",
+        "nanoseconds_per_operation",
+    ] {
+        assert!(
+            relocation_benchmark.contains(required),
+            "relocation benchmark must report `{required}`"
+        );
+    }
+}
+
+fn assert_runtime_consumer_dependencies(root: &Path) {
+    let backend_api = read_required(root.join("crates/compiler/backend-api/src/lib.rs"));
+    for required in [
+        "RuntimeProfile",
+        "BackendGcCapability",
+        "RelocatingManagedReferences",
+        "validate_runtime_profile",
+        "IncompatibleNativeAbi",
+    ] {
+        assert!(
+            backend_api.contains(required),
+            "backend API must enforce runtime-profile fact `{required}`"
+        );
+    }
+
+    let internal_manifest = read_required(root.join("crates/libraries/internal/Cargo.toml"));
+    assert!(internal_manifest.contains("pop-runtime-native-abi.workspace = true"));
+    assert!(!internal_manifest.contains("pop-runtime-collector.workspace = true"));
+    assert!(!internal_manifest.contains("pop-runtime-native.workspace = true"));
+
+    let llvm_manifest = read_required(root.join("crates/compiler/backends/llvm/Cargo.toml"));
+    assert!(llvm_manifest.contains("pop-runtime-native-abi.workspace = true"));
+    assert!(!llvm_manifest.contains("pop-runtime-collector.workspace = true"));
+
+    let interpreter_manifest =
+        read_required(root.join("crates/compiler/backends/mir-interp/Cargo.toml"));
+    assert!(interpreter_manifest.contains("pop-runtime-collector.workspace = true"));
+    assert!(!interpreter_manifest.contains("pop-runtime-native.workspace = true"));
+}
+
+fn assert_runtime_documentation(runtime: &Path) {
+    for crate_directory in ["interface", "collector", "native-abi", "native"] {
+        let crate_root = runtime.join(crate_directory);
+        assert!(
+            crate_root.join("README.md").is_file(),
+            "runtime ownership crate `{crate_directory}` needs a README"
+        );
+        let source = read_required(crate_root.join("src/lib.rs"));
+        assert!(
+            source.lines().count() <= 80,
+            "runtime crate root `{crate_directory}` must remain a thin module inventory"
+        );
+    }
+
+    let guide = read_required(runtime.join("README.md"));
+    for required in [
+        "## Dependency direction",
+        "## Choose the owning crate",
+        "pop-runtime-interface",
+        "pop-runtime-collector",
+        "pop-runtime-native-abi",
+        "pop-runtime-native",
+        "Performance",
+    ] {
+        assert!(
+            guide.contains(required),
+            "runtime contributor guide must explain `{required}`"
+        );
+    }
+}
+
+fn read_required(path: impl AsRef<Path>) -> String {
+    let path = path.as_ref();
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+fn read_rust_sources(directory: &Path) -> String {
+    let mut paths: Vec<_> = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read runtime source entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect();
+    paths.sort();
+
+    paths
+        .into_iter()
+        .map(read_required)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_runtime_modules_are_focused(directory: &Path, maximum_lines: usize) {
+    let mut paths: Vec<_> = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read runtime source entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let source = read_required(&path);
+        assert!(
+            source.lines().count() <= maximum_lines,
+            "runtime responsibility module {} exceeds {maximum_lines} lines",
+            path.display()
+        );
     }
 }
 

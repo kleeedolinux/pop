@@ -78,6 +78,9 @@ transplanted into a Luau-shaped file.
 - Classes, modules, records, tuples, arrays, and tables are distinct
   concepts even when an implementation can share storage internally.
 - Runtime services are reached through a versioned backend-neutral interface.
+- Runtime implementation ownership is split among the pure PLRI contract, the
+  portable collector, the native ABI vocabulary, and the native host facade;
+  native symbols and platform state never enter PLRI.
 - User-defined attributes contain typed compile-time values.
 - Compile-time evaluation cannot parse or inject source strings.
 - Reflection is compile-time-first, visibility-preserving, capability-limited,
@@ -92,6 +95,8 @@ transplanted into a Luau-shaped file.
 - Library Bubbles emit self-describing `.poplib` artifacts resolved by
   `BubbleIdentity` and the locked dependency graph.
 - Pop GC uses precise roots, a moving nursery, and concurrent mature marking.
+- Collecting safe points update typed `RootSlot` publications in place; object
+  identity survives relocation while stale physical reference tokens do not.
 - Source-visible built-in types and attributes use `PascalCase`, including
   `String`, `Int`, `Boolean`, `UInt32`, and `@Serializable`.
 - `Pop.Internal` is the trusted private compiler/runtime library;

@@ -6,6 +6,12 @@ Compiler dependencies point from orchestration and lowering layers toward
 stable data contracts. No front-end component imports LLVM or VM implementation
 types.
 
+Mutable root publication is part of this backend-neutral contract. PLRI pairs
+each value with a canonical `RootSlot`; moving collectors rewrite current
+physical tokens in place while bootstrap collectors preserve them. Backend API
+capabilities—not MIR or the collector crate—authorize a runtime profile for a
+selected target.
+
 ```mermaid
 flowchart TD
     Driver[Driver / build orchestration] --> Query[Incremental query engine]
@@ -25,6 +31,10 @@ flowchart TD
     VM[Future VM backend] --> MIR
     LLVM --> PLRI[Runtime interface contracts]
     VM --> PLRI
+    Collector[Portable collector] --> PLRI
+    NativeABI[Native ABI vocabulary] --> PLRI
+    NativeRuntime[Native host facade] --> Collector
+    NativeRuntime --> NativeABI
 ```
 
 An arrow means “depends on.” Cross-cutting diagnostics, IDs, arenas, and target
@@ -60,7 +70,9 @@ compiler/
   documentation/    XML doc parser, semantic checks, DocIds, artifact emitter
 runtime/
   interface/        versioned PLRI operations and semantic contracts
-  native/           native runtime implementation
+  collector/        reusable collector engine implementing PLRI GC semantics
+  native-abi/       versioned native C ABI vocabulary and operation mapping
+  native/           native exports, process-global state, and target adapters
 tools/
   language-server/  incremental semantic client
   formatter/        lossless syntax client
@@ -184,7 +196,23 @@ encoded as typed HIR inputs or explicit runtime-interface operations.
 PLRI contracts describe abstract allocation, strings, typed collections,
 dispatch metadata, suspension, errors, Module/Bubble initialization,
 GC operations, loading, and retained metadata adapters. Runtime contracts do not
-expose compiler arenas or IDs.
+expose compiler arenas or IDs. They also do not expose C symbols, platform entry
+types, global runtime instances, collector storage, or backend implementation
+types.
+
+ADR 0038 separates implementation ownership below this contract. The portable
+collector implements `RuntimeAdapter` and owns heap/trace/root/pin behavior
+without a native ABI or process-global singleton. The native-ABI crate owns the
+closed C symbol/version mapping without collector policy. The native facade
+composes both, owns C exports and target/process adapters, and delegates heap
+semantics to the collector.
+
+LLVM depends on PLRI and the native ABI mapping, not on collector internals. The
+MIR interpreter normally depends only on PLRI and may compose the collector for
+bootstrap/conformance tests without importing the native facade. A future VM can
+reuse the collector without linking a C ABI. `Pop.Internal` source/HIR/MIR uses
+semantic PLRI identities; only its reviewed Rust native-bootstrap adapter may
+depend on the native ABI vocabulary.
 
 ## Base-library ownership
 

@@ -14,6 +14,7 @@ pop-backend-api.workspace = true
 pop-foundation.workspace = true
 pop-mir.workspace = true
 pop-runtime-interface.workspace = true
+pop-runtime-native-abi.workspace = true
 pop-target.workspace = true
 pop-types.workspace = true
 
