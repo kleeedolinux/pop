@@ -183,6 +183,7 @@ impl std::error::Error for LlvmLoweringError {}
 ///
 /// Returns an error when MIR verification fails, a type is invalid, or the
 /// requested entry point has an unsupported signature.
+#[allow(clippy::too_many_lines)]
 pub fn lower_mir_to_llvm_ir(
     bubble: &MirBubble,
     types: &TypeArena,
@@ -191,12 +192,24 @@ pub fn lower_mir_to_llvm_ir(
 ) -> Result<LlvmModule, LlvmLoweringError> {
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
     let field_layout = collect_field_layout(bubble);
+    let record_fields = collect_record_fields(bubble);
+    let record_field_types = collect_record_field_types(bubble);
     let string_literals = collect_string_literals(bubble);
     let self_capture_slots = collect_self_capture_slots(bubble);
     let mut functions = bubble
         .functions()
         .iter()
-        .map(|function| lower_function(function, types, options, &field_layout, &string_literals))
+        .map(|function| {
+            lower_function(
+                function,
+                types,
+                options,
+                &field_layout,
+                &record_fields,
+                &record_field_types,
+                &string_literals,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     for method in bubble.methods() {
         let mut lowered = lower_function(
@@ -204,6 +217,8 @@ pub fn lower_mir_to_llvm_ir(
             types,
             options,
             &field_layout,
+            &record_fields,
+            &record_field_types,
             &string_literals,
         )?;
         lowered.name = format!("pop_method_{}", method.method().raw());
@@ -227,6 +242,8 @@ pub fn lower_mir_to_llvm_ir(
             types,
             options,
             &field_layout,
+            &record_fields,
+            &record_field_types,
             &string_literals,
         )?);
     }
@@ -396,14 +413,9 @@ fn runtime_declarations() -> Vec<String> {
         RuntimeOperation::AllocateTable,
         RuntimeOperation::ArrayGet,
         RuntimeOperation::FieldGet,
-        RuntimeOperation::RecordUpdate,
     ]
     .into_iter()
     .map(|operation| format!("declare i64 @{}(...)", operation.abi_symbol()))
-    .chain(std::iter::once(format!(
-        "declare i64 @{}(i64, ...)",
-        RuntimeOperation::TupleMake.abi_symbol()
-    )))
     .chain(
         [RuntimeOperation::ArraySet, RuntimeOperation::FieldSet]
             .into_iter()
@@ -427,6 +439,42 @@ fn collect_field_layout(bubble: &MirBubble) -> BTreeMap<FieldId, u32> {
         }
     }
     layout
+}
+
+fn collect_record_fields(bubble: &MirBubble) -> BTreeMap<SymbolId, Vec<FieldId>> {
+    bubble
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Record(record) => Some((
+                declaration.symbol(),
+                record
+                    .fields()
+                    .iter()
+                    .map(pop_mir::MirField::field)
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_record_field_types(bubble: &MirBubble) -> BTreeMap<TypeId, Vec<TypeId>> {
+    bubble
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Record(record) => Some((
+                record.type_id(),
+                record
+                    .fields()
+                    .iter()
+                    .map(pop_mir::MirField::field_type)
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 fn lower_interface_dispatchers(
@@ -876,6 +924,8 @@ fn lower_function(
     types: &TypeArena,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
+    record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     lower_function_parts(
@@ -887,6 +937,8 @@ fn lower_function(
         types,
         options,
         field_layout,
+        record_fields,
+        record_field_types,
         string_literals,
     )
 }
@@ -901,6 +953,8 @@ fn lower_function_parts(
     types: &TypeArena,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
+    record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     let mut value_types = BTreeMap::new();
@@ -953,6 +1007,8 @@ fn lower_function_parts(
                 &value_types,
                 types,
                 field_layout,
+                record_fields,
+                record_field_types,
                 string_literals,
                 environment,
             )?);
@@ -1060,11 +1116,14 @@ fn lower_block_arguments(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn lower_instruction(
     instruction: &pop_mir::MirInstruction,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
+    record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
     environment: Option<(&str, &BTreeSet<u32>)>,
 ) -> Result<String, LlvmLoweringError> {
@@ -1148,12 +1207,24 @@ fn lower_instruction(
         MirInstructionKind::BooleanOr { left, right } => {
             format!("{result} = or i1 %v{}, %v{}", left.raw(), right.raw())
         }
-        MirInstructionKind::CompareEqual { left, right } => {
-            lower_equality(&result, *left, *right, false, value_types, types)?
-        }
-        MirInstructionKind::CompareNotEqual { left, right } => {
-            lower_equality(&result, *left, *right, true, value_types, types)?
-        }
+        MirInstructionKind::CompareEqual { left, right } => lower_equality(
+            &result,
+            *left,
+            *right,
+            false,
+            value_types,
+            types,
+            record_field_types,
+        )?,
+        MirInstructionKind::CompareNotEqual { left, right } => lower_equality(
+            &result,
+            *left,
+            *right,
+            true,
+            value_types,
+            types,
+            record_field_types,
+        )?,
         MirInstructionKind::CompareIntegerLess { kind, left, right } => format!(
             "{result} = icmp {} i{} %v{}, %v{}",
             if kind.is_signed() { "slt" } else { "ult" },
@@ -1320,15 +1391,9 @@ fn lower_instruction(
                 types,
             )?
         }
-        MirInstructionKind::TupleMake(elements) => runtime_call_with_count(
-            &result,
-            result_type,
-            RuntimeOperation::TupleMake,
-            elements.len(),
-            elements,
-            value_types,
-            types,
-        )?,
+        MirInstructionKind::TupleMake(elements) => {
+            lower_tuple_make(&result, elements, value_types, types)?
+        }
         MirInstructionKind::ArrayGet { array, index } => runtime_call(
             &result,
             result_type,
@@ -1337,19 +1402,20 @@ fn lower_instruction(
             value_types,
             types,
         )?,
-        MirInstructionKind::RecordUpdate { base, fields, .. } => {
-            let arguments = std::iter::once(*base)
-                .chain(fields.iter().map(|(_, value)| *value))
-                .collect::<Vec<_>>();
-            runtime_call(
-                &result,
-                result_type,
-                RuntimeOperation::RecordUpdate,
-                &arguments,
-                value_types,
-                types,
-            )?
-        }
+        MirInstructionKind::RecordUpdate {
+            record,
+            base,
+            fields,
+        } => lower_record_update(
+            &result,
+            *record,
+            *base,
+            fields,
+            record_fields,
+            field_layout,
+            value_types,
+            types,
+        )?,
         MirInstructionKind::FieldGet { base, field } => runtime_field_call(
             &result,
             result_type,
@@ -1580,6 +1646,7 @@ fn lower_equality(
     negated: bool,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
 ) -> Result<String, LlvmLoweringError> {
     let type_id = *values
         .get(&left)
@@ -1593,6 +1660,20 @@ fn lower_equality(
             if negated { "eq" } else { "ne" }
         ));
     }
+    if matches!(
+        types.get(type_id),
+        Some(SemanticType::Tuple(_) | SemanticType::Record(_))
+    ) {
+        return lower_aggregate_equality(
+            result,
+            left,
+            right,
+            type_id,
+            negated,
+            types,
+            record_field_types,
+        );
+    }
     let ty = llvm_value_type(values, left, types)?;
     let operator = match (ty.as_str(), negated) {
         ("float" | "double", false) => "fcmp oeq",
@@ -1605,6 +1686,152 @@ fn lower_equality(
         left.raw(),
         right.raw()
     ))
+}
+
+fn lower_aggregate_equality(
+    result: &str,
+    left: ValueId,
+    right: ValueId,
+    type_id: TypeId,
+    negated: bool,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = Vec::new();
+    let condition = emit_aggregate_equality(
+        &mut lines,
+        result.trim_start_matches('%'),
+        &format!("%v{}", left.raw()),
+        &format!("%v{}", right.raw()),
+        type_id,
+        types,
+        record_field_types,
+    )?;
+    lines.push(if negated {
+        format!("{result} = xor i1 {condition}, true")
+    } else {
+        format!("{result} = xor i1 {condition}, false")
+    });
+    Ok(lines.join("\n"))
+}
+
+fn emit_aggregate_equality(
+    lines: &mut Vec<String>,
+    prefix: &str,
+    left: &str,
+    right: &str,
+    type_id: TypeId,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let field_types = match types
+        .get(type_id)
+        .ok_or(LlvmLoweringError::InvalidType(type_id))?
+    {
+        SemanticType::Tuple(elements) => elements.clone(),
+        SemanticType::Record(_) => record_field_types
+            .get(&type_id)
+            .cloned()
+            .ok_or(LlvmLoweringError::InvalidType(type_id))?,
+        _ => return Err(LlvmLoweringError::InvalidType(type_id)),
+    };
+    let mut conditions = Vec::new();
+    for (index, field_type) in field_types.into_iter().enumerate() {
+        let left_field = format!("%{prefix}_{index}_left");
+        let right_field = format!("%{prefix}_{index}_right");
+        lines.extend([
+            format!(
+                "{left_field} = call i64 @{}(i64 {left}, i64 {})",
+                RuntimeOperation::FieldGet.abi_symbol(),
+                index + 1
+            ),
+            format!(
+                "{right_field} = call i64 @{}(i64 {right}, i64 {})",
+                RuntimeOperation::FieldGet.abi_symbol(),
+                index + 1
+            ),
+        ]);
+        conditions.push(emit_stored_value_equality(
+            lines,
+            &format!("{prefix}_{index}"),
+            &left_field,
+            &right_field,
+            field_type,
+            types,
+            record_field_types,
+        )?);
+    }
+    if conditions.is_empty() {
+        let condition = format!("%{prefix}_empty");
+        lines.push(format!("{condition} = xor i1 0, true"));
+        return Ok(condition);
+    }
+    let mut combined = conditions[0].clone();
+    for (index, condition) in conditions.into_iter().enumerate().skip(1) {
+        let next = format!("%{prefix}_and_{index}");
+        lines.push(format!("{next} = and i1 {combined}, {condition}"));
+        combined = next;
+    }
+    Ok(combined)
+}
+
+fn emit_stored_value_equality(
+    lines: &mut Vec<String>,
+    prefix: &str,
+    left: &str,
+    right: &str,
+    type_id: TypeId,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let semantic = types
+        .get(type_id)
+        .ok_or(LlvmLoweringError::InvalidType(type_id))?;
+    if matches!(semantic, SemanticType::Tuple(_) | SemanticType::Record(_)) {
+        return emit_aggregate_equality(
+            lines,
+            prefix,
+            left,
+            right,
+            type_id,
+            types,
+            record_field_types,
+        );
+    }
+    let condition = format!("%{prefix}_equal");
+    match semantic {
+        SemanticType::Primitive(PrimitiveType::String) => {
+            let raw = format!("%{prefix}_string_equal");
+            lines.extend([
+                format!("{raw} = call i8 @pop_rt_string_equal(i64 {left}, i64 {right})"),
+                format!("{condition} = icmp ne i8 {raw}, 0"),
+            ]);
+        }
+        SemanticType::Primitive(PrimitiveType::Float32) => {
+            let left_bits = format!("%{prefix}_left_bits");
+            let right_bits = format!("%{prefix}_right_bits");
+            let left_float = format!("%{prefix}_left_float");
+            let right_float = format!("%{prefix}_right_float");
+            lines.extend([
+                format!("{left_bits} = trunc i64 {left} to i32"),
+                format!("{right_bits} = trunc i64 {right} to i32"),
+                format!("{left_float} = bitcast i32 {left_bits} to float"),
+                format!("{right_float} = bitcast i32 {right_bits} to float"),
+                format!("{condition} = fcmp oeq float {left_float}, {right_float}"),
+            ]);
+        }
+        SemanticType::Primitive(PrimitiveType::Float64) => {
+            let left_float = format!("%{prefix}_left_float");
+            let right_float = format!("%{prefix}_right_float");
+            lines.extend([
+                format!("{left_float} = bitcast i64 {left} to double"),
+                format!("{right_float} = bitcast i64 {right} to double"),
+                format!("{condition} = fcmp oeq double {left_float}, {right_float}"),
+            ]);
+        }
+        _ => lines.push(format!("{condition} = icmp eq i64 {left}, {right}")),
+    }
+    Ok(condition)
 }
 
 fn call_line(
@@ -1681,6 +1908,82 @@ fn lower_object_make(
             RuntimeOperation::FieldSet.abi_symbol(),
             slot,
             value.raw()
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn lower_tuple_make(
+    result: &str,
+    elements: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {})",
+        RuntimeOperation::AllocateObject.abi_symbol(),
+        elements.len()
+    )];
+    for (index, value) in elements.iter().enumerate() {
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (conversions, stored) =
+            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            RuntimeOperation::FieldSet.abi_symbol(),
+            index + 1
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_record_update(
+    result: &str,
+    record: SymbolId,
+    base: ValueId,
+    updates: &[(FieldId, ValueId)],
+    record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    field_layout: &BTreeMap<FieldId, u32>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let fields = record_fields
+        .get(&record)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {})",
+        RuntimeOperation::AllocateObject.abi_symbol(),
+        fields.len()
+    )];
+    for field in fields {
+        let slot = *field_layout
+            .get(field)
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let stored = if let Some((_, value)) = updates.iter().find(|(updated, _)| updated == field)
+        {
+            let type_id = *values
+                .get(value)
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let (conversions, stored) =
+                lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+            lines.extend(conversions);
+            stored
+        } else {
+            let loaded = format!("{result}_field_{slot}");
+            lines.push(format!(
+                "{loaded} = call i64 @{}(i64 %v{}, i64 {slot})",
+                RuntimeOperation::FieldGet.abi_symbol(),
+                base.raw()
+            ));
+            loaded
+        };
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {slot}, i64 {stored})",
+            RuntimeOperation::FieldSet.abi_symbol()
         ));
     }
     Ok(lines.join("\n"))
@@ -2032,36 +2335,6 @@ fn lower_array_make(
         ));
     }
     Ok(lines.join("\n"))
-}
-
-fn runtime_call_with_count(
-    result: &str,
-    result_type: Option<TypeId>,
-    operation: RuntimeOperation,
-    count: usize,
-    arguments: &[ValueId],
-    values: &BTreeMap<ValueId, TypeId>,
-    types: &TypeArena,
-) -> Result<String, LlvmLoweringError> {
-    let args = arguments
-        .iter()
-        .map(|value| {
-            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let return_type =
-        result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
-    let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
-    let arguments = if args.is_empty() {
-        count.to_string()
-    } else {
-        format!("{count}, {}", args.join(", "))
-    };
-    Ok(format!(
-        "{assignment}call {return_type} @{}(i64 {})",
-        operation.abi_symbol(),
-        arguments
-    ))
 }
 
 fn llvm_results(results: &[TypeId], types: &TypeArena) -> Result<String, LlvmLoweringError> {

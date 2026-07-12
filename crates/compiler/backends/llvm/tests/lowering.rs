@@ -474,6 +474,38 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_preserves_structural_record_and_tuple_values() {
+    let module = native_module(
+        "namespace Main\n\
+public record Point\n\
+    x: Int\n\
+    name: String\n\
+end\n\
+private function aggregates(): Boolean\n\
+    local left: Point = { x = 7, name = \"pop\" }\n\
+    local reordered: Point = { name = \"pop\", x = 7 }\n\
+    local updated = left with { x = 7, }\n\
+    return left == reordered and updated == left and (1, \"x\") == (1, \"x\")\n\
+end\n\
+public function run(): Int\n\
+    if aggregates() then\n\
+        return 42\n\
+    else\n\
+        return 1\n\
+    end\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "aggregate-values");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted aggregate values: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
     let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(
