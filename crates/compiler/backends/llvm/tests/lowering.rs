@@ -417,6 +417,63 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_executes_escaping_mutating_closures() {
+    let module = native_module(
+        "namespace Main\n\
+private function makeCounter(start: Int): function(delta: Int): Int\n\
+    local total = start\n\
+    return function(delta: Int): Int\n\
+        total = total + delta\n\
+        return total\n\
+    end\n\
+end\n\
+public function run(): Int\n\
+    local counter = makeCounter(1)\n\
+    counter(2)\n\
+    return counter(39)\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "mutating-closure");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted closure captures: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_direct_function_values_and_recursive_local_functions() {
+    let module = native_module(
+        "namespace Main\n\
+private function increment(value: Int): Int\n\
+    return value + 1\n\
+end\n\
+private function apply(operation: function(value: Int): Int, value: Int): Int\n\
+    return operation(value)\n\
+end\n\
+public function run(): Int\n\
+    local function factorial(value: Int): Int\n\
+        if value == 0 then\n\
+            return 1\n\
+        end\n\
+        return value * factorial(value - 1)\n\
+    end\n\
+    return apply(increment, 20) + factorial(3) + 15\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "recursive-closure");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted function values: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
     let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(

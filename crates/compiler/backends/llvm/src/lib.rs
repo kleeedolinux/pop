@@ -192,6 +192,7 @@ pub fn lower_mir_to_llvm_ir(
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
     let field_layout = collect_field_layout(bubble);
     let string_literals = collect_string_literals(bubble);
+    let self_capture_slots = collect_self_capture_slots(bubble);
     let mut functions = bubble
         .functions()
         .iter()
@@ -208,7 +209,29 @@ pub fn lower_mir_to_llvm_ir(
         lowered.name = format!("pop_method_{}", method.method().raw());
         functions.push(lowered);
     }
+    for nested in bubble.nested_functions() {
+        let self_slots = self_capture_slots
+            .get(&(nested.owner(), nested.function()))
+            .cloned()
+            .unwrap_or_default();
+        functions.push(lower_function_parts(
+            format!(
+                "pop_nested_{}_{}",
+                nested.owner().raw(),
+                nested.function().raw()
+            ),
+            nested.parameters(),
+            nested.results(),
+            nested.blocks(),
+            Some(("%environment", &self_slots)),
+            types,
+            options,
+            &field_layout,
+            &string_literals,
+        )?);
+    }
     functions.extend(lower_interface_dispatchers(bubble, types)?);
+    functions.extend(lower_indirect_dispatchers(bubble, types)?);
     let entry_point = options
         .entry_point
         .map(|symbol| lower_entry_point(symbol, bubble, types))
@@ -285,11 +308,68 @@ fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {
             _ => None,
         })
         .collect::<BTreeSet<_>>();
+    let nested_values = bubble
+        .nested_functions()
+        .iter()
+        .flat_map(pop_mir::MirNestedFunction::blocks)
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::StringConstant(value) => Some(value.clone()),
+            _ => None,
+        });
+    let values = values
+        .into_iter()
+        .chain(nested_values)
+        .collect::<BTreeSet<_>>();
     values
         .into_iter()
         .enumerate()
         .map(|(index, value)| (value, format!("@pop_string_{index}")))
         .collect()
+}
+
+fn collect_self_capture_slots(
+    bubble: &MirBubble,
+) -> BTreeMap<(SymbolId, pop_foundation::NestedFunctionId), BTreeSet<u32>> {
+    let mut slots = BTreeMap::new();
+    for instruction in bubble
+        .functions()
+        .iter()
+        .map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .map(|method| method.function().blocks()),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .map(pop_mir::MirNestedFunction::blocks),
+        )
+        .flatten()
+        .flat_map(pop_mir::MirBlock::instructions)
+    {
+        if let MirInstructionKind::ClosureEnvironmentAllocate {
+            owner,
+            function,
+            captures,
+            ..
+        } = instruction.kind()
+        {
+            slots
+                .entry((*owner, *function))
+                .or_insert_with(BTreeSet::new)
+                .extend(
+                    captures
+                        .iter()
+                        .filter(|capture| capture.self_reference())
+                        .map(|capture| capture.slot()),
+                );
+        }
+    }
+    slots
 }
 
 fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec<String> {
@@ -317,8 +397,6 @@ fn runtime_declarations() -> Vec<String> {
         RuntimeOperation::ArrayGet,
         RuntimeOperation::FieldGet,
         RuntimeOperation::RecordUpdate,
-        RuntimeOperation::CaptureLoad,
-        RuntimeOperation::DispatchCall,
     ]
     .into_iter()
     .map(|operation| format!("declare i64 @{}(...)", operation.abi_symbol()))
@@ -331,10 +409,6 @@ fn runtime_declarations() -> Vec<String> {
             .into_iter()
             .map(|operation| format!("declare i8 @{}(...)", operation.abi_symbol())),
     )
-    .chain(std::iter::once(format!(
-        "declare void @{}(...)",
-        RuntimeOperation::CaptureStore.abi_symbol()
-    )))
     .collect()
 }
 
@@ -493,6 +567,220 @@ fn lower_interface_dispatcher(
     })
 }
 
+fn lower_indirect_dispatchers(
+    bubble: &MirBubble,
+    types: &TypeArena,
+) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
+    let mut function_types = BTreeSet::new();
+    for blocks in bubble
+        .functions()
+        .iter()
+        .map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .map(|method| method.function().blocks()),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .map(pop_mir::MirNestedFunction::blocks),
+        )
+    {
+        let value_types = collect_block_value_types(blocks);
+        for instruction in blocks.iter().flat_map(pop_mir::MirBlock::instructions) {
+            if let MirInstructionKind::CallIndirect { callee, .. } = instruction.kind()
+                && let Some(type_id) = value_types.get(callee)
+            {
+                function_types.insert(*type_id);
+            }
+        }
+    }
+    function_types
+        .into_iter()
+        .map(|type_id| lower_indirect_dispatcher(type_id, bubble, types))
+        .collect()
+}
+
+fn collect_block_value_types(blocks: &[pop_mir::MirBlock]) -> BTreeMap<ValueId, TypeId> {
+    blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .arguments()
+                .iter()
+                .map(|argument| (argument.value(), argument.type_id()))
+                .chain(block.instructions().iter().filter_map(|instruction| {
+                    instruction
+                        .optional_result_type()
+                        .map(|type_id| (instruction.result(), type_id))
+                }))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
+fn lower_indirect_dispatcher(
+    function_type: TypeId,
+    bubble: &MirBubble,
+    types: &TypeArena,
+) -> Result<PrivateFunction, LlvmLoweringError> {
+    let Some(SemanticType::Function {
+        parameters: parameter_types,
+        results: result_types,
+        ..
+    }) = types.get(function_type)
+    else {
+        return Err(LlvmLoweringError::InvalidType(function_type));
+    };
+    let result_type = llvm_results(result_types, types)?;
+    let mut parameters = vec!["i64 %v0".to_owned()];
+    let typed_arguments = parameter_types
+        .iter()
+        .enumerate()
+        .map(|(index, type_id)| {
+            llvm_type(*type_id, types).map(|ty| format!("{ty} %v{}", index + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    parameters.extend(typed_arguments.clone());
+    let argument_text = typed_arguments.join(", ");
+    let direct = bubble
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.parameters() == parameter_types && function.results() == result_types
+        })
+        .collect::<Vec<_>>();
+    let nested = bubble
+        .nested_functions()
+        .iter()
+        .filter(|function| {
+            function.parameters() == parameter_types && function.results() == result_types
+        })
+        .collect::<Vec<_>>();
+    let direct_cases = direct
+        .iter()
+        .map(|function| {
+            format!(
+                "    i64 {}, label %direct_s{}",
+                function.symbol().raw(),
+                function.symbol().raw()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let nested_cases = nested
+        .iter()
+        .map(|function| {
+            format!(
+                "    i64 {}, label %nested_{}_{}",
+                nested_function_tag(function.owner(), function.function()),
+                function.owner().raw(),
+                function.function().raw()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut blocks = vec![
+        PrivateBlock {
+            label: "dispatch".to_owned(),
+            instructions: vec![
+                "%direct_bits = and i64 %v0, 9223372036854775808".to_owned(),
+                "%is_direct = icmp ne i64 %direct_bits, 0".to_owned(),
+            ],
+            terminator: "br i1 %is_direct, label %direct, label %closure".to_owned(),
+        },
+        PrivateBlock {
+            label: "direct".to_owned(),
+            instructions: vec!["%direct_symbol = and i64 %v0, 9223372036854775807".to_owned()],
+            terminator: format!(
+                "switch i64 %direct_symbol, label %invalid_indirect [\n{direct_cases}\n  ]"
+            ),
+        },
+        PrivateBlock {
+            label: "closure".to_owned(),
+            instructions: vec![format!(
+                "%closure_tag = call i64 @{}(i64 %v0, i64 1)",
+                RuntimeOperation::FieldGet.abi_symbol()
+            )],
+            terminator: format!(
+                "switch i64 %closure_tag, label %invalid_indirect [\n{nested_cases}\n  ]"
+            ),
+        },
+    ];
+    for function in direct {
+        blocks.push(indirect_call_target(
+            format!("direct_s{}", function.symbol().raw()),
+            &format!("@pop_s{}", function.symbol().raw()),
+            &argument_text,
+            &result_type,
+            result_types.is_empty(),
+        ));
+    }
+    for function in nested {
+        let arguments = if argument_text.is_empty() {
+            "i64 %v0".to_owned()
+        } else {
+            format!("i64 %v0, {argument_text}")
+        };
+        blocks.push(indirect_call_target(
+            format!(
+                "nested_{}_{}",
+                function.owner().raw(),
+                function.function().raw()
+            ),
+            &format!(
+                "@pop_nested_{}_{}",
+                function.owner().raw(),
+                function.function().raw()
+            ),
+            &arguments,
+            &result_type,
+            result_types.is_empty(),
+        ));
+    }
+    blocks.push(PrivateBlock {
+        label: "invalid_indirect".to_owned(),
+        instructions: Vec::new(),
+        terminator: format!(
+            "call void @{}()\n  unreachable",
+            RuntimeOperation::Trap.abi_symbol()
+        ),
+    });
+    Ok(PrivateFunction {
+        name: format!("pop_indirect_t{}", function_type.raw()),
+        parameters,
+        result: result_type,
+        blocks,
+    })
+}
+
+fn indirect_call_target(
+    label: String,
+    callee: &str,
+    arguments: &str,
+    result_type: &str,
+    returns_void: bool,
+) -> PrivateBlock {
+    if returns_void {
+        return PrivateBlock {
+            label,
+            instructions: vec![format!("call void {callee}({arguments})")],
+            terminator: "ret void".to_owned(),
+        };
+    }
+    let result = format!("%indirect_result_{label}");
+    PrivateBlock {
+        label,
+        instructions: vec![format!(
+            "{result} = call {result_type} {callee}({arguments})"
+        )],
+        terminator: format!("ret {result_type} {result}"),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PrivateModule {
     globals: Vec<String>,
@@ -590,8 +878,33 @@ fn lower_function(
     field_layout: &BTreeMap<FieldId, u32>,
     string_literals: &BTreeMap<String, String>,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
+    lower_function_parts(
+        format!("pop_s{}", function.symbol().raw()),
+        function.parameters(),
+        function.results(),
+        function.blocks(),
+        None,
+        types,
+        options,
+        field_layout,
+        string_literals,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_function_parts(
+    name: String,
+    parameter_types: &[TypeId],
+    result_types: &[TypeId],
+    function_blocks: &[pop_mir::MirBlock],
+    environment: Option<(&str, &BTreeSet<u32>)>,
+    types: &TypeArena,
+    options: LlvmLoweringOptions,
+    field_layout: &BTreeMap<FieldId, u32>,
+    string_literals: &BTreeMap<String, String>,
+) -> Result<PrivateFunction, LlvmLoweringError> {
     let mut value_types = BTreeMap::new();
-    for block in function.blocks() {
+    for block in function_blocks {
         for argument in block.arguments() {
             value_types.insert(argument.value(), argument.type_id());
         }
@@ -604,7 +917,7 @@ fn lower_function(
     let mut incoming_edges: BTreeMap<BlockId, Vec<(String, Vec<ValueId>)>> = BTreeMap::new();
     let mut union_payload_sources = BTreeMap::new();
     let mut has_union_switch = false;
-    for predecessor in function.blocks() {
+    for predecessor in function_blocks {
         match predecessor.terminator() {
             MirTerminator::Branch { target, arguments } => {
                 incoming_edges
@@ -624,7 +937,7 @@ fn lower_function(
         }
     }
     let mut blocks = Vec::new();
-    for block in function.blocks() {
+    for block in function_blocks {
         let mut instructions = lower_block_arguments(
             block,
             incoming_edges.get(&block.block()).map(Vec::as_slice),
@@ -641,6 +954,7 @@ fn lower_function(
                 types,
                 field_layout,
                 string_literals,
+                environment,
             )?);
         }
         blocks.push(PrivateBlock {
@@ -659,16 +973,20 @@ fn lower_function(
             ),
         });
     }
-    let parameters = function
-        .parameters()
-        .iter()
-        .enumerate()
-        .map(|(index, type_id)| llvm_type(*type_id, types).map(|ty| format!("{ty} %v{index}")))
-        .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
+    let mut parameters = environment
+        .map(|(name, _)| vec![format!("i64 {name}")])
+        .unwrap_or_default();
+    parameters.extend(
+        parameter_types
+            .iter()
+            .enumerate()
+            .map(|(index, type_id)| llvm_type(*type_id, types).map(|ty| format!("{ty} %v{index}")))
+            .collect::<Result<Vec<_>, LlvmLoweringError>>()?,
+    );
     Ok(PrivateFunction {
-        name: format!("pop_s{}", function.symbol().raw()),
+        name,
         parameters,
-        result: llvm_results(function.results(), types)?,
+        result: llvm_results(result_types, types)?,
         blocks,
     })
 }
@@ -748,6 +1066,7 @@ fn lower_instruction(
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
     string_literals: &BTreeMap<String, String>,
+    environment: Option<(&str, &BTreeSet<u32>)>,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
@@ -862,10 +1181,7 @@ fn lower_instruction(
             right.raw()
         ),
         MirInstructionKind::FunctionReference(symbol) => {
-            format!(
-                "{result} = select i1 true, ptr @pop_s{}, ptr null",
-                symbol.raw()
-            )
+            format!("{result} = add i64 0, {}", direct_function_tag(*symbol))
         }
         MirInstructionKind::CallDirect {
             function: callee,
@@ -912,11 +1228,22 @@ fn lower_instruction(
             RuntimeOperation::SatbWriteBarrier.abi_symbol(),
             owner.raw()
         ),
-        MirInstructionKind::CaptureCellAllocate { .. }
-        | MirInstructionKind::ClosureEnvironmentAllocate { .. } => format!(
-            "{result} = call i64 @{}(i64 0)",
-            RuntimeOperation::AllocateObject.abi_symbol()
-        ),
+        MirInstructionKind::CaptureCellAllocate { initial, .. } => {
+            lower_capture_cell_allocate(&result, *initial, value_types, types)?
+        }
+        MirInstructionKind::ClosureEnvironmentAllocate {
+            owner,
+            function,
+            captures,
+            ..
+        } => lower_closure_environment_allocate(
+            &result,
+            *owner,
+            *function,
+            captures,
+            value_types,
+            types,
+        )?,
         MirInstructionKind::ArrayMake {
             elements,
             element_map,
@@ -976,7 +1303,23 @@ fn lower_instruction(
         )?,
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
-        } => indirect_call_line(&result, result_type, *callee, arguments, value_types, types)?,
+        } => {
+            let callee_type = value_types
+                .get(callee)
+                .copied()
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let arguments = std::iter::once(*callee)
+                .chain(arguments.iter().copied())
+                .collect::<Vec<_>>();
+            call_line(
+                &result,
+                result_type,
+                &format!("@pop_indirect_t{}", callee_type.raw()),
+                &arguments,
+                value_types,
+                types,
+            )?
+        }
         MirInstructionKind::TupleMake(elements) => runtime_call_with_count(
             &result,
             result_type,
@@ -1035,36 +1378,53 @@ fn lower_instruction(
         MirInstructionKind::InterfaceUpcast { value, .. } => {
             format!("{result} = add i64 %v{}, 0", value.raw())
         }
-        MirInstructionKind::CaptureCellLoad { cell } => runtime_call(
-            &result,
-            result_type,
-            RuntimeOperation::CaptureLoad,
-            &[*cell],
-            value_types,
+        MirInstructionKind::CaptureCellLoad { cell } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            &format!("%v{}", cell.raw()),
+            1,
+            types,
+        )?
+        .join("\n"),
+        MirInstructionKind::CaptureCellStore { cell, value } => {
+            lower_capture_store(&format!("%v{}", cell.raw()), *value, value_types, types)?
+        }
+        MirInstructionKind::CaptureLoad { slot, mode, .. } => lower_capture_load(
+            instruction.result(),
+            instruction.result_type(),
+            environment
+                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                })?
+                .0,
+            *slot,
+            *mode,
+            environment.is_some_and(|(_, self_slots)| self_slots.contains(slot)),
             types,
         )?,
-        MirInstructionKind::CaptureCellStore { cell, value } => runtime_call(
-            &result,
-            result_type,
-            RuntimeOperation::CaptureStore,
-            &[*cell, *value],
-            value_types,
+        MirInstructionKind::CaptureCellReference { slot, .. } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            environment
+                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                })?
+                .0,
+            *slot as usize + 2,
             types,
-        )?,
-        MirInstructionKind::CaptureLoad { .. }
-        | MirInstructionKind::CaptureCellReference { .. } => runtime_call(
-            &result,
-            result_type,
-            RuntimeOperation::CaptureLoad,
-            &[],
-            value_types,
-            types,
-        )?,
-        MirInstructionKind::CaptureStore { value, .. } => runtime_call(
-            &result,
-            result_type,
-            RuntimeOperation::CaptureStore,
-            &[*value],
+        )?
+        .join("\n"),
+        MirInstructionKind::CaptureStore { slot, value, .. } => lower_nested_capture_store(
+            environment
+                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                })?
+                .0,
+            *slot,
+            *value,
             value_types,
             types,
         )?,
@@ -1270,30 +1630,6 @@ fn call_line(
     ))
 }
 
-fn indirect_call_line(
-    result: &str,
-    result_type: Option<TypeId>,
-    callee: ValueId,
-    arguments: &[ValueId],
-    values: &BTreeMap<ValueId, TypeId>,
-    types: &TypeArena,
-) -> Result<String, LlvmLoweringError> {
-    let args = arguments
-        .iter()
-        .map(|value| {
-            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
-    let return_type =
-        result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
-    Ok(format!(
-        "{assignment}call {return_type} %v{}({})",
-        callee.raw(),
-        args.join(", ")
-    ))
-}
-
 fn runtime_call(
     result: &str,
     result_type: Option<TypeId>,
@@ -1405,6 +1741,145 @@ fn lower_union_make(
     Ok(lines.join("\n"))
 }
 
+fn direct_function_tag(symbol: SymbolId) -> u64 {
+    (1_u64 << 63) | u64::from(symbol.raw())
+}
+
+fn nested_function_tag(owner: SymbolId, function: pop_foundation::NestedFunctionId) -> u64 {
+    ((u64::from(owner.raw()) << 32) | u64::from(function.raw())).saturating_add(1)
+}
+
+fn lower_capture_cell_allocate(
+    result: &str,
+    initial: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let type_id = *values
+        .get(&initial)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (conversions, stored) =
+        lower_runtime_slot_store(initial, type_id, &llvm_type(type_id, types)?)?;
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 1)",
+        RuntimeOperation::AllocateObject.abi_symbol()
+    )];
+    lines.extend(conversions);
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {stored})",
+        RuntimeOperation::FieldSet.abi_symbol()
+    ));
+    Ok(lines.join("\n"))
+}
+
+fn lower_closure_environment_allocate(
+    result: &str,
+    owner: SymbolId,
+    function: pop_foundation::NestedFunctionId,
+    captures: &[pop_mir::MirClosureCapture],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {})",
+        RuntimeOperation::AllocateObject.abi_symbol(),
+        captures.len() + 1
+    )];
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {})",
+        RuntimeOperation::FieldSet.abi_symbol(),
+        nested_function_tag(owner, function)
+    ));
+    for capture in captures {
+        let (conversions, stored) = if capture.self_reference() {
+            (Vec::new(), result.to_owned())
+        } else {
+            let value = capture.value();
+            let type_id = *values
+                .get(&value)
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?
+        };
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            RuntimeOperation::FieldSet.abi_symbol(),
+            capture.slot() + 2
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn lower_capture_store(
+    owner: &str,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let type_id = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
+    lines.push(format!(
+        "call i8 @{}(i64 {owner}, i64 1, i64 {stored})",
+        RuntimeOperation::FieldSet.abi_symbol()
+    ));
+    Ok(lines.join("\n"))
+}
+
+fn lower_capture_load(
+    result: ValueId,
+    result_type: TypeId,
+    environment: &str,
+    slot: u32,
+    mode: pop_mir::MirCaptureMode,
+    self_reference: bool,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    if mode == pop_mir::MirCaptureMode::Value || self_reference {
+        return lower_runtime_slot_load_from(
+            result,
+            result_type,
+            environment,
+            slot as usize + 2,
+            types,
+        )
+        .map(|lines| lines.join("\n"));
+    }
+    let cell = format!("%v{}_cell", result.raw());
+    let mut lines = vec![format!(
+        "{cell} = call i64 @{}(i64 {environment}, i64 {})",
+        RuntimeOperation::FieldGet.abi_symbol(),
+        slot + 2
+    )];
+    lines.extend(lower_runtime_slot_load_from(
+        result,
+        result_type,
+        &cell,
+        1,
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+fn lower_nested_capture_store(
+    environment: &str,
+    slot: u32,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let cell = format!("%capture_cell_{}", value.raw());
+    let mut lines = vec![format!(
+        "{cell} = call i64 @{}(i64 {environment}, i64 {})",
+        RuntimeOperation::FieldGet.abi_symbol(),
+        slot + 2
+    )];
+    lines.push(lower_capture_store(&cell, value, values, types)?);
+    Ok(lines.join("\n"))
+}
+
 fn lower_runtime_slot_store(
     value: ValueId,
     type_id: TypeId,
@@ -1444,13 +1919,28 @@ fn lower_runtime_slot_load(
     slot: usize,
     types: &TypeArena,
 ) -> Result<Vec<String>, LlvmLoweringError> {
+    lower_runtime_slot_load_from(
+        result,
+        result_type,
+        &format!("%v{}", owner.raw()),
+        slot,
+        types,
+    )
+}
+
+fn lower_runtime_slot_load_from(
+    result: ValueId,
+    result_type: TypeId,
+    owner: &str,
+    slot: usize,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
     let ty = llvm_type(result_type, types)?;
     let result = format!("%v{}", result.raw());
     let loaded = format!("{result}_slot");
     let call = format!(
-        "call i64 @{}(i64 %v{}, i64 {slot})",
+        "call i64 @{}(i64 {owner}, i64 {slot})",
         RuntimeOperation::FieldGet.abi_symbol(),
-        owner.raw()
     );
     Ok(match ty.as_str() {
         "i64" => vec![format!("{result} = {call}")],
@@ -1614,7 +2104,6 @@ fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, LlvmLoweringE
         SemanticType::Primitive(PrimitiveType::Float32) => Ok("float".to_owned()),
         SemanticType::Primitive(PrimitiveType::Float64) => Ok("double".to_owned()),
         SemanticType::Primitive(PrimitiveType::Never) => Ok("void".to_owned()),
-        SemanticType::Function { .. } => Ok("ptr".to_owned()),
         _ => Ok("i64".to_owned()),
     }
 }
