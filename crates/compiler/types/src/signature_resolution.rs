@@ -170,6 +170,21 @@ impl ResolvedFunctionSignature {
         }
     }
 
+    /// Rehydrates one already-verified public reference signature in the
+    /// consumer's isolated type arena.
+    #[must_use]
+    pub fn referenced(
+        symbol: SymbolId,
+        name: impl Into<String>,
+        parameters: Vec<(String, TypeId, SourceSpan)>,
+        results: Vec<(TypeId, SourceSpan)>,
+        effects: crate::EffectSummary,
+    ) -> Self {
+        let mut signature = Self::canonical(symbol, name.into(), parameters, results);
+        signature.effects = effects;
+        signature
+    }
+
     #[must_use]
     pub const fn symbol(&self) -> SymbolId {
         self.symbol

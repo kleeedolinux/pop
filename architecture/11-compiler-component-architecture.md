@@ -68,7 +68,9 @@ tools/
   test-runner/      conformance and fixture orchestration
   architecture-tests/ Cargo layout and dependency-direction conformance
 libraries/
+  bridge/           closed typed native-foundation adapter descriptors
   internal/         trusted Pop.Internal source, intrinsics, bootstrap metadata
+  macros/           standard-library-only `#[poplib]` procedural expansion
   standard/         public Pop.Standard source and API baselines
 crates/extensions/
   data, ai, cli, rpc, syntax, lsp
@@ -197,6 +199,43 @@ The compiler has no hard-coded knowledge of convenience APIs; syntax protocols
 are identified by reserved semantic IDs declared in the base-library contract.
 
 API baseline and intrinsic-table verification are build gates.
+
+The two Rust bootstrap crates are internally modular under
+[ADR 0035](./decisions/0035-modular-base-library-implementation.md). Their
+`src/lib.rs` files are thin explicit inventories: `pop-standard` implementation
+modules follow canonical public API-family ownership, while `pop-internal`
+modules follow trusted runtime-service ownership. This source partition does
+not create more foundational Bubbles or make Cargo modules part of Pop Lang's
+semantic hierarchy.
+
+[ADR 0037](./decisions/0037-typed-rust-foundation-adapter-attribute.md) adds two
+Rust-only support crates beside those implementations. `pop-library-bridge`
+owns closed build-time native adapter descriptors, and `pop-library-macros`
+expands `#[poplib(...)]` without third-party parsing dependencies. Neither crate
+is a foundational Bubble or a Pop source/API-definition path. Foundation
+modules retain explicit descriptor inventories; generated descriptors are
+verified against accepted metadata before linking.
+
+An ordinary portable library algorithm remains library work. It changes its
+owning module, focused tests, documentation, and API baseline without changing
+the parser, resolver, HIR, MIR, backends, or runtime. Cross-component edits are
+reserved for accepted compiler-known protocols/identities, trusted intrinsics,
+PLRI services, or native ABI boundaries.
+
+Each foundation implementation crate contains a distinct `pop/` source root.
+Its conventional `src/lib.pop` and additional `.pop` Modules form one reserved
+Bubble and are discovered without a compiler-side file inventory. Repository
+conformance builds `Pop.Internal` before `Pop.Standard`, carries the exact
+Bubble dependency into HIR/MIR, and compiles an added contribution Module as a
+regression probe. The source manifests are trusted toolchain inputs, not
+ordinary replaceable dependencies.
+
+ADR 0036 makes the first contributed public functions consumable without
+compiler-known IDs. The producer emits a closed typed public-function projection;
+the consumer resolver indexes names from direct dependencies; and HIR/MIR carry
+the original `(BubbleId, SymbolId)` identity. Metadata arenas may remap storage
+IDs locally but cannot erase the owning Bubble or introduce name-based runtime
+dispatch.
 
 Official extensions are normal public Packages, not compiler components. In
 particular, `Pop.Syntax` defines a reviewed public facade rather than exporting

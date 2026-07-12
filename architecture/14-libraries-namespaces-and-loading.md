@@ -190,6 +190,14 @@ arenas, backend objects, and unrelated implementation details. Reference-only
 artifacts never execute. XML documentation is separate and does not alter the
 public API hash.
 
+Cross-Bubble declarations use
+`SymbolIdentity { bubble: BubbleId, symbol: SymbolId }` under
+[ADR 0036](./decisions/0036-typed-cross-bubble-function-references.md). The
+first implementation emits public namespace functions with closed primitive
+parameter/result signatures and effects. Unsupported public signature types
+reject metadata emission rather than becoming erased or dynamic. HIR/MIR retain
+the complete identity after any session-local metadata remapping.
+
 ## Compile-time resolution algorithm
 
 For selected Workspace/Package/Bubble roots, the toolchain:

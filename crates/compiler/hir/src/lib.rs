@@ -7,7 +7,7 @@ use std::fmt::Write;
 use pop_foundation::{
     AttributeId, BindingId, BubbleId, CaptureId, ClassId, FieldId, FunctionId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId, SourceSpan,
-    StandardFunctionId, SymbolId, TypeId, UnionCaseId, ValueParameterId,
+    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -29,6 +29,7 @@ pub struct HirBubble {
     functions: Vec<HirFunction>,
     methods: Vec<HirMethod>,
     public_symbols: Vec<SymbolId>,
+    function_references: Vec<HirFunctionReference>,
 }
 
 impl HirBubble {
@@ -150,7 +151,35 @@ impl HirBubble {
             functions,
             methods,
             public_symbols,
+            function_references: Vec::new(),
         })
+    }
+
+    /// Attaches verified direct-dependency function signatures.
+    ///
+    /// # Errors
+    ///
+    /// Rejects references outside the Bubble dependency set or duplicate
+    /// Bubble-scoped identities.
+    pub fn with_function_references(
+        mut self,
+        mut references: Vec<HirFunctionReference>,
+    ) -> Result<Self, HirBubbleError> {
+        references.sort_by_key(HirFunctionReference::identity);
+        let mut previous = None;
+        for reference in &references {
+            if !self.dependencies.contains(&reference.identity.bubble()) {
+                return Err(HirBubbleError::UnknownReferenceBubble(
+                    reference.identity.bubble(),
+                ));
+            }
+            if previous == Some(reference.identity) {
+                return Err(HirBubbleError::DuplicateReference(reference.identity));
+            }
+            previous = Some(reference.identity);
+        }
+        self.function_references = references;
+        Ok(self)
     }
 
     #[must_use]
@@ -186,6 +215,11 @@ impl HirBubble {
     #[must_use]
     pub fn public_symbols(&self) -> &[SymbolId] {
         &self.public_symbols
+    }
+
+    #[must_use]
+    pub fn function_references(&self) -> &[HirFunctionReference] {
+        &self.function_references
     }
 
     /// Independently verifies this complete HIR Bubble against its semantic
@@ -240,6 +274,53 @@ pub enum HirBubbleError {
     DuplicateFunction(SymbolId),
     DuplicateDeclaration(SymbolId),
     DuplicateMethod(MethodId),
+    DuplicateReference(SymbolIdentity),
+    UnknownReferenceBubble(BubbleId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirFunctionReference {
+    identity: SymbolIdentity,
+    parameters: Vec<TypeId>,
+    results: Vec<TypeId>,
+    effects: pop_types::EffectSummary,
+}
+
+impl HirFunctionReference {
+    #[must_use]
+    pub fn new(
+        identity: SymbolIdentity,
+        parameters: Vec<TypeId>,
+        results: Vec<TypeId>,
+        effects: pop_types::EffectSummary,
+    ) -> Self {
+        Self {
+            identity,
+            parameters,
+            results,
+            effects,
+        }
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> pop_types::EffectSummary {
+        self.effects
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1630,6 +1711,9 @@ pub enum HirCallDispatch {
     Direct {
         function: SymbolId,
     },
+    Referenced {
+        function: SymbolIdentity,
+    },
     DirectMethod {
         method: MethodId,
     },
@@ -1994,6 +2078,9 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
         TypedCallDispatch::Direct { function } => HirCallDispatch::Direct {
             function: *function,
         },
+        TypedCallDispatch::Referenced { function } => HirCallDispatch::Referenced {
+            function: *function,
+        },
         TypedCallDispatch::DirectMethod { method, receiver } => {
             return HirCall {
                 dispatch: HirCallDispatch::DirectMethod { method: *method },
@@ -2171,6 +2258,7 @@ fn lower_expression(
         },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
+        | TypedExpressionKind::ReferencedCall { .. }
         | TypedExpressionKind::IndirectCall { .. }
         | TypedExpressionKind::DirectMethodCall { .. }
         | TypedExpressionKind::InterfaceMethodCall { .. }) => {
@@ -2212,6 +2300,18 @@ fn lower_call_expression(
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Direct {
+                function: *function,
+            },
+            arguments: arguments
+                .iter()
+                .map(|argument| lower_expression(argument, interface_slots))
+                .collect(),
+        },
+        TypedExpressionKind::ReferencedCall {
+            function,
+            arguments,
+        } => HirExpressionKind::Call {
+            dispatch: HirCallDispatch::Referenced {
                 function: *function,
             },
             arguments: arguments
@@ -2424,9 +2524,9 @@ fn first_unknown_interface_call(
                     Some((*interface, *method, call.span()))
                 } else {
                     let receiver = match call.dispatch() {
-                        TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
-                            None
-                        }
+                        TypedCallDispatch::Standard { .. }
+                        | TypedCallDispatch::Direct { .. }
+                        | TypedCallDispatch::Referenced { .. } => None,
                         TypedCallDispatch::DirectMethod { receiver, .. } => receiver
                             .as_deref()
                             .and_then(|value| first_unknown_interface_expression(value, slots)),
@@ -2516,6 +2616,7 @@ fn first_unknown_interface_expression(
         }),
         TypedExpressionKind::UnionCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
+        | TypedExpressionKind::ReferencedCall { arguments, .. }
         | TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .find_map(|argument| first_unknown_interface_expression(argument, slots)),
@@ -2618,7 +2719,9 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
 
 fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {
     let callee = match call.dispatch() {
-        TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => None,
+        TypedCallDispatch::Standard { .. }
+        | TypedCallDispatch::Direct { .. }
+        | TypedCallDispatch::Referenced { .. } => None,
         TypedCallDispatch::DirectMethod { receiver, .. } => receiver
             .as_deref()
             .and_then(first_compile_time_only_expression),
@@ -2678,6 +2781,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         }),
         TypedExpressionKind::UnionCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
+        | TypedExpressionKind::ReferencedCall { arguments, .. }
         | TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .find_map(first_compile_time_only_expression),
@@ -2794,6 +2898,10 @@ pub enum HirVerificationError {
     },
     UnknownFunction {
         function: SymbolId,
+        span: SourceSpan,
+    },
+    UnknownReferencedFunction {
+        function: SymbolIdentity,
         span: SourceSpan,
     },
     UnknownMethod {
@@ -3088,6 +3196,7 @@ struct HirDeclaredMethod {
 
 struct HirSchema {
     functions: BTreeMap<SymbolId, HirCallableSignature>,
+    function_references: BTreeMap<SymbolIdentity, HirCallableSignature>,
     methods: BTreeMap<MethodId, HirCallableSignature>,
     declared_methods: BTreeMap<MethodId, HirDeclaredMethod>,
     records: BTreeMap<SymbolId, HirAggregateSchema>,
@@ -3106,6 +3215,7 @@ impl HirSchema {
     ) -> Self {
         let mut schema = Self {
             functions: BTreeMap::new(),
+            function_references: BTreeMap::new(),
             methods: BTreeMap::new(),
             declared_methods: BTreeMap::new(),
             records: BTreeMap::new(),
@@ -3129,6 +3239,18 @@ impl HirSchema {
             schema.functions.insert(
                 function.symbol(),
                 HirCallableSignature::from_function(function),
+            );
+        }
+        for reference in bubble.function_references() {
+            for type_id in reference.parameters().iter().chain(reference.results()) {
+                verify_schema_type(arena, *type_id, empty_span(), errors);
+            }
+            schema.function_references.insert(
+                reference.identity(),
+                HirCallableSignature {
+                    parameters: reference.parameters().to_vec(),
+                    results: reference.results().to_vec(),
+                },
             );
         }
         schema.verify_class_interfaces(errors);
@@ -4584,6 +4706,20 @@ impl Verifier<'_> {
                     .and_then(|schema| schema.functions.get(function))
                     .cloned()
             }
+            HirCallDispatch::Referenced { function } => {
+                let signature = self
+                    .schema
+                    .and_then(|schema| schema.function_references.get(function))
+                    .cloned();
+                if self.schema.is_some() && signature.is_none() {
+                    self.errors
+                        .push(HirVerificationError::UnknownReferencedFunction {
+                            function: *function,
+                            span,
+                        });
+                }
+                signature
+            }
             HirCallDispatch::DirectMethod { method } => {
                 if !self.known_methods.contains(method) {
                     self.errors.push(HirVerificationError::UnknownMethod {
@@ -6010,6 +6146,14 @@ fn dump_call(
         }
         HirCallDispatch::Direct { function } => {
             let _ = write!(output, "call.direct s{}(", function.raw());
+        }
+        HirCallDispatch::Referenced { function } => {
+            let _ = write!(
+                output,
+                "call.reference b{}:s{}(",
+                function.bubble().raw(),
+                function.symbol().raw()
+            );
         }
         HirCallDispatch::DirectMethod { method } => {
             let _ = write!(output, "call.method m{}(", method.raw());

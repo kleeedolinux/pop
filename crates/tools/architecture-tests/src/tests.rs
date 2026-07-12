@@ -32,7 +32,9 @@ const MEMBERS: &[&str] = &[
     "crates/extensions/lsp",
     "crates/extensions/rpc",
     "crates/extensions/syntax",
+    "crates/libraries/bridge",
     "crates/libraries/internal",
+    "crates/libraries/macros",
     "crates/libraries/standard",
     "crates/runtime/interface",
     "crates/runtime/native",
@@ -395,6 +397,131 @@ fn reserved_library_layers_have_the_required_dependency_direction() {
         .expect("read Pop.Standard implementation manifest");
     assert!(standard.contains("pop-internal.workspace = true"));
     assert!(!internal.contains("pop-standard.workspace = true"));
+}
+
+#[test]
+fn foundation_libraries_are_partitioned_by_contributor_ownership() {
+    let root = repository_root();
+    let standard = root.join("crates/libraries/standard");
+    let internal = root.join("crates/libraries/internal");
+
+    let standard_root =
+        fs::read_to_string(standard.join("src/lib.rs")).expect("read pop-standard crate root");
+    for declaration in [
+        "mod native_output;",
+        "pub mod math;",
+        "pub mod sequence;",
+        "pub mod text;",
+    ] {
+        assert!(
+            standard_root.lines().any(|line| line.trim() == declaration),
+            "pop-standard must explicitly inventory `{declaration}`"
+        );
+    }
+    for implementation in ["pub fn ", "pub enum ", "extern \"C\" fn", "pub mod math {"] {
+        assert!(
+            !standard_root.contains(implementation),
+            "pop-standard src/lib.rs must remain a thin module inventory"
+        );
+    }
+
+    let internal_root =
+        fs::read_to_string(internal.join("src/lib.rs")).expect("read pop-internal crate root");
+    assert!(
+        internal_root
+            .lines()
+            .any(|line| line.trim() == "pub mod runtime;")
+    );
+    assert!(!internal_root.contains("pub mod runtime {"));
+
+    for relative in [
+        "standard/src/math.rs",
+        "standard/src/native_output.rs",
+        "standard/src/sequence.rs",
+        "standard/src/text.rs",
+        "standard/tests/math.rs",
+        "standard/tests/native_output.rs",
+        "standard/tests/sequence.rs",
+        "standard/tests/text.rs",
+        "standard/pop/bubble.toml",
+        "standard/pop/src/lib.pop",
+        "internal/src/runtime.rs",
+        "internal/tests/runtime.rs",
+        "internal/pop/bubble.toml",
+        "internal/pop/src/lib.pop",
+    ] {
+        assert!(
+            root.join("crates/libraries").join(relative).is_file(),
+            "foundation library ownership file `{relative}` is missing"
+        );
+    }
+
+    let contributor_guide = fs::read_to_string(root.join("crates/libraries/README.md"))
+        .expect("read foundation-library contributor guide");
+    for required in [
+        "ordinary portable library function",
+        "compiler-known identity",
+        "trusted intrinsic",
+        "native ABI",
+        "`Pop.Standard` is the recommended contribution path",
+        "## Choose the right contribution path",
+        "## Step-by-step: add a `Pop.Standard` function",
+        "## Before proposing `Pop.Internal` work",
+        "## Pull request checklist",
+    ] {
+        assert!(
+            contributor_guide.contains(required),
+            "foundation-library contributor guide must explain `{required}` changes"
+        );
+    }
+}
+
+#[test]
+fn foundation_native_adapters_use_typed_poplib_descriptors() {
+    let root = repository_root();
+    let bridge = root.join("crates/libraries/bridge");
+    let macros = root.join("crates/libraries/macros");
+
+    for path in [
+        bridge.join("Cargo.toml"),
+        bridge.join("src/lib.rs"),
+        macros.join("Cargo.toml"),
+        macros.join("src/lib.rs"),
+    ] {
+        assert!(
+            path.is_file(),
+            "ADR 0037 support file is missing: {}",
+            path.display()
+        );
+    }
+
+    let bridge_manifest =
+        fs::read_to_string(bridge.join("Cargo.toml")).expect("read pop-library-bridge manifest");
+    let macro_manifest =
+        fs::read_to_string(macros.join("Cargo.toml")).expect("read pop-library-macros manifest");
+    let macro_source =
+        fs::read_to_string(macros.join("src/lib.rs")).expect("read pop-library-macros source");
+    assert!(bridge_manifest.contains("pop-library-macros.workspace = true"));
+    assert!(!macro_manifest.contains("syn ="));
+    assert!(!macro_manifest.contains("quote ="));
+
+    let standard = fs::read_to_string(root.join("crates/libraries/standard/src/native_output.rs"))
+        .expect("read native standard adapters");
+    assert_eq!(standard.matches("#[poplib(").count(), 2);
+    assert!(!standard.contains("#[unsafe(no_mangle)]"));
+    assert!(standard.contains("pub const NATIVE_EXPORTS"));
+    assert!(standard.contains("POP_STD_PRINT_INT_POPLIB_EXPORT"));
+    assert!(standard.contains("POP_STD_PRINT_STRING_POPLIB_EXPORT"));
+
+    let internal = fs::read_to_string(root.join("crates/libraries/internal/src/lib.rs"))
+        .expect("read internal foundation root");
+    assert!(internal.contains("pub use runtime::NATIVE_EXPORTS;"));
+
+    for forbidden in ["inventory::", "linkme::", "ctor::", "std::fs::read_dir"] {
+        assert!(!standard.contains(forbidden));
+        assert!(!internal.contains(forbidden));
+        assert!(!macro_source.contains(forbidden));
+    }
 }
 
 #[test]

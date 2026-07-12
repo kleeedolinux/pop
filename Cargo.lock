@@ -199,6 +199,7 @@ dependencies = [
  "pop-diagnostics",
  "pop-foundation",
  "pop-hir",
+ "pop-library-bridge",
  "pop-mir",
  "pop-projects",
  "pop-query",
@@ -269,6 +270,7 @@ dependencies = [
 name = "pop-internal"
 version = "0.1.0"
 dependencies = [
+ "pop-library-bridge",
  "pop-runtime-interface",
 ]
 
@@ -283,6 +285,17 @@ dependencies = [
  "pop-source",
  "pop-syntax",
 ]
+
+[[package]]
+name = "pop-library-bridge"
+version = "0.1.0"
+dependencies = [
+ "pop-library-macros",
+]
+
+[[package]]
+name = "pop-library-macros"
+version = "0.1.0"
 
 [[package]]
 name = "pop-mir"
@@ -344,6 +357,7 @@ name = "pop-standard"
 version = "0.1.0"
 dependencies = [
  "pop-internal",
+ "pop-library-bridge",
 ]
 
 [[package]]
@@ -367,6 +381,10 @@ name = "pop-test-runner"
 version = "0.1.0"
 dependencies = [
  "pop-driver",
+ "pop-foundation",
+ "pop-mir",
+ "pop-projects",
+ "pop-source",
 ]
 
 [[package]]

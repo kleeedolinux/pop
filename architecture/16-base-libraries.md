@@ -123,6 +123,20 @@ root, boxed dynamic fallback, or reflective member protocol.
 Library algorithms remain normal Pop code whenever that preserves the required
 cost, portability, and dependency contracts.
 
+### Bootstrap implementation organization
+
+[ADR 0035](./decisions/0035-modular-base-library-implementation.md) keeps the
+`pop-internal` Rust crate as one trusted implementation boundary while dividing
+its source by runtime-service responsibility. Its `src/lib.rs` is an explicit
+thin module inventory, not a place for unrelated adapter implementations. A new
+trusted module must name the intrinsic, PLRI, GC/runtime, capability, or
+bootstrap responsibility that authorizes it.
+
+The crate's separate `pop/` root owns trusted Pop source Modules. Conventional
+Module discovery feeds them through the normal typed HIR/MIR pipeline before
+`Pop.Standard` is analyzed. This repository source root is selected by the
+toolchain and cannot be substituted through a user Package dependency.
+
 ## `Pop.Standard`
 
 ### Identity and availability
@@ -168,6 +182,35 @@ formatting protocol.
 These are implementation evidence, not a completed public standard library.
 Their migration review is recorded in
 [the implementation plan](./22.6-standard-library-implementation-plan.md).
+
+### Bootstrap implementation organization
+
+[ADR 0035](./decisions/0035-modular-base-library-implementation.md) keeps the
+`pop-standard` Rust crate as one implementation of the reserved `Pop.Standard`
+Bubble while dividing its source and tests by canonical API-family ownership.
+Portable families, such as Math, Text, and Sequence, do not share a monolithic
+implementation file with native bootstrap output adapters.
+
+Adding or extending an ordinary typed algorithm requires only its owning
+library module, focused tests, checked documentation, and applicable API
+baseline. It does not require compiler or backend edits. A source-visible
+compiler-known identity, intrinsic, or ABI adapter follows its separate
+architecture and cross-backend conformance process. These Rust module names are
+host implementation partitions, not additional Pop Lang namespaces or Bubbles.
+
+Portable Pop bodies live under the crate's separate `pop/` source root. Adding
+a `.pop` Module relies on deterministic conventional discovery and requires no
+Rust `mod` declaration or compiler registry entry. Repository conformance proves
+complete source discovery, verified HIR/MIR lowering, and logical public
+reference-metadata consumption by a dependent Bubble. Deterministic on-disk
+`.poplib` encoding and linked execution remain later artifact/runtime slices.
+
+Rust-native foundation adapters use the typed `#[poplib(...)]` contract from
+[ADR 0037](./decisions/0037-typed-rust-foundation-adapter-attribute.md). The
+attribute generates a checked host ABI descriptor, not a Pop declaration or a
+runtime registry entry. Each descriptor must match accepted trusted metadata
+and remains in an explicit module-owned inventory. Ordinary portable algorithms
+continue to be implemented as Pop source.
 
 ### Public scope and ownership
 

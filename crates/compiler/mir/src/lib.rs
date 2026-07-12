@@ -11,8 +11,8 @@ use std::fmt::Write;
 use pop_foundation::{
     BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, NamespaceId, NestedFunctionId, SourceSpan,
-    StandardFunctionId, SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
-    ValueParameterId,
+    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
+    ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure, HirDeclaration,
@@ -116,6 +116,32 @@ impl MirEffectSummary {
     }
 }
 
+fn lower_effect_summary(summary: pop_types::EffectSummary) -> MirEffectSummary {
+    const EFFECTS: [(pop_types::Effect, MirEffect); 11] = [
+        (pop_types::Effect::Allocates, MirEffect::Allocates),
+        (
+            pop_types::Effect::WritesManagedReference,
+            MirEffect::WritesManagedReference,
+        ),
+        (pop_types::Effect::MayTrap, MirEffect::MayTrap),
+        (pop_types::Effect::MayUnwind, MirEffect::MayUnwind),
+        (pop_types::Effect::Suspends, MirEffect::Suspends),
+        (pop_types::Effect::UnsafeMemory, MirEffect::UnsafeMemory),
+        (
+            pop_types::Effect::ForeignFunction,
+            MirEffect::ForeignFunction,
+        ),
+        (pop_types::Effect::AmbientIo, MirEffect::AmbientIo),
+        (pop_types::Effect::CompilerQuery, MirEffect::CompilerQuery),
+        (pop_types::Effect::GcSafePoint, MirEffect::GcSafePoint),
+        (pop_types::Effect::Roots, MirEffect::Roots),
+    ];
+    EFFECTS
+        .into_iter()
+        .filter_map(|(source, target)| summary.contains(source).then_some(target))
+        .fold(MirEffectSummary::empty(), MirEffectSummary::with)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirUnwindAction {
     Propagate,
@@ -131,12 +157,18 @@ pub struct MirBubble {
     functions: Vec<MirFunction>,
     methods: Vec<MirMethod>,
     nested_functions: Vec<MirNestedFunction>,
+    function_references: Vec<MirFunctionReference>,
 }
 
 impl MirBubble {
     #[must_use]
     pub const fn bubble(&self) -> BubbleId {
         self.bubble
+    }
+
+    #[must_use]
+    pub fn function_references(&self) -> &[MirFunctionReference] {
+        &self.function_references
     }
 
     #[must_use]
@@ -171,6 +203,9 @@ impl MirBubble {
             let _ = write!(output, " b{}", dependency.raw());
         }
         output.push('\n');
+        for reference in &self.function_references {
+            dump_function_reference(&mut output, reference);
+        }
         for declaration in &self.declarations {
             dump_declaration(&mut output, declaration);
         }
@@ -190,6 +225,36 @@ impl MirBubble {
             dump_nested_function(&mut output, function);
         }
         output
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirFunctionReference {
+    identity: SymbolIdentity,
+    parameters: Vec<TypeId>,
+    results: Vec<TypeId>,
+    effects: MirEffectSummary,
+}
+
+impl MirFunctionReference {
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> MirEffectSummary {
+        self.effects
     }
 }
 
@@ -831,6 +896,12 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
+    CallReferenced {
+        function: SymbolIdentity,
+        arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
     CallStandard {
         function: StandardFunctionId,
         arguments: Vec<ValueId>,
@@ -1097,6 +1168,7 @@ pub enum MirVerificationError {
         found: TypeId,
     },
     UnknownFunction(SymbolId),
+    UnknownReferencedFunction(SymbolIdentity),
     UnknownMethod(MethodId),
     InvalidInstructionType {
         instruction: ValueId,
@@ -1131,6 +1203,7 @@ pub enum MirVerificationError {
         right: TypeId,
     },
     DuplicateDeclaration(SymbolId),
+    DuplicateReferencedFunction(SymbolIdentity),
     DuplicateClass(ClassId),
     DuplicateDeclaredField(FieldId),
     DuplicateUnionCase {
@@ -1260,6 +1333,20 @@ pub fn lower_hir_bubble(
     hir: &HirBubble,
     arena: &TypeArena,
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
+    let function_references: Vec<_> = hir
+        .function_references()
+        .iter()
+        .map(|reference| MirFunctionReference {
+            identity: reference.identity(),
+            parameters: reference.parameters().to_vec(),
+            results: reference.results().to_vec(),
+            effects: lower_effect_summary(reference.effects()),
+        })
+        .collect();
+    let reference_effects: BTreeMap<_, _> = function_references
+        .iter()
+        .map(|reference| (reference.identity, reference.effects))
+        .collect();
     let declarations: Vec<_> = hir
         .declarations()
         .iter()
@@ -1271,7 +1358,8 @@ pub fn lower_hir_bubble(
         .functions()
         .iter()
         .map(|function| {
-            let (function, mut nested) = lower_function(function, arena, &gc_schema);
+            let (function, mut nested) =
+                lower_function(function, arena, &gc_schema, &reference_effects);
             nested_functions.append(&mut nested);
             function
         })
@@ -1281,7 +1369,8 @@ pub fn lower_hir_bubble(
         .methods()
         .iter()
         .map(|method| {
-            let (function, mut nested) = lower_function(method.function(), arena, &gc_schema);
+            let (function, mut nested) =
+                lower_function(method.function(), arena, &gc_schema, &reference_effects);
             nested_functions.append(&mut nested);
             MirMethod {
                 method: method.method(),
@@ -1299,6 +1388,7 @@ pub fn lower_hir_bubble(
         functions,
         methods,
         nested_functions,
+        function_references,
     };
     recompute_effects(&mut mir);
     while insert_gc_safe_points(&mut mir, arena) {
@@ -1436,8 +1526,10 @@ fn lower_function(
     function: &HirFunction,
     arena: &TypeArena,
     gc_schema: &LoweringGcSchema,
+    reference_effects: &BTreeMap<SymbolIdentity, MirEffectSummary>,
 ) -> (MirFunction, Vec<MirNestedFunction>) {
-    let (mut lowered, nested) = FunctionBuilder::new(function, arena, gc_schema).lower();
+    let (mut lowered, nested) =
+        FunctionBuilder::new(function, arena, gc_schema, reference_effects).lower();
     lowered.function = function.function();
     (lowered, nested)
 }
@@ -1492,6 +1584,7 @@ struct FunctionBuilder<'hir> {
     capture_schema: BTreeMap<CaptureId, MirCapture>,
     arena: &'hir TypeArena,
     gc_schema: &'hir LoweringGcSchema,
+    reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
     blocks: Vec<BuildingBlock>,
     current: BlockId,
     next_value: u32,
@@ -1691,6 +1784,7 @@ impl<'hir> FunctionBuilder<'hir> {
         hir: &'hir HirFunction,
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
+        reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
     ) -> Self {
         let parameter_specs: Vec<_> = hir
             .parameters()
@@ -1705,6 +1799,7 @@ impl<'hir> FunctionBuilder<'hir> {
             BTreeMap::new(),
             arena,
             gc_schema,
+            reference_effects,
         )
     }
 
@@ -1713,6 +1808,7 @@ impl<'hir> FunctionBuilder<'hir> {
         closure: &'hir HirClosure,
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
+        reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
     ) -> Self {
         let parameter_specs = closure
             .parameters()
@@ -1747,6 +1843,7 @@ impl<'hir> FunctionBuilder<'hir> {
             capture_schema,
             arena,
             gc_schema,
+            reference_effects,
         )
     }
 
@@ -1759,6 +1856,7 @@ impl<'hir> FunctionBuilder<'hir> {
         capture_schema: BTreeMap<CaptureId, MirCapture>,
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
+        reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
     ) -> Self {
         let mut arguments = Vec::new();
         let mut parameters = BTreeMap::new();
@@ -1783,6 +1881,7 @@ impl<'hir> FunctionBuilder<'hir> {
             capture_schema,
             arena,
             gc_schema,
+            reference_effects,
             blocks: vec![BuildingBlock {
                 arguments,
                 instructions: Vec::new(),
@@ -2321,8 +2420,14 @@ impl<'hir> FunctionBuilder<'hir> {
     }
 
     fn lower_closure(&mut self, closure: &HirClosure, closure_type: TypeId) -> ValueId {
-        let (lowered, mut nested) =
-            FunctionBuilder::new_closure(self.owner, closure, self.arena, self.gc_schema).lower();
+        let (lowered, mut nested) = FunctionBuilder::new_closure(
+            self.owner,
+            closure,
+            self.arena,
+            self.gc_schema,
+            self.reference_effects,
+        )
+        .lower();
         let captures: Vec<_> = closure
             .captures()
             .iter()
@@ -2545,6 +2650,19 @@ impl<'hir> FunctionBuilder<'hir> {
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
                 declared_effects: MirEffectSummary::empty(),
+                unwind: MirUnwindAction::Propagate,
+            },
+            HirCallDispatch::Referenced { function } => MirInstructionKind::CallReferenced {
+                function: *function,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.lower_expression(argument))
+                    .collect(),
+                declared_effects: self
+                    .reference_effects
+                    .get(function)
+                    .copied()
+                    .unwrap_or_default(),
                 unwind: MirUnwindAction::Propagate,
             },
             HirCallDispatch::DirectMethod { method } => MirInstructionKind::CallDirectMethod {
@@ -2997,6 +3115,9 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
             MirEffectSummary::from_effects([MirEffect::WritesManagedReference])
         }
         MirInstructionKind::CallDirect {
+            declared_effects, ..
+        }
+        | MirInstructionKind::CallReferenced {
             declared_effects, ..
         }
         | MirInstructionKind::CallStandard {
@@ -3472,6 +3593,27 @@ pub fn verify_mir_bubble(
         })
         .collect();
     let mut errors = Vec::new();
+    let mut reference_signatures = BTreeMap::new();
+    for reference in &bubble.function_references {
+        let signature = (
+            reference.parameters.clone(),
+            reference.results.clone(),
+            reference.effects,
+        );
+        if reference_signatures
+            .insert(reference.identity, signature)
+            .is_some()
+        {
+            errors.push(MirVerificationError::DuplicateReferencedFunction(
+                reference.identity,
+            ));
+        }
+        if !bubble.dependencies.contains(&reference.identity.bubble()) {
+            errors.push(MirVerificationError::UnknownReferencedFunction(
+                reference.identity,
+            ));
+        }
+    }
     let schema = MirSchema::collect(bubble, arena, &mut errors);
     for function in &bubble.functions {
         verify_function(
@@ -3479,6 +3621,7 @@ pub fn verify_mir_bubble(
             arena,
             &schema,
             &signatures,
+            &reference_signatures,
             &method_signatures,
             &mut errors,
         );
@@ -3489,6 +3632,7 @@ pub fn verify_mir_bubble(
             arena,
             &schema,
             &signatures,
+            &reference_signatures,
             &method_signatures,
             &mut errors,
         );
@@ -3637,6 +3781,7 @@ fn verify_function(
     arena: &TypeArena,
     schema: &MirSchema<'_>,
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     errors: &mut Vec<MirVerificationError>,
 ) {
@@ -3716,6 +3861,11 @@ fn verify_function(
             {
                 errors.push(MirVerificationError::UnknownFunction(function));
             }
+            if let MirInstructionKind::CallReferenced { function, .. } = instruction.kind()
+                && !reference_signatures.contains_key(function)
+            {
+                errors.push(MirVerificationError::UnknownReferencedFunction(*function));
+            }
             if let MirInstructionKind::CallDirectMethod { method, .. } = instruction.kind()
                 && !method_signatures.contains_key(method)
             {
@@ -3726,12 +3876,19 @@ fn verify_function(
                 arena,
                 schema,
                 facts.values,
-                signatures,
-                method_signatures,
+                CallableSignatures {
+                    functions: signatures,
+                    references: reference_signatures,
+                    methods: method_signatures,
+                },
                 errors,
             );
-            let expected_effects =
-                expected_instruction_effects(instruction, signatures, method_signatures);
+            let expected_effects = expected_instruction_effects(
+                instruction,
+                signatures,
+                reference_signatures,
+                method_signatures,
+            );
             required_function_effects = required_function_effects.union(expected_effects);
             if instruction.effects() != expected_effects {
                 errors.push(MirVerificationError::InstructionEffectMismatch {
@@ -3782,10 +3939,15 @@ fn verify_entry_parameters(function: &MirFunction, errors: &mut Vec<MirVerificat
 fn expected_instruction_effects(
     instruction: &MirInstruction,
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
 ) -> MirEffectSummary {
     match instruction.kind() {
         MirInstructionKind::CallDirect { function, .. } => signatures
+            .get(function)
+            .map(|(_, _, effects)| *effects)
+            .unwrap_or_default(),
+        MirInstructionKind::CallReferenced { function, .. } => reference_signatures
             .get(function)
             .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
@@ -3807,6 +3969,7 @@ fn verify_unwind_action(
 ) {
     let unwind = match instruction.kind() {
         MirInstructionKind::CallDirect { unwind, .. }
+        | MirInstructionKind::CallReferenced { unwind, .. }
         | MirInstructionKind::CallDirectMethod { unwind, .. }
         | MirInstructionKind::CallIndirect { unwind, .. } => *unwind,
         _ => return,
@@ -4553,13 +4716,19 @@ fn block_targets(block: &MirBlock) -> Vec<BlockId> {
     targets
 }
 
+#[derive(Clone, Copy)]
+struct CallableSignatures<'a> {
+    functions: &'a BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    references: &'a BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    methods: &'a BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+}
+
 fn verify_instruction_types(
     instruction: &MirInstruction,
     arena: &TypeArena,
     schema: &MirSchema<'_>,
     values: &BTreeMap<ValueId, TypeId>,
-    signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
-    method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    signatures: CallableSignatures<'_>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     let requires_effect_form = matches!(
@@ -4588,8 +4757,9 @@ fn verify_instruction_types(
         instruction,
         arena,
         values,
-        signatures,
-        method_signatures,
+        signatures.functions,
+        signatures.references,
+        signatures.methods,
         errors,
     ) {
         return;
@@ -5310,6 +5480,7 @@ fn verify_callable_instruction(
     arena: &TypeArena,
     values: &BTreeMap<ValueId, TypeId>,
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     errors: &mut Vec<MirVerificationError>,
 ) -> bool {
@@ -5335,6 +5506,15 @@ fn verify_callable_instruction(
             ..
         } => {
             if let Some((parameters, results, _)) = signatures.get(function) {
+                verify_call_signature(instruction, arguments, parameters, results, values, errors);
+            }
+        }
+        MirInstructionKind::CallReferenced {
+            function,
+            arguments,
+            ..
+        } => {
+            if let Some((parameters, results, _)) = reference_signatures.get(function) {
                 verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
@@ -5679,6 +5859,9 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CallDirect {
             arguments: values, ..
         }
+        | MirInstructionKind::CallReferenced {
+            arguments: values, ..
+        }
         | MirInstructionKind::CallStandard {
             arguments: values, ..
         }
@@ -5957,6 +6140,21 @@ fn dump_function(output: &mut String, function: &MirFunction) {
     dump_effects(output, function.effects);
     output.push_str("]\n");
     dump_blocks(output, &function.blocks);
+}
+
+fn dump_function_reference(output: &mut String, reference: &MirFunctionReference) {
+    let _ = write!(
+        output,
+        "reference b{}:s{} params(",
+        reference.identity.bubble().raw(),
+        reference.identity.symbol().raw()
+    );
+    dump_type_ids(output, &reference.parameters);
+    output.push_str(") results(");
+    dump_type_ids(output, &reference.results);
+    output.push_str(") effects[");
+    dump_effects(output, reference.effects);
+    output.push_str("]\n");
 }
 
 fn dump_nested_function(output: &mut String, function: &MirNestedFunction) {
@@ -6281,6 +6479,21 @@ fn dump_callable_or_schema_instruction(
             unwind,
         } => {
             let _ = write!(output, "callDirect s{} ", function.raw());
+            dump_value_list(output, arguments);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
+        MirInstructionKind::CallReferenced {
+            function,
+            arguments,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(
+                output,
+                "callReference b{}:s{} ",
+                function.bubble().raw(),
+                function.symbol().raw()
+            );
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }

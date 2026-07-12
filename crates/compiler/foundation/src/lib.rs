@@ -56,6 +56,30 @@ typed_id!(
     ValueId,
 );
 
+/// Stable identity of one declaration inside its owning Bubble.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SymbolIdentity {
+    bubble: BubbleId,
+    symbol: SymbolId,
+}
+
+impl SymbolIdentity {
+    #[must_use]
+    pub const fn new(bubble: BubbleId, symbol: SymbolId) -> Self {
+        Self { bubble, symbol }
+    }
+
+    #[must_use]
+    pub const fn bubble(self) -> BubbleId {
+        self.bubble
+    }
+
+    #[must_use]
+    pub const fn symbol(self) -> SymbolId {
+        self.symbol
+    }
+}
+
 /// A UTF-8 byte offset in a source file.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextSize(u32);

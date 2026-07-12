@@ -6,7 +6,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use pop_foundation::{ClassId, FieldId, NestedFunctionId, SymbolId, TypeId, UnionCaseId, ValueId};
+use pop_foundation::{
+    ClassId, FieldId, NestedFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
+};
 use pop_mir::{
     MirBubble, MirInstruction, MirInstructionKind, MirTerminator, MirUnwindAction,
     MirVerificationError, verify_mir_bubble,
@@ -325,6 +327,7 @@ impl Default for ExecutionLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     UnknownFunction(SymbolId),
+    UnknownReferencedFunction(SymbolIdentity),
     WrongArity,
     TypeMismatch,
     MissingValue(ValueId),
@@ -911,6 +914,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CompareFloatGreater { .. }
             | MirInstructionKind::CallStandard { .. }
             | MirInstructionKind::CallDirect { .. }
+            | MirInstructionKind::CallReferenced { .. }
             | MirInstructionKind::CallDirectMethod { .. }
             | MirInstructionKind::CallInterface { .. }
             | MirInstructionKind::CallIndirect { .. }
@@ -970,6 +974,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => self.execute_direct_call(*function, arguments, values)?,
+            MirInstructionKind::CallReferenced { function, .. } => {
+                return Err(ExecutionError::UnknownReferencedFunction(*function));
+            }
             MirInstructionKind::CallDirectMethod {
                 method, arguments, ..
             } => self.execute_method_call(*method, arguments, values)?,
@@ -1139,6 +1146,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => single_result(self.execute_direct_call(*function, arguments, values)?),
+            MirInstructionKind::CallReferenced { function, .. } => {
+                return Err(ExecutionError::UnknownReferencedFunction(*function));
+            }
             MirInstructionKind::CallDirectMethod {
                 method, arguments, ..
             } => single_result(self.execute_method_call(*method, arguments, values)?),

@@ -454,6 +454,7 @@ pub enum UnsupportedCompileTimeConstruct {
     AttributeQuery,
     IndirectCall,
     FunctionReference,
+    ReferencedCall,
     FieldAccess,
     ArrayAccess,
     Record,
@@ -875,6 +876,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
                 UnsupportedCompileTimeConstruct::ResultlessCall
             }
+            TypedCallDispatch::Referenced { .. } => UnsupportedCompileTimeConstruct::ReferencedCall,
             TypedCallDispatch::DirectMethod { .. } => UnsupportedCompileTimeConstruct::MethodCall,
             TypedCallDispatch::InterfaceMethod { .. } => {
                 UnsupportedCompileTimeConstruct::InterfaceDispatch
@@ -934,6 +936,9 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::InterfaceConversion
         }
         TypedExpressionKind::IndirectCall { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
+        TypedExpressionKind::ReferencedCall { .. } => {
+            UnsupportedCompileTimeConstruct::ReferencedCall
+        }
         TypedExpressionKind::StandardCall { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::AttributeQuery { .. }

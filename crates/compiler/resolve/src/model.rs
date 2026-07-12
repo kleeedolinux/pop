@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use pop_foundation::{BubbleId, ModuleId, SourceSpan, SymbolId};
+use pop_foundation::{BubbleId, ModuleId, SourceSpan, SymbolId, SymbolIdentity};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Visibility {
@@ -72,6 +72,7 @@ pub struct Declaration {
     kind: DeclarationKind,
     visibility: Visibility,
     span: SourceSpan,
+    reference_identity: Option<SymbolIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,6 +145,28 @@ impl Declaration {
             kind,
             visibility,
             span,
+            reference_identity: None,
+        }
+    }
+
+    #[must_use]
+    pub fn referenced(
+        symbol: SymbolId,
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        kind: DeclarationKind,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            symbol,
+            owner: DeclarationOwner::new(module, identity.bubble(), namespace),
+            name: name.into(),
+            kind,
+            visibility: Visibility::Public,
+            span,
+            reference_identity: Some(identity),
         }
     }
 
@@ -199,6 +222,11 @@ impl Declaration {
     #[must_use]
     pub const fn span(&self) -> SourceSpan {
         self.span
+    }
+
+    #[must_use]
+    pub const fn reference_identity(&self) -> Option<SymbolIdentity> {
+        self.reference_identity
     }
 
     #[must_use]
@@ -328,8 +356,68 @@ impl DeclarationIndex {
         self.declarations.get(&symbol)
     }
 
+    #[must_use]
+    pub fn declaration_by_reference_identity(
+        &self,
+        identity: SymbolIdentity,
+    ) -> Option<&Declaration> {
+        self.declarations
+            .values()
+            .find(|declaration| declaration.reference_identity() == Some(identity))
+    }
+
     pub fn declarations(&self) -> impl Iterator<Item = &Declaration> {
         self.declarations.values()
+    }
+
+    /// Adds verified public dependency declarations with session-local symbol
+    /// remapping while retaining their original Bubble-scoped identities.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate reference identities or exhaustion of the local
+    /// symbol arena.
+    pub fn with_referenced_declarations(
+        mut self,
+        references: impl IntoIterator<Item = ReferencedDeclaration>,
+    ) -> Result<Self, ReferenceIndexError> {
+        let mut identities: BTreeMap<_, _> = self
+            .declarations
+            .values()
+            .filter_map(|declaration| {
+                declaration
+                    .reference_identity()
+                    .map(|identity| (identity, declaration.symbol()))
+            })
+            .collect();
+        let mut next = self
+            .declarations
+            .keys()
+            .next_back()
+            .map_or(0, |symbol| symbol.raw().saturating_add(1));
+        for reference in references {
+            if identities.contains_key(&reference.identity) {
+                return Err(ReferenceIndexError::DuplicateIdentity(reference.identity));
+            }
+            let symbol = SymbolId::from_raw(next);
+            next = next
+                .checked_add(1)
+                .ok_or(ReferenceIndexError::SymbolArenaExhausted)?;
+            identities.insert(reference.identity, symbol);
+            self.declarations.insert(
+                symbol,
+                Declaration::referenced(
+                    symbol,
+                    reference.identity,
+                    reference.module,
+                    reference.namespace,
+                    reference.name,
+                    reference.kind,
+                    reference.span,
+                ),
+            );
+        }
+        Ok(self)
     }
 
     #[must_use]
@@ -398,4 +486,40 @@ impl DeclarationIndex {
             })
             .collect()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferencedDeclaration {
+    identity: SymbolIdentity,
+    module: ModuleId,
+    namespace: String,
+    name: String,
+    kind: DeclarationKind,
+    span: SourceSpan,
+}
+
+impl ReferencedDeclaration {
+    #[must_use]
+    pub fn function(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::Function,
+            span,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceIndexError {
+    DuplicateIdentity(SymbolIdentity),
+    SymbolArenaExhausted,
 }

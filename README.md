@@ -410,13 +410,20 @@ architecture/decisions/
                     Accepted Architecture Decision Records
 crates/compiler/    Syntax, resolution, types, compile time, HIR, MIR, drivers
 crates/extensions/  Independent Pop.Data/Ai/Cli/Rpc/Syntax/Lsp package builds
+crates/libraries/   Modular Pop.Internal/Pop.Standard Rust bootstrap code
+                    plus conventionally discovered pop/ source roots
 crates/runtime/     PLRI and bootstrap/native runtime contracts
 crates/tools/       Architecture tests, formatter, documentation, CLI tooling
-libraries/internal/ Pop.Internal bootstrap foundations
-libraries/standard/ Pop.Standard bootstrap foundations
+libraries/internal/ Pop.Internal verified bootstrap metadata
+libraries/standard/ Pop.Standard verified bootstrap metadata
 ```
 
 The compiler and runtime are implemented in Rust. Rust is the implementation language of the toolchain; it does not define Pop source syntax or its package model.
+
+The [foundation-library contributor guide](crates/libraries/README.md) shows how
+ordinary Math, Text, and Sequence work stays inside one focused module and test,
+and when an intrinsic or native-boundary change genuinely needs compiler or
+runtime knowledge.
 
 ## License
 
