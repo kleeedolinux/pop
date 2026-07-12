@@ -1,9 +1,11 @@
 use pop_runtime_native::{
-    abi_safe_point, allocate_mapped_object, allocate_utf8_string_literal, pop_rt_abi_major,
-    pop_rt_abi_minor, pop_rt_allocate_array, pop_rt_allocate_object, pop_rt_allocate_table,
-    pop_rt_array_get, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
-    pop_rt_release_root, pop_rt_retain_root, pop_rt_string_equal, request_abi_collection,
+    abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
+    allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
+    pop_rt_allocate_array, pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_get,
+    pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage, pop_rt_release_root,
+    pop_rt_retain_root, pop_rt_string_equal, request_abi_collection,
 };
+use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn abi_test_lock() -> MutexGuard<'static, ()> {
@@ -37,6 +39,53 @@ fn bootstrap_strings_preserve_valid_utf8_and_compare_by_value() {
 
     let invalid = [0xff_u8];
     assert_eq!(allocate_utf8_string_literal(&invalid), 0);
+}
+
+#[test]
+fn process_arguments_preserve_order_empty_and_non_ascii_utf8() {
+    let _guard = abi_test_lock();
+    let arguments =
+        allocate_process_arguments(&[b"first".as_slice(), b"".as_slice(), "Pop 🫧".as_bytes()]);
+    assert_ne!(arguments, 0);
+
+    for (index, expected) in ["first", "", "Pop 🫧"].iter().enumerate() {
+        let actual = pop_rt_array_get(arguments, u64::try_from(index + 1).expect("index"));
+        let expected = allocate_utf8_string_literal(expected.as_bytes());
+        assert_ne!(actual, 0);
+        assert_eq!(pop_rt_string_equal(actual, expected), 1);
+    }
+    assert_eq!(pop_rt_array_get(arguments, 4), 0);
+}
+
+#[test]
+fn process_arguments_reject_invalid_utf8_without_partial_success() {
+    let _guard = abi_test_lock();
+    assert_eq!(
+        allocate_process_arguments(&[b"valid".as_slice(), &[0xff_u8]]),
+        0
+    );
+}
+
+#[test]
+fn platform_argument_adapter_omits_the_executable_path() {
+    let _guard = abi_test_lock();
+    let executable = CString::new("/tmp/pop-program").expect("executable");
+    let first = CString::new("first").expect("argument");
+    let unicode = CString::new("Pop 🫧").expect("argument");
+    let arguments = allocate_platform_arguments(&[&executable, &first, &unicode]);
+    assert_ne!(arguments, 0);
+
+    let expected_first = allocate_utf8_string_literal(b"first");
+    let expected_unicode = allocate_utf8_string_literal("Pop 🫧".as_bytes());
+    assert_eq!(
+        pop_rt_string_equal(pop_rt_array_get(arguments, 1), expected_first),
+        1
+    );
+    assert_eq!(
+        pop_rt_string_equal(pop_rt_array_get(arguments, 2), expected_unicode),
+        1
+    );
+    assert_eq!(pop_rt_array_get(arguments, 3), 0);
 }
 
 #[test]

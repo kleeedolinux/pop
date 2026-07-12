@@ -1,0 +1,5 @@
+namespace NativeWrongParameters
+
+private function main(): Int
+    return 0
+end

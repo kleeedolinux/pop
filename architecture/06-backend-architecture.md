@@ -51,6 +51,13 @@ parses that private emission, verifies the LLVM module, applies target data, and
 emits the object. No Inkwell or `llvm-sys` value escapes into MIR, the driver,
 the runtime interface, or another backend.
 
+The executable entry wrapper is a target boundary, not a second language entry
+contract. It maps the platform argument vector through the typed runtime
+adapter, calls the canonical entry `SymbolId` with a managed `Array<String>`,
+and maps its `Int` result to process status. Entry discovery remains a
+resolved-program/driver responsibility; the LLVM backend receives the selected
+ID and never scans names or signatures to invent an entry.
+
 The bootstrap conformance path must assemble emitted textual IR with the target
 LLVM toolchain and execute a pure entry point through LLVM's native execution
 environment. This proves that the private lowering is real LLVM output without

@@ -20,7 +20,7 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/main.pop",
-        "namespace Main\npublic function run(): Int\n    local value: Int = 40 + 2\n    return value\nend\n",
+        "namespace Main\nprivate function main(arguments: Array<String>): Int\n    local value: Int = 40 + 2\n    return value\nend\n",
     )
     .expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(
@@ -42,7 +42,7 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     .expect("LLVM lowering");
     let text = module.to_string();
     assert!(text.contains("target triple = \"x86_64-unknown-linux-gnu\""));
-    assert!(text.contains("define i64 @pop_s0()"));
+    assert!(text.contains("define i64 @pop_s0(i64 %v0)"));
     assert!(text.contains("add i64"));
     assert!(text.contains("ret i64"));
     assert!(
@@ -56,7 +56,7 @@ fn emitted_text_is_accepted_by_llvm_as() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/main.pop",
-        "namespace Main\npublic function run(): Int\n    return 40 + 2\nend\n",
+        "namespace Main\nprivate function main(arguments: Array<String>): Int\n    return 40 + 2\nend\n",
     )
     .expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(
@@ -98,7 +98,7 @@ fn emitted_llvm_executes_a_pure_pop_function() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/main.pop",
-        "namespace Main\npublic function run(): Int\n    return 42\nend\n",
+        "namespace Main\nprivate function main(arguments: Array<String>): Int\n    return 42\nend\n",
     )
     .expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(
@@ -116,19 +116,17 @@ fn emitted_llvm_executes_a_pure_pop_function() {
         LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
     )
     .expect("LLVM lowering");
-    let input = std::env::temp_dir().join("pop-backend-llvm-execution.ll");
-    fs::write(&input, module.to_string()).expect("write temporary LLVM input");
-    let result = Command::new("lli")
-        .arg(&input)
-        .output()
-        .expect("lli must be installed");
+    let text = module.to_string();
+    assert!(text.contains("define i32 @main(i32 %pop_argc, ptr %pop_argv)"));
+    assert!(text.contains("call i64 @pop_rt_process_arguments"));
+    assert!(text.contains("call i64 @pop_s0(i64 %pop_arguments)"));
+    let result = link_with_runtime_and_run(&module, "pure-entry");
     assert_eq!(
         result.status.code(),
         Some(42),
         "lli rejected or failed generated IR: {}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let _ = fs::remove_file(input);
 }
 
 #[test]
@@ -158,7 +156,7 @@ private function idle()\n\
     while false do\n\
     end\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     idle()\n\
     if enabled() then\n\
         return choose(0, count())\n\
@@ -222,7 +220,7 @@ private function consume(result: ResultValue): Int\n\
         return 1\n\
     end\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     return consume(ResultValue.Ok(7))\n\
 end\n",
     )
@@ -273,7 +271,7 @@ end\n\
 private function empty(): Boolean\n\
     return \"\" == \"\"\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     if same() and different() and empty() then\n\
         return 42\n\
     else\n\
@@ -335,7 +333,7 @@ end\n\
 private function negate(value: Int8): Int8\n\
     return -value\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     if addByte(40, 2) == 42 then\n\
         return 42\n\
     else\n\
@@ -359,7 +357,7 @@ end\n",
 private function addByte(left: UInt8, right: UInt8): UInt8\n\
     return left + right\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     if addByte(255, 1) == 0 then\n\
         return 1\n\
     else\n\
@@ -397,7 +395,7 @@ end\n\
 private function readThroughInterface(reader: Reader, value: Int): Int\n\
     return reader:read(value)\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     local reader = IncrementReader {}\n\
     local doubleReader = DoubleReader {}\n\
     if readDirect(reader) == 41 then\n\
@@ -428,7 +426,7 @@ private function makeCounter(start: Int): function(delta: Int): Int\n\
         return total\n\
     end\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     local counter = makeCounter(1)\n\
     counter(2)\n\
     return counter(39)\n\
@@ -454,7 +452,7 @@ end\n\
 private function apply(operation: function(value: Int): Int, value: Int): Int\n\
     return operation(value)\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     local function factorial(value: Int): Int\n\
         if value == 0 then\n\
             return 1\n\
@@ -488,7 +486,7 @@ private function aggregates(): Boolean\n\
     local updated = left with { x = 7, }\n\
     return left == reordered and updated == left and (1, \"x\") == (1, \"x\")\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     if aggregates() then\n\
         return 42\n\
     else\n\
@@ -702,7 +700,7 @@ public class Box\n\
         return Box { value = value }\n\
     end\n\
 end\n\
-public function run(): Int\n\
+private function main(arguments: Array<String>): Int\n\
     local box = Box.new(41)\n\
     return box.value\n\
 end\n",

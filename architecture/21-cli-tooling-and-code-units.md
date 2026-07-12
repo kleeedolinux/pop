@@ -167,7 +167,10 @@ private function main(arguments: Array<String>): Int
 end
 ```
 
-`arguments` excludes the executable path; returning zero means success.
+`arguments` excludes the executable path; returning zero means success. Every
+argument must be valid UTF-8 and is preserved exactly, including empty and
+non-ASCII strings. Invalid platform argument bytes cause a closed runtime trap
+before `main` executes rather than lossy conversion.
 Applications keep typed `Result` errors internally and translate them explicitly
 at the entry boundary. Async programs call the typed `Async.run` adapter rather
 than adding hidden async entry behavior. Entry selection uses `SymbolId` during

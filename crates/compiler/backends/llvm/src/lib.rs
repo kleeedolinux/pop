@@ -168,7 +168,7 @@ impl fmt::Display for LlvmLoweringError {
             }
             Self::UnsupportedEntryPointSignature(symbol) => write!(
                 formatter,
-                "entry point s{} must have signature () -> Int",
+                "entry point s{} must have signature (Array<String>) -> Int",
                 symbol.raw()
             ),
         }
@@ -286,6 +286,7 @@ pub fn lower_mir_to_llvm_ir(
         ),
         "declare i64 @pop_rt_string_literal(ptr, i64)".to_owned(),
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
+        "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.extend(runtime_declarations());
@@ -891,11 +892,18 @@ fn lower_entry_point(
     let int_type = types
         .source_type("Int")
         .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    if function.parameters().iter().next().is_some() || function.results() != [int_type] {
+    let string_type = types
+        .source_type("String")
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let canonical_parameter = function.parameters().first().is_some_and(|parameter| {
+        matches!(types.get(*parameter), Some(SemanticType::Array(element)) if *element == string_type)
+    });
+    if function.parameters().len() != 1 || !canonical_parameter || function.results() != [int_type]
+    {
         return Err(LlvmLoweringError::UnsupportedEntryPointSignature(symbol));
     }
     Ok(format!(
-        "define i32 @main() {{\nentry:\n  %pop_exit_value = call i64 @pop_s{}()\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code\n}}",
+        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n  %pop_exit_value = call i64 @pop_s{}(i64 %pop_arguments)\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code\n}}",
         symbol.raw()
     ))
 }

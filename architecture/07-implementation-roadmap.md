@@ -78,7 +78,8 @@ not table or runtime-name lookup.
 - PLRI native ABI and runtime library;
 - `.poplib` Bubble manifests/reference metadata, object emission, and platform linking;
 - standalone bootstrap `pop build`/`pop run` examples that exercise Rust
-  `Pop.Standard` output and allocating Rust-runtime operations;
+  `Pop.Standard` output, canonical process arguments, and allocating
+  Rust-runtime operations;
 - `BubbleContext` default loading and initialization;
 - moving nursery, card barriers, and GC stress tests;
 - `Pop.Standard` I/O, time, tasks, and platform adapters;

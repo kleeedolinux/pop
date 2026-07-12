@@ -1,0 +1,5 @@
+namespace NativeMissingMain
+
+private function helper(): Int
+    return 0
+end

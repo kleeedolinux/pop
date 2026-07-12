@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-07-11
 - Supersedes: none
+- Superseded in part by: ADR 0025 canonical native entry and process arguments
 
 ## Context
 
@@ -50,6 +51,9 @@ MIR carry its stable standard-function identity rather than a source spelling,
 and the LLVM backend maps it to the Rust `Pop.Standard` integer-output adapter.
 Standalone `pop build <source.pop>` and `pop run <source.pop>` accept one
 unambiguous `() -> Int` entry, whose return value is only the process status.
+ADR 0025 supersedes this temporary entry clause with the canonical private
+`main(arguments: Array<String>): Int` contract. The rest of this decision
+remains accepted.
 
 ## Consequences
 

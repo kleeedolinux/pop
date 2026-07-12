@@ -1,0 +1,5 @@
+namespace NativePublicMain
+
+public function main(arguments: Array<String>): Int
+    return 0
+end

@@ -163,19 +163,69 @@ fn build_and_run_emit_and_execute_a_native_pop_program_with_standard_output() {
     assert!(output_path.is_file(), "pop build must emit an executable");
 
     let executable = Command::new(&output_path)
+        .args(["first", "", "Pop 🫧"])
         .output()
         .expect("built Pop executable runs");
     assert!(executable.status.success());
     assert_eq!(output_text(&executable.stdout), "42\n");
 
-    let run = run_pop(&["run"], Some("native.pop"));
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .arg("run")
+        .arg(fixture("native.pop"))
+        .args(["--", "first", "", "Pop 🫧"])
+        .output()
+        .expect("pop run executes with program arguments");
     assert!(
         run.status.success(),
         "stderr:\n{}",
         output_text(&run.stderr)
     );
     assert_eq!(output_text(&run.stdout), "42\n");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let invalid = Command::new(&output_path)
+            .arg(std::ffi::OsString::from_vec(vec![0xff]))
+            .output()
+            .expect("native program receives invalid platform bytes");
+        assert!(
+            !invalid.status.success(),
+            "invalid UTF-8 must trap before user main"
+        );
+        assert!(invalid.stdout.is_empty());
+    }
     let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
+fn native_build_rejects_every_noncanonical_entry_shape() {
+    for fixture_name in [
+        "nativeMissingMain.pop",
+        "nativePublicMain.pop",
+        "nativeWrongParameters.pop",
+        "nativeWrongResult.pop",
+    ] {
+        let output_path = std::env::temp_dir().join(format!("pop-invalid-entry-{fixture_name}"));
+        let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+            .arg("build")
+            .arg(fixture(fixture_name))
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .expect("pop build runs");
+        assert!(
+            !output.status.success(),
+            "{fixture_name} unexpectedly built"
+        );
+        let stderr = output_text(&output.stderr);
+        assert!(
+            stderr.contains("private function main(arguments: Array<String>): Int"),
+            "{fixture_name} emitted an imprecise entry diagnostic: {stderr}"
+        );
+        assert!(!output_path.exists());
+    }
 }
 
 #[test]

@@ -4,7 +4,16 @@ public function add(left: Int, right: Int): Int
     return left + right
 end
 
-public function run(): Int
+private function helperText(): String
+    return "typed helper result"
+end
+
+private function idle()
+end
+
+private function main(arguments: Array<String>): Int
+    idle()
+    helperText()
     local result = add(20, 22)
     print(result)
     return 0

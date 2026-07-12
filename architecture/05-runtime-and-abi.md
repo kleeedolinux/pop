@@ -28,6 +28,16 @@ source call `print(Int)` to a fixed integer-output adapter. This adapter is not
 a PLRI operation, and its host ABI spelling never participates in source name
 resolution.
 
+At a binary boundary, the target entry adapter omits the executable path,
+validates each remaining platform argument as UTF-8, and constructs the
+canonical managed `Array<String>` before invoking the entry `SymbolId`. The
+array has a precise managed-reference element map and is rooted while its
+strings are materialized. Empty and non-ASCII arguments are preserved exactly.
+Invalid UTF-8 causes a closed runtime trap before user code executes; the
+adapter never performs lossy conversion. The entry's `Int` result becomes the
+platform process status. This target-specific adapter does not change MIR's
+logical Pop Lang calling convention.
+
 ## Runtime responsibilities
 
 The runtime is expected to own or coordinate:

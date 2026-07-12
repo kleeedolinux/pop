@@ -1,0 +1,5 @@
+namespace NativeWrongResult
+
+private function main(arguments: Array<String>): String
+    return "wrong"
+end

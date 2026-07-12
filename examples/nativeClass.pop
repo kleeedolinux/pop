@@ -8,7 +8,7 @@ public class Box
     end
 end
 
-public function run(): Int
+private function main(arguments: Array<String>): Int
     local box = Box.new(41)
     print(box.value + 1)
     return 0

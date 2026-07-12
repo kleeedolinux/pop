@@ -8,16 +8,18 @@ use std::process::{Command, ExitCode};
 
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
-use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
+use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::lower_hir_bubble;
+use pop_resolve::Visibility;
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
+use pop_types::SemanticType;
 
 const USAGE: &str = "\
 Usage:
     pop check <source.pop> [--dump <hir|mir>]...
     pop build <source.pop> --output <executable>
-    pop run <source.pop>
+    pop run <source.pop> [-- <arguments>...]
 
 The direct source path is a bootstrap compiler inspection mode. It checks one
 Module in an ephemeral Bubble and does not define Package or Bubble identity.
@@ -43,6 +45,7 @@ enum CommandLine {
     },
     Run {
         source_path: PathBuf,
+        arguments: Vec<OsString>,
     },
 }
 
@@ -54,7 +57,10 @@ fn main() -> ExitCode {
             source_path,
             output_path,
         }) => build_source(&source_path, &output_path),
-        Ok(CommandLine::Run { source_path }) => run_source(&source_path),
+        Ok(CommandLine::Run {
+            source_path,
+            arguments,
+        }) => run_source(&source_path, &arguments),
         Err(error) => {
             eprintln!("pop: {error}\n\n{USAGE}");
             ExitCode::from(2)
@@ -145,10 +151,22 @@ fn parse_run_arguments(
     mut arguments: impl Iterator<Item = OsString>,
 ) -> Result<CommandLine, String> {
     let source_path = required_source_path(arguments.next(), "run")?;
-    if arguments.next().is_some() {
-        return Err("`pop run` accepts exactly one source path in bootstrap mode".to_owned());
+    let Some(separator) = arguments.next() else {
+        return Ok(CommandLine::Run {
+            source_path,
+            arguments: Vec::new(),
+        });
+    };
+    if separator != "--" {
+        return Err(format!(
+            "unsupported option `{}`; program arguments must follow `--`",
+            separator.to_string_lossy()
+        ));
     }
-    Ok(CommandLine::Run { source_path })
+    Ok(CommandLine::Run {
+        source_path,
+        arguments: arguments.collect(),
+    })
 }
 
 fn required_source_path(argument: Option<OsString>, command: &str) -> Result<PathBuf, String> {
@@ -249,35 +267,19 @@ fn write_output(output: &str) -> ExitCode {
 }
 
 fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
-    let Some((mir, types)) = lower_source(source_path) else {
+    let Some(program) = lower_native_source(source_path) else {
         return ExitCode::FAILURE;
     };
-    let Some(int_type) = types.source_type("Int") else {
-        eprintln!("pop: internal compiler error: missing canonical Int type");
-        return ExitCode::from(101);
-    };
-    let mut entries = mir
-        .functions()
-        .iter()
-        .filter(|function| function.parameters().is_empty() && function.results() == [int_type]);
-    let Some(entry) = entries.next() else {
-        eprintln!("pop: native bootstrap requires one function with signature () -> Int");
-        return ExitCode::FAILURE;
-    };
-    if entries.next().is_some() {
-        eprintln!("pop: native bootstrap found more than one () -> Int entry candidate");
-        return ExitCode::FAILURE;
-    }
     let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
         .pointer_width(PointerWidth::Bits64)
         .endianness(Endianness::Little)
         .build()
         .expect("repository native target is complete");
     let module = match lower_mir_to_llvm_ir(
-        &mir,
-        &types,
+        &program.mir,
+        &program.types,
         &target,
-        LlvmLoweringOptions::default().with_entry_point(entry.symbol()),
+        LlvmLoweringOptions::default().with_entry_point(program.entry),
     ) {
         Ok(module) => module,
         Err(error) => {
@@ -295,13 +297,13 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     result
 }
 
-fn run_source(source_path: &Path) -> ExitCode {
+fn run_source(source_path: &Path, arguments: &[OsString]) -> ExitCode {
     let executable = std::env::temp_dir().join(format!("pop-run-{}", std::process::id()));
     let build = build_source(source_path, &executable);
     if build != ExitCode::SUCCESS {
         return build;
     }
-    let status = Command::new(&executable).status();
+    let status = Command::new(&executable).args(arguments).status();
     let _ = fs::remove_file(&executable);
     match status {
         Ok(status) if status.success() => ExitCode::SUCCESS,
@@ -318,7 +320,13 @@ fn run_source(source_path: &Path) -> ExitCode {
     }
 }
 
-fn lower_source(source_path: &Path) -> Option<(pop_mir::MirBubble, pop_types::TypeArena)> {
+struct NativeProgram {
+    mir: pop_mir::MirBubble,
+    types: pop_types::TypeArena,
+    entry: SymbolId,
+}
+
+fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
     let source_text = fs::read_to_string(source_path)
         .map_err(|error| {
             eprintln!("pop: could not read `{}`: {error}", source_path.display());
@@ -344,6 +352,7 @@ fn lower_source(source_path: &Path) -> Option<(pop_mir::MirBubble, pop_types::Ty
         return None;
     }
     let hir = result.hir()?;
+    let entry = select_native_entry(hir, result.types())?;
     let mir = lower_hir_bubble(hir, result.types())
         .map_err(|errors| {
             eprintln!(
@@ -351,7 +360,44 @@ fn lower_source(source_path: &Path) -> Option<(pop_mir::MirBubble, pop_types::Ty
             );
         })
         .ok()?;
-    Some((mir, result.types().clone()))
+    Some(NativeProgram {
+        mir,
+        types: result.types().clone(),
+        entry,
+    })
+}
+
+fn select_native_entry(hir: &pop_hir::HirBubble, types: &pop_types::TypeArena) -> Option<SymbolId> {
+    let int_type = types.source_type("Int")?;
+    let string_type = types.source_type("String")?;
+    let candidates: Vec<_> = hir
+        .functions()
+        .iter()
+        .filter(|function| function.name() == "main")
+        .collect();
+    let [entry] = candidates.as_slice() else {
+        eprintln!(
+            "pop: native binary requires exactly `private function main(arguments: Array<String>): Int`"
+        );
+        return None;
+    };
+    let parameter_is_string_array = entry.parameters().first().is_some_and(|parameter| {
+        matches!(
+            types.get(parameter.type_id()),
+            Some(SemanticType::Array(element)) if *element == string_type
+        )
+    });
+    if entry.visibility() != Visibility::Private
+        || entry.parameters().len() != 1
+        || !parameter_is_string_array
+        || entry.results() != [int_type]
+    {
+        eprintln!(
+            "pop: native binary requires exactly `private function main(arguments: Array<String>): Int`"
+        );
+        return None;
+    }
+    Some(entry.symbol())
 }
 
 fn link_native_executable(object_path: &Path, output_path: &Path) -> ExitCode {
