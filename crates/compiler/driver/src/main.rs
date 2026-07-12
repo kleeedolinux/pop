@@ -709,13 +709,7 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
 
     let build = Command::new("cargo")
         .current_dir(root)
-        .args([
-            "build",
-            "-p",
-            "pop-standard",
-            "-p",
-            "pop-runtime-native",
-        ])
+        .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"])
         .status();
 
     if !matches!(build, Ok(status) if status.success()) {
