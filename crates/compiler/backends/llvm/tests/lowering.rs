@@ -524,6 +524,73 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_preserves_typed_scalar_aggregate_storage_and_table_entries() {
+    let module = native_module(
+        "namespace Main\n\
+public record Settings\n\
+    enabled: Boolean\n\
+    small: UInt8\n\
+    single: Float32\n\
+    wide: Float64\n\
+end\n\
+public class Box\n\
+    private enabled: Boolean\n\
+    private small: UInt8\n\
+    private single: Float32\n\
+    private wide: Float64\n\
+    public function Box.new(): Box\n\
+        return Box { enabled = true, small = 7, single = 1, wide = 2 }\n\
+    end\n\
+    public function Box:mutate()\n\
+        self.enabled = false\n\
+        self.small = 9\n\
+        self.single = 3\n\
+        self.wide = 4\n\
+    end\n\
+    public function Box:isValid(): Boolean\n\
+        local minimumSingle: Float32 = 2\n\
+        local minimumWide: Float64 = 3\n\
+        return not self.enabled and self.small == 9 and self.single > minimumSingle and self.wide > minimumWide\n\
+    end\n\
+end\n\
+private function aggregates(): Boolean\n\
+    local zeroSingle: Float32 = 0\n\
+    local minimumWide: Float64 = 1\n\
+    local settings: Settings = { enabled = true, small = 7, single = 1, wide = 2 }\n\
+    local flags: {Boolean} = { true, false }\n\
+    local singles: {Float32} = { 1, 3 }\n\
+    local scores: {[String]: Float32} = { first = 1, second = 3 }\n\
+    local box = Box.new()\n\
+    box:mutate()\n\
+    return settings.enabled and settings.small == 7 and settings.single > zeroSingle and settings.wide > minimumWide and box:isValid()\n\
+end\n\
+private function main(): Int\n\
+    if aggregates() then\n\
+        return 42\n\
+    else\n\
+        return 1\n\
+    end\n\
+end\n",
+    );
+    let text = module.to_string();
+    assert!(
+        text.contains("call i64 @pop_rt_allocate_mapped_object(i64 4"),
+        "typed tables must retain all four key/value slots: {text}"
+    );
+    assert!(text.contains("alloca [2 x i32]"));
+    assert!(text.contains("store i32 0"));
+    assert!(text.contains("store i32 2"));
+    let result = link_with_runtime_and_run(&module, "scalar-aggregate-storage");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable lost typed scalar aggregate values: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
     let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(

@@ -1388,11 +1388,10 @@ fn lower_instruction(
             elements,
             element_map,
         } => lower_array_make(&result, elements, *element_map, value_types, types)?,
-        MirInstructionKind::TableMake { entries, .. } => format!(
-            "{result} = call i64 @{}(i64 {})",
-            RuntimeOperation::AllocateTable.abi_symbol(),
-            entries.len()
-        ),
+        MirInstructionKind::TableMake {
+            entries,
+            object_map,
+        } => lower_table_make(&result, entries, object_map, value_types, types)?,
         MirInstructionKind::RecordMake { fields, .. } => {
             let slot_count = u32::try_from(fields.len())
                 .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
@@ -1975,16 +1974,16 @@ fn lower_object_make(
         let slot = field_layout
             .get(field)
             .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
-        if llvm_value_type(values, *value, types)? != "i64" {
-            return Err(LlvmLoweringError::InvalidType(*values.get(value).ok_or(
-                LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)),
-            )?));
-        }
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (conversions, stored) =
+            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+        lines.extend(conversions);
         lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 %v{})",
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
             RuntimeOperation::FieldSet.abi_symbol(),
-            slot,
-            value.raw()
+            slot
         ));
     }
     Ok(lines.join("\n"))
@@ -2433,8 +2432,18 @@ fn lower_runtime_slot_load_from(
     slot: usize,
     types: &TypeArena,
 ) -> Result<Vec<String>, LlvmLoweringError> {
-    let ty = llvm_type(result_type, types)?;
     let result = format!("%v{}", result.raw());
+    lower_runtime_slot_load_named(&result, result_type, owner, slot, types)
+}
+
+fn lower_runtime_slot_load_named(
+    result: &str,
+    result_type: TypeId,
+    owner: &str,
+    slot: usize,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let ty = llvm_type(result_type, types)?;
     let loaded = format!("{result}_slot");
     let call = format!(
         "call i64 @{}(i64 {owner}, i64 {slot})",
@@ -2484,18 +2493,30 @@ fn runtime_field_call(
             LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)),
         )?));
     }
-    let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
-    let return_type = result_type.map_or_else(|| Ok("i8".to_owned()), |id| llvm_type(id, types))?;
-    let value_text = value
-        .map(|value| format!(", i64 %v{}", value.raw()))
-        .unwrap_or_default();
-    Ok(format!(
-        "{assignment}call {return_type} @{}(i64 %v{}, i64 {}{})",
-        operation.abi_symbol(),
-        base.raw(),
-        slot,
-        value_text
-    ))
+    if let Some(value) = value {
+        let type_id = *values
+            .get(&value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (mut lines, stored) =
+            lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
+        lines.push(format!(
+            "call i8 @{}(i64 %v{}, i64 {}, i64 {stored})",
+            operation.abi_symbol(),
+            base.raw(),
+            slot
+        ));
+        return Ok(lines.join("\n"));
+    }
+    let result_type =
+        result_type.ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    lower_runtime_slot_load_named(
+        result,
+        result_type,
+        &format!("%v{}", base.raw()),
+        *slot as usize,
+        types,
+    )
+    .map(|lines| lines.join("\n"))
 }
 
 fn lower_array_make(
@@ -2516,18 +2537,48 @@ fn lower_array_make(
         }
     )];
     for (index, value) in elements.iter().enumerate() {
-        let value_type = llvm_value_type(values, *value, types)?;
-        if value_type != "i64" {
-            return Err(LlvmLoweringError::InvalidType(*values.get(value).ok_or(
-                LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)),
-            )?));
-        }
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (conversions, stored) =
+            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+        lines.extend(conversions);
         lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 %v{})",
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
             RuntimeOperation::ArraySet.abi_symbol(),
-            index + 1,
-            value.raw()
+            index + 1
         ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn lower_table_make(
+    result: &str,
+    entries: &[(ValueId, ValueId)],
+    object_map: &pop_runtime_interface::ObjectMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let reference_slots = object_map
+        .reference_slots()
+        .iter()
+        .map(|slot| slot.raw())
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(result, object_map.slot_count(), &reference_slots);
+    for (entry, (key, value)) in entries.iter().enumerate() {
+        for (offset, item) in [*key, *value].into_iter().enumerate() {
+            let type_id = *values
+                .get(&item)
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let (conversions, stored) =
+                lower_runtime_slot_store(item, type_id, &llvm_type(type_id, types)?)?;
+            lines.extend(conversions);
+            lines.push(format!(
+                "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+                RuntimeOperation::FieldSet.abi_symbol(),
+                entry * 2 + offset + 1
+            ));
+        }
     }
     Ok(lines.join("\n"))
 }
