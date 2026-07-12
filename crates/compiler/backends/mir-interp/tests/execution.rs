@@ -432,6 +432,55 @@ fn array_indexing_is_one_based_and_returns_nil_out_of_bounds() {
 }
 
 #[test]
+fn fixed_array_core_operations_execute_with_one_based_checked_semantics() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function arrays(): (Int, Int, Int?)\n\
+             local values = Array.create<<Int>>(4, 0)\n\
+             Array.fill(values, 7)\n\
+             values[1] = 3\n\
+             return (Array.length(values), Array.get(values, 1), values[5])\n\
+         end\n",
+    );
+    let function = mir.functions()[0].symbol();
+    let expected = vec![MirValue::Tuple(vec![int(4), int(3), MirValue::Nil])];
+
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified MIR")
+            .call(function, &[])
+            .expect("array core operations"),
+        expected
+    );
+    let optimized = optimize_mir(mir, &types).expect("optimized MIR");
+    assert_eq!(
+        MirInterpreter::new(&optimized, &types)
+            .expect("verified optimized MIR")
+            .call(function, &[])
+            .expect("optimized array core operations"),
+        expected
+    );
+}
+
+#[test]
+fn fixed_array_negative_lengths_and_checked_bounds_trap() {
+    for source in [
+        "namespace Main\npublic function fail(): Int\nlocal values = Array.create<<Int>>(-1, 0)\nreturn 0\nend\n",
+        "namespace Main\npublic function fail(): Int\nlocal values = Array.create<<Int>>(1, 0)\nreturn Array.get(values, 2)\nend\n",
+    ] {
+        let (mir, types) = executable_source(source);
+        let function = mir.functions()[0].symbol();
+        assert!(matches!(
+            MirInterpreter::new(&mir, &types)
+                .expect("verified MIR")
+                .call(function, &[]),
+            Err(ExecutionError::Runtime(RuntimeFailure::Trap(trap)))
+                if trap.kind() == TrapKind::BoundsViolation
+        ));
+    }
+}
+
+#[test]
 fn native_class_construction_and_resolved_fields_execute_without_tables() {
     let (mir, types) = executable_source(
         "namespace Main\n\

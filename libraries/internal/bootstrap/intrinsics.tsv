@@ -1,8 +1,12 @@
 schemaVersion	1
 intrinsicId	owner	signature	loweringKind	requiredCapabilities
 Integer.CheckedAdd	Pop.Internal.Integer	(TInteger,TInteger)->TInteger	CheckedIntegerAdd	-
+Array.Create	Pop.Internal.Collections	(Int64,T)->Array<T>	ArrayCreate	-
 Array.Length	Pop.Internal.Collections	(Array<T>)->Int64	ArrayLength	-
-Array.Get	Pop.Internal.Collections	(Array<T>,Int64)->T	ArrayGet	-
+Array.Get	Pop.Internal.Collections	(Array<T>,Int64)->T	ArrayGetChecked	-
+Array.GetOptional	Pop.Internal.Collections	(Array<T>,Int64)->T?	ArrayGet	-
+Array.Set	Pop.Internal.Collections	(Array<T>,Int64,T)->()	ArraySet	-
+Array.Fill	Pop.Internal.Collections	(Array<T>,T)->()	ArrayFill	-
 String.ByteAt	Pop.Internal.Text	(String,Int64)->Byte	StringByteAccess	-
 Gc.AllocateObject	Pop.Internal.Gc	(TypeInfo)->ManagedReference	AllocateObject	PreciseStackMaps,RelocatingNursery
 Gc.SafePoint	Pop.Internal.Gc	()->()	GcSafePoint	PreciseStackMaps

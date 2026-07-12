@@ -644,6 +644,17 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             element_map: parse_array_element_map(element_map, line)?,
         });
     }
+    if let Some(rest) = text.strip_prefix("arrayCreate ") {
+        let (element_map, operands) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "array creation element map"))?;
+        let (length, initial_value) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::ArrayCreate {
+            length,
+            initial_value,
+            element_map: parse_array_element_map(element_map, line)?,
+        });
+    }
     if let Some(rest) = text.strip_prefix("tableMake ") {
         let (key_map, rest) = rest
             .split_once(' ')
@@ -661,12 +672,36 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         let (array, index) = parse_two_values(operands, line)?;
         return Ok(MirInstructionKind::ArrayGet { array, index });
     }
+    if let Some(array) = text.strip_prefix("arrayLength ") {
+        return Ok(MirInstructionKind::ArrayLength {
+            array: ValueId::from_raw(parse_prefixed(array, 'v', line)?),
+        });
+    }
+    if let Some(operands) = text.strip_prefix("arrayGetChecked ") {
+        let (array, index) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::ArrayGetChecked { array, index });
+    }
     if let Some(operands) = text.strip_prefix("arraySet ") {
+        let (element_map, operands) = operands
+            .split_once(' ')
+            .ok_or_else(|| error(line, "array set element map"))?;
         let (array, index, value) = parse_three_values(operands, line)?;
         return Ok(MirInstructionKind::ArraySet {
             array,
             index,
             value,
+            element_map: parse_array_element_map(element_map, line)?,
+        });
+    }
+    if let Some(operands) = text.strip_prefix("arrayFill ") {
+        let (element_map, operands) = operands
+            .split_once(' ')
+            .ok_or_else(|| error(line, "array fill element map"))?;
+        let (array, value) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::ArrayFill {
+            array,
+            value,
+            element_map: parse_array_element_map(element_map, line)?,
         });
     }
     if let Some(operation) = parse_numeric_operation(text, line)? {

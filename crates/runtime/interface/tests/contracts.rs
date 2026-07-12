@@ -8,6 +8,7 @@ fn plri_version_is_explicit_and_ordered() {
     assert!(PlriVersion::new(1, 1) > PlriVersion::new(1, 0));
     assert!(PlriVersion::new(1, 2) > PlriVersion::new(1, 1));
     assert!(PlriVersion::new(1, 3) > PlriVersion::new(1, 2));
+    assert!(PlriVersion::new(1, 4) > PlriVersion::new(1, 3));
     assert!(PlriVersion::new(2, 0) > PlriVersion::new(1, 99));
 }
 
@@ -23,10 +24,14 @@ fn native_runtime_operation_symbols_are_explicit_and_unique() {
     let operations = [
         RuntimeOperation::AllocateObject,
         RuntimeOperation::AllocateArray,
+        RuntimeOperation::AllocateArrayFilled,
         RuntimeOperation::AllocateTable,
         RuntimeOperation::TupleMake,
         RuntimeOperation::ArrayGet,
+        RuntimeOperation::ArrayLength,
+        RuntimeOperation::ArrayGetChecked,
         RuntimeOperation::ArraySet,
+        RuntimeOperation::ArrayFill,
         RuntimeOperation::FieldGet,
         RuntimeOperation::FieldSet,
         RuntimeOperation::RecordUpdate,

@@ -144,6 +144,10 @@ fn collections_lower_to_typed_portable_operations_and_round_trip() {
              local scores: {[String]: Int} = { first = 1, second = 2 }\n\
              names[2] = \"updated\"\n\
              local firstName: String? = names[1]\n\
+             local numbers = Array.create<<Int>>(4, 0)\n\
+             Array.fill(numbers, 7)\n\
+             local count = Array.length(numbers)\n\
+             local first = Array.get(numbers, 1)\n\
              return (names, scores)\n\
          end\n",
     )
@@ -191,6 +195,10 @@ fn collections_lower_to_typed_portable_operations_and_round_trip() {
     assert!(dump.contains("tableMake"));
     assert!(dump.contains("arrayGet"));
     assert!(dump.contains("arraySet"));
+    assert!(dump.contains("arrayCreate scalar"));
+    assert!(dump.contains("arrayFill scalar"));
+    assert!(dump.contains("arrayLength"));
+    assert!(dump.contains("arrayGetChecked"));
     let reparsed = parse_mir_dump(&dump).expect("collection MIR parses");
     assert_eq!(reparsed.dump(), dump);
     assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());

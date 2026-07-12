@@ -399,7 +399,8 @@ the explicit debug-oriented form:
 ```text
 pop check path/to/example.pop --dump hir
 pop check path/to/example.pop --dump mir
-pop check path/to/example.pop --dump hir --dump mir
+pop check path/to/example.pop --dump ll
+pop check path/to/example.pop --dump hir --dump mir --dump ll
 ```
 
 The driver supplies an ephemeral Workspace, Package, Bubble, Module, and
@@ -409,12 +410,15 @@ resolve dependencies, widen visibility, emit build artifacts, or populate
 normal Package/Workspace caches. It therefore cannot replace manifest-driven
 selection for a real program.
 
-`--dump hir` and `--dump mir` are repeatable and preserve request order. The
-driver completes front-end diagnostics, verified HIR construction, and
-canonical MIR verification before writing any requested dump. Diagnostics are
-written to standard error; failure writes no partial IR to standard output.
-Dump text is deterministic for a compiler version and is a test/debug format,
-not a stable serialization or machine compatibility contract.
+`--dump hir`, `--dump mir`, and `--dump ll` are repeatable and preserve request
+order. The driver completes front-end diagnostics, verified HIR construction,
+canonical MIR verification, and, when requested, LLVM lowering and LLVM
+verification before writing any dump. `ll` uses the fixed standalone inspection
+target and is the conventional suffix for textual LLVM IR; it does not enter
+HIR or MIR. Diagnostics are written to standard error; failure writes no
+partial IR to standard output. Dump text is deterministic for a compiler
+version and inspection target and is a test/debug format, not a stable
+serialization or machine compatibility contract.
 
 ### Experimental C transpilation
 

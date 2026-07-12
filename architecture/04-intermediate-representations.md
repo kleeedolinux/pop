@@ -119,7 +119,8 @@ Memory:        allocateObject, allocateClosureEnvironment, allocateArray,
 Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
                callInterface, callIndirect
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
-Collections:   arrayGet, arraySet, tableGet, tableSet
+Collections:   arrayCreate, arrayLength, arrayGetOptional, arrayGetChecked,
+               arraySet, arrayFill, tableGet, tableSet
 Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume
 Debug:         debugValue, sourceScope
 ```
@@ -127,6 +128,11 @@ Debug:         debugValue, sourceScope
 `checkedDowncast` has a named static target and typed optional/result output. It
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
+
+Array construction always carries an explicit initial value. Checked reads and
+writes carry `BoundsViolation`; optional reads do not trap for bounds. Scalar
+and managed-element arrays remain distinguishable for optimization and precise
+barriers. See ADR 0034.
 
 MIR invariants:
 

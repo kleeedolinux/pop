@@ -1,14 +1,19 @@
 namespace BenchmarkArrayLoop
 
 function main()
-    local values: {Int} = { 0 }
+    local values = Array.create<<Int>>(1000000, 0)
+    local length = Array.length(values)
     local index = 1
-    local total = 0
     repeat
-        values[1] = index
-        local current: Int? = values[1]
-        total = total + index
+        values[index] = index
         index = index + 1
     until index == 1000001
+
+    index = 1
+    local total = 0
+    repeat
+        total = total + Array.get(values, index)
+        index = index + 1
+    until index == length + 1
     print(total)
 end

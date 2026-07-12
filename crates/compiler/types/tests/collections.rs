@@ -259,3 +259,50 @@ fn indexed_array_assignment_rejects_the_wrong_element_type() {
     assert!(fixture.result.body().is_none());
     assert!(fixture.result.diagnostic_snapshot().starts_with("POP2003"));
 }
+
+#[test]
+fn fixed_array_core_operations_are_fully_typed() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(): (Int, Int, Int?, {Int})\n\
+             local values = Array.create<<Int>>(4, 0)\n\
+             Array.fill(values, 7)\n\
+             values[1] = 3\n\
+             local first = Array.get(values, 1)\n\
+             local missing = values[5]\n\
+             return (Array.length(values), first, missing, values)\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    assert!(fixture.result.body().is_some());
+}
+
+#[test]
+fn fixed_array_core_operations_reject_incompatible_operands() {
+    for statement in [
+        "local values = Array.create<<Int>>(4, \"wrong\")",
+        "local values = Array.create<<Int>>(true, 0)",
+        "local length = Array.length(1)",
+        "local values: {Int} = { 0 }\nlocal value = Array.get(values, true)",
+        "local values: {Int} = { 0 }\nArray.fill(values, \"wrong\")",
+    ] {
+        let source = format!(
+            "namespace Example\n\
+             public function collections()\n\
+                 {statement}\n\
+             end\n"
+        );
+        let fixture = check_function(&source);
+        assert!(fixture.result.body().is_none(), "{statement}");
+        assert!(
+            fixture.result.diagnostic_snapshot().starts_with("POP2003"),
+            "{statement}: {}",
+            fixture.result.diagnostic_snapshot()
+        );
+    }
+}

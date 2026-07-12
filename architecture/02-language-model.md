@@ -171,6 +171,12 @@ Indexed array assignment uses the same one-based indexing model as reads. The
 assigned value must have the array's element type, and an out-of-bounds write
 traps rather than growing the array or falling back to table semantics.
 
+Arrays have fixed length. `Array.create<<T>>(length, initialValue)` constructs a
+fully initialized array, `Array.length(array)` queries its length,
+`Array.get(array, index)` performs a trapping non-optional read, and
+`Array.fill(array, value)` replaces every element. Ordinary `array[index]`
+reads remain optional. See ADR 0034.
+
 ## Control flow and loops
 
 `while` remains the pre-condition loop. Pop Lang also has the Luau-shaped

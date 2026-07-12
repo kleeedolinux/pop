@@ -275,6 +275,12 @@ regions.
   object-age rule.
 - Bulk moves use dedicated range barriers.
 
+Fixed-array initialization and fill are bulk stores. Scalar arrays require no
+reference barrier. Managed-element arrays use the precise homogeneous element
+map and a range barrier or equivalent per-element combined barriers. Direct
+contiguous backend access requires a scoped pin unless escape analysis proves
+the array is not a managed allocation. See ADR 0034.
+
 Read barriers are not required in the selected version-one design.
 
 ## Young/major interaction

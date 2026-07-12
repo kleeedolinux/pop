@@ -44,6 +44,14 @@ maps. Arrays retain their contiguous homogeneous element map, while tables use
 interleaved key/value slots without becoming generic objects or exposing their
 layout to MIR.
 
+ADR 0034 advances the bootstrap native ABI to version 1.4 and completes fixed
+arrays with bulk initialized allocation, O(1) length, optional and checked
+reads, checked writes, and fill. PLRI adapters preserve one-based bounds
+behavior and distinguish scalar from managed elements. Native backends may
+scalar-replace non-escaping arrays, batch transitions, or use scoped pinned
+contiguous access, but raw managed pointers never become source, HIR, MIR, or
+public PLRI values.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry

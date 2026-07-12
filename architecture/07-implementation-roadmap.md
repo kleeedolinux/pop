@@ -51,7 +51,7 @@ conversions.
 - CFG/block-argument MIR;
 - HIR lowering with explicit evaluation order;
 - MIR parser, printer, verifier, and deterministic `pop check <source.pop>
-  --dump mir` bootstrap inspection;
+  --dump mir|ll` bootstrap inspection;
 - portable constant folding and dead-code elimination;
 - a simple MIR interpreter and minimal runtime adapter.
 - warning-wave policy, scoped suppression, LSP/JSON output, and fix-all engine.

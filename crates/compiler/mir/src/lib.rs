@@ -667,6 +667,16 @@ impl MirInstruction {
         &self.kind
     }
 
+    /// Returns the ordinary SSA operands read by this instruction.
+    ///
+    /// Precise GC roots are stack-map metadata and are intentionally not
+    /// ordinary operands; consumers that transform roots must inspect the
+    /// `GcSafePoint` instruction directly.
+    #[must_use]
+    pub fn operands(&self) -> Vec<ValueId> {
+        instruction_operands(&self.kind)
+    }
+
     #[must_use]
     pub const fn effects(&self) -> MirEffectSummary {
         self.effects
@@ -691,6 +701,11 @@ pub enum MirInstructionKind {
         elements: Vec<ValueId>,
         element_map: ArrayElementMap,
     },
+    ArrayCreate {
+        length: ValueId,
+        initial_value: ValueId,
+        element_map: ArrayElementMap,
+    },
     TableMake {
         entries: Vec<(ValueId, ValueId)>,
         key_map: ArrayElementMap,
@@ -700,10 +715,23 @@ pub enum MirInstructionKind {
         array: ValueId,
         index: ValueId,
     },
+    ArrayLength {
+        array: ValueId,
+    },
+    ArrayGetChecked {
+        array: ValueId,
+        index: ValueId,
+    },
     ArraySet {
         array: ValueId,
         index: ValueId,
         value: ValueId,
+        element_map: ArrayElementMap,
+    },
+    ArrayFill {
+        array: ValueId,
+        value: ValueId,
+        element_map: ArrayElementMap,
     },
     CheckedIntegerAdd {
         kind: IntegerKind,
@@ -1587,6 +1615,7 @@ fn visit_expression_closures(
             visit_expression_closures(base, parameters, locals);
         }
         HirExpressionKind::ArrayGet { array, index }
+        | HirExpressionKind::ArrayGetChecked { array, index }
         | HirExpressionKind::Binary {
             left: array,
             right: index,
@@ -1594,6 +1623,20 @@ fn visit_expression_closures(
         } => {
             visit_expression_closures(array, parameters, locals);
             visit_expression_closures(index, parameters, locals);
+        }
+        HirExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            visit_expression_closures(length, parameters, locals);
+            visit_expression_closures(initial_value, parameters, locals);
+        }
+        HirExpressionKind::ArrayLength { array } => {
+            visit_expression_closures(array, parameters, locals);
+        }
+        HirExpressionKind::ArrayFill { array, value } => {
+            visit_expression_closures(array, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
         }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
@@ -1943,6 +1986,7 @@ impl<'hir> FunctionBuilder<'hir> {
                     index,
                     value,
                 } => {
+                    let element_map = array_element_map(self.arena, array.type_id());
                     let array = self.lower_expression(array);
                     let index = self.lower_expression(index);
                     let value = self.lower_expression(value);
@@ -1955,6 +1999,7 @@ impl<'hir> FunctionBuilder<'hir> {
                             array,
                             index,
                             value,
+                            element_map,
                         },
                         nil,
                         statement.span(),
@@ -2159,6 +2204,14 @@ impl<'hir> FunctionBuilder<'hir> {
                     .collect(),
                 element_map: array_element_map(self.arena, expression.type_id()),
             },
+            HirExpressionKind::ArrayCreate {
+                length,
+                initial_value,
+            } => MirInstructionKind::ArrayCreate {
+                length: self.lower_expression(length),
+                initial_value: self.lower_expression(initial_value),
+                element_map: array_element_map(self.arena, expression.type_id()),
+            },
             HirExpressionKind::Table(entries) => {
                 let (key_map, value_map) = table_element_maps(self.arena, expression.type_id());
                 MirInstructionKind::TableMake {
@@ -2209,6 +2262,20 @@ impl<'hir> FunctionBuilder<'hir> {
                 let index = self.lower_expression(index);
                 MirInstructionKind::ArrayGet { array, index }
             }
+            HirExpressionKind::ArrayLength { array } => MirInstructionKind::ArrayLength {
+                array: self.lower_expression(array),
+            },
+            HirExpressionKind::ArrayGetChecked { array, index } => {
+                MirInstructionKind::ArrayGetChecked {
+                    array: self.lower_expression(array),
+                    index: self.lower_expression(index),
+                }
+            }
+            HirExpressionKind::ArrayFill { array, value } => MirInstructionKind::ArrayFill {
+                array: self.lower_expression(array),
+                value: self.lower_expression(value),
+                element_map: array_element_map(self.arena, array.type_id()),
+            },
             HirExpressionKind::Record { record, fields } => MirInstructionKind::RecordMake {
                 record: *record,
                 fields: self.lower_fields(fields),
@@ -2886,8 +2953,18 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         | MirInstructionKind::CheckedIntegerMultiply { .. }
         | MirInstructionKind::CheckedIntegerDivide { .. }
         | MirInstructionKind::CheckedIntegerRemainder { .. }
-        | MirInstructionKind::IntegerNegate { .. } => {
+        | MirInstructionKind::IntegerNegate { .. }
+        | MirInstructionKind::ArrayGetChecked { .. } => {
             MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::ArraySet { element_map, .. }
+        | MirInstructionKind::ArrayFill { element_map, .. } => {
+            let effects = MirEffectSummary::empty().with(MirEffect::MayTrap);
+            if *element_map == ArrayElementMap::ManagedReference {
+                effects.with(MirEffect::WritesManagedReference)
+            } else {
+                effects
+            }
         }
         MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
@@ -2900,6 +2977,12 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
                 MirEffect::GcSafePoint,
             ])
         }
+        MirInstructionKind::ArrayCreate { .. } => MirEffectSummary::from_effects([
+            MirEffect::Allocates,
+            MirEffect::MayTrap,
+            MirEffect::MayUnwind,
+            MirEffect::GcSafePoint,
+        ]),
         MirInstructionKind::GcSafePoint { .. } => {
             MirEffectSummary::empty().with(MirEffect::GcSafePoint)
         }
@@ -2936,7 +3019,7 @@ fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleMake(_)
         | MirInstructionKind::ArrayGet { .. }
-        | MirInstructionKind::ArraySet { .. }
+        | MirInstructionKind::ArrayLength { .. }
         | MirInstructionKind::FloatAdd { .. }
         | MirInstructionKind::FloatSubtract { .. }
         | MirInstructionKind::FloatMultiply { .. }
@@ -4530,6 +4613,37 @@ fn verify_instruction_types(
                 verify_operand_type(instruction.result(), *operand, element_type, values, errors);
             }
         }
+        MirInstructionKind::ArrayCreate {
+            length,
+            initial_value,
+            element_map,
+        } => {
+            let Some(SemanticType::Array(element_type)) =
+                arena.get(instruction.result_type()).cloned()
+            else {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+                return;
+            };
+            if let Some(integer) = arena.source_type("Int") {
+                verify_operand_type(instruction.result(), *length, integer, values, errors);
+            }
+            verify_operand_type(
+                instruction.result(),
+                *initial_value,
+                element_type,
+                values,
+                errors,
+            );
+            if *element_map != array_element_map(arena, instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::TableMake { entries, .. } => {
             let Some(SemanticType::Table { key, value }) =
                 arena.get(instruction.result_type()).cloned()
@@ -4567,10 +4681,51 @@ fn verify_instruction_types(
                 });
             }
         }
+        MirInstructionKind::ArrayLength { array } => {
+            let Some(array_type) = values.get(array).copied() else {
+                return;
+            };
+            if !matches!(arena.get(array_type), Some(SemanticType::Array(_))) {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *array,
+                    found: array_type,
+                });
+            }
+            if arena.source_type("Int") != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ArrayGetChecked { array, index } => {
+            let Some(array_type) = values.get(array).copied() else {
+                return;
+            };
+            let Some(SemanticType::Array(element_type)) = arena.get(array_type).cloned() else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *array,
+                    found: array_type,
+                });
+                return;
+            };
+            if let Some(integer) = arena.source_type("Int") {
+                verify_operand_type(instruction.result(), *index, integer, values, errors);
+            }
+            if instruction.result_type() != element_type {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::ArraySet {
             array,
             index,
             value,
+            element_map,
         } => {
             let Some(array_type) = values.get(array).copied() else {
                 return;
@@ -4587,7 +4742,39 @@ fn verify_instruction_types(
                 verify_operand_type(instruction.result(), *index, integer, values, errors);
             }
             verify_operand_type(instruction.result(), *value, element_type, values, errors);
+            if *element_map != array_element_map(arena, array_type) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
             if arena.source_type("nil") != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ArrayFill {
+            array,
+            value,
+            element_map,
+        } => {
+            let Some(array_type) = values.get(array).copied() else {
+                return;
+            };
+            let Some(SemanticType::Array(element_type)) = arena.get(array_type).cloned() else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *array,
+                    found: array_type,
+                });
+                return;
+            };
+            verify_operand_type(instruction.result(), *value, element_type, values, errors);
+            if *element_map != array_element_map(arena, array_type)
+                || arena.source_type("nil") != Some(instruction.result_type())
+            {
                 errors.push(MirVerificationError::InvalidInstructionType {
                     instruction: instruction.result(),
                     result_type: instruction.result_type(),
@@ -5504,6 +5691,11 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::UnionMake {
             arguments: values, ..
         } => values.clone(),
+        MirInstructionKind::ArrayCreate {
+            length,
+            initial_value,
+            ..
+        } => vec![*length, *initial_value],
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
         } => std::iter::once(*callee)
@@ -5530,11 +5722,15 @@ fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. } => vec![*operand],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
+        MirInstructionKind::ArrayLength { array } => vec![*array],
+        MirInstructionKind::ArrayGetChecked { array, index } => vec![*array, *index],
         MirInstructionKind::ArraySet {
             array,
             index,
             value,
+            ..
         } => vec![*array, *index, *value],
+        MirInstructionKind::ArrayFill { array, value, .. } => vec![*array, *value],
         MirInstructionKind::RecordMake { fields, .. } => {
             fields.iter().map(|(_, value)| *value).collect()
         }
@@ -5862,6 +6058,19 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "arrayMake {map} ");
             dump_value_list(output, elements);
         }
+        MirInstructionKind::ArrayCreate {
+            length,
+            initial_value,
+            element_map,
+        } => {
+            let map = array_element_map_name(*element_map);
+            let _ = write!(
+                output,
+                "arrayCreate {map} v{} v{}",
+                length.raw(),
+                initial_value.raw()
+            );
+        }
         MirInstructionKind::TableMake {
             entries,
             key_map,
@@ -5875,18 +6084,34 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::ArrayGet { array, index } => {
             dump_binary(output, "arrayGet", *array, *index);
         }
+        MirInstructionKind::ArrayLength { array } => {
+            let _ = write!(output, "arrayLength v{}", array.raw());
+        }
+        MirInstructionKind::ArrayGetChecked { array, index } => {
+            dump_binary(output, "arrayGetChecked", *array, *index);
+        }
         MirInstructionKind::ArraySet {
             array,
             index,
             value,
+            element_map,
         } => {
+            let map = array_element_map_name(*element_map);
             let _ = write!(
                 output,
-                "arraySet v{} v{} v{}",
+                "arraySet {map} v{} v{} v{}",
                 array.raw(),
                 index.raw(),
                 value.raw()
             );
+        }
+        MirInstructionKind::ArrayFill {
+            array,
+            value,
+            element_map,
+        } => {
+            let map = array_element_map_name(*element_map);
+            let _ = write!(output, "arrayFill {map} v{} v{}", array.raw(), value.raw());
         }
         binary @ (MirInstructionKind::BooleanAnd { .. }
         | MirInstructionKind::BooleanOr { .. }

@@ -677,6 +677,41 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 );
                 return Ok(RuntimeValue::managed(visible, reference));
             }
+            MirInstructionKind::ArrayCreate {
+                length,
+                initial_value,
+                element_map,
+            } => {
+                let MirValue::Integer(length) = value(values, *length)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let Some(length) = length
+                    .signed()
+                    .filter(|length| *length >= 0)
+                    .and_then(|length| u32::try_from(length).ok())
+                else {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::BoundsViolation)),
+                    ));
+                };
+                let reference = self
+                    .runtime
+                    .allocate_array(&ArrayAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        length,
+                        *element_map,
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                let initial_value = value(values, *initial_value)?.visible.clone();
+                let mut elements = Vec::new();
+                elements
+                    .try_reserve_exact(length as usize)
+                    .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                elements.resize(length as usize, initial_value);
+                return Ok(RuntimeValue::managed(MirValue::Array(elements), reference));
+            }
             MirInstructionKind::TableMake {
                 entries,
                 key_map,
@@ -731,10 +766,45 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     elements.get(zero_based).cloned().unwrap_or(MirValue::Nil),
                 ));
             }
+            MirInstructionKind::ArrayLength { array } => {
+                let MirValue::Array(elements) = &value(values, *array)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                MirValue::Integer(
+                    IntegerValue::parse_decimal(&elements.len().to_string(), IntegerKind::Int64)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                )
+            }
+            MirInstructionKind::ArrayGetChecked { array, index } => {
+                let (MirValue::Array(elements), MirValue::Integer(index)) = (
+                    &value(values, *array)?.visible,
+                    &value(values, *index)?.visible,
+                ) else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let Some(zero_based) = index
+                    .signed()
+                    .and_then(|value| value.checked_sub(1))
+                    .and_then(|value| usize::try_from(value).ok())
+                else {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::BoundsViolation)),
+                    ));
+                };
+                let Some(element) = elements.get(zero_based).cloned() else {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::BoundsViolation)),
+                    ));
+                };
+                element
+            }
             MirInstructionKind::ArraySet {
                 array,
                 index,
                 value: stored,
+                ..
             } => {
                 let owner = value(values, *array)?
                     .reference
@@ -768,6 +838,31 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                         ));
                     };
                     *slot = stored.clone();
+                    updated = true;
+                }
+                if !updated {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                MirValue::Nil
+            }
+            MirInstructionKind::ArrayFill {
+                array,
+                value: stored,
+                ..
+            } => {
+                let owner = value(values, *array)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let stored = value(values, *stored)?.visible.clone();
+                let mut updated = false;
+                for candidate in values.values_mut() {
+                    if candidate.reference != Some(owner) {
+                        continue;
+                    }
+                    let MirValue::Array(elements) = &mut candidate.visible else {
+                        continue;
+                    };
+                    elements.fill(stored.clone());
                     updated = true;
                 }
                 if !updated {

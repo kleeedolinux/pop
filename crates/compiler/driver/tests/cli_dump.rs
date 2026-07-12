@@ -96,11 +96,37 @@ fn check_dumps_deterministic_verified_canonical_mir_for_a_pop_module() {
 }
 
 #[test]
+fn check_dumps_deterministic_verified_llvm_ir_for_a_pop_module() {
+    let first = run_check_dump("inspectable.pop", "ll");
+    let second = run_check_dump("inspectable.pop", "ll");
+
+    assert!(
+        first.status.success(),
+        "stderr:\n{}",
+        output_text(&first.stderr)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "LLVM IR dump must be deterministic"
+    );
+    assert_eq!(first.stderr, second.stderr);
+
+    let stdout = output_text(&first.stdout);
+    assert!(stdout.starts_with("; Pop Lang native module\n"));
+    assert!(stdout.contains("target triple = \"x86_64-unknown-linux-gnu\""));
+    assert!(stdout.contains("define i64 @pop_b0_s0(i64 %v0, i64 %v1)"));
+    assert!(stdout.contains("@llvm.sadd.with.overflow.i64"));
+    assert!(!stdout.contains("hir bubble"));
+    assert!(!stdout.contains("mir bubble"));
+    assert!(first.stderr.is_empty());
+}
+
+#[test]
 fn check_accepts_repeatable_dump_options_in_command_line_order() {
     let output = Command::new(env!("CARGO_BIN_EXE_pop"))
         .arg("check")
         .arg(fixture("inspectable.pop"))
-        .args(["--dump", "hir", "--dump", "mir"])
+        .args(["--dump", "hir", "--dump", "mir", "--dump", "ll"])
         .output()
         .expect("pop command runs");
 
@@ -114,9 +140,14 @@ fn check_accepts_repeatable_dump_options_in_command_line_order() {
     let stdout = output_text(&output.stdout);
     let hir = stdout.find("hir bubble").expect("HIR dump");
     let mir = stdout.find("mir bubble").expect("MIR dump");
-    assert!(hir < mir, "requested dump order must be preserved");
+    let llvm = stdout.find("; Pop Lang native module").expect("LLVM dump");
+    assert!(
+        hir < mir && mir < llvm,
+        "requested dump order must be preserved"
+    );
     assert_eq!(stdout.matches("hir bubble").count(), 1);
     assert_eq!(stdout.matches("mir bubble").count(), 1);
+    assert_eq!(stdout.matches("; Pop Lang native module").count(), 1);
 }
 
 #[test]
@@ -124,7 +155,7 @@ fn invalid_source_emits_a_structured_diagnostic_and_no_dump() {
     let output = Command::new(env!("CARGO_BIN_EXE_pop"))
         .arg("check")
         .arg(fixture("invalid.pop"))
-        .args(["--dump", "hir", "--dump", "mir"])
+        .args(["--dump", "hir", "--dump", "mir", "--dump", "ll"])
         .output()
         .expect("pop command runs");
 
@@ -147,7 +178,7 @@ fn unsupported_dump_kind_is_a_usage_error() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(output_text(&output.stderr).contains("hir|mir"));
+    assert!(output_text(&output.stderr).contains("hir|mir|ll"));
 }
 
 #[test]

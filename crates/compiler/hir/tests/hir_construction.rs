@@ -413,6 +413,10 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
              local scores: {[String]: Int} = { first = 1, second = 2 }\n\
              names[2] = \"updated\"\n\
              local firstName: String? = names[1]\n\
+             local numbers = Array.create<<Int>>(4, 0)\n\
+             Array.fill(numbers, 7)\n\
+             local count = Array.length(numbers)\n\
+             local first = Array.get(numbers, 1)\n\
              return (names, scores)\n\
          end\n",
     )
@@ -486,6 +490,26 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
                 && matches!(index.kind(), HirExpressionKind::Integer(value) if value.to_string() == "1")
     ));
     assert!(verify_hir_function(&hir, resolver.arena(), &known).is_ok());
+    assert!(matches!(
+        hir.body()[4].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ArrayCreate { .. })
+    ));
+    assert!(matches!(
+        hir.body()[5].kind(),
+        HirStatementKind::Expression(expression)
+            if matches!(expression.kind(), HirExpressionKind::ArrayFill { .. })
+    ));
+    assert!(matches!(
+        hir.body()[6].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ArrayLength { .. })
+    ));
+    assert!(matches!(
+        hir.body()[7].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ArrayGetChecked { .. })
+    ));
 }
 
 #[test]

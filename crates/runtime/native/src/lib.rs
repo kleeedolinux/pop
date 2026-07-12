@@ -33,7 +33,7 @@ pub extern "C" fn pop_rt_abi_major() -> u16 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_abi_minor() -> u16 {
-    3
+    4
 }
 
 #[allow(unsafe_code)]
@@ -66,6 +66,39 @@ pub extern "C" fn pop_rt_allocate_array(length: u64, managed: u8) -> u64 {
     runtime
         .allocate_array(&request)
         .map_or(0, ManagedReference::raw)
+}
+
+/// Allocates one fixed array and initializes every element before publication.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_allocate_array_filled(
+    length: u64,
+    managed: u8,
+    initial_value: u64,
+) -> u64 {
+    let Ok(length) = u32::try_from(length) else {
+        return 0;
+    };
+    let request = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        AllocationClass::Mature,
+        length,
+        if managed == 0 {
+            ArrayElementMap::Scalar
+        } else {
+            ArrayElementMap::ManagedReference
+        },
+    );
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Ok(reference) = runtime.allocate_array(&request) else {
+        return 0;
+    };
+    if runtime.fill_array_value(reference, initial_value).is_err() {
+        return 0;
+    }
+    reference.raw()
 }
 
 #[allow(unsafe_code)]
@@ -219,6 +252,71 @@ pub extern "C" fn pop_rt_array_set(reference: u64, index: u64, value: u64) -> u8
     )
 }
 
+/// Writes the fixed array length through `output` and reports success.
+///
+/// # Safety
+///
+/// `output` must address one writable `u64` for the duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_array_length(reference: u64, output: *mut u64) -> u8 {
+    if output.is_null() {
+        return 0;
+    }
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Some(length) = runtime.array_length(ManagedReference::new(reference)) else {
+        return 0;
+    };
+    // SAFETY: The caller contract requires one writable `u64`.
+    unsafe { output.write(length) };
+    1
+}
+
+/// Loads one array element through `output` and reports bounds/type success.
+///
+/// # Safety
+///
+/// `output` must address one writable `u64` for the duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_array_get_checked(
+    reference: u64,
+    index: u64,
+    output: *mut u64,
+) -> u8 {
+    let Some(slot) = array_slot(index) else {
+        return 0;
+    };
+    if output.is_null() {
+        return 0;
+    }
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Ok(value) = runtime.load_array_value(ManagedReference::new(reference), slot) else {
+        return 0;
+    };
+    // SAFETY: The caller contract requires one writable `u64`.
+    unsafe { output.write(value) };
+    1
+}
+
+/// Replaces every fixed-array element with one typed scalar or managed handle.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_array_fill(reference: u64, value: u64) -> u8 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(
+        runtime
+            .fill_array_value(ManagedReference::new(reference), value)
+            .is_ok(),
+    )
+}
+
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_field_get(reference: u64, field: u64) -> u64 {
@@ -229,7 +327,7 @@ pub extern "C" fn pop_rt_field_get(reference: u64, field: u64) -> u64 {
         return 0;
     };
     runtime
-        .load_array_value(ManagedReference::new(reference), slot)
+        .load_slot_value(ManagedReference::new(reference), slot)
         .unwrap_or(0)
 }
 
@@ -244,7 +342,7 @@ pub extern "C" fn pop_rt_field_set(reference: u64, field: u64, value: u64) -> u8
     };
     u8::from(
         runtime
-            .store_array_value(ManagedReference::new(reference), slot, value)
+            .store_slot_value(ManagedReference::new(reference), slot, value)
             .is_ok(),
     )
 }
@@ -627,8 +725,16 @@ enum SlotValue {
     Reference(Option<ManagedReference>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AllocationKind {
+    Object,
+    Array(ArrayElementMap),
+    Table,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Allocation {
+    kind: AllocationKind,
     type_id: RuntimeTypeId,
     class: AllocationClass,
     object_map: ObjectMap,
@@ -700,6 +806,51 @@ impl BootstrapRuntime {
         self.objects
             .get(&reference)
             .map(|allocation| allocation.class)
+    }
+
+    #[must_use]
+    fn array_length(&self, reference: ManagedReference) -> Option<u64> {
+        self.objects.get(&reference).and_then(|allocation| {
+            matches!(allocation.kind, AllocationKind::Array(_))
+                .then(|| u64::try_from(allocation.slots.len()).unwrap_or(u64::MAX))
+        })
+    }
+
+    fn fill_array_value(
+        &mut self,
+        owner: ManagedReference,
+        value: u64,
+    ) -> Result<(), RuntimeFailure> {
+        let (length, element_map) = self
+            .objects
+            .get(&owner)
+            .and_then(|allocation| match allocation.kind {
+                AllocationKind::Array(element_map) => Some((allocation.slots.len(), element_map)),
+                AllocationKind::Object | AllocationKind::Table => None,
+            })
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if element_map == ArrayElementMap::ManagedReference {
+            let reference = (value != 0).then(|| ManagedReference::new(value));
+            if reference.is_some_and(|reference| !self.contains(reference)) {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+            for index in 0..length {
+                self.store_reference(
+                    owner,
+                    ObjectSlot::new(u32::try_from(index).unwrap_or(u32::MAX)),
+                    reference,
+                )?;
+            }
+        } else {
+            let allocation = self
+                .objects
+                .get_mut(&owner)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            for slot in &mut allocation.slots {
+                *slot = SlotValue::Scalar(value);
+            }
+        }
+        Ok(())
     }
 
     pub const fn request_collection(&mut self) {
@@ -805,6 +956,22 @@ impl BootstrapRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
+        if !self
+            .objects
+            .get(&owner)
+            .is_some_and(|allocation| matches!(allocation.kind, AllocationKind::Array(_)))
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        self.store_slot_value(owner, slot, value)
+    }
+
+    fn store_slot_value(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        value: u64,
+    ) -> Result<(), RuntimeFailure> {
         let is_reference = self
             .objects
             .get(&owner)
@@ -828,6 +995,21 @@ impl BootstrapRuntime {
     ///
     /// Returns a portable invariant panic for an invalid allocation or slot.
     pub fn load_array_value(
+        &self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+    ) -> Result<u64, RuntimeFailure> {
+        if !self
+            .objects
+            .get(&owner)
+            .is_some_and(|allocation| matches!(allocation.kind, AllocationKind::Array(_)))
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        self.load_slot_value(owner, slot)
+    }
+
+    fn load_slot_value(
         &self,
         owner: ManagedReference,
         slot: ObjectSlot,
@@ -876,6 +1058,7 @@ impl BootstrapRuntime {
         &mut self,
         type_id: RuntimeTypeId,
         allocation_class: AllocationClass,
+        kind: AllocationKind,
         object_map: ObjectMap,
     ) -> Result<ManagedReference, RuntimeFailure> {
         let requested_slots = usize::try_from(object_map.slot_count())
@@ -900,6 +1083,7 @@ impl BootstrapRuntime {
         self.objects.insert(
             reference,
             Allocation {
+                kind,
                 type_id,
                 class: allocation_class,
                 object_map,
@@ -1011,6 +1195,7 @@ impl RuntimeAdapter for BootstrapRuntime {
         self.allocate(
             request.type_id(),
             request.allocation_class(),
+            AllocationKind::Object,
             request.object_map().clone(),
         )
     }
@@ -1034,7 +1219,12 @@ impl RuntimeAdapter for BootstrapRuntime {
         };
         let object_map = ObjectMap::new(request.length(), reference_slots)
             .map_err(|_| RuntimeFailure::runtime_invariant())?;
-        self.allocate(request.type_id(), request.allocation_class(), object_map)
+        self.allocate(
+            request.type_id(),
+            request.allocation_class(),
+            AllocationKind::Array(request.element_map()),
+            object_map,
+        )
     }
 
     fn allocate_table(
@@ -1044,6 +1234,7 @@ impl RuntimeAdapter for BootstrapRuntime {
         self.allocate(
             request.type_id(),
             request.allocation_class(),
+            AllocationKind::Table,
             request.object_map().clone(),
         )
     }

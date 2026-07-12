@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "createdAt": "2026-07-12T19:59:01Z",
-  "samples": 5,
+  "createdAt": "2026-07-12T21:43:09Z",
+  "samples": 1,
   "warmups": 2,
   "timing": "execution only; provisioning and compilation are excluded",
   "workloads": [
@@ -29,14 +29,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.555622821993893,
-        0.5404822469863575,
-        0.5393566210113931,
-        0.5474417239893228,
-        0.5391912360209972
+        0.5897691330173984
       ],
-      "medianSeconds": 0.5404822469863575,
-      "minimumSeconds": 0.5391912360209972,
+      "medianSeconds": 0.5897691330173984,
+      "minimumSeconds": 0.5897691330173984,
       "comparable": true
     },
     {
@@ -46,14 +42,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.18451040200307034,
-        0.19787944300333038,
-        0.18207071599317715,
-        0.16922513698227704,
-        0.18449939298443496
+        0.20040599699132144
       ],
-      "medianSeconds": 0.18449939298443496,
-      "minimumSeconds": 0.16922513698227704,
+      "medianSeconds": 0.20040599699132144,
+      "minimumSeconds": 0.20040599699132144,
       "comparable": true
     },
     {
@@ -63,14 +55,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.020854411006439477,
-        0.020760779007105157,
-        0.017451068008085713,
-        0.020674932980909944,
-        0.018338121997658163
+        0.018570271000498906
       ],
-      "medianSeconds": 0.020674932980909944,
-      "minimumSeconds": 0.017451068008085713,
+      "medianSeconds": 0.018570271000498906,
+      "minimumSeconds": 0.018570271000498906,
       "comparable": true
     },
     {
@@ -80,14 +68,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.05088418998639099,
-        0.04894488799618557,
-        0.04377430898603052,
-        0.05170195398386568,
-        0.043532152980333194
+        0.05196094900020398
       ],
-      "medianSeconds": 0.04894488799618557,
-      "minimumSeconds": 0.043532152980333194,
+      "medianSeconds": 0.05196094900020398,
+      "minimumSeconds": 0.05196094900020398,
       "comparable": true
     },
     {
@@ -97,14 +81,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.02736067899968475,
-        0.03463054899475537,
-        0.033516646013595164,
-        0.028463552007451653,
-        0.029023716982919723
+        0.04487706799409352
       ],
-      "medianSeconds": 0.029023716982919723,
-      "minimumSeconds": 0.02736067899968475,
+      "medianSeconds": 0.04487706799409352,
+      "minimumSeconds": 0.04487706799409352,
       "comparable": true
     },
     {
@@ -114,14 +94,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.005449802993098274,
-        0.006329103984171525,
-        0.005671908991644159,
-        0.007190217002062127,
-        0.0057156310067512095
+        0.006255593994865194
       ],
-      "medianSeconds": 0.0057156310067512095,
-      "minimumSeconds": 0.005449802993098274,
+      "medianSeconds": 0.006255593994865194,
+      "minimumSeconds": 0.006255593994865194,
       "comparable": true
     },
     {
@@ -131,14 +107,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.5083885510102846,
-        0.5193880180013366,
-        0.5109477550140582,
-        0.5282168610137887,
-        0.5191809959942475
+        0.5520021830161568
       ],
-      "medianSeconds": 0.5191809959942475,
-      "minimumSeconds": 0.5083885510102846,
+      "medianSeconds": 0.5520021830161568,
+      "minimumSeconds": 0.5520021830161568,
       "comparable": true
     },
     {
@@ -148,14 +120,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.20096987302531488,
-        0.20058724598493427,
-        0.20418121700640768,
-        0.20098217701888643,
-        0.20525811100378633
+        0.20600373201887123
       ],
-      "medianSeconds": 0.20098217701888643,
-      "minimumSeconds": 0.20058724598493427,
+      "medianSeconds": 0.20600373201887123,
+      "minimumSeconds": 0.20600373201887123,
       "comparable": true
     },
     {
@@ -165,14 +133,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.020025143981911242,
-        0.020769605005625635,
-        0.022010450018569827,
-        0.018393987993476912,
-        0.02040593299898319
+        0.019826379022561014
       ],
-      "medianSeconds": 0.02040593299898319,
-      "minimumSeconds": 0.018393987993476912,
+      "medianSeconds": 0.019826379022561014,
+      "minimumSeconds": 0.019826379022561014,
       "comparable": true
     },
     {
@@ -182,14 +146,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.3642941380094271,
-        0.3685438290121965,
-        0.3526189889817033,
-        0.36373168099089526,
-        0.33932321800966747
+        0.3668495859892573
       ],
-      "medianSeconds": 0.36373168099089526,
-      "minimumSeconds": 0.33932321800966747,
+      "medianSeconds": 0.3668495859892573,
+      "minimumSeconds": 0.3668495859892573,
       "comparable": true
     },
     {
@@ -199,14 +159,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.12149535899516195,
-        0.12016809801571071,
-        0.1118331549805589,
-        0.11115909900399856,
-        0.10873240701039322
+        0.13227964600082487
       ],
-      "medianSeconds": 0.1118331549805589,
-      "minimumSeconds": 0.10873240701039322,
+      "medianSeconds": 0.13227964600082487,
+      "minimumSeconds": 0.13227964600082487,
       "comparable": true
     },
     {
@@ -216,14 +172,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.016464562009787187,
-        0.014469454996287823,
-        0.016974866011878476,
-        0.016800220008008182,
-        0.014206769003067166
+        0.013703086995519698
       ],
-      "medianSeconds": 0.016464562009787187,
-      "minimumSeconds": 0.014206769003067166,
+      "medianSeconds": 0.013703086995519698,
+      "minimumSeconds": 0.013703086995519698,
       "comparable": true
     },
     {
@@ -233,14 +185,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.7486539310193621,
-        0.7594317220209632,
-        0.7418734890234191,
-        0.7287138899846468,
-        0.7642619029793423
+        0.7873591350216884
       ],
-      "medianSeconds": 0.7486539310193621,
-      "minimumSeconds": 0.7287138899846468,
+      "medianSeconds": 0.7873591350216884,
+      "minimumSeconds": 0.7873591350216884,
       "comparable": true
     },
     {
@@ -250,14 +198,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        1.0516411519784015,
-        1.0693753880041186,
-        1.0348176740226336,
-        1.0802188869856764,
-        1.0438708139990922
+        1.062128613004461
       ],
-      "medianSeconds": 1.0516411519784015,
-      "minimumSeconds": 1.0348176740226336,
+      "medianSeconds": 1.062128613004461,
+      "minimumSeconds": 1.062128613004461,
       "comparable": true
     },
     {
@@ -267,14 +211,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.09750964399427176,
-        0.09943062299862504,
-        0.11201975200674497,
-        0.10369620600249618,
-        0.10135664499830455
+        0.10700138300308026
       ],
-      "medianSeconds": 0.10135664499830455,
-      "minimumSeconds": 0.09750964399427176,
+      "medianSeconds": 0.10700138300308026,
+      "minimumSeconds": 0.10700138300308026,
       "comparable": true
     },
     {
@@ -284,14 +224,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.05621930898632854,
-        0.05073953198734671,
-        0.05214381101541221,
-        0.05338046100223437,
-        0.05481692199828103
+        0.05685541499406099
       ],
-      "medianSeconds": 0.05338046100223437,
-      "minimumSeconds": 0.05073953198734671,
+      "medianSeconds": 0.05685541499406099,
+      "minimumSeconds": 0.05685541499406099,
       "comparable": true
     },
     {
@@ -301,14 +237,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.02290128599270247,
-        0.017340969992801547,
-        0.023429483000654727,
-        0.021747367980424315,
-        0.031221415993059054
+        0.021459993993630633
       ],
-      "medianSeconds": 0.02290128599270247,
-      "minimumSeconds": 0.017340969992801547,
+      "medianSeconds": 0.021459993993630633,
+      "minimumSeconds": 0.021459993993630633,
       "comparable": true
     },
     {
@@ -318,14 +250,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.00456764898262918,
-        0.004717310017440468,
-        0.004160990996751934,
-        0.00539273300091736,
-        0.0045794270117767155
+        0.005184256995562464
       ],
-      "medianSeconds": 0.0045794270117767155,
-      "minimumSeconds": 0.004160990996751934,
+      "medianSeconds": 0.005184256995562464,
+      "minimumSeconds": 0.005184256995562464,
       "comparable": true
     },
     {
@@ -335,14 +263,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0016631869948469102,
-        0.0016765610198490322,
-        0.0016173789917957038,
-        0.0014520109980367124,
-        0.0012445440224837512
+        0.0020537159871309996
       ],
-      "medianSeconds": 0.0016173789917957038,
-      "minimumSeconds": 0.0012445440224837512,
+      "medianSeconds": 0.0020537159871309996,
+      "minimumSeconds": 0.0020537159871309996,
       "comparable": true
     },
     {
@@ -352,14 +276,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.0005173429963178933,
-        0.0004807999939657748,
-        0.0005341490032151341,
-        0.000523602997418493,
-        0.0007981679809745401
+        0.0005502330022864044
       ],
-      "medianSeconds": 0.000523602997418493,
-      "minimumSeconds": 0.0004807999939657748,
+      "medianSeconds": 0.0005502330022864044,
+      "minimumSeconds": 0.0005502330022864044,
       "comparable": true
     },
     {
@@ -369,14 +289,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.004099582991329953,
-        0.004278951993910596,
-        0.004426391999004409,
-        0.004398042015964165,
-        0.004382929007988423
+        0.0048040649853646755
       ],
-      "medianSeconds": 0.004382929007988423,
-      "minimumSeconds": 0.004099582991329953,
+      "medianSeconds": 0.0048040649853646755,
+      "minimumSeconds": 0.0048040649853646755,
       "comparable": true
     },
     {
@@ -386,14 +302,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0023529260070063174,
-        0.002232569007901475,
-        0.0020197150006424636,
-        0.0022232570045161992,
-        0.0016182090039364994
+        0.0025293869839515537
       ],
-      "medianSeconds": 0.0022232570045161992,
-      "minimumSeconds": 0.0016182090039364994,
+      "medianSeconds": 0.0025293869839515537,
+      "minimumSeconds": 0.0025293869839515537,
       "comparable": true
     },
     {
@@ -403,14 +315,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.0008867869910318404,
-        0.0010650829935912043,
-        0.0010475610033608973,
-        0.0009243820095434785,
-        0.0008077460224740207
+        0.000840680004330352
       ],
-      "medianSeconds": 0.0009243820095434785,
-      "minimumSeconds": 0.0008077460224740207,
+      "medianSeconds": 0.000840680004330352,
+      "minimumSeconds": 0.000840680004330352,
       "comparable": true
     },
     {
@@ -420,14 +328,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.007063983997795731,
-        0.0065704419976100326,
-        0.006605178001336753,
-        0.007343090022914112,
-        0.006534471991471946
+        0.005251088994555175
       ],
-      "medianSeconds": 0.006605178001336753,
-      "minimumSeconds": 0.006534471991471946,
+      "medianSeconds": 0.005251088994555175,
+      "minimumSeconds": 0.005251088994555175,
       "comparable": true
     },
     {
@@ -437,14 +341,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.07983576101833023,
-        0.07832225898164324,
-        0.07281341101042926,
-        0.07622867700411007,
-        0.08019111398607492
+        0.07542854599887505
       ],
-      "medianSeconds": 0.07832225898164324,
-      "minimumSeconds": 0.07281341101042926,
+      "medianSeconds": 0.07542854599887505,
+      "minimumSeconds": 0.07542854599887505,
       "comparable": true
     },
     {
@@ -454,14 +354,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.04342230400652625,
-        0.03829627498635091,
-        0.03418360001523979,
-        0.04533816600451246,
-        0.046275153988972306
+        0.04052482300903648
       ],
-      "medianSeconds": 0.04342230400652625,
-      "minimumSeconds": 0.03418360001523979,
+      "medianSeconds": 0.04052482300903648,
+      "minimumSeconds": 0.04052482300903648,
       "comparable": true
     },
     {
@@ -471,14 +367,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.026011344976723194,
-        0.027122519997647032,
-        0.02975854801479727,
-        0.029714882984990254,
-        0.02595219897921197
+        0.03066545899491757
       ],
-      "medianSeconds": 0.027122519997647032,
-      "minimumSeconds": 0.02595219897921197,
+      "medianSeconds": 0.03066545899491757,
+      "minimumSeconds": 0.03066545899491757,
       "comparable": true
     },
     {
@@ -488,14 +380,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.054342579998774454,
-        0.043042762990808114,
-        0.048072591016534716,
-        0.05304083100054413,
-        0.05301602301187813
+        0.044549261016072705
       ],
-      "medianSeconds": 0.05301602301187813,
-      "minimumSeconds": 0.043042762990808114,
+      "medianSeconds": 0.044549261016072705,
+      "minimumSeconds": 0.044549261016072705,
       "comparable": true
     },
     {
@@ -505,14 +393,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.014819495001574978,
-        0.019221043010475114,
-        0.017112114001065493,
-        0.018364004004979506,
-        0.01785792500595562
+        0.017295584024395794
       ],
-      "medianSeconds": 0.01785792500595562,
-      "minimumSeconds": 0.014819495001574978,
+      "medianSeconds": 0.017295584024395794,
+      "minimumSeconds": 0.017295584024395794,
       "comparable": true
     },
     {
@@ -522,14 +406,10 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.007143815979361534,
-        0.006978151999646798,
-        0.0071439979947172105,
-        0.0060434000042732805,
-        0.005887234990950674
+        0.006630520016187802
       ],
-      "medianSeconds": 0.006978151999646798,
-      "minimumSeconds": 0.005887234990950674,
+      "medianSeconds": 0.006630520016187802,
+      "minimumSeconds": 0.006630520016187802,
       "comparable": true
     },
     {
@@ -539,14 +419,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0020653499814216048,
-        0.0023599239939358085,
-        0.002004846988711506,
-        0.002699974022107199,
-        0.0025659549864940345
+        0.0024225939996540546
       ],
-      "medianSeconds": 0.0023599239939358085,
-      "minimumSeconds": 0.002004846988711506,
+      "medianSeconds": 0.0024225939996540546,
+      "minimumSeconds": 0.0024225939996540546,
       "comparable": true
     },
     {
@@ -556,14 +432,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.0006384960142895579,
-        0.0007639120158273727,
-        0.0005788870039395988,
-        0.0007630900072399527,
-        0.0007544420077465475
+        0.0006460959848482162
       ],
-      "medianSeconds": 0.0007544420077465475,
-      "minimumSeconds": 0.0005788870039395988,
+      "medianSeconds": 0.0006460959848482162,
+      "minimumSeconds": 0.0006460959848482162,
       "comparable": true
     },
     {
@@ -573,16 +445,11 @@
       "workload": "tableLoop",
       "workloadName": "Array loop",
       "samplesSeconds": [
-        0.034775284002535045,
-        0.033733826014213264,
-        0.030971389001933858,
-        0.028139687987277284,
-        0.033793062990298495
+        0.00496547800139524
       ],
-      "medianSeconds": 0.033733826014213264,
-      "minimumSeconds": 0.028139687987277284,
-      "comparable": true,
-      "comparisonNote": "Pop now performs checked indexed array mutation, but bulk fixed-array allocation is not yet exposed in source; this one-cell diagnostic remains excluded from rankings."
+      "medianSeconds": 0.00496547800139524,
+      "minimumSeconds": 0.00496547800139524,
+      "comparable": true
     }
   ]
 }
