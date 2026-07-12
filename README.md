@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/pop.png" alt="pop" width="120"></p>
+<p align="center"><img src="assets/pop.png" alt="pop" width="220"></p>
 <p align="center">
   <a href="#status">Status</a> •
 </p>
