@@ -247,6 +247,7 @@ pub fn lower_mir_to_llvm_ir(
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.extend(runtime_declarations());
+    declarations.extend(checked_integer_declarations());
     Ok(LlvmModule {
         triple: target.triple().to_owned(),
         private: PrivateModule {
@@ -256,6 +257,19 @@ pub fn lower_mir_to_llvm_ir(
             functions,
         },
     })
+}
+
+fn checked_integer_declarations() -> Vec<String> {
+    [8_u16, 16, 32, 64]
+        .into_iter()
+        .flat_map(|bits| {
+            ["sadd", "uadd", "ssub", "usub", "smul", "umul"].map(move |operation| {
+                format!(
+                    "declare {{ i{bits}, i1 }} @llvm.{operation}.with.overflow.i{bits}(i{bits}, i{bits})"
+                )
+            })
+        })
+        .collect()
 }
 
 fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {
@@ -448,7 +462,7 @@ fn lower_function(
             }
         }
     }
-    let mut incoming_edges: BTreeMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = BTreeMap::new();
+    let mut incoming_edges: BTreeMap<BlockId, Vec<(String, Vec<ValueId>)>> = BTreeMap::new();
     let mut union_payload_sources = BTreeMap::new();
     let mut has_union_switch = false;
     for predecessor in function.blocks() {
@@ -457,7 +471,7 @@ fn lower_function(
                 incoming_edges
                     .entry(*target)
                     .or_default()
-                    .push((predecessor.block(), arguments.clone()));
+                    .push((llvm_block_exit_label(predecessor), arguments.clone()));
             }
             MirTerminator::UnionSwitch {
                 scrutinee, arms, ..
@@ -520,9 +534,31 @@ fn lower_function(
     })
 }
 
+fn llvm_block_exit_label(block: &pop_mir::MirBlock) -> String {
+    block
+        .instructions()
+        .iter()
+        .rev()
+        .find(|instruction| {
+            matches!(
+                instruction.kind(),
+                MirInstructionKind::CheckedIntegerAdd { .. }
+                    | MirInstructionKind::CheckedIntegerSubtract { .. }
+                    | MirInstructionKind::CheckedIntegerMultiply { .. }
+                    | MirInstructionKind::CheckedIntegerDivide { .. }
+                    | MirInstructionKind::CheckedIntegerRemainder { .. }
+                    | MirInstructionKind::IntegerNegate { .. }
+            )
+        })
+        .map_or_else(
+            || format!("b{}", block.block().raw()),
+            |instruction| format!("v{}_continue", instruction.result().raw()),
+        )
+}
+
 fn lower_block_arguments(
     block: &pop_mir::MirBlock,
-    incoming: Option<&[(BlockId, Vec<ValueId>)]>,
+    incoming: Option<&[(String, Vec<ValueId>)]>,
     union_payload_source: Option<ValueId>,
     types: &TypeArena,
 ) -> Result<Vec<String>, LlvmLoweringError> {
@@ -538,7 +574,7 @@ fn lower_block_arguments(
                         let value = values
                             .get(index)
                             .ok_or(LlvmLoweringError::InvalidType(argument.type_id()))?;
-                        Ok(format!("[ %v{}, %b{} ]", value.raw(), predecessor.raw()))
+                        Ok(format!("[ %v{}, %{predecessor} ]", value.raw()))
                     })
                     .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
                 Ok(format!(
@@ -576,14 +612,6 @@ fn lower_instruction(
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
-    let binary = |operator: &str, left: ValueId, right: ValueId, kind: IntegerKind| {
-        format!(
-            "{result} = {operator} i{} %v{}, %v{}",
-            kind.bit_width(),
-            left.raw(),
-            right.raw()
-        )
-    };
     let line = match instruction.kind() {
         MirInstructionKind::IntegerConstant(value) => format!(
             "{result} = add i{} 0, {}",
@@ -609,31 +637,23 @@ fn lower_instruction(
             )
         }
         MirInstructionKind::CheckedIntegerAdd { kind, left, right } => {
-            binary("add", *left, *right, *kind)
+            lower_checked_integer_binary(&result, "add", *kind, *left, *right)
         }
         MirInstructionKind::CheckedIntegerSubtract { kind, left, right } => {
-            binary("sub", *left, *right, *kind)
+            lower_checked_integer_binary(&result, "sub", *kind, *left, *right)
         }
         MirInstructionKind::CheckedIntegerMultiply { kind, left, right } => {
-            binary("mul", *left, *right, *kind)
+            lower_checked_integer_binary(&result, "mul", *kind, *left, *right)
         }
-        MirInstructionKind::CheckedIntegerDivide { kind, left, right } => binary(
-            if kind.is_signed() { "sdiv" } else { "udiv" },
-            *left,
-            *right,
-            *kind,
-        ),
-        MirInstructionKind::CheckedIntegerRemainder { kind, left, right } => binary(
-            if kind.is_signed() { "srem" } else { "urem" },
-            *left,
-            *right,
-            *kind,
-        ),
-        MirInstructionKind::IntegerNegate { kind, operand } => format!(
-            "{result} = sub i{} 0, %v{}",
-            kind.bit_width(),
-            operand.raw()
-        ),
+        MirInstructionKind::CheckedIntegerDivide { kind, left, right } => {
+            lower_checked_integer_division(&result, "div", *kind, *left, *right)
+        }
+        MirInstructionKind::CheckedIntegerRemainder { kind, left, right } => {
+            lower_checked_integer_division(&result, "rem", *kind, *left, *right)
+        }
+        MirInstructionKind::IntegerNegate { kind, operand } => {
+            lower_checked_integer_negate(&result, *kind, *operand)
+        }
         MirInstructionKind::FloatAdd { kind, left, right } => format!(
             "{result} = fadd {} %v{}, %v{}",
             float_type(*kind),
@@ -972,6 +992,88 @@ fn lower_terminator(
             )
         }
     })
+}
+
+fn lower_checked_integer_binary(
+    result: &str,
+    operation: &str,
+    kind: IntegerKind,
+    left: ValueId,
+    right: ValueId,
+) -> String {
+    let bits = kind.bit_width();
+    let signed = if kind.is_signed() { 's' } else { 'u' };
+    let pair = format!("{result}_checked");
+    let overflow = format!("{result}_overflow");
+    format!(
+        "{pair} = call {{ i{bits}, i1 }} @llvm.{signed}{operation}.with.overflow.i{bits}(i{bits} %v{}, i{bits} %v{})\n{result} = extractvalue {{ i{bits}, i1 }} {pair}, 0\n{overflow} = extractvalue {{ i{bits}, i1 }} {pair}, 1\n{}",
+        left.raw(),
+        right.raw(),
+        lower_trap_edge(result, &overflow)
+    )
+}
+
+fn lower_checked_integer_division(
+    result: &str,
+    operation: &str,
+    kind: IntegerKind,
+    left: ValueId,
+    right: ValueId,
+) -> String {
+    let bits = kind.bit_width();
+    let zero = format!("{result}_zero");
+    let mut lines = vec![format!("{zero} = icmp eq i{bits} %v{}, 0", right.raw())];
+    let invalid = if kind.is_signed() {
+        let minimum = -(1_i128 << (bits - 1));
+        let minimum_value = format!("{result}_minimum");
+        let negative_one = format!("{result}_negative_one");
+        let overflow = format!("{result}_overflow");
+        let invalid = format!("{result}_invalid");
+        lines.extend([
+            format!(
+                "{minimum_value} = icmp eq i{bits} %v{}, {minimum}",
+                left.raw()
+            ),
+            format!("{negative_one} = icmp eq i{bits} %v{}, -1", right.raw()),
+            format!("{overflow} = and i1 {minimum_value}, {negative_one}"),
+            format!("{invalid} = or i1 {zero}, {overflow}"),
+        ]);
+        invalid
+    } else {
+        zero
+    };
+    lines.push(lower_trap_edge(result, &invalid));
+    lines.push(format!(
+        "{result} = {} i{bits} %v{}, %v{}",
+        if kind.is_signed() {
+            format!("s{operation}")
+        } else {
+            format!("u{operation}")
+        },
+        left.raw(),
+        right.raw()
+    ));
+    lines.join("\n")
+}
+
+fn lower_checked_integer_negate(result: &str, kind: IntegerKind, operand: ValueId) -> String {
+    let bits = kind.bit_width();
+    let signed = if kind.is_signed() { 's' } else { 'u' };
+    let pair = format!("{result}_checked");
+    let overflow = format!("{result}_overflow");
+    format!(
+        "{pair} = call {{ i{bits}, i1 }} @llvm.{signed}sub.with.overflow.i{bits}(i{bits} 0, i{bits} %v{})\n{result} = extractvalue {{ i{bits}, i1 }} {pair}, 0\n{overflow} = extractvalue {{ i{bits}, i1 }} {pair}, 1\n{}",
+        operand.raw(),
+        lower_trap_edge(result, &overflow)
+    )
+}
+
+fn lower_trap_edge(result: &str, condition: &str) -> String {
+    let label = result.trim_start_matches('%');
+    format!(
+        "br i1 {condition}, label %{label}_trap, label %{label}_continue\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_continue:",
+        RuntimeOperation::Trap.abi_symbol()
+    )
 }
 
 fn lower_equality(

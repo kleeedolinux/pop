@@ -46,8 +46,8 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     assert!(text.contains("add i64"));
     assert!(text.contains("ret i64"));
     assert!(
-        !text.contains("llvm."),
-        "runtime operations must use PLRI names"
+        !text.contains("pop_rt_semantic"),
+        "runtime operations must use closed PLRI identities"
     );
 }
 
@@ -311,6 +311,92 @@ end\n",
         String::from_utf8_lossy(&result.stderr),
         module
     );
+}
+
+#[test]
+fn emitted_llvm_preserves_exact_numeric_widths_and_checked_overflow() {
+    let success = native_module(
+        "namespace Main\n\
+private function addByte(left: UInt8, right: UInt8): UInt8\n\
+    return left + right\n\
+end\n\
+private function subtractByte(left: UInt8, right: UInt8): UInt8\n\
+    return left - right\n\
+end\n\
+private function multiplyByte(left: UInt8, right: UInt8): UInt8\n\
+    return left * right\n\
+end\n\
+private function divideByte(left: UInt8, right: UInt8): UInt8\n\
+    return left / right\n\
+end\n\
+private function remainderByte(left: UInt8, right: UInt8): UInt8\n\
+    return left % right\n\
+end\n\
+private function negate(value: Int8): Int8\n\
+    return -value\n\
+end\n\
+public function run(): Int\n\
+    if addByte(40, 2) == 42 then\n\
+        return 42\n\
+    else\n\
+        return 1\n\
+    end\n\
+end\n",
+    );
+    let text = success.to_string();
+    assert!(text.contains("@llvm.uadd.with.overflow.i8"));
+    assert!(text.contains("@llvm.usub.with.overflow.i8"));
+    assert!(text.contains("@llvm.umul.with.overflow.i8"));
+    assert!(text.contains("udiv i8"));
+    assert!(text.contains("urem i8"));
+    assert!(text.contains("@llvm.ssub.with.overflow.i8"));
+    assert!(text.contains("_zero = icmp eq i8"));
+    let result = link_with_runtime_and_run(&success, "numeric-success");
+    assert_eq!(result.status.code(), Some(42));
+
+    let overflow = native_module(
+        "namespace Main\n\
+private function addByte(left: UInt8, right: UInt8): UInt8\n\
+    return left + right\n\
+end\n\
+public function run(): Int\n\
+    if addByte(255, 1) == 0 then\n\
+        return 1\n\
+    else\n\
+        return 2\n\
+    end\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&overflow, "numeric-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "checked UInt8 overflow must trap instead of wrapping\n{overflow}"
+    );
+}
+
+fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
+    let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let entry = mir.functions().last().expect("entry").symbol();
+    lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering")
 }
 
 fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {
