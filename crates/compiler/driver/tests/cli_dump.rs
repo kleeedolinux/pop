@@ -162,7 +162,7 @@ fn invalid_source_emits_a_structured_diagnostic_and_no_dump() {
     assert!(!output.status.success());
     assert!(
         output.stdout.is_empty(),
-        "invalid HIR/MIR must not be dumped"
+        "invalid HIR/MIR/LLVM must not be dumped"
     );
 
     let stderr = output_text(&output.stderr);

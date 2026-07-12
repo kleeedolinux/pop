@@ -51,7 +51,7 @@ conversions.
 - CFG/block-argument MIR;
 - HIR lowering with explicit evaluation order;
 - MIR parser, printer, verifier, and deterministic `pop check <source.pop>
-  --dump mir|ll` bootstrap inspection;
+  --dump mir` bootstrap inspection;
 - portable constant folding and dead-code elimination;
 - a simple MIR interpreter and minimal runtime adapter.
 - warning-wave policy, scoped suppression, LSP/JSON output, and fix-all engine.
@@ -75,6 +75,7 @@ not table or runtime-name lookup.
 ## Milestone 4 — LLVM native backend
 
 - target layout and Inkwell-confined LLVM lowering through backend-private IR;
+- deterministic verified `pop check <source.pop> --dump ll` inspection;
 - PLRI native ABI and runtime library;
 - `.poplib` Bubble manifests/reference metadata, object emission, and platform linking;
 - standalone bootstrap `pop build`/`pop run` examples that exercise Rust

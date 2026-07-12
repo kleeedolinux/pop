@@ -350,7 +350,7 @@ Core commands:
 | Command | Contract |
 | --- | --- |
 | `pop new` / `pop initialize` | Create a Package or Workspace using canonical layout |
-| `pop check` | Resolve and type-check through HIR/MIR verification without final native linking |
+| `pop check` | Resolve and type-check through HIR/MIR verification, with optional verified backend dumps and no final native linking |
 | `pop build` | Build selected Bubbles and dependencies |
 | `pop transpile` | Experimentally emit a selected backend source artifact without compiling it |
 | `pop run` | Build and run exactly one binary/example Bubble |
@@ -475,7 +475,7 @@ Stable machine-facing contracts are:
 - structured diagnostics and workspace edits;
 - `pop metadata --messageFormat json` with an explicit schema version;
 - newline-delimited build events for progress/artifacts/diagnostics;
-- deterministic HIR/MIR/debug dumps for the compiler version;
+- deterministic HIR/MIR/LLVM debug dumps for the compiler version and inspection target;
 - dep-info files listing tracked source, manifest, environment capability, and
   generated inputs;
 - cancellation and bounded editor queries;

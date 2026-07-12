@@ -370,11 +370,7 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let Some(program) = lower_native_source(source_path) else {
         return ExitCode::FAILURE;
     };
-    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
-        .expect("repository native target is complete");
+    let target = native_target();
     let module = match lower_mir_to_llvm_ir(
         &program.mir,
         &program.types,
@@ -593,11 +589,7 @@ fn collect_sources_in(
 }
 
 fn emit_native_object(program: &NativeProgram, output_path: &Path) -> Option<()> {
-    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
-        .expect("repository native target is complete");
+    let target = native_target();
     let options = program
         .entry
         .map_or_else(LlvmLoweringOptions::default, |entry| {
