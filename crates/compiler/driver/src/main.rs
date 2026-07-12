@@ -703,21 +703,30 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
         .ancestors()
         .nth(3)
         .expect("driver crate is under repository root");
+
     let standard = root.join("target/debug/libpop_standard.a");
     let runtime = root.join("target/debug/libpop_runtime_native.a");
-    if !standard.is_file() || !runtime.is_file() {
-        let build = Command::new("cargo")
-            .current_dir(root)
-            .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"])
-            .status();
-        if !matches!(build, Ok(status) if status.success()) {
-            eprintln!("pop: could not build bootstrap foundation archives");
-            return ExitCode::FAILURE;
-        }
+
+    let build = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"])
+        .status();
+
+    if !matches!(build, Ok(status) if status.success()) {
+        eprintln!("pop: could not build bootstrap foundation archives");
+        return ExitCode::FAILURE;
     }
+
+    if !standard.is_file() || !runtime.is_file() {
+        eprintln!("pop: bootstrap foundation archives were not produced");
+        return ExitCode::FAILURE;
+    }
+
     let mut command = Command::new("clang");
     command.args(object_paths).arg(&standard).arg(&runtime);
+
     let link = command.arg("-o").arg(output_path).output();
+
     match link {
         Ok(output) if output.status.success() => ExitCode::SUCCESS,
         Ok(output) => {

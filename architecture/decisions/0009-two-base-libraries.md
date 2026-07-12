@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-10
+- Superseded in part by: ADR 0030 (public standard-library direction)
 
 ## Context
 
@@ -13,13 +14,17 @@ separation.
 
 ## Decision
 
+> **Supersession note:** ADR 0030 replaces this record's public BCL framing and
+> public-library shape. This ADR continues to authorize the two reserved base
+> library identities and their dependency direction.
+
 The toolchain provides exactly two reserved foundational library Bubble identities:
 
 - `Pop.Internal`, a private trusted library Bubble containing primitive implementations,
   intrinsic declarations, GC/runtime bridges, coroutine/loader/FFI transitions,
   and platform adapters;
-- `Pop.Standard`, the public automatically referenced compact BCL-inspired library Bubble organized
-  under documented `Pop.*` namespaces.
+- `Pop.Standard`, the public automatically referenced native Pop library Bubble
+  organized under documented `Pop.*` namespaces.
 
 User code cannot reference `Pop.Internal`. Compiler binding uses versioned
 intrinsic IDs/signature hashes, not names. `Pop.Standard` depends on

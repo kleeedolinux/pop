@@ -158,8 +158,10 @@ Companion functions are useful when the type supplies important context:
 - `Json.encode`;
 - `Text.slice`.
 
-Do not repeat that context in long names. Within `Http`, prefer `Client` over
-`HttpClient`; within `Json`, prefer `Value` over `JsonValue`.
+Do not repeat that context in long names. Within `Http`, prefer `Request` over
+`HttpRequest`; within `Json`, prefer `Value` over `JsonValue`. A stateful noun
+such as `Client` is accepted only for an opaque resource with real protocol
+state, such as a connection pool.
 
 ## Interfaces
 
@@ -247,9 +249,9 @@ This keeps dispatch, allocation, evaluation order, and module ownership clear.
   needed.
 - Factory functions are plain namespace functions when construction involves
   parsing, I/O, caching, or selecting among result variants.
-- Builder objects are reserved for incremental stateful construction that cannot
-  be expressed cleanly as a record/list; contextual names remain short
-  (`Text.Builder`).
+- Incremental stateful construction uses a direct reusable buffer or domain
+  value only when a record/list cannot express it; for text, prefer a
+  `Bytes.Buffer` with an explicit checked UTF-8 finish operation.
 
 ## Errors and effects
 
@@ -297,22 +299,35 @@ Common standard code therefore needs no `using`:
 
 ```luau
 local bytes = Json.encode(player)
-local fileResult = Io.open(path)
-local delay = Time.Duration.seconds(2)
-local task = Async.run(loadPlayer)
+local fileResult = File.read(path)
+local delay = Time.seconds(2)
+local task = Task.spawn(loadPlayer)
 ```
 
 Context keeps names short:
 
 - `Json.Value`, not `JsonValue`;
-- `Http.Client`, not `HttpClient`;
-- `Text.Builder`, not `StringBuilder`;
-- `Async.CancelToken`, commonly prelude-shortened to `CancelToken`;
+- `Http.Request`, not `HttpRequest`;
+- `Bytes.Buffer`, not `ByteBufferBuilder`;
+- prelude `CancelToken`, not `Async.CancellationToken`;
 - `Set<T>`, not `HashSet<T>`;
 - `Table<K, V>`, not `Dictionary<K, V>`.
 
 External/user libraries remain explicit with `using`; the language does not
 allow projects to inject arbitrary global usings.
+
+## Concision and cost review
+
+API review evaluates real call sites, not only declarations. Each public family
+shows a concise default call, advanced typed options, and an efficient
+view/buffer/stream/resource form. Common operations normally require one call;
+advanced control must not replace the common path with a builder chain.
+
+Short names come from stable domain context, not arbitrary truncation. Review
+rejects repeated words (`File.openFile`), vague containers (`System.Manager`),
+and generic action nouns (`Utility`, `Helper`). It also rejects convenience that
+hides materialization, copying, task scheduling, dynamic/interface dispatch, or
+native transitions. ADR 0032 and section 22 define the full cost contract.
 
 ## Analyzer guidance
 
@@ -326,6 +341,8 @@ APIs:
 - single-method interface replaceable by a function value;
 - factory/service/helper/manager class with no state/lifecycle;
 - fluent API with hidden allocation/blocking;
+- common operation requiring avoidable construction/configuration ceremony;
+- undocumented allocation, copying, dispatch, suspension, or native boundary;
 - marker interface replaceable by an attribute.
 
 These are warnings with semantic quick fixes/previews where safe, not hard

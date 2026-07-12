@@ -34,7 +34,7 @@ This is an architectural inventory, not yet a complete compatibility table.
 | `require`-style module values | Replace with file-scoped namespaces, direct namespace declarations, `bubble.toml` dependencies, Bubble metadata, and analyzable initialization. | Replace |
 | Implicit globals and mutable environment functions | Exclude; unsafe facilities must still expose statically typed operations. | Reject |
 | Single IEEE-754 `number` type | Replace with explicit PascalCase fixed-width integers/floats; `Int` is `Int64` and `Float` is `Float64`. | Replace |
-| Lua-compatible standard library details | Replace with compact BCL-inspired `Pop.Standard`; provide migration adapters only when they do not distort semantics. | Adapt / Replace |
+| Lua-compatible standard library details | Replace with the native, tiered `Pop.Standard` architecture; provide migration adapters only when they do not distort semantics. | Adapt / Replace |
 | Sandboxed embedding | Preserve as a deployment capability, not as a reason to couple the language to one host. | Adapt |
 | Attributes | Keep Luau's lightweight `@` direction and extend it with typed user-defined attributes evaluated at compile time. | Adapt |
 | `any`/gradual escape behavior | Reject runtime operations without a proven static type. Migration requires schemas, unions, interfaces, or typed wrappers. | Reject |

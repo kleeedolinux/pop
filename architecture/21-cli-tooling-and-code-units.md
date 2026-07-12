@@ -26,6 +26,27 @@ A namespace is orthogonal to this ownership hierarchy. It organizes item names
 across modules in one Bubble but is not a file, Bubble, package, runtime object,
 or dependency unit.
 
+## Public library distribution
+
+The public library uses the tiers in
+[Public standard-library architecture](./22-public-standard-library-architecture.md).
+`Pop.Standard` is automatically referenced, but that does not make every
+official or platform Package implicit. Package metadata records tier, supported
+platform targets, required capabilities, stability/status, unsafe status, API
+hash, cost/effect schema version, and documentation identity. Dependency
+resolution rejects upward tier edges and
+public dependency cycles. A Package may contain private implementation Bubbles,
+but its public metadata must expose only the documented tier contract.
+
+The first official extensions are independently selected `Pop.Data`, `Pop.Ai`,
+`Pop.Cli`, `Pop.Rpc`, `Pop.Syntax`, and `Pop.Lsp` Packages. Future package-manager
+work will install them with ordinary `pop add`/resolution flows; the current
+bootstrap validates their local manifests and builds but does not claim registry
+installation is implemented. Sharing the toolchain repository does not merge
+their versions, manifests, dependency graphs, builds, `internal` visibility, or
+installation state. Only an explicit Package dependency makes one available to
+a project.
+
 ## Items
 
 An item is a namespace-scope declaration or a declared member/case owned by one.
@@ -179,9 +200,10 @@ exactly, including empty and non-ASCII strings. Invalid platform argument bytes
 cause a closed runtime trap before an argument-taking `main` executes rather
 than lossy conversion.
 Applications keep typed `Result` errors internally and translate them explicitly
-at the entry boundary. Async programs call the typed `Async.run` adapter rather
-than adding hidden async entry behavior. Entry selection uses `SymbolId` during
-compilation, never runtime string lookup.
+at the entry boundary. Future async entry lowering must use the typed task
+runtime adapter accepted by the async architecture rather than adding hidden
+entry behavior. Entry selection uses `SymbolId` during compilation, never
+runtime string lookup.
 
 Library Bubbles do not resolve an entry item. A Package may build `src/lib.pop`
 and `src/main.pop` together without imposing the binary's `main` contract on the

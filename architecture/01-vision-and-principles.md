@@ -118,14 +118,18 @@ is not exposed as language reflection.
 ### Coherent base libraries and tooling
 
 The trusted `Pop.Internal` library owns compiler/runtime primitives while the
-public `Pop.Standard` library provides a compact BCL-inspired foundation. Stable
-structured diagnostics and semantic quick fixes are designed with the language,
-not added after compilation works.
+public `Pop.Standard` library provides Pop's native portable foundation. Its
+capability breadth, tiers, concise API rules, and cost contracts are defined in
+[Public standard-library architecture](./22-public-standard-library-architecture.md).
+Stable structured diagnostics and semantic quick fixes are designed with the
+language, not added after compilation works. The fixed `Pop` prelude makes
+common types/functions available without repetitive imports.
 
-“BCL-inspired” means breadth, consistency, documentation, and runtime integration;
-it does not mean copying .NET's object model, long names, exception patterns, or
-namespace fragmentation. The fixed `Pop` prelude makes common types/functions
-available without repetitive imports.
+The public library is judged by call sites as well as type structure. Common
+work should take one or a few direct calls, while explicit views, buffers,
+streams, options, and resource scopes preserve advanced control. Convenience
+does not authorize hidden allocation, copying, dynamic dispatch, ambient
+authority, or native transitions.
 
 ## Non-goals
 

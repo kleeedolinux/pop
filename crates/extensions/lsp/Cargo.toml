@@ -1,0 +1,16 @@
+[package]
+name = "pop-extension-lsp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pop-extension-rpc.workspace = true
+pop-extension-syntax.workspace = true
+
+[lints]
+workspace = true

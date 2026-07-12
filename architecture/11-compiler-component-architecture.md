@@ -69,7 +69,10 @@ tools/
   architecture-tests/ Cargo layout and dependency-direction conformance
 libraries/
   internal/         trusted Pop.Internal source, intrinsics, bootstrap metadata
-  standard/         public Pop.Standard BCL source and API baselines
+  standard/         public Pop.Standard source and API baselines
+crates/extensions/
+  data, ai, cli, rpc, syntax, lsp
+                    independent official Package bootstrap builds
 ```
 
 Cargo package names are implementation details; they do not replace Pop Lang's
@@ -187,12 +190,20 @@ expose compiler arenas or IDs.
 managed bodies/runtime entries. Its verified reference metadata is an input to
 normal compilation but never a user reference.
 
-`Pop.Standard` owns the public compact BCL-inspired contracts and depends only on
-`Pop.Internal` plus target adapters reached through PLRI. The compiler has no
-hard-coded knowledge of convenience APIs; syntax protocols are identified by
-reserved semantic IDs declared in the base-library contract.
+`Pop.Standard` owns the native Pop portable public contracts and depends only on
+`Pop.Internal` plus target adapters reached through PLRI. Its tier and capability
+boundaries are defined in [Public standard-library architecture](./22-public-standard-library-architecture.md).
+The compiler has no hard-coded knowledge of convenience APIs; syntax protocols
+are identified by reserved semantic IDs declared in the base-library contract.
 
 API baseline and intrinsic-table verification are build gates.
+
+Official extensions are normal public Packages, not compiler components. In
+particular, `Pop.Syntax` defines a reviewed public facade rather than exporting
+the private syntax crate, and `Pop.Lsp` defines the protocol boundary that the
+private language-server/tooling implementation consumes. Dependency direction
+may point from official tooling to these public extensions, never from an
+extension into compiler-private crates.
 
 ## Documentation ownership
 

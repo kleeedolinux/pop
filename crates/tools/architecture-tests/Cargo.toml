@@ -8,6 +8,8 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dev-dependencies]
+pop-projects.workspace = true
+
 [lints]
 workspace = true
-

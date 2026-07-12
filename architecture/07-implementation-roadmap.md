@@ -105,12 +105,21 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - FFI;
 - opt-in retained metadata and generated typed adapters where justified;
 - concurrent mature GC, pacing, latency telemetry, and benchmark gates;
-- networking, serialization, locale, debug, crypto, and interop standard
-  namespaces according to target profile;
+- the first public-library slices authorized by the section 22 implementation
+  plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.
 
 Exit criterion: semantics and performance are stable enough for an initial
 language release.
+
+## Public-library delivery sequence
+
+The detailed phase/package matrix, prerequisites, test and benchmark gates,
+migration requirements, definitions of done, and first implementation pull
+requests are maintained in
+[Public library implementation and migration plan](./22.6-standard-library-implementation-plan.md).
+This roadmap does not duplicate that catalog. A planned namespace is not an
+implemented milestone artifact.
 
 ## Cross-cutting requirements
 

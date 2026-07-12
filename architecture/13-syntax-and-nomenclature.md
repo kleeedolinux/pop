@@ -30,6 +30,21 @@ name. Widely standardized initialisms/technical forms such as `Json`, `Http`,
 follow word casing. Namespace context removes repetition instead of chopping
 words.
 
+Public-library namespace roots, tier suffixes, experimental names, and explicit
+`Unsafe`/`Native` boundaries are defined by ADR 0031 and
+[Public standard-library architecture](./22-public-standard-library-architecture.md).
+Those rules apply to library API design as well as source spelling; a familiar
+framework-role name does not justify `Builder`, `Manager`, `Factory`, or
+`Service` when an immutable configuration value and free function express the
+contract.
+
+ADR 0032 additionally requires concise call sites. Complete names do not mean
+repeating context: write `Json.Error`, `File.open`, and `Http.send`, not
+`JsonDecodeError`, `File.openFile`, or `Http.sendHttpRequest`. `Ui` and `Ai` are
+accepted technical forms alongside the closed ADR 0031 and ADR 0033
+public-library
+vocabulary; arbitrary project abbreviations remain forbidden.
+
 | Entity | Convention | Examples |
 | --- | --- | --- |
 | Namespace | `PascalCase` components | `Game.Players`, `Pop.Text` |
@@ -347,7 +362,7 @@ implicit/global usings, and runtime-computed imports are excluded.
 The fixed `Pop` prelude is a language/toolchain contract, not a configurable
 global-using feature. It selectively exposes declarations marked by the trusted
 standard library's `@Prelude` contract, so common code can write `Json.encode`,
-`Io.open`, and `Math.min` without imports while child members remain qualified.
+`File.read`, and `Math.min` without imports while child members remain qualified.
 Prelude names have lower resolution priority than locals/current namespace/
 explicit aliases; `Pop.Json` remains available for intentional conflicts.
 

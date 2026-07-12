@@ -945,30 +945,48 @@ fn emit_entry(
         .iter()
         .find(|function| function.symbol() == entry)
         .ok_or(CBackendError::InvalidEntryPoint(entry))?;
-    output.push_str("static int pop_process_status(int64_t status)\n{\n    uint32_t bits = (uint32_t)(uint64_t)status;\n    if (bits <= (uint32_t)INT32_MAX) return (int)bits;\n    return -1 - (int)(UINT32_MAX - bits);\n}\n\nint main(void)\n{\n");
+
     if function.results().is_empty() {
+        output.push_str("int main(void)\n{\n");
+
         let _ = writeln!(
             output,
             "    pop_b{}_s{}();",
             bubble.bubble().raw(),
             entry.raw()
         );
-        output.push_str("    return 0;\n");
+
+        output.push_str("    return 0;\n}\n");
     } else {
         let int = types
             .source_type("Int")
             .ok_or(CBackendError::UnsupportedEntryPointSignature(entry))?;
+
         if function.results() != [int] {
             return Err(CBackendError::UnsupportedEntryPointSignature(entry));
         }
+
+        output.push_str(
+            "static int pop_process_status(int64_t status)\n\
+             {\n\
+                 uint32_t bits = (uint32_t)(uint64_t)status;\n\
+                 if (bits <= (uint32_t)INT32_MAX) return (int)bits;\n\
+                 return -1 - (int)(UINT32_MAX - bits);\n\
+             }\n\n\
+             int main(void)\n\
+             {\n",
+        );
+
         let _ = writeln!(
             output,
             "    return pop_process_status(pop_b{}_s{}());",
             bubble.bubble().raw(),
             entry.raw()
         );
+
+        output.push_str("}\n");
     }
-    output.push_str("}\n");
+
     Ok(())
 }
 

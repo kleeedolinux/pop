@@ -19,6 +19,12 @@ members = [
     "crates/compiler/syntax",
     "crates/compiler/target",
     "crates/compiler/types",
+    "crates/extensions/ai",
+    "crates/extensions/cli",
+    "crates/extensions/data",
+    "crates/extensions/lsp",
+    "crates/extensions/rpc",
+    "crates/extensions/syntax",
     "crates/libraries/internal",
     "crates/libraries/standard",
     "crates/runtime/interface",
@@ -46,6 +52,12 @@ pop-projects = { path = "crates/compiler/projects" }
 pop-query = { path = "crates/compiler/query" }
 pop-resolve = { path = "crates/compiler/resolve" }
 pop-types = { path = "crates/compiler/types" }
+pop-extension-ai = { path = "crates/extensions/ai" }
+pop-extension-cli = { path = "crates/extensions/cli" }
+pop-extension-data = { path = "crates/extensions/data" }
+pop-extension-lsp = { path = "crates/extensions/lsp" }
+pop-extension-rpc = { path = "crates/extensions/rpc" }
+pop-extension-syntax = { path = "crates/extensions/syntax" }
 pop-internal = { path = "crates/libraries/internal" }
 pop-standard = { path = "crates/libraries/standard" }
 pop-compile-time = { path = "crates/compiler/compile-time" }

@@ -2,23 +2,29 @@
 
 - Status: accepted
 - Date: 2026-07-10
+- Superseded in part by: ADR 0030 and ADR 0031 (public catalog and names)
 
 ## Context
 
-The first BCL-inspired catalog copied too many .NET-style namespaces and long
-type names. Requiring many `using Pop...` directives would make ordinary Pop
-Lang noisier than Lua/Luau and repeat context in names.
+The first public catalog copied too many foreign-style namespaces and long type
+names. Requiring many `using Pop...` directives would make ordinary Pop Lang
+noisier than Lua/Luau and repeat context in names.
 
 ## Decision
+
+> **Supersession note:** The fixed, small prelude decision remains accepted.
+> ADR 0030 and ADR 0031 replace this record's illustrative public catalog and
+> naming examples with the native tiered public-library contract.
 
 Normal projects automatically reference `Pop.Standard` and receive exactly one
 fixed curated prelude from trusted `@Prelude` declarations. It exposes
 high-frequency types/functions plus selected child namespace names. Child
 members stay qualified; the entire root namespace is not blindly imported.
 
-Common code writes `Json.encode`, `Io.open`, `Math.min`, `Text.Builder`, and
-`Http.Client` without imports. Core collections use `List`, `Table`, `Set`,
-`Iterable`, and `Sequence`; async uses `Task` and `CancelToken`.
+Common code writes selected prelude-qualified operations without imports. The
+exact prelude and contextual namespace names are defined by ADR 0031. Core
+collections use `List`, `Table`, `Set`, `Iterable`, and `Sequence`; async uses
+`Task` and `CancelToken`.
 
 Namespaces provide context, so APIs avoid redundant names such as `JsonValue`,
 `StringBuilder`, `HttpClient`, `Dictionary`, `HashSet`, and
@@ -31,7 +37,7 @@ explicit.
 - Ordinary standard-library code needs zero imports.
 - The prelude is a compatibility surface and must remain small/stable.
 - Namespace qualification prevents child APIs from flooding file scope.
-- Some familiar .NET BCL names intentionally change.
+- Public names follow the native naming contract rather than foreign conventions.
 - Documentation and autocomplete group short names under contextual namespaces.
 
 ## Alternatives considered
@@ -48,5 +54,5 @@ unbounded.
 
 ### Copy .NET names exactly
 
-Rejected because Pop Lang adopts BCL design lessons, not its OOP/history-driven
-nomenclature.
+Rejected because Pop Lang uses its own naming contract rather than foreign
+OOP/history-driven nomenclature.

@@ -88,13 +88,13 @@ construction rules, and layout. It is not a table with a metatable.
 Canonical direction:
 
 ```luau
-namespace Network.Transport
+namespace Studio.Transport
 
 public class Connection
-    public endpoint: Network.Endpoint
+    public endpoint: Endpoint
     private closed: Boolean = false
 
-    public function Connection.new(endpoint: Network.Endpoint): Connection
+    public function Connection.new(endpoint: Endpoint): Connection
         return Connection {
             endpoint = endpoint,
         }
