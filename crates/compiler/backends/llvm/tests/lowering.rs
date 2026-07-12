@@ -374,6 +374,49 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_executes_direct_and_nominal_interface_dispatch() {
+    let module = native_module(
+        "namespace Main\n\
+public interface Reader\n\
+    function read(value: Int): Int\n\
+end\n\
+public class IncrementReader implements Reader\n\
+    public function IncrementReader:read(value: Int): Int\n\
+        return value + 1\n\
+    end\n\
+end\n\
+public class DoubleReader implements Reader\n\
+    public function DoubleReader:read(value: Int): Int\n\
+        return value + value\n\
+    end\n\
+end\n\
+private function readDirect(reader: IncrementReader): Int\n\
+    return reader:read(40)\n\
+end\n\
+private function readThroughInterface(reader: Reader, value: Int): Int\n\
+    return reader:read(value)\n\
+end\n\
+public function run(): Int\n\
+    local reader = IncrementReader {}\n\
+    local doubleReader = DoubleReader {}\n\
+    if readDirect(reader) == 41 then\n\
+        return readThroughInterface(reader, 20) + readThroughInterface(doubleReader, 10) + 1\n\
+    else\n\
+        return 1\n\
+    end\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "interface-dispatch");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted nominal dispatch: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
     let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
     let front_end = analyze_bubble(FrontEndBubbleInput::new(
