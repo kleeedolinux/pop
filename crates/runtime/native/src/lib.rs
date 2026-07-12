@@ -168,6 +168,71 @@ pub extern "C" fn pop_rt_field_set(reference: u64, field: u64, value: u64) -> u8
     )
 }
 
+/// Materializes one immutable, valid UTF-8 string from compiler-emitted bytes.
+///
+/// # Safety
+///
+/// `bytes` must address `length` readable bytes for the duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_string_literal(bytes: *const u8, length: u64) -> u64 {
+    let Ok(length) = usize::try_from(length) else {
+        return 0;
+    };
+    if bytes.is_null() {
+        return 0;
+    }
+    // SAFETY: The native backend supplies a pointer to an immutable LLVM
+    // constant with exactly the declared byte length.
+    let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+    allocate_utf8_string_literal(bytes)
+}
+
+/// Safe Rust adapter for the bootstrap string-literal ABI.
+#[must_use]
+pub fn allocate_utf8_string_literal(bytes: &[u8]) -> u64 {
+    if std::str::from_utf8(bytes).is_err() {
+        return 0;
+    }
+    let Ok(portable_length) = u32::try_from(bytes.len()) else {
+        return 0;
+    };
+    let request = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(1),
+        AllocationClass::Mature,
+        portable_length,
+        ArrayElementMap::Scalar,
+    );
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Ok(reference) = runtime.allocate_array(&request) else {
+        return 0;
+    };
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        let Ok(index) = u32::try_from(index) else {
+            return 0;
+        };
+        if runtime
+            .store_scalar(reference, ObjectSlot::new(index), u64::from(byte))
+            .is_err()
+        {
+            return 0;
+        }
+    }
+    reference.raw()
+}
+
+/// Compares two managed UTF-8 strings by their byte content.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_string_equal(left: u64, right: u64) -> u8 {
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    u8::from(runtime.strings_equal(ManagedReference::new(left), ManagedReference::new(right)))
+}
+
 fn array_slot(index: u64) -> Option<ObjectSlot> {
     (index > 0)
         .then(|| u32::try_from(index - 1).ok())
@@ -470,6 +535,18 @@ impl BootstrapRuntime {
             Some(SlotValue::Reference(value)) => Ok(value.map_or(0, ManagedReference::raw)),
             None => Err(RuntimeFailure::runtime_invariant()),
         }
+    }
+
+    fn strings_equal(&self, left: ManagedReference, right: ManagedReference) -> bool {
+        let Some(left) = self.objects.get(&left) else {
+            return false;
+        };
+        let Some(right) = self.objects.get(&right) else {
+            return false;
+        };
+        left.type_id == RuntimeTypeId::new(1)
+            && right.type_id == RuntimeTypeId::new(1)
+            && left.slots == right.slots
     }
 
     /// Performs a precise stop-the-world collection using registered strong

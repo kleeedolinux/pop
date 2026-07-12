@@ -1,7 +1,8 @@
 use pop_runtime_native::{
-    pop_rt_abi_major, pop_rt_abi_minor, pop_rt_allocate_array, pop_rt_allocate_object,
-    pop_rt_allocate_table, pop_rt_array_get, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set,
-    pop_rt_gc_stage, pop_rt_release_root, pop_rt_retain_root,
+    allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor, pop_rt_allocate_array,
+    pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_get, pop_rt_array_set,
+    pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage, pop_rt_release_root, pop_rt_retain_root,
+    pop_rt_string_equal,
 };
 
 #[test]
@@ -9,6 +10,23 @@ fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     assert_eq!(pop_rt_abi_major(), 1);
     assert_eq!(pop_rt_abi_minor(), 0);
     assert_eq!(pop_rt_gc_stage(), 1);
+}
+
+#[test]
+fn bootstrap_strings_preserve_valid_utf8_and_compare_by_value() {
+    let pop = "Pop 🫧".as_bytes();
+    let lua = "Lua".as_bytes();
+    let first = allocate_utf8_string_literal(pop);
+    let second = allocate_utf8_string_literal(pop);
+    let different = allocate_utf8_string_literal(lua);
+    assert_ne!(first, 0);
+    assert_ne!(second, 0);
+    assert_ne!(different, 0);
+    assert_eq!(pop_rt_string_equal(first, second), 1);
+    assert_eq!(pop_rt_string_equal(first, different), 0);
+
+    let invalid = [0xff_u8];
+    assert_eq!(allocate_utf8_string_literal(&invalid), 0);
 }
 
 #[test]

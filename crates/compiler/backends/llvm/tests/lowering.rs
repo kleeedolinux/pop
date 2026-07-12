@@ -258,6 +258,61 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_preserves_utf8_string_literals_and_value_equality() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+private function same(): Boolean\n\
+    return \"Pop 🫧\" == \"Pop 🫧\"\n\
+end\n\
+private function different(): Boolean\n\
+    return \"Pop\" ~= \"Lua\"\n\
+end\n\
+private function empty(): Boolean\n\
+    return \"\" == \"\"\n\
+end\n\
+public function run(): Int\n\
+    if same() and different() and empty() then\n\
+        return 42\n\
+    else\n\
+        return 1\n\
+    end\n\
+end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let entry = mir.functions().last().expect("run").symbol();
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+    let result = link_with_runtime_and_run(&module, "utf8-string");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted strings: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

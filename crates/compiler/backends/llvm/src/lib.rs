@@ -6,8 +6,8 @@
 //! emission parses and verifies that private output with Inkwell before asking
 //! LLVM's target machine to write the artifact.
 
-use std::collections::BTreeMap;
-use std::fmt;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Write as _};
 use std::path::Path;
 
 use inkwell::OptimizationLevel;
@@ -191,13 +191,20 @@ pub fn lower_mir_to_llvm_ir(
 ) -> Result<LlvmModule, LlvmLoweringError> {
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
     let field_layout = collect_field_layout(bubble);
+    let string_literals = collect_string_literals(bubble);
     let mut functions = bubble
         .functions()
         .iter()
-        .map(|function| lower_function(function, types, options, &field_layout))
+        .map(|function| lower_function(function, types, options, &field_layout, &string_literals))
         .collect::<Result<Vec<_>, _>>()?;
     for method in bubble.methods() {
-        let mut lowered = lower_function(method.function(), types, options, &field_layout)?;
+        let mut lowered = lower_function(
+            method.function(),
+            types,
+            options,
+            &field_layout,
+            &string_literals,
+        )?;
         lowered.name = format!("pop_method_{}", method.method().raw());
         functions.push(lowered);
     }
@@ -235,17 +242,58 @@ pub fn lower_mir_to_llvm_ir(
             "declare void @{}()",
             RuntimeOperation::ContinueUnwind.abi_symbol()
         ),
+        "declare i64 @pop_rt_string_literal(ptr, i64)".to_owned(),
+        "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.extend(runtime_declarations());
     Ok(LlvmModule {
         triple: target.triple().to_owned(),
         private: PrivateModule {
+            globals: render_string_literals(&string_literals),
             declarations,
             entry_point,
             functions,
         },
     })
+}
+
+fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {
+    let values = bubble
+        .functions()
+        .iter()
+        .chain(bubble.methods().iter().map(pop_mir::MirMethod::function))
+        .flat_map(pop_mir::MirFunction::blocks)
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::StringConstant(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (value, format!("@pop_string_{index}")))
+        .collect()
+}
+
+fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec<String> {
+    literals
+        .iter()
+        .map(|(value, symbol)| {
+            let bytes = value
+                .as_bytes()
+                .iter()
+                .fold(String::new(), |mut output, byte| {
+                    let _ = write!(output, "\\{byte:02X}");
+                    output
+                });
+            format!(
+                "{symbol} = private unnamed_addr constant [{} x i8] c\"{bytes}\"",
+                value.len()
+            )
+        })
+        .collect()
 }
 
 fn runtime_declarations() -> Vec<String> {
@@ -294,6 +342,7 @@ fn collect_field_layout(bubble: &MirBubble) -> BTreeMap<FieldId, u32> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PrivateModule {
+    globals: Vec<String>,
     declarations: Vec<String>,
     entry_point: Option<String>,
     functions: Vec<PrivateFunction>,
@@ -316,6 +365,12 @@ struct PrivateBlock {
 
 impl PrivateModule {
     fn render(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for global in &self.globals {
+            writeln!(formatter, "{global}")?;
+        }
+        if !self.globals.is_empty() {
+            writeln!(formatter)?;
+        }
         for declaration in &self.declarations {
             writeln!(formatter, "{declaration}")?;
         }
@@ -380,6 +435,7 @@ fn lower_function(
     types: &TypeArena,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
+    string_literals: &BTreeMap<String, String>,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     let mut value_types = BTreeMap::new();
     for block in function.blocks() {
@@ -431,6 +487,7 @@ fn lower_function(
                 &value_types,
                 types,
                 field_layout,
+                string_literals,
             )?);
         }
         blocks.push(PrivateBlock {
@@ -515,6 +572,7 @@ fn lower_instruction(
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
+    string_literals: &BTreeMap<String, String>,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
@@ -541,10 +599,15 @@ fn lower_instruction(
             format!("{result} = xor i1 0, {}", u8::from(*value))
         }
         MirInstructionKind::NilConstant => format!("{result} = add i64 0, 0"),
-        MirInstructionKind::StringConstant(value) => format!(
-            "{result} = call i64 @pop_string_literal(i64 0, i64 {})",
-            value.len()
-        ),
+        MirInstructionKind::StringConstant(value) => {
+            let symbol = string_literals
+                .get(value)
+                .ok_or(LlvmLoweringError::InvalidType(instruction.result_type()))?;
+            format!(
+                "{result} = call i64 @pop_rt_string_literal(ptr {symbol}, i64 {})",
+                value.len()
+            )
+        }
         MirInstructionKind::CheckedIntegerAdd { kind, left, right } => {
             binary("add", *left, *right, *kind)
         }
@@ -607,18 +670,12 @@ fn lower_instruction(
         MirInstructionKind::BooleanOr { left, right } => {
             format!("{result} = or i1 %v{}, %v{}", left.raw(), right.raw())
         }
-        MirInstructionKind::CompareEqual { left, right } => format!(
-            "{result} = icmp eq {} %v{}, %v{}",
-            llvm_value_type(value_types, *left, types)?,
-            left.raw(),
-            right.raw()
-        ),
-        MirInstructionKind::CompareNotEqual { left, right } => format!(
-            "{result} = icmp ne {} %v{}, %v{}",
-            llvm_value_type(value_types, *left, types)?,
-            left.raw(),
-            right.raw()
-        ),
+        MirInstructionKind::CompareEqual { left, right } => {
+            lower_equality(&result, *left, *right, false, value_types, types)?
+        }
+        MirInstructionKind::CompareNotEqual { left, right } => {
+            lower_equality(&result, *left, *right, true, value_types, types)?
+        }
         MirInstructionKind::CompareIntegerLess { kind, left, right } => format!(
             "{result} = icmp {} i{} %v{}, %v{}",
             if kind.is_signed() { "slt" } else { "ult" },
@@ -915,6 +972,40 @@ fn lower_terminator(
             )
         }
     })
+}
+
+fn lower_equality(
+    result: &str,
+    left: ValueId,
+    right: ValueId,
+    negated: bool,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let type_id = *values
+        .get(&left)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    if types.get(type_id) == Some(&SemanticType::Primitive(PrimitiveType::String)) {
+        let equal = format!("{result}_string_equal");
+        return Ok(format!(
+            "{equal} = call i8 @pop_rt_string_equal(i64 %v{}, i64 %v{})\n{result} = icmp {} i8 {equal}, 0",
+            left.raw(),
+            right.raw(),
+            if negated { "eq" } else { "ne" }
+        ));
+    }
+    let ty = llvm_value_type(values, left, types)?;
+    let operator = match (ty.as_str(), negated) {
+        ("float" | "double", false) => "fcmp oeq",
+        ("float" | "double", true) => "fcmp une",
+        (_, false) => "icmp eq",
+        (_, true) => "icmp ne",
+    };
+    Ok(format!(
+        "{result} = {operator} {ty} %v{}, %v{}",
+        left.raw(),
+        right.raw()
+    ))
 }
 
 fn call_line(
