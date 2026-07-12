@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Aqua popping bubble icon">
+  <defs>
+    <radialGradient id="bubbleFill" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(418 350) rotate(58) scale(560 520)">
+      <stop offset="0" stop-color="#F2FEFF" stop-opacity="0.92"/>
+      <stop offset="0.45" stop-color="#B8F4FF" stop-opacity="0.68"/>
+      <stop offset="0.78" stop-color="#53D7F3" stop-opacity="0.52"/>
+      <stop offset="1" stop-color="#18A9DA" stop-opacity="0.78"/>
+    </radialGradient>
+
+    <linearGradient id="rim" x1="178" y1="170" x2="815" y2="825" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5DEBFF"/>
+      <stop offset="0.45" stop-color="#19B8E6"/>
+      <stop offset="1" stop-color="#0586C7"/>
+    </linearGradient>
+
+    <linearGradient id="rimLight" x1="220" y1="205" x2="730" y2="805" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.88"/>
+      <stop offset="0.45" stop-color="#CFFAFF" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#00A6D8" stop-opacity="0.35"/>
+    </linearGradient>
+
+    <linearGradient id="dropFill" x1="774" y1="180" x2="930" y2="390" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#75F4FF"/>
+      <stop offset="0.6" stop-color="#20C4EA"/>
+      <stop offset="1" stop-color="#078BCB"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="-18%" y="-18%" width="136%" height="136%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#0686B9" flood-opacity="0.14"/>
+    </filter>
+
+    <filter id="glow" x="-12%" y="-12%" width="124%" height="124%">
+      <feGaussianBlur stdDeviation="2.4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Transparent background intentionally left empty -->
+
+  <g filter="url(#softShadow)">
+    <!-- Main popping bubble silhouette -->
+    <path
+      d="M803.8 296.2
+         C735.7 219.2 635.8 172.1 524.9 172.1
+         C319.8 172.1 153.5 338.4 153.5 543.5
+         C153.5 748.6 319.8 914.9 524.9 914.9
+         C716.7 914.9 874.7 769.4 894.8 582.9
+         C901.3 522.5 892.8 463.7 873.0 411.0
+         C841.7 417.1 812.0 397.6 807.2 366.2
+         C803.6 342.5 816.4 321.5 837.3 311.8
+         C825.9 311.5 814.4 306.1 803.8 296.2Z"
+      fill="url(#bubbleFill)"
+      stroke="url(#rim)"
+      stroke-width="28"
+      stroke-linejoin="round"/>
+
+    <!-- Inner rim -->
+    <path
+      d="M780.5 315.8
+         C715.3 245.7 623.6 204.5 524.9 204.5
+         C337.7 204.5 186.0 356.3 186.0 543.5
+         C186.0 730.8 337.7 882.5 524.9 882.5
+         C699.6 882.5 843.8 750.4 861.8 580.2
+         C867.4 526.8 859.8 475.5 842.6 429.0
+         C809.2 428.9 779.8 406.4 773.2 372.7
+         C769.0 350.7 772.1 331.9 780.5 315.8Z"
+      fill="none"
+      stroke="url(#rimLight)"
+      stroke-width="10"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      opacity="0.9"/>
+
+    <!-- Bite / pop curves: negative-space impression with blue outline -->
+    <path
+      d="M796 312
+         C769 323 755 344 762 369
+         C770 398 797 413 827 407
+         C814 431 822 460 846 473
+         C866 484 884 480 900 468"
+      fill="none"
+      stroke="#16BCEB"
+      stroke-width="18"
+      stroke-linecap="round"
+      stroke-linejoin="round"/>
+
+    <path
+      d="M796 313
+         C771 323 758 344 765 367
+         C773 393 798 406 827 401
+         C818 424 826 450 848 462
+         C865 472 881 470 896 461"
+      fill="none"
+      stroke="#BDF8FF"
+      stroke-width="7"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      opacity="0.95"/>
+
+    <!-- Primary highlight -->
+    <path
+      d="M278 418
+         C303 330 386 265 482 246
+         C509 241 526 270 506 289
+         C452 341 388 399 347 461
+         C316 509 260 483 278 418Z"
+      fill="#FFFFFF"
+      opacity="0.74"/>
+
+    <!-- Lower highlight -->
+    <path
+      d="M644 780
+         C684 739 748 723 768 737
+         C792 755 748 803 687 819
+         C650 828 629 796 644 780Z"
+      fill="#FFFFFF"
+      opacity="0.48"/>
+
+    <!-- Thin rim shine -->
+    <path
+      d="M214 550
+         C216 380 348 235 526 221
+         C591 216 653 229 707 256"
+      stroke="#FFFFFF"
+      stroke-width="11"
+      stroke-linecap="round"
+      opacity="0.62"/>
+
+    <path
+      d="M331 866
+         C422 912 538 923 640 888"
+      stroke="#9FF6FF"
+      stroke-width="8"
+      stroke-linecap="round"
+      opacity="0.42"/>
+
+    <!-- Popping droplets, simplified for icon readability -->
+    <path
+      d="M841 208
+         C880 238 875 289 833 334
+         C824 283 814 235 841 208Z"
+      fill="url(#dropFill)"
+      stroke="#079FD5"
+      stroke-width="8"
+      stroke-linejoin="round"/>
+
+    <path
+      d="M872 226
+         C852 233 841 260 838 292"
+      stroke="#D8FCFF"
+      stroke-width="7"
+      stroke-linecap="round"
+      opacity="0.85"/>
+
+    <path
+      d="M925 350
+         C957 363 965 398 930 429
+         C918 394 900 367 925 350Z"
+      fill="url(#dropFill)"
+      stroke="#079FD5"
+      stroke-width="7"
+      stroke-linejoin="round"/>
+
+    <path
+      d="M948 365
+         C933 369 923 385 921 405"
+      stroke="#D8FCFF"
+      stroke-width="5"
+      stroke-linecap="round"
+      opacity="0.85"/>
+
+    <circle cx="905" cy="494" r="19" fill="url(#dropFill)" stroke="#079FD5" stroke-width="7"/>
+    <circle cx="910" cy="488" r="7" fill="#E9FEFF" opacity="0.85"/>
+
+    <!-- Tiny accent sparkle/bubbles -->
+    <circle cx="956" cy="287" r="8" fill="#51E5F6" opacity="0.8"/>
+    <circle cx="960" cy="287" r="4" fill="#FFFFFF" opacity="0.7"/>
+    <path d="M907 305 L929 291" stroke="#5DEBFF" stroke-width="8" stroke-linecap="round" opacity="0.75"/>
+  </g>
+</svg>

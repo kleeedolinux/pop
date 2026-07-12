@@ -1,4 +1,9 @@
-# Pop Language
+<p align="center"><img src="assets/pop.png" alt="pop" width="400"></p>
+<p align="center">
+  <a href="#status">Status</a> •
+</p>
+
+# Pop Lang
 
 Pop Lang is a native, strongly and statically typed programming language
 inspired directly by Luau. It keeps Luau's lightweight syntax, readable
@@ -298,13 +303,62 @@ pop tree
 pop metadata
 pop package
 pop publish
+pop install
+pop clean
 ```
+
+`pop` remains the language, Workspace, Package, Bubble, documentation, and
+package-manager command. `pop install` builds and installs a Package's public
+binary Bubble. The narrowly separate `popup` command manages complete Pop Lang
+compiler/runtime toolchain distributions; it never edits `bubble.toml` or
+`bubble.lock` and is not a second Package manager.
+
+The accepted `popup` workflow includes deterministic noninteractive commands
+for listing, installing, selecting, updating, diagnosing, and removing exact
+toolchains, plus an optional Ratatui view over the same typed operations:
+
+```text
+popup list --available
+popup install stable
+popup default stable
+popup run --toolchain 1.0.0 -- pop check
+popup doctor
+```
+
+Each toolchain is an immutable relocatable host distribution containing one
+compatible compiler, runtime/PLRI, first-party tools, `Pop.Internal`,
+`Pop.Standard`, target support, licenses, and versioned file inventory. The
+managed `pop` shim selects an already installed exact distribution using an
+explicit `popup run`, `POPUP_TOOLCHAIN`, the nearest exact
+`pop-toolchain.toml`, then the global default. Checked-in pins record an exact
+version and distribution digest; selection never downloads implicitly.
+
+`popup` discovers releases through a canonical versioned release index signed
+by the trusted distribution root, not by scraping repository tags, pages,
+branches, or filenames. Signature, digest, expiry, rollback, target, archive,
+and inventory checks fail closed. Installation and self-update stage and verify
+complete content before atomic activation, preserving the previous usable state
+after interruption or concurrent access.
+
+The one-script Bash bootstrap is only a narrow path to an exact pinned `popup`:
+it verifies the documented host, size, and embedded SHA-256 digest before
+execution, and does not evaluate downloaded text, build the repository, invoke
+Cargo, request `sudo`, or silently edit shell startup files. The release gate
+requires reproducible relocatable archives, signed metadata,
+licenses/SBOM/provenance, cross-backend/runtime/foundational-Bubble checks, and
+an empty-root smoke installation outside the checkout before a signed channel
+is published. See
+[ADR 0028](architecture/decisions/0028-toolchain-distribution-and-popup-management.md).
 
 Machine tooling consumes versioned structured diagnostics, metadata, symbols,
 build events, and workspace edits. It does not scrape human CLI output.
-Diagnostics use stable `POP####` codes, typed arguments, spans, labels, notes,
-origins, severity/category, warning waves, and semantic quick fixes. Safe
-fix-all operations are atomic, version-checked, composable, formatted, and
+Diagnostics use stable `POP####` codes, typed arguments, typed
+source/manifest/path/artifact/toolchain-state/no-location locations, labels,
+notes, origins, severity/category, warning waves, and semantic quick fixes.
+Toolchain failures use non-suppressible `POP9xxx` codes without fabricated
+source spans. Plain, versioned JSON, and Ratatui presentation preserve the same
+typed facts; color and widget layout are not machine APIs. Safe fix-all
+operations are atomic, version-checked, composable, formatted, and
 postcondition-verified.
 
 Public documentation uses Lua-shaped `---` comments with checked XML concepts.
@@ -356,6 +410,7 @@ Start with these documents when changing or extending the project:
 - [Type-system architecture](architecture/12-type-system-architecture.md)
 - [Syntax and nomenclature](architecture/13-syntax-and-nomenclature.md)
 - [Architecture conformance and regression policy](architecture/19-architecture-conformance-and-regression-policy.md)
+- [Toolchain distribution and `popup` management](architecture/decisions/0028-toolchain-distribution-and-popup-management.md)
 - [Accepted decisions](architecture/decisions/README.md)
 
 The project treats those documents, accepted ADRs, specifications, conformance
