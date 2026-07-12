@@ -118,6 +118,41 @@ Whenever possible, do not use Python for scripting. Prefer Ruby when it is avail
 
 For scripts intended to be added to the repository, ask the host machine owner to install Ruby if it is not already installed, and provide clear installation instructions for their operating system. We don't accept python scripts on repository.
 
+# Follow Linux Git Commit Conventions
+
+Write commit messages in the style commonly used by the Linux project. Begin with a short, specific subject line written in the imperative mood, such as `Fix invalid configuration handling` rather than `Fixed invalid configuration handling`. Do not end the subject line with a period.
+
+Keep the subject concise and make it describe one logical change. Leave a blank line between the subject and the commit body.
+
+Use the body to explain why the change was necessary, what problem it solves, and any important consequences. Do not merely repeat what the code already shows. Wrap body text at approximately 72 characters per line.
+
+```text
+Fix invalid configuration handling
+
+Reject empty configuration values before initialization. Allowing them
+to reach the parser caused unclear runtime errors and made invalid
+deployments harder to diagnose.
+```
+
+Keep unrelated changes in separate commits. A bug fix, refactor,
+formatting change, dependency update, and new feature should not be
+combined unless they are inseparable parts of the same logical change.
+
+Each commit should be independently understandable, reviewable, and
+revertible. It should leave the repository in a working state whenever
+practical.
+
+Do not use vague commit subjects such as `Update code`, `Fix stuff`,
+`Changes`, or `WIP`. Describe the actual change instead.
+
+Bad:
+
+Update files
+
+Good:
+
+Prevent duplicate user registration
+
 ## Scope
 
 **Keep active:** accepted architecture is the repository contract, and the
