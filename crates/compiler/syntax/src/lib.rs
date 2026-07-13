@@ -20,6 +20,7 @@ mod interface;
 mod lexer;
 mod signature;
 mod string_literal;
+mod type_alias;
 
 pub use attribute::{
     AttributeArgumentSyntax, AttributeDeclarationSyntax, AttributeParameterSyntax,
@@ -51,6 +52,9 @@ pub use signature::{
     GenericParameterSyntax, TypeSyntax, TypeSyntaxKind, parse_function_signature,
 };
 pub use string_literal::{StringLiteralError, decode_string_literal};
+pub use type_alias::{
+    TypeAliasDeclarationError, TypeAliasDeclarationSyntax, parse_type_alias_declaration,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeKind {

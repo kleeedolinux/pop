@@ -16,7 +16,7 @@ use pop_syntax::{
     AttributeUseSyntax, NodeKind, parse_attribute_declaration, parse_attribute_use,
     parse_class_declaration, parse_class_method_body, parse_const_declaration, parse_file,
     parse_function_body, parse_function_signature, parse_interface_declaration,
-    parse_record_declaration, parse_union_declaration,
+    parse_record_declaration, parse_type_alias_declaration, parse_union_declaration,
 };
 use pop_types::{
     AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SignatureResolver,
@@ -87,6 +87,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     validate_standard_native_exports(&bootstrap, pop_standard::NATIVE_EXPORTS)
         .expect("repository-validated native Standard adapters");
     let mut resolver = SignatureResolver::new(&database, bootstrap.clone());
+    define_type_aliases(&parsed, &database, &mut resolver, &mut diagnostics);
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,
         input.bubble,
@@ -209,6 +210,36 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         constants,
         diagnostics,
         reference_metadata,
+    }
+}
+
+fn define_type_aliases(
+    modules: &[ParsedModule],
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for module in modules {
+        for node in module.syntax.root().children() {
+            if node.kind() != NodeKind::TypeAliasDeclaration {
+                continue;
+            }
+            match parse_type_alias_declaration(&module.source, &module.syntax, node) {
+                Ok(syntax) => {
+                    if let Some(symbol) = resolve_symbol(
+                        database,
+                        module.module,
+                        syntax.name(),
+                        SymbolSpace::Type,
+                        syntax.span(),
+                        diagnostics,
+                    ) {
+                        resolver.register_type_alias(module.module, symbol, &syntax);
+                    }
+                }
+                Err(error) => diagnostics.push(syntax_error(error.span(), error.expectation())),
+            }
+        }
     }
 }
 

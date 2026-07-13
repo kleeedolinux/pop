@@ -24,6 +24,10 @@ The initial type families include:
 - `Never` for expressions that do not return;
 - an internal `error` type used only to recover after a diagnostic.
 
+Namespace type aliases erase to their recursively resolved target before HIR;
+they add no nominal identity or runtime operation. Alias cycles and type
+arguments on the initial non-generic alias form are rejected. See ADR 0048.
+
 There is no user-visible `dynamic`, `any`, or unknown value on which operations
 can be performed. A top type may exist for type-theory purposes only if values
 must be narrowed to a concrete supported type before use.

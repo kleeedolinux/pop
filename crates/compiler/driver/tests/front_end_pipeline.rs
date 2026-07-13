@@ -5,6 +5,57 @@ use pop_mir::lower_hir_bubble;
 use pop_source::SourceFile;
 
 #[test]
+fn erased_type_aliases_work_in_runtime_signatures_and_bodies() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+         private type Score = Int\n\
+         private type Scores = {Score}\n\
+         public function increment(score: Score): Score\n\
+             local values: Scores = { score }\n\
+             return Array.get(values, 1) + 1\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("verified HIR"), result.types())
+        .expect("verified MIR");
+    assert!(!mir.dump().contains("Score"));
+}
+
+#[test]
+fn type_alias_cycles_and_type_arguments_are_rejected() {
+    for source_text in [
+        "namespace Main\nprivate type First = Second\nprivate type Second = First\npublic function value(input: First): Int\n    return 0\nend\n",
+        "namespace Main\nprivate type Score = Int\npublic function value(input: Score<String>): Int\n    return 0\nend\n",
+    ] {
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+
+        assert!(result.hir().is_none());
+        assert!(!result.diagnostics().is_empty());
+    }
+}
+
+#[test]
 fn multi_module_bubble_reaches_verified_typed_hir() {
     let models = SourceFile::new(
         FileId::from_raw(0),

@@ -7,8 +7,8 @@ use pop_foundation::{
 };
 use pop_resolve::{ResolutionDatabase, SymbolSpace};
 use pop_syntax::{
-    FunctionSignatureSyntax, RecordDeclarationSyntax, TypeSyntax, TypeSyntaxKind,
-    UnionDeclarationSyntax,
+    FunctionSignatureSyntax, RecordDeclarationSyntax, TypeAliasDeclarationSyntax, TypeSyntax,
+    TypeSyntaxKind, UnionDeclarationSyntax,
 };
 
 use crate::field_defaults::resolve_field_default;
@@ -453,6 +453,8 @@ pub struct SignatureResolver<'index> {
     pub(crate) classes_by_type: BTreeMap<TypeId, SymbolId>,
     pub(crate) interface_types: BTreeMap<SymbolId, TypeId>,
     pub(crate) interface_definitions: BTreeMap<SymbolId, crate::InterfaceDefinition>,
+    type_aliases: BTreeMap<SymbolId, (ModuleId, TypeSyntax)>,
+    resolving_aliases: BTreeMap<SymbolId, SourceSpan>,
     pub(crate) interfaces_by_type: BTreeMap<TypeId, SymbolId>,
     pub(crate) attribute_definitions: BTreeMap<SymbolId, crate::AttributeDefinition>,
 }
@@ -481,6 +483,8 @@ impl<'index> SignatureResolver<'index> {
             classes_by_type: BTreeMap::new(),
             interface_types: BTreeMap::new(),
             interface_definitions: BTreeMap::new(),
+            type_aliases: BTreeMap::new(),
+            resolving_aliases: BTreeMap::new(),
             interfaces_by_type: BTreeMap::new(),
             attribute_definitions: BTreeMap::new(),
         }
@@ -554,6 +558,16 @@ impl<'index> SignatureResolver<'index> {
     #[must_use]
     pub fn union_definition(&self, symbol: SymbolId) -> Option<&UnionDefinition> {
         self.union_definitions.get(&symbol)
+    }
+
+    pub fn register_type_alias(
+        &mut self,
+        module: ModuleId,
+        symbol: SymbolId,
+        syntax: &TypeAliasDeclarationSyntax,
+    ) {
+        self.type_aliases
+            .insert(symbol, (module, syntax.target().clone()));
     }
 
     #[must_use]
@@ -1055,6 +1069,28 @@ impl<'index> SignatureResolver<'index> {
             return None;
         }
         let symbol = resolution.symbol()?;
+        if let Some((alias_module, target)) = self.type_aliases.get(&symbol).cloned() {
+            if !arguments.is_empty() {
+                diagnostics.push(type_diagnostics::wrong_type_arity(
+                    syntax.span(),
+                    &name,
+                    0,
+                    arguments.len(),
+                ));
+                return None;
+            }
+            if self.resolving_aliases.contains_key(&symbol) {
+                diagnostics.push(pop_diagnostics::resolution::unknown_name(
+                    syntax.span(),
+                    name,
+                ));
+                return None;
+            }
+            self.resolving_aliases.insert(symbol, syntax.span());
+            let resolved = self.resolve_type(alias_module, &target, generics, diagnostics);
+            self.resolving_aliases.remove(&symbol);
+            return resolved;
+        }
         let arguments = self.resolve_types(module, arguments, generics, diagnostics)?;
         let type_id = self
             .record_definitions
