@@ -573,6 +573,10 @@ fn lower_expression(
             array: Box::new(lower_expression(array, interface_slots)),
             index: Box::new(lower_expression(index, interface_slots)),
         },
+        TypedExpressionKind::TupleGet { tuple, index } => HirExpressionKind::TupleGet {
+            tuple: Box::new(lower_expression(tuple, interface_slots)),
+            index: *index,
+        },
         TypedExpressionKind::ArrayCreate {
             length,
             initial_value,
@@ -1064,6 +1068,9 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
         }
+        TypedExpressionKind::TupleGet { tuple, .. } => {
+            first_unknown_interface_expression(tuple, slots)
+        }
         TypedExpressionKind::ArrayCreate {
             length,
             initial_value,
@@ -1289,6 +1296,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             .find_map(|field| first_compile_time_only_expression(field.value())),
         TypedExpressionKind::ArrayGet { array, index } => first_compile_time_only_expression(array)
             .or_else(|| first_compile_time_only_expression(index)),
+        TypedExpressionKind::TupleGet { tuple, .. } => first_compile_time_only_expression(tuple),
         TypedExpressionKind::ArrayCreate {
             length,
             initial_value,

@@ -78,6 +78,8 @@ fn fixed_packs_destructure_swap_and_preserve_target_before_value_order() {
          end\n\
          public function calculate(value: Int): Int\n\
              local left, right = split(value)\n\
+             local result = split(value)\n\
+             local projected = result[2]\n\
              left, right = right, left\n\
              local counter = 0\n\
              local function advance(): Int\n\
@@ -90,7 +92,7 @@ fn fixed_packs_destructure_swap_and_preserve_target_before_value_order() {
              local values: {Int} = { 10, 20 }\n\
              local box = Box {}\n\
              box.value, values[advance()], values[advance()] = 7, observed(), 99\n\
-             return box.value * 100000 + left * 10000 + right * 1000 + Array.get(values, 1) * 100 + Array.get(values, 2)\n\
+             return box.value * 100000 + projected * 10000 + right * 1000 + Array.get(values, 1) * 100 + Array.get(values, 2)\n\
          end\n",
     );
     let calculate = mir.functions().last().expect("calculate").symbol();

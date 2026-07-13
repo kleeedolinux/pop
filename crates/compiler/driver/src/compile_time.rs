@@ -162,6 +162,9 @@ fn collect_direct_calls(
                 collect_direct_calls(element, calls);
             }
         }
+        CompileTimeExpressionKind::TupleGet { tuple, .. } => {
+            collect_direct_calls(tuple, calls);
+        }
         CompileTimeExpressionKind::Call {
             function,
             arguments,

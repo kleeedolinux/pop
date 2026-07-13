@@ -267,6 +267,20 @@ impl ExpressionVerifier<'_> {
             CompileTimeExpressionKind::Tuple(elements) => {
                 self.verify_tuple(expression.type_id(), elements, locals)?;
             }
+            CompileTimeExpressionKind::TupleGet { tuple, index } => {
+                self.verify(tuple, locals)?;
+                let Some(SemanticType::Tuple(elements)) = self.types.get(tuple.type_id()) else {
+                    return Err(ProgramError::ValueTypeMismatch {
+                        expected: tuple.type_id(),
+                    });
+                };
+                let Some(element) = elements.get(*index as usize) else {
+                    return Err(ProgramError::ValueTypeMismatch {
+                        expected: tuple.type_id(),
+                    });
+                };
+                require_type(*element, expression.type_id())?;
+            }
             CompileTimeExpressionKind::Call {
                 function,
                 arguments,

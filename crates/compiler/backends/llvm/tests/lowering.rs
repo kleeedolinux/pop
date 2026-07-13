@@ -74,8 +74,9 @@ fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
          end\n\
          private function main(arguments: Array<String>): Int\n\
              local left, right = split(10)\n\
+             local result = split(10)\n\
              left, right = right, left\n\
-             return left + right\n\
+             return result[1] + result[2]\n\
          end\n",
     )
     .expect("source");

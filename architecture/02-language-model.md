@@ -310,6 +310,10 @@ explicit construction and projection. Variadic tails must have known repeated
 types or generic pack constraints and are not dynamically typed bags. See ADR
 0045.
 
+Tuple and fixed-pack elements use one-based static projection such as
+`result[1]`. The index is a compile-time integer literal within the exact arity,
+so the result type and MIR slot are known without runtime tuple lookup.
+
 ## Exhaustive tagged-union matching
 
 The initial `match` is a statement whose arms use `when ... then` and must name

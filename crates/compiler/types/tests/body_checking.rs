@@ -255,6 +255,45 @@ fn fixed_pack_arity_diagnostic_reports_the_exact_target_count() {
 }
 
 #[test]
+fn tuple_projection_is_one_based_static_and_exactly_typed() {
+    let fixture = check_function(
+        "namespace Example\n\
+         private function pair(value: Int): (Int, String)\n\
+             return value, String(value)\n\
+         end\n\
+         public function select(value: Int): String\n\
+             local result = pair(value)\n\
+             return result[2]\n\
+         end\n",
+        "select",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn tuple_projection_rejects_dynamic_and_out_of_range_indexes() {
+    for expression in ["result[index]", "result[-1]", "result[0]", "result[3]"] {
+        let source = format!(
+            "namespace Example\n\
+             public function invalid(index: Int): Int\n\
+                 local result = (1, 2)\n\
+                 return {expression}\n\
+             end\n"
+        );
+        let fixture = check_function(&source, "invalid");
+        assert!(
+            !fixture.result.diagnostics().is_empty(),
+            "tuple projection accepted {expression}"
+        );
+    }
+}
+
+#[test]
 fn reports_unknown_values_wrong_call_arity_and_invalid_operands() {
     for (source, expected_code) in [
         (

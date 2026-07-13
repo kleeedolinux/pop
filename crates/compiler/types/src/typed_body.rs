@@ -314,6 +314,10 @@ pub enum TypedExpressionKind {
         array: Box<TypedExpression>,
         index: Box<TypedExpression>,
     },
+    TupleGet {
+        tuple: Box<TypedExpression>,
+        index: u32,
+    },
     ArrayCreate {
         length: Box<TypedExpression>,
         initial_value: Box<TypedExpression>,

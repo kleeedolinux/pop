@@ -522,6 +522,7 @@ fn visit_expression_closures(
             }
         }
         HirExpressionKind::Field { base, .. }
+        | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. } => {
@@ -1806,6 +1807,10 @@ impl<'hir> FunctionBuilder<'hir> {
                 let index = self.lower_expression(index);
                 MirInstructionKind::ArrayGet { array, index }
             }
+            HirExpressionKind::TupleGet { tuple, index } => MirInstructionKind::TupleGet {
+                tuple: self.lower_expression(tuple),
+                index: *index,
+            },
             HirExpressionKind::ArrayLength { array } => MirInstructionKind::ArrayLength {
                 array: self.lower_expression(array),
             },

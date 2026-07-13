@@ -347,6 +347,18 @@ impl CompileTimeExpression {
     }
 
     #[must_use]
+    pub fn tuple_get(tuple: Self, index: u32, type_id: TypeId, span: SourceSpan) -> Self {
+        Self {
+            kind: CompileTimeExpressionKind::TupleGet {
+                tuple: Box::new(tuple),
+                index,
+            },
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
     pub fn attribute_query(
         module: ModuleId,
         attribute: AttributeId,
@@ -418,6 +430,10 @@ pub enum CompileTimeExpressionKind {
         when_false: Box<CompileTimeExpression>,
     },
     Tuple(Vec<CompileTimeExpression>),
+    TupleGet {
+        tuple: Box<CompileTimeExpression>,
+        index: u32,
+    },
     Call {
         function: FunctionId,
         arguments: Vec<CompileTimeExpression>,

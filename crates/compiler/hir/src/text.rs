@@ -546,6 +546,10 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         HirExpressionKind::ArrayGet { array, index } => {
             dump_array_get(output, array, index, arena);
         }
+        HirExpressionKind::TupleGet { tuple, index } => {
+            let _ = write!(output, "tuple.get {index} ");
+            dump_expression(output, tuple, arena);
+        }
         HirExpressionKind::ArrayCreate {
             length,
             initial_value,

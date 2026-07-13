@@ -183,6 +183,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);
         }
+        TypedExpressionKind::TupleGet { tuple, .. } => {
+            finalize_expression_captures(tuple, written);
+        }
         TypedExpressionKind::ArrayCreate {
             length,
             initial_value,

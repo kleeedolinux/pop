@@ -449,8 +449,8 @@ fn fixed_pack_returns_and_multiple_locals_evaluate_at_compile_time() {
              return value, value + 1\n\
          end\n\
          public function sum(value: Int): Int\n\
-             local left, right = split(value)\n\
-             return left + right\n\
+             local result = split(value)\n\
+             return result[1] + result[2]\n\
          end\n",
     );
     let program = CompileTimeProgram::new(

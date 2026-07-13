@@ -83,8 +83,10 @@ fn fixed_packs_preserve_hir_grouping_and_lower_to_tuple_projection() {
          end\n\
          public function exchange(value: Int): Int\n\
              local left, right = split(value)\n\
+             local result = split(value)\n\
+             local projected = result[2]\n\
              left, right = right, left\n\
-             return left\n\
+             return left + projected\n\
          end\n",
     )
     .expect("source");
@@ -103,6 +105,7 @@ fn fixed_packs_preserve_hir_grouping_and_lower_to_tuple_projection() {
     let hir_dump = hir.dump(front_end.types());
     assert!(hir_dump.contains("multipleLocal"), "{hir_dump}");
     assert!(hir_dump.contains("multipleAssignment"), "{hir_dump}");
+    assert!(hir_dump.contains("tuple.get 1"), "{hir_dump}");
 
     let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
     let dump = mir.dump();

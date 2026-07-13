@@ -1559,6 +1559,10 @@ pub enum HirExpressionKind {
         array: Box<HirExpression>,
         index: Box<HirExpression>,
     },
+    TupleGet {
+        tuple: Box<HirExpression>,
+        index: u32,
+    },
     ArrayCreate {
         length: Box<HirExpression>,
         initial_value: Box<HirExpression>,

@@ -1469,6 +1469,22 @@ impl Verifier<'_> {
             HirExpressionKind::ArrayGet { array, index } => {
                 self.verify_array_get(array, index, visible);
             }
+            HirExpressionKind::TupleGet { tuple, index } => {
+                self.verify_expression(tuple, visible);
+                let Some(SemanticType::Tuple(elements)) = self.arena.get(tuple.type_id()) else {
+                    self.errors.push(HirVerificationError::InvalidFixedPack {
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                let Some(element) = elements.get(*index as usize) else {
+                    self.errors.push(HirVerificationError::InvalidFixedPack {
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                self.verify_expression_type(*element, expression);
+            }
             HirExpressionKind::ArrayCreate {
                 length,
                 initial_value,
@@ -3162,6 +3178,7 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             }
         }
         HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
+        HirExpressionKind::TupleGet { tuple, .. } => collect_cell_captures(tuple, written),
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index } => {
             collect_cell_captures(array, written);

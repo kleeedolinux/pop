@@ -215,6 +215,12 @@ impl TypedCompileTimeLowerer<'_> {
                 self.lower_parameter(parameter.raw(), type_id, span)
             }
             TypedExpressionKind::Tuple(elements) => self.lower_tuple(elements, type_id, span),
+            TypedExpressionKind::TupleGet { tuple, index } => Ok(CompileTimeExpression::tuple_get(
+                self.lower_expression(tuple)?,
+                *index,
+                type_id,
+                span,
+            )),
             TypedExpressionKind::Unary { operator, operand } => {
                 let lowered_operand = self.lower_expression(operand)?;
                 let operator = self.lower_unary_operator(*operator, operand.type_id(), span)?;
@@ -505,6 +511,7 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Tuple(_)
+        | TypedExpressionKind::TupleGet { .. }
         | TypedExpressionKind::Unary { .. }
         | TypedExpressionKind::Binary { .. }
         | TypedExpressionKind::Conditional { .. }

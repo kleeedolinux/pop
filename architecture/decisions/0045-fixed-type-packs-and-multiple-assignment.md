@@ -29,6 +29,20 @@ tuple expression of the same type is also accepted as the single returned pack.
 A result annotation without parentheses continues to denote one result, and an
 omitted annotation continues to denote the empty result pack.
 
+An exact tuple or fixed pack supports one-based static projection with ordinary
+index punctuation:
+
+```luau
+local result = divide(value)
+local quotient = result[1]
+```
+
+The index must be a positive integer literal within the tuple arity. Projection
+returns the exact statically known element type, evaluates the tuple expression
+once, and lowers to `tupleGet` with a zero-based static MIR slot. Dynamic,
+negative, zero, and out-of-range tuple indexes are compile-time errors; they do
+not become runtime tuple lookup.
+
 Multiple local declaration and assignment retain Luau's comma-shaped surface:
 
 ```luau
@@ -70,8 +84,9 @@ stores and barriers. No backend reconstructs comma adjustment or performs
 runtime arity/type lookup.
 
 The restricted compile-time evaluator supports fixed-pack construction,
-returns, direct calls, and multiple local bindings through the same exact tuple
-types. Multiple assignment remains mutation and is rejected at compile time.
+returns, direct calls, static projection, and multiple local bindings through
+the same exact tuple types. Multiple assignment remains mutation and is rejected
+at compile time.
 
 Variadic type-pack tails and generic type-pack parameters remain fully static
 architectural requirements but are not introduced by this ADR. Their surface
@@ -110,6 +125,8 @@ canonical tuple operations; future variadic tails must also remain typed.
 - positive typing for heterogeneous packs, swaps, captures, fields, and arrays;
 - rejection of missing/extra values, mismatched element types, invalid targets,
   and pack use where one scalar is required;
+- exact tuple projection typing plus rejection of dynamic, zero, negative, and
+  out-of-range indexes;
 - exact left-to-right target/value evaluation, once-only field/array target
   evaluation, swap behavior, and duplicate-target store order;
 - HIR preservation and MIR `tupleMake`/`tupleGet` construction, verification,

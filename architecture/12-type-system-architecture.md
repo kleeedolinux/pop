@@ -166,6 +166,10 @@ list of scalar right-hand sides must also match the target arity exactly. There
 is no Lua-style `nil` padding, extra-value truncation, or arbitrary last-value
 expansion. See ADR 0045.
 
+Indexing a tuple or fixed pack requires a positive in-range integer literal and
+produces the exact element type at that position. A computed index is rejected;
+tuple projection never introduces a common element type or dynamic lookup.
+
 Colon method syntax affects receiver insertion at parsing/HIR construction, not
 the underlying ability to type-check the call.
 

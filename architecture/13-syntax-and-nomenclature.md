@@ -349,6 +349,8 @@ end
 
 local quotient: Int, remainder = split(value)
 left, right = right, left
+local result = split(value)
+local first = result[1]
 ```
 
 Each local may carry its own annotation. The right-hand side must be one fixed
@@ -356,6 +358,8 @@ pack of the target arity or an exact list of scalar expressions. Pop source does
 not silently add `nil`, discard extra values, or use an untyped variadic carrier.
 Multiple-assignment target locations evaluate left to right before all values;
 stores then occur left to right. See ADR 0045.
+Tuple projection uses the same one-based `value[index]` punctuation as
+collections, but its index must be a statically in-range integer literal.
 
 ### Compound assignment
 

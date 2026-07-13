@@ -381,6 +381,22 @@ impl<'program> CompileTimeInterpreter<'program> {
             CompileTimeExpressionKind::Tuple(elements) => {
                 self.evaluate_tuple(elements, parameters, locals, expression.span())
             }
+            CompileTimeExpressionKind::TupleGet { tuple, index } => {
+                match self.evaluate_expression(tuple, parameters, locals)? {
+                    CompileTimeValue::Tuple(values) => {
+                        values.get(*index as usize).cloned().ok_or_else(|| {
+                            self.failure(
+                                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                                expression.span(),
+                            )
+                        })
+                    }
+                    _ => Err(self.failure(
+                        EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                        expression.span(),
+                    )),
+                }
+            }
             CompileTimeExpressionKind::Call {
                 function,
                 arguments,
