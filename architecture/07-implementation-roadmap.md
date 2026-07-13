@@ -35,6 +35,7 @@ diagnostics.
   primitive formatting from ADR 0041;
 - conditional expressions and `elseif` statement chains from ADR 0043;
 - typed compound assignment with single-evaluation targets from ADR 0044;
+- fixed type packs, comma returns, and exact multiple assignment from ADR 0045;
 - constraint-based local inference with no dynamic fallback;
 - typed UDA declarations, attachment, constant arguments, and query API;
 - deterministic compile-time constant/function evaluation with budgets;

@@ -33,10 +33,32 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 annotation,
                 initializer,
             } => self.check_local(signature, name, annotation.as_ref(), initializer)?,
+            StatementSyntaxKind::MultipleLocal { bindings, values } => {
+                self.check_multiple_local(signature, bindings, values, statement.span())?
+            }
             StatementSyntaxKind::LocalFunction { name, function } => {
                 self.check_local_function(signature, name, function)?
             }
             StatementSyntaxKind::Return { values } => {
+                if signature.results().len() == 1
+                    && let Some(result_type) = signature.results()[0].type_id()
+                    && let Some(SemanticType::Tuple(elements)) =
+                        self.resolver.arena().get(result_type).cloned()
+                {
+                    let value = self.check_fixed_pack(
+                        values,
+                        Some((&elements, result_type)),
+                        elements.len(),
+                        statement.span(),
+                        "return",
+                    )?;
+                    return Some(TypedStatement {
+                        kind: TypedStatementKind::Return {
+                            values: vec![value],
+                        },
+                        span: statement.span(),
+                    });
+                }
                 if signature.results().len() != values.len() {
                     self.diagnostics.push(type_diagnostics::wrong_value_arity(
                         statement.span(),
@@ -119,6 +141,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 operator,
                 value,
             } => self.check_assignment(target, *operator, value, statement.span())?,
+            StatementSyntaxKind::MultipleAssignment { targets, values } => {
+                self.check_multiple_assignment(targets, values, statement.span())?
+            }
             StatementSyntaxKind::Expression(expression) => {
                 self.check_expression_statement(expression)?
             }
@@ -334,6 +359,159 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         })
     }
 
+    fn check_multiple_local(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        bindings: &[pop_syntax::LocalBindingSyntax],
+        values: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let value = self.check_fixed_pack(values, None, bindings.len(), span, "multiple local")?;
+        let Some(SemanticType::Tuple(element_types)) =
+            self.resolver.arena().get(value.type_id()).cloned()
+        else {
+            return None;
+        };
+        if bindings.len() != element_types.len() {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "multiple local",
+                bindings.len(),
+                element_types.len(),
+            ));
+            return None;
+        }
+
+        let mut names = BTreeMap::new();
+        for binding in bindings {
+            if let Some(original) = names.insert(binding.name(), binding.span()) {
+                self.diagnostics.push(type_diagnostics::duplicate_binding(
+                    binding.span(),
+                    binding.name(),
+                    original,
+                ));
+                return None;
+            }
+        }
+        let mut typed_bindings = Vec::with_capacity(bindings.len());
+        for (binding_syntax, inferred) in bindings.iter().zip(element_types) {
+            let local_type = if let Some(annotation) = binding_syntax.annotation() {
+                let (resolved, diagnostics) =
+                    self.resolver
+                        .resolve_annotation(self.module, annotation, signature);
+                self.diagnostics.extend(diagnostics);
+                let expected = resolved?.type_id()?;
+                self.require_same_type(expected, inferred, span, annotation.span());
+                expected
+            } else {
+                inferred
+            };
+            let local = LocalId::from_raw(self.next_local);
+            self.next_local = self.next_local.saturating_add(1);
+            let binding = BindingId::from_raw(self.next_binding);
+            self.next_binding = self.next_binding.saturating_add(1);
+            typed_bindings.push(TypedLocalBinding {
+                binding,
+                local,
+                name: binding_syntax.name().to_owned(),
+                local_type,
+                span: binding_syntax.span(),
+            });
+        }
+        for binding in &typed_bindings {
+            self.scopes
+                .last_mut()
+                .expect("body checker always has a lexical scope")
+                .insert(
+                    binding.name.clone(),
+                    Binding {
+                        id: binding.binding,
+                        kind: BindingKind::Local(binding.local),
+                        type_id: binding.local_type,
+                        function_depth: self.function_depth,
+                    },
+                );
+        }
+        Some(TypedStatementKind::MultipleLocal {
+            bindings: typed_bindings,
+            value,
+        })
+    }
+
+    fn check_fixed_pack(
+        &mut self,
+        values: &[ExpressionSyntax],
+        expected: Option<(&[pop_foundation::TypeId], pop_foundation::TypeId)>,
+        expected_arity: usize,
+        span: SourceSpan,
+        context: &str,
+    ) -> Option<TypedExpression> {
+        if values.len() == 1 {
+            let value = self.check_expression_expected(
+                &values[0],
+                expected.map(|(_, pack)| ExpectedExpressionType::plain(pack)),
+            )?;
+            let Some(SemanticType::Tuple(elements)) =
+                self.resolver.arena().get(value.type_id()).cloned()
+            else {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    span,
+                    context,
+                    expected_arity,
+                    1,
+                ));
+                return None;
+            };
+            if let Some((expected_elements, expected_pack)) = expected {
+                if elements.len() != expected_elements.len() {
+                    self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                        span,
+                        context,
+                        expected_elements.len(),
+                        elements.len(),
+                    ));
+                    return None;
+                }
+                self.require_same_type(expected_pack, value.type_id(), value.span(), span);
+            }
+            return Some(value);
+        }
+        if let Some((expected_elements, _)) = expected
+            && values.len() != expected_elements.len()
+        {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                context,
+                expected_elements.len(),
+                values.len(),
+            ));
+            return None;
+        }
+        let mut typed = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let expected_type = expected.and_then(|(elements, _)| elements.get(index).copied());
+            let value = self.check_expression_expected(
+                value,
+                expected_type.map(ExpectedExpressionType::plain),
+            )?;
+            if let Some(expected_type) = expected_type {
+                self.require_same_type(expected_type, value.type_id(), value.span(), span);
+            }
+            typed.push(value);
+        }
+        let element_types = typed.iter().map(TypedExpression::type_id).collect();
+        let pack_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Tuple(element_types))
+            .ok()?;
+        Some(TypedExpression {
+            kind: TypedExpressionKind::Tuple(typed),
+            type_id: pack_type,
+            span,
+        })
+    }
+
     pub(crate) fn check_local_function(
         &mut self,
         signature: &ResolvedFunctionSignature,
@@ -544,6 +722,119 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return self.check_compound_assignment(target, operator, value, span);
         }
         self.check_plain_assignment(target, value, span)
+    }
+
+    fn check_multiple_assignment(
+        &mut self,
+        targets: &[ExpressionSyntax],
+        values: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let targets: Option<Vec<_>> = targets
+            .iter()
+            .map(|target| self.check_multiple_assignment_target(target, span))
+            .collect();
+        let targets = targets?;
+        let element_types: Vec<_> = targets
+            .iter()
+            .map(TypedAssignmentTarget::value_type)
+            .collect();
+        let pack_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Tuple(element_types.clone()))
+            .ok()?;
+        let value = self.check_fixed_pack(
+            values,
+            Some((&element_types, pack_type)),
+            targets.len(),
+            span,
+            "assignment",
+        )?;
+        Some(TypedStatementKind::MultipleAssignment { targets, value })
+    }
+
+    fn check_multiple_assignment_target(
+        &mut self,
+        target: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedAssignmentTarget> {
+        if let ExpressionSyntaxKind::Name(path) = target.kind()
+            && path.len() == 1
+            && let Some(binding) = self.binding_by_name(&path[0])
+        {
+            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "multiple assignment",
+                    "immutable numeric for binding",
+                ));
+                return None;
+            }
+            let target_kind = self.binding_reference_kind(binding)?;
+            if matches!(target_kind, TypedExpressionKind::Parameter(_)) {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "multiple assignment",
+                    "immutable parameter",
+                ));
+                return None;
+            }
+            self.written_bindings.insert(binding.id);
+            return match target_kind {
+                TypedExpressionKind::Local(local) => Some(TypedAssignmentTarget::Local {
+                    binding: binding.id,
+                    local,
+                    value_type: binding.type_id,
+                }),
+                TypedExpressionKind::Capture(capture) => Some(TypedAssignmentTarget::Capture {
+                    binding: binding.id,
+                    capture,
+                    value_type: binding.type_id,
+                }),
+                _ => None,
+            };
+        }
+
+        let target = self.check_expression(target)?;
+        let target_type = target.type_id();
+        if let TypedExpressionKind::ArrayGet { array, index } = target.kind {
+            let Some(SemanticType::Array(element_type)) =
+                self.resolver.arena().get(array.type_id()).cloned()
+            else {
+                return None;
+            };
+            return Some(TypedAssignmentTarget::Array {
+                array: *array,
+                index: *index,
+                element_type,
+            });
+        }
+        let TypedExpressionKind::Field { base, field } = target.kind else {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                span,
+                "multiple assignment",
+                self.type_name(target_type),
+            ));
+            return None;
+        };
+        if self
+            .resolver
+            .class_definition_for_type(base.type_id())
+            .is_none()
+        {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                span,
+                "multiple assignment",
+                "immutable field",
+            ));
+            return None;
+        }
+        Some(TypedAssignmentTarget::Field {
+            base: *base,
+            field,
+            value_type: target_type,
+        })
     }
 
     fn check_plain_assignment(
@@ -814,7 +1105,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         if statements.iter().any(|statement| {
             matches!(
                 statement.kind(),
-                StatementSyntaxKind::Local { .. } | StatementSyntaxKind::LocalFunction { .. }
+                StatementSyntaxKind::Local { .. }
+                    | StatementSyntaxKind::MultipleLocal { .. }
+                    | StatementSyntaxKind::LocalFunction { .. }
             )
         }) && contains_continue_for_current_loop(statements)
         {
@@ -1045,10 +1338,12 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
         | StatementSyntaxKind::RepeatUntil { .. }
         | StatementSyntaxKind::NumericFor { .. }
         | StatementSyntaxKind::Local { .. }
+        | StatementSyntaxKind::MultipleLocal { .. }
         | StatementSyntaxKind::LocalFunction { .. }
         | StatementSyntaxKind::Return { .. }
         | StatementSyntaxKind::Break
         | StatementSyntaxKind::Assignment { .. }
+        | StatementSyntaxKind::MultipleAssignment { .. }
         | StatementSyntaxKind::Expression(_) => false,
     })
 }

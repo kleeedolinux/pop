@@ -159,6 +159,13 @@ Luau-like multiple returns use a statically described type pack. A variadic tail
 has a known repeated element type or a generic type-pack parameter with solver
 constraints. It is never an untyped bag of values.
 
+The first implemented pack form is fixed and exact. A parenthesized function
+result annotation defines its element types, comma return syntax constructs it,
+and multiple local declaration/assignment projects it by static index. A comma
+list of scalar right-hand sides must also match the target arity exactly. There
+is no Lua-style `nil` padding, extra-value truncation, or arbitrary last-value
+expansion. See ADR 0045.
+
 Colon method syntax affects receiver insertion at parsing/HIR construction, not
 the underlying ability to type-check the call.
 

@@ -53,6 +53,10 @@ pub enum TypedStatementKind {
         local_type: TypeId,
         initializer: TypedExpression,
     },
+    MultipleLocal {
+        bindings: Vec<TypedLocalBinding>,
+        value: TypedExpression,
+    },
     LocalSet {
         local: LocalId,
         value: TypedExpression,
@@ -122,8 +126,84 @@ pub enum TypedStatementKind {
         operator: TypedCompoundOperator,
         value: TypedExpression,
     },
+    MultipleAssignment {
+        targets: Vec<TypedAssignmentTarget>,
+        value: TypedExpression,
+    },
     Call(TypedCall),
     Expression(TypedExpression),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedLocalBinding {
+    pub(crate) binding: BindingId,
+    pub(crate) local: LocalId,
+    pub(crate) name: String,
+    pub(crate) local_type: TypeId,
+    pub(crate) span: SourceSpan,
+}
+
+impl TypedLocalBinding {
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    #[must_use]
+    pub const fn local(&self) -> LocalId {
+        self.local
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn local_type(&self) -> TypeId {
+        self.local_type
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedAssignmentTarget {
+    Local {
+        binding: BindingId,
+        local: LocalId,
+        value_type: TypeId,
+    },
+    Capture {
+        binding: BindingId,
+        capture: CaptureId,
+        value_type: TypeId,
+    },
+    Field {
+        base: TypedExpression,
+        field: FieldId,
+        value_type: TypeId,
+    },
+    Array {
+        array: TypedExpression,
+        index: TypedExpression,
+        element_type: TypeId,
+    },
+}
+
+impl TypedAssignmentTarget {
+    #[must_use]
+    pub const fn value_type(&self) -> TypeId {
+        match self {
+            Self::Local { value_type, .. }
+            | Self::Capture { value_type, .. }
+            | Self::Field { value_type, .. } => *value_type,
+            Self::Array { element_type, .. } => *element_type,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

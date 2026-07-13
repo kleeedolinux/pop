@@ -230,6 +230,25 @@ impl CompileTimeExpression {
     }
 
     #[must_use]
+    pub fn let_tuple(
+        locals: Vec<(LocalId, TypeId)>,
+        initializer: Self,
+        body: Self,
+        span: SourceSpan,
+    ) -> Self {
+        let type_id = body.type_id();
+        Self {
+            kind: CompileTimeExpressionKind::LetTuple {
+                locals,
+                initializer: Box::new(initializer),
+                body: Box::new(body),
+            },
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
     pub fn binary(
         operator: CompileTimeBinaryOperator,
         left: Self,
@@ -372,6 +391,11 @@ pub enum CompileTimeExpressionKind {
     Let {
         local: LocalId,
         local_type: TypeId,
+        initializer: Box<CompileTimeExpression>,
+        body: Box<CompileTimeExpression>,
+    },
+    LetTuple {
+        locals: Vec<(LocalId, TypeId)>,
         initializer: Box<CompileTimeExpression>,
         body: Box<CompileTimeExpression>,
     },

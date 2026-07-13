@@ -88,6 +88,9 @@ HIR invariants:
 - compound assignment retains its resolved mutable target, typed operator, and
   right-hand side until lowering can evaluate a receiver/index once and emit
   ordinary MIR load-operation-store instructions.
+- a fixed result pack retains exact element types; grouped multiple assignment
+  retains resolved targets until MIR emits target locations, values, typed
+  projections, and stores in the order fixed by ADR 0045.
 
 ## Compile-time HIR and values
 
@@ -180,6 +183,12 @@ the exact operand kind, and records their allocation and safe-point effects.
 Interpolation lowers in source order through those operations; it never becomes
 a runtime format string, type inspection, or backend-specific instruction. See
 ADR 0041.
+
+Fixed type packs lower to one typed tuple-like MIR value. `tupleMake` constructs
+an exact pack and `tupleGet` projects a statically indexed element; grouped
+multiple assignment then uses ordinary stores and barriers. MIR contains no
+dynamic variadic carrier, runtime arity adjustment, or comma semantics. See ADR
+0045.
 
 The initial portable failure/GC encoding is fixed by ADR 0022. Runtime traps
 are closed `TrapKind` values and are not ordinary exceptions. Panic uses a

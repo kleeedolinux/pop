@@ -1263,6 +1263,45 @@ fn verify_instruction_types(
         | MirInstructionKind::CompareNotEqual { left, right } => {
             verify_equality_instruction(instruction, *left, *right, arena, values, errors);
         }
+        MirInstructionKind::TupleMake(elements) => {
+            let Some(SemanticType::Tuple(element_types)) = arena.get(instruction.result_type())
+            else {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+                return;
+            };
+            if elements.len() != element_types.len() {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+                return;
+            }
+            for (element, expected) in elements.iter().zip(element_types) {
+                verify_operand_type(instruction.result(), *element, *expected, values, errors);
+            }
+        }
+        MirInstructionKind::TupleGet { tuple, index } => {
+            let Some(tuple_type) = values.get(tuple).copied() else {
+                return;
+            };
+            let Some(SemanticType::Tuple(element_types)) = arena.get(tuple_type) else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *tuple,
+                    found: tuple_type,
+                });
+                return;
+            };
+            if element_types.get(*index as usize) != Some(&instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::ArrayMake { elements, .. } => {
             let Some(SemanticType::Array(element_type)) =
                 arena.get(instruction.result_type()).cloned()
@@ -2441,6 +2480,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::UnionMake {
             arguments: values, ..
         } => values.clone(),
+        MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
         MirInstructionKind::ArrayCreate {
             length,
             initial_value,

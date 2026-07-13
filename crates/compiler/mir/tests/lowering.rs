@@ -71,6 +71,51 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
 }
 
 #[test]
+fn fixed_packs_preserve_hir_grouping_and_lower_to_tuple_projection() {
+    // ADR 0045: HIR owns grouped assignment order and MIR exposes only typed
+    // tuple construction/projection plus ordinary stores.
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/fixedPack.pop",
+        "namespace Main\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         public function exchange(value: Int): Int\n\
+             local left, right = split(value)\n\
+             left, right = right, left\n\
+             return left\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let hir_dump = hir.dump(front_end.types());
+    assert!(hir_dump.contains("multipleLocal"), "{hir_dump}");
+    assert!(hir_dump.contains("multipleAssignment"), "{hir_dump}");
+
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("tupleMake"), "{dump}");
+    assert!(dump.contains("tupleGet 0"), "{dump}");
+    assert!(dump.contains("tupleGet 1"), "{dump}");
+    assert!(!dump.contains("multipleAssignment"), "{dump}");
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+    let reparsed = parse_mir_dump(&dump).expect("MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+}
+
+#[test]
 fn repeat_until_lowers_to_portable_body_condition_exit_and_backedge_cfg() {
     // ADR 0032 deliberately keeps repeat-until out of the MIR instruction set.
     let source = SourceFile::new(

@@ -308,6 +308,9 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "functionReference s{}", function.raw());
         }
         MirInstructionKind::TupleMake(values) => dump_values(output, "tupleMake", values),
+        MirInstructionKind::TupleGet { tuple, index } => {
+            let _ = write!(output, "tupleGet {index} v{}", tuple.raw());
+        }
         MirInstructionKind::ArrayMake {
             elements,
             element_map,

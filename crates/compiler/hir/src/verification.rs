@@ -110,6 +110,9 @@ pub enum HirVerificationError {
         found: usize,
         span: SourceSpan,
     },
+    InvalidFixedPack {
+        span: SourceSpan,
+    },
     InvalidConditionType {
         found: TypeId,
         span: SourceSpan,
@@ -1073,6 +1076,46 @@ impl Verifier<'_> {
                     self.verify_expression_type(*local_type, initializer);
                     visible.insert(*local);
                 }
+                HirStatementKind::MultipleLocal { bindings, value } => {
+                    self.verify_expression(value, &visible);
+                    let element_types = match self.arena.get(value.type_id()) {
+                        Some(SemanticType::Tuple(elements)) if elements.len() == bindings.len() => {
+                            Some(elements.clone())
+                        }
+                        _ => {
+                            self.errors.push(HirVerificationError::InvalidFixedPack {
+                                span: statement.span(),
+                            });
+                            None
+                        }
+                    };
+                    for (index, binding) in bindings.iter().enumerate() {
+                        self.verify_type(binding.local_type, binding.span);
+                        if element_types
+                            .as_ref()
+                            .and_then(|elements| elements.get(index))
+                            .is_some_and(|element| *element != binding.local_type)
+                        {
+                            self.errors.push(HirVerificationError::InvalidFixedPack {
+                                span: binding.span,
+                            });
+                        }
+                        if self
+                            .local_types
+                            .insert(binding.local, binding.local_type)
+                            .is_some()
+                        {
+                            self.errors
+                                .push(HirVerificationError::DuplicateLocal(binding.local));
+                        }
+                        self.local_bindings.insert(binding.local, binding.binding);
+                        if !self.bindings.insert(binding.binding) {
+                            self.errors
+                                .push(HirVerificationError::DuplicateBinding(binding.binding));
+                        }
+                    }
+                    visible.extend(bindings.iter().map(|binding| binding.local));
+                }
                 HirStatementKind::LocalSet { local, value } => {
                     self.verify_expression(value, &visible);
                     if !visible.contains(local) {
@@ -1251,6 +1294,28 @@ impl Verifier<'_> {
                     }
                     self.verify_compound_operator(*operator, *element_type, statement.span());
                 }
+                HirStatementKind::MultipleAssignment { targets, value } => {
+                    let mut target_types = Vec::with_capacity(targets.len());
+                    for target in targets {
+                        target_types.push(self.verify_assignment_target(
+                            target,
+                            &visible,
+                            statement.span(),
+                        ));
+                    }
+                    self.verify_expression(value, &visible);
+                    match self.arena.get(value.type_id()) {
+                        Some(SemanticType::Tuple(elements))
+                            if elements.len() == target_types.len()
+                                && target_types
+                                    .iter()
+                                    .zip(elements)
+                                    .all(|(target, element)| target == &Some(*element)) => {}
+                        _ => self.errors.push(HirVerificationError::InvalidFixedPack {
+                            span: statement.span(),
+                        }),
+                    }
+                }
                 HirStatementKind::Call(call) => {
                     self.verify_call(
                         call.dispatch(),
@@ -1263,6 +1328,92 @@ impl Verifier<'_> {
                 HirStatementKind::Expression(expression) => {
                     self.verify_expression(expression, &visible);
                 }
+            }
+        }
+    }
+
+    fn verify_assignment_target(
+        &mut self,
+        target: &HirAssignmentTarget,
+        visible: &BTreeSet<LocalId>,
+        span: SourceSpan,
+    ) -> Option<TypeId> {
+        match target {
+            HirAssignmentTarget::Local {
+                local, value_type, ..
+            } => {
+                self.verify_type(*value_type, span);
+                if !visible.contains(local) {
+                    self.errors.push(HirVerificationError::UnknownLocal {
+                        local: *local,
+                        span,
+                    });
+                } else if self.local_types.get(local) != Some(value_type) {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*value_type)
+            }
+            HirAssignmentTarget::Capture {
+                capture,
+                value_type,
+                ..
+            } => {
+                self.verify_type(*value_type, span);
+                if self.capture_types.get(capture) != Some(value_type)
+                    || self.capture_modes.get(capture) != Some(&HirCaptureMode::Cell)
+                {
+                    self.errors.push(HirVerificationError::CaptureModeMismatch {
+                        capture: *capture,
+                        span,
+                    });
+                }
+                Some(*value_type)
+            }
+            HirAssignmentTarget::Field {
+                base,
+                field,
+                value_type,
+            } => {
+                self.verify_expression(base, visible);
+                self.verify_type(*value_type, span);
+                if let Some(declared) = self
+                    .schema
+                    .and_then(|schema| schema.fields.get(field))
+                    .cloned()
+                {
+                    self.verify_field_owner(*field, base, &declared, span);
+                    if declared.field_type != *value_type {
+                        self.errors
+                            .push(HirVerificationError::InvalidFixedPack { span });
+                    }
+                    if !declared.mutable {
+                        self.errors.push(HirVerificationError::ImmutableFieldSet {
+                            field: *field,
+                            span,
+                        });
+                    }
+                } else if self.schema.is_some() {
+                    self.errors.push(HirVerificationError::UnknownField {
+                        field: *field,
+                        span,
+                    });
+                }
+                Some(*value_type)
+            }
+            HirAssignmentTarget::Array {
+                array,
+                index,
+                element_type,
+            } => {
+                self.verify_array_get(array, index, visible);
+                self.verify_type(*element_type, span);
+                if !matches!(self.arena.get(array.type_id()), Some(SemanticType::Array(element)) if element == element_type)
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*element_type)
             }
         }
     }
@@ -2774,6 +2925,11 @@ fn collect_local_binding_map(
             HirStatementKind::Local { local, binding, .. } => {
                 local_bindings.insert(*local, *binding);
             }
+            HirStatementKind::MultipleLocal { bindings, .. } => {
+                for binding in bindings {
+                    local_bindings.insert(binding.local, binding.binding);
+                }
+            }
             HirStatementKind::If {
                 then_body,
                 else_body,
@@ -2814,6 +2970,7 @@ fn collect_local_binding_map(
             | HirStatementKind::CompoundFieldSet { .. }
             | HirStatementKind::ArraySet { .. }
             | HirStatementKind::CompoundArraySet { .. }
+            | HirStatementKind::MultipleAssignment { .. }
             | HirStatementKind::Call(_)
             | HirStatementKind::Expression(_) => {}
         }
@@ -2831,6 +2988,9 @@ fn collect_written_bindings(
         match statement.kind() {
             HirStatementKind::Local { initializer, .. } => {
                 collect_cell_captures(initializer, written);
+            }
+            HirStatementKind::MultipleLocal { value, .. } => {
+                collect_cell_captures(value, written);
             }
             HirStatementKind::LocalSet { local, value } => {
                 if let Some(binding) = local_bindings.get(local) {
@@ -2957,6 +3117,24 @@ fn collect_written_bindings(
             } => {
                 collect_cell_captures(array, written);
                 collect_cell_captures(index, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::MultipleAssignment { targets, value } => {
+                for target in targets {
+                    match target {
+                        HirAssignmentTarget::Local { binding, .. }
+                        | HirAssignmentTarget::Capture { binding, .. } => {
+                            written.insert(*binding);
+                        }
+                        HirAssignmentTarget::Field { base, .. } => {
+                            collect_cell_captures(base, written);
+                        }
+                        HirAssignmentTarget::Array { array, index, .. } => {
+                            collect_cell_captures(array, written);
+                            collect_cell_captures(index, written);
+                        }
+                    }
+                }
                 collect_cell_captures(value, written);
             }
             HirStatementKind::Call(call) => {

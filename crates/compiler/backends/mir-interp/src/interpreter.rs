@@ -12,14 +12,30 @@ use pop_mir::{
     verify_mir_bubble,
 };
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, BarrierKind, ObjectAllocationRequest, PinHandle,
-    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
-    TableAllocationRequest, Trap, TrapKind, WriteBarrier,
+    AllocationClass, ArrayAllocationRequest, BarrierKind, ObjectAllocationRequest, ObjectMap,
+    ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
+    RuntimeTypeId, TableAllocationRequest, Trap, TrapKind, WriteBarrier,
 };
-use pop_types::{IntegerKind, IntegerValue, TypeArena};
+use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+
+fn managed_type(arena: &TypeArena, type_id: TypeId) -> bool {
+    matches!(
+        arena.get(type_id),
+        Some(
+            SemanticType::Primitive(PrimitiveType::String)
+                | SemanticType::Tuple(_)
+                | SemanticType::Array(_)
+                | SemanticType::Table { .. }
+                | SemanticType::Class { .. }
+                | SemanticType::Interface { .. }
+                | SemanticType::Builtin { .. }
+        )
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionLimits {
     maximum_steps: u64,
@@ -413,12 +429,51 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
             MirInstructionKind::FunctionReference(function) => MirValue::Function(*function),
-            MirInstructionKind::TupleMake(elements) => MirValue::Tuple(
-                elements
+            MirInstructionKind::TupleMake(elements) => {
+                let tuple = MirValue::Tuple(
+                    elements
+                        .iter()
+                        .map(|element| value(values, *element).map(|value| value.visible.clone()))
+                        .collect::<Result<_, _>>()?,
+                );
+                let Some(SemanticType::Tuple(element_types)) =
+                    self.arena.get(instruction.result_type())
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let references = element_types
                     .iter()
-                    .map(|element| value(values, *element).map(|value| value.visible.clone()))
-                    .collect::<Result<_, _>>()?,
-            ),
+                    .enumerate()
+                    .filter_map(|(index, type_id)| {
+                        managed_type(self.arena, *type_id)
+                            .then(|| u32::try_from(index).ok().map(ObjectSlot::new))
+                            .flatten()
+                    })
+                    .collect();
+                let object_map = ObjectMap::new(
+                    u32::try_from(element_types.len()).unwrap_or(u32::MAX),
+                    references,
+                )
+                .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map,
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                return Ok(RuntimeValue::managed(tuple, reference));
+            }
+            MirInstructionKind::TupleGet { tuple, index } => {
+                let MirValue::Tuple(elements) = &value(values, *tuple)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                elements
+                    .get(*index as usize)
+                    .cloned()
+                    .ok_or(ExecutionError::InvalidControlFlow)?
+            }
             MirInstructionKind::ArrayMake {
                 elements,
                 element_map,
@@ -807,7 +862,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 let target = captures
                     .get_mut(slot)
                     .ok_or(ExecutionError::InvalidControlFlow)?;
-                *target = stored;
+                if let MirValue::Function(symbol) = &target.visible
+                    && let Some(PrivateValue::Cell(cell)) = self.private_values.get(symbol)
+                {
+                    *cell.borrow_mut() = stored;
+                } else {
+                    *target = stored;
+                }
                 return Ok(());
             }
             MirInstructionKind::GcSafePoint {

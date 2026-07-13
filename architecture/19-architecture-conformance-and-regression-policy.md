@@ -220,6 +220,7 @@ Minimum traceability matrix:
 | Numeric ranges and loop control | parser, type checker, HIR/MIR, backends | integer-kind, immutable binding, CFG target, safe-point, and differential tests |
 | Conditional expressions | parser, type checker, compile time, HIR/MIR, backends | Boolean/common-type, laziness, typed-join, and differential tests |
 | Compound assignment | parser, type checker, HIR/MIR, backends | exact operator/type, single-evaluation target, load-operation-store, and differential tests |
+| Fixed type packs and multiple assignment | parser, type checker, HIR/MIR, backends | exact arity/type, target/value/store order, tuple projection, no dynamic variadics, and differential tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |

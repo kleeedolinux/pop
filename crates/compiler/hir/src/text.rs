@@ -238,6 +238,25 @@ fn dump_statements(
                 dump_expression(output, initializer, arena);
                 output.push('\n');
             }
+            HirStatementKind::MultipleLocal { bindings, value } => {
+                output.push_str("multipleLocal ");
+                for (index, binding) in bindings.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    let _ = write!(
+                        output,
+                        "bind#{} l{} {}:{}",
+                        binding.binding.raw(),
+                        binding.local.raw(),
+                        binding.name,
+                        type_text(binding.local_type, arena)
+                    );
+                }
+                output.push_str(" = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::LocalSet { local, value } => {
                 let _ = write!(output, "local.set l{} = ", local.raw());
                 dump_expression(output, value, arena);
@@ -250,6 +269,18 @@ fn dump_statements(
             }
             HirStatementKind::CaptureSet { capture, value } => {
                 let _ = write!(output, "capture.set cap{} = ", capture.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::MultipleAssignment { targets, value } => {
+                output.push_str("multipleAssignment ");
+                for (index, target) in targets.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    dump_assignment_target(output, target, arena);
+                }
+                output.push_str(" = ");
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
@@ -415,6 +446,24 @@ fn dump_statements(
                 dump_expression(output, expression, arena);
                 output.push('\n');
             }
+        }
+    }
+}
+
+fn dump_assignment_target(output: &mut String, target: &HirAssignmentTarget, arena: &TypeArena) {
+    match target {
+        HirAssignmentTarget::Local { local, .. } => {
+            let _ = write!(output, "l{}", local.raw());
+        }
+        HirAssignmentTarget::Capture { capture, .. } => {
+            let _ = write!(output, "cap{}", capture.raw());
+        }
+        HirAssignmentTarget::Field { base, field, .. } => {
+            dump_expression(output, base, arena);
+            let _ = write!(output, ".field#{}", field.raw());
+        }
+        HirAssignmentTarget::Array { array, index, .. } => {
+            dump_array_get(output, array, index, arena);
         }
     }
 }

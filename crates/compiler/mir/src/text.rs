@@ -681,6 +681,15 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     if let Some(values) = text.strip_prefix("tupleMake ") {
         return Ok(MirInstructionKind::TupleMake(parse_values(values, line)?));
     }
+    if let Some(rest) = text.strip_prefix("tupleGet ") {
+        let (index, tuple) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "tuple projection"))?;
+        return Ok(MirInstructionKind::TupleGet {
+            tuple: ValueId::from_raw(parse_prefixed(tuple, 'v', line)?),
+            index: parse_u32(index, line)?,
+        });
+    }
     if let Some(rest) = text.strip_prefix("arrayMake ") {
         let (element_map, values) = rest
             .split_once(' ')

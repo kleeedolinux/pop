@@ -14,6 +14,11 @@ fn executable_source(text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
         Vec::new(),
         vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
     ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
     let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
     (mir, front_end.types().clone())
 }
@@ -56,6 +61,54 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .call(choose, &[int(5), int(3)])
             .expect("else branch"),
         vec![int(3)]
+    );
+}
+
+#[test]
+fn fixed_packs_destructure_swap_and_preserve_target_before_value_order() {
+    // ADR 0045: all target locations are evaluated once before RHS values,
+    // then tuple projections are stored from left to right.
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public class Box\n\
+             public value: Int = 1\n\
+         end\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         public function calculate(value: Int): Int\n\
+             local left, right = split(value)\n\
+             left, right = right, left\n\
+             local counter = 0\n\
+             local function advance(): Int\n\
+                 counter += 1\n\
+                 return counter\n\
+             end\n\
+             local function observed(): Int\n\
+                 return counter\n\
+             end\n\
+             local values: {Int} = { 10, 20 }\n\
+             local box = Box {}\n\
+             box.value, values[advance()], values[advance()] = 7, observed(), 99\n\
+             return box.value * 100000 + left * 10000 + right * 1000 + Array.get(values, 1) * 100 + Array.get(values, 2)\n\
+         end\n",
+    );
+    let calculate = mir.functions().last().expect("calculate").symbol();
+    let expected = vec![int(754_299)];
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+    assert_eq!(
+        interpreter.call(calculate, &[int(4)]).expect("fixed pack"),
+        expected
+    );
+
+    let optimized = optimize_mir(mir.clone(), &types).expect("optimized fixed-pack MIR");
+    let optimized_interpreter =
+        MirInterpreter::new(&optimized, &types).expect("verified optimized MIR");
+    assert_eq!(
+        optimized_interpreter
+            .call(calculate, &[int(4)])
+            .expect("optimized fixed pack"),
+        expected
     );
 }
 

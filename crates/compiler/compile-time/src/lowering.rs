@@ -130,6 +130,19 @@ impl TypedCompileTimeLowerer<'_> {
                 first.span(),
             ));
         }
+        if let TypedStatementKind::MultipleLocal { bindings, value } = first.kind() {
+            let initializer = self.lower_expression(value)?;
+            let body = self.lower_statements(rest)?;
+            return Ok(CompileTimeExpression::let_tuple(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.local(), binding.local_type()))
+                    .collect(),
+                initializer,
+                body,
+                first.span(),
+            ));
+        }
         if rest.is_empty() {
             return self.lower_result_statement(first);
         }
@@ -402,6 +415,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::Break
         | TypedStatementKind::Continue => UnsupportedCompileTimeConstruct::Loop,
         TypedStatementKind::LocalSet { .. }
+        | TypedStatementKind::MultipleAssignment { .. }
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::FieldSet { .. }
@@ -421,6 +435,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
             TypedCallDispatch::Indirect { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
         },
         TypedStatementKind::Local { .. }
+        | TypedStatementKind::MultipleLocal { .. }
         | TypedStatementKind::Return { .. }
         | TypedStatementKind::If { .. }
         | TypedStatementKind::Expression(_) => return None,

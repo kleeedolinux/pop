@@ -212,6 +212,11 @@ impl ExpressionVerifier<'_> {
                 initializer,
                 body,
             } => self.verify_let(expression, *local, *local_type, initializer, body, locals)?,
+            CompileTimeExpressionKind::LetTuple {
+                locals: bindings,
+                initializer,
+                body,
+            } => self.verify_let_tuple(expression, bindings, initializer, body, locals)?,
             CompileTimeExpressionKind::Unary { operator, operand } => {
                 self.verify(operand, locals)?;
                 if !valid_unary_operator(
@@ -299,6 +304,40 @@ impl ExpressionVerifier<'_> {
         }
         let mut body_locals = locals.clone();
         body_locals.insert(local, local_type);
+        self.verify(body, &body_locals)?;
+        require_type(expression.type_id(), body.type_id())
+    }
+
+    fn verify_let_tuple(
+        &self,
+        expression: &CompileTimeExpression,
+        bindings: &[(LocalId, TypeId)],
+        initializer: &CompileTimeExpression,
+        body: &CompileTimeExpression,
+        locals: &BTreeMap<LocalId, TypeId>,
+    ) -> Result<(), ProgramError> {
+        self.verify(initializer, locals)?;
+        let Some(SemanticType::Tuple(elements)) = self.types.get(initializer.type_id()) else {
+            return Err(ProgramError::ValueTypeMismatch {
+                expected: initializer.type_id(),
+            });
+        };
+        if elements.len() != bindings.len()
+            || elements
+                .iter()
+                .zip(bindings)
+                .any(|(element, (_, binding_type))| element != binding_type)
+        {
+            return Err(ProgramError::ValueTypeMismatch {
+                expected: initializer.type_id(),
+            });
+        }
+        let mut body_locals = locals.clone();
+        for (local, local_type) in bindings {
+            if body_locals.insert(*local, *local_type).is_some() {
+                return Err(ProgramError::DuplicateLocal(*local));
+            }
+        }
         self.verify(body, &body_locals)?;
         require_type(expression.type_id(), body.type_id())
     }

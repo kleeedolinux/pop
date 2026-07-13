@@ -1278,6 +1278,10 @@ pub enum HirStatementKind {
         local_type: TypeId,
         initializer: HirExpression,
     },
+    MultipleLocal {
+        bindings: Vec<HirLocalBinding>,
+        value: HirExpression,
+    },
     LocalSet {
         local: LocalId,
         value: HirExpression,
@@ -1347,8 +1351,67 @@ pub enum HirStatementKind {
         operator: TypedCompoundOperator,
         value: HirExpression,
     },
+    MultipleAssignment {
+        targets: Vec<HirAssignmentTarget>,
+        value: HirExpression,
+    },
     Call(HirCall),
     Expression(HirExpression),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirLocalBinding {
+    pub(crate) binding: BindingId,
+    pub(crate) local: LocalId,
+    pub(crate) name: String,
+    pub(crate) local_type: TypeId,
+    pub(crate) span: SourceSpan,
+}
+
+impl HirLocalBinding {
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    #[must_use]
+    pub const fn local(&self) -> LocalId {
+        self.local
+    }
+
+    #[must_use]
+    pub const fn local_type(&self) -> TypeId {
+        self.local_type
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HirAssignmentTarget {
+    Local {
+        binding: BindingId,
+        local: LocalId,
+        value_type: TypeId,
+    },
+    Capture {
+        binding: BindingId,
+        capture: CaptureId,
+        value_type: TypeId,
+    },
+    Field {
+        base: HirExpression,
+        field: FieldId,
+        value_type: TypeId,
+    },
+    Array {
+        array: HirExpression,
+        index: HirExpression,
+        element_type: TypeId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

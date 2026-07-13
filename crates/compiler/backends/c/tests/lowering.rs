@@ -498,6 +498,27 @@ fn runtime_free_c_rejects_numeric_range_safe_points_without_a_fallback() {
 }
 
 #[test]
+fn runtime_free_c_rejects_fixed_packs_without_a_dynamic_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         function main(): Int\n\
+             local left, right = split(20)\n\
+             return left + right\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(mir.functions()[1].symbol()),
+    )
+    .expect_err("runtime-free C cannot represent a managed fixed pack");
+    assert!(matches!(error, CBackendError::UnsupportedType(_)));
+}
+
+#[test]
 fn checked_addition_traps_for_every_fixed_integer_width() {
     for (name, maximum) in [
         ("Int8", "127"),

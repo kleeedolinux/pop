@@ -73,6 +73,40 @@ fn parses_typed_and_inferred_locals_and_return() {
 }
 
 #[test]
+fn parses_fixed_pack_returns_multiple_locals_and_multiple_assignment() {
+    // ADR 0045: comma-shaped source is exact fixed-pack syntax, not a dynamic
+    // variadic carrier or Lua value adjustment.
+    let body = parse_body(
+        "namespace Example\n\
+         public function exchange(left: Int, right: String): (Int, String)\n\
+             local first: Int, second: String = left, right\n\
+             first, second = left, right\n\
+             return first, second\n\
+         end\n",
+    );
+
+    assert_eq!(body.statements().len(), 3);
+    assert!(matches!(
+        body.statements()[0].kind(),
+        StatementSyntaxKind::MultipleLocal { bindings, values }
+            if bindings.len() == 2
+                && bindings[0].name() == "first"
+                && bindings[0].annotation().is_some()
+                && bindings[1].name() == "second"
+                && values.len() == 2
+    ));
+    assert!(matches!(
+        body.statements()[1].kind(),
+        StatementSyntaxKind::MultipleAssignment { targets, values }
+            if targets.len() == 2 && values.len() == 2
+    ));
+    assert!(matches!(
+        body.statements()[2].kind(),
+        StatementSyntaxKind::Return { values } if values.len() == 2
+    ));
+}
+
+#[test]
 fn parses_local_and_anonymous_functions_without_table_desugaring() {
     let body = parse_body(
         "namespace Example\n\

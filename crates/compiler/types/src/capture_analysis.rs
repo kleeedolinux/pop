@@ -21,6 +21,9 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
         TypedStatementKind::Local { initializer, .. } => {
             finalize_expression_captures(initializer, written);
         }
+        TypedStatementKind::MultipleLocal { value, .. } => {
+            finalize_expression_captures(value, written);
+        }
         TypedStatementKind::LocalSet { value, .. }
         | TypedStatementKind::ParameterSet { value, .. }
         | TypedStatementKind::CaptureSet { value, .. }
@@ -102,6 +105,22 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
         } => {
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedStatementKind::MultipleAssignment { targets, value } => {
+            for target in targets {
+                match target {
+                    TypedAssignmentTarget::Local { .. } | TypedAssignmentTarget::Capture { .. } => {
+                    }
+                    TypedAssignmentTarget::Field { base, .. } => {
+                        finalize_expression_captures(base, written);
+                    }
+                    TypedAssignmentTarget::Array { array, index, .. } => {
+                        finalize_expression_captures(array, written);
+                        finalize_expression_captures(index, written);
+                    }
+                }
+            }
             finalize_expression_captures(value, written);
         }
         TypedStatementKind::Call(call) => finalize_call_captures(call, written),

@@ -121,6 +121,32 @@ fn unmarked_and_spoofed_compile_time_functions_are_rejected_by_identity() {
 }
 
 #[test]
+fn fixed_pack_local_bindings_preserve_transitive_compile_time_eligibility() {
+    let result = analyze(
+        "namespace Example\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         @CompileTime\n\
+         private function sum(value: Int): Int\n\
+             local left, right = split(value)\n\
+             return left + right\n\
+         end\n\
+         private const ANSWER = sum(20)\n",
+    );
+
+    assert!(result.hir().is_none());
+    assert!(
+        result
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "POP4004"),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+}
+
+#[test]
 fn compile_time_boolean_operators_preserve_source_short_circuiting() {
     let result = analyze(SHORT_CIRCUIT);
     assert!(

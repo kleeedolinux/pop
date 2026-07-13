@@ -23,7 +23,7 @@ This is an architectural inventory, not yet a complete compatibility table.
 | --- | --- | --- |
 | Gradual typing and local inference | Keep inference and familiar annotations; reject gradual fallback. Every successful value is statically typed. | Adapt |
 | Type annotations, aliases, generics, unions, intersections, singleton types, and narrowing | Core type-system input with soundness rules and no `any` operations. | Adopt / Adapt |
-| Type packs and variadic results | Use fully typed tuples/type packs and preserve ergonomic destructuring. | Adapt |
+| Type packs and variadic results | Use fully typed tuples/type packs and preserve ergonomic destructuring. ADR 0045 fixes exact fixed packs and multiple assignment; typed variadic tails remain future work. | Adapt |
 | First-class functions and closures | Core feature with explicit closure conversion in MIR. | Adopt |
 | Coroutines | Preserve structured suspension capability behind backend-neutral MIR/runtime operations. | Adapt |
 | `repeat`/`until`, `continue`, compound assignment, if-expressions, generalized iteration, and string interpolation | Preserve them in the source language with canonical formatting; ADR 0032 fixes the body-first loop contract, ADR 0042 fixes numeric `for` ranges and loop control, ADR 0043 fixes conditional expressions, ADR 0044 fixes compound assignment, and generalized iteration remains protocol-gated. | Adopt |

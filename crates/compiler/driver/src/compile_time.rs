@@ -133,6 +133,9 @@ fn collect_direct_calls(
         | CompileTimeExpressionKind::Local(_) => {}
         CompileTimeExpressionKind::Let {
             initializer, body, ..
+        }
+        | CompileTimeExpressionKind::LetTuple {
+            initializer, body, ..
         } => {
             collect_direct_calls(initializer, calls);
             collect_direct_calls(body, calls);

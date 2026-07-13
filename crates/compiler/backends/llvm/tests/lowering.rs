@@ -64,6 +64,52 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
 }
 
 #[test]
+fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/fixedPack.pop",
+        "namespace Main\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             local left, right = split(10)\n\
+             left, right = right, left\n\
+             return left + right\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[1].symbol()),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+    assert!(
+        text.contains("call i64 @pop_rt_allocate_mapped_object"),
+        "{text}"
+    );
+    assert!(text.contains("@pop_rt_field_get"), "{text}");
+
+    let result = link_with_runtime_and_run(&module, "fixed-pack");
+    assert_eq!(result.status.code(), Some(21), "{}", module);
+}
+
+#[test]
 fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
     let mut types = pop_types::TypeArena::new();
     let integer = types.source_type("Int").expect("Int");

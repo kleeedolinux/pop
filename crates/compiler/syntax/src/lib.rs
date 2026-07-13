@@ -28,7 +28,7 @@ pub use attribute::{
 pub use body::{
     BinaryOperator, CaptureFunctionParameterSyntax, CaptureFunctionSyntax, ExpressionSyntax,
     ExpressionSyntaxKind, FieldInitializerSyntax, FunctionBodyError, FunctionBodySyntax,
-    MatchArmSyntax, StatementSyntax, StatementSyntaxKind, StringSegmentSyntax,
+    LocalBindingSyntax, MatchArmSyntax, StatementSyntax, StatementSyntaxKind, StringSegmentSyntax,
     StringSegmentSyntaxKind, UnaryOperator, parse_function_body,
 };
 pub use class::{

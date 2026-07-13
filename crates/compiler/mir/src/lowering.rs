@@ -11,9 +11,9 @@ use pop_foundation::{
     SourceSpan, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, ValueId, ValueParameterId,
 };
 use pop_hir::{
-    HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure, HirDeclaration,
-    HirDeclarationKind, HirExpression, HirExpressionKind, HirFieldValue, HirFunction, HirMatchArm,
-    HirStatement, HirStatementKind, HirTableEntry,
+    HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
+    HirDeclaration, HirDeclarationKind, HirExpression, HirExpressionKind, HirFieldValue,
+    HirFunction, HirMatchArm, HirStatement, HirStatementKind, HirTableEntry,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
@@ -290,6 +290,28 @@ struct LoopContext {
     continue_state: LiveState,
 }
 
+enum LoweredAssignmentTarget {
+    Local {
+        local: LocalId,
+        value_type: TypeId,
+    },
+    Capture {
+        capture: CaptureId,
+        value_type: TypeId,
+    },
+    Field {
+        base: ValueId,
+        field: FieldId,
+        value_type: TypeId,
+    },
+    Array {
+        array: ValueId,
+        index: ValueId,
+        array_type: TypeId,
+        element_type: TypeId,
+    },
+}
+
 struct FunctionBuilder<'hir> {
     owner: SymbolId,
     parameters_schema: Vec<TypeId>,
@@ -331,6 +353,9 @@ fn visit_statement_closures(
     match statement.kind() {
         HirStatementKind::Local { initializer, .. } => {
             visit_expression_closures(initializer, parameters, locals);
+        }
+        HirStatementKind::MultipleLocal { value, .. } => {
+            visit_expression_closures(value, parameters, locals);
         }
         HirStatementKind::LocalSet { value, .. }
         | HirStatementKind::ParameterSet { value, .. }
@@ -417,6 +442,21 @@ fn visit_statement_closures(
             visit_expression_closures(index, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
+        HirStatementKind::MultipleAssignment { targets, value } => {
+            for target in targets {
+                match target {
+                    HirAssignmentTarget::Local { .. } | HirAssignmentTarget::Capture { .. } => {}
+                    HirAssignmentTarget::Field { base, .. } => {
+                        visit_expression_closures(base, parameters, locals);
+                    }
+                    HirAssignmentTarget::Array { array, index, .. } => {
+                        visit_expression_closures(array, parameters, locals);
+                        visit_expression_closures(index, parameters, locals);
+                    }
+                }
+            }
+            visit_expression_closures(value, parameters, locals);
+        }
         HirStatementKind::Call(call) => {
             for argument in call.arguments() {
                 visit_expression_closures(argument, parameters, locals);
@@ -443,6 +483,7 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         | HirStatementKind::RepeatUntil { .. }
         | HirStatementKind::NumericFor { .. }
         | HirStatementKind::Local { .. }
+        | HirStatementKind::MultipleLocal { .. }
         | HirStatementKind::LocalSet { .. }
         | HirStatementKind::ParameterSet { .. }
         | HirStatementKind::CaptureSet { .. }
@@ -452,6 +493,7 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         | HirStatementKind::CompoundFieldSet { .. }
         | HirStatementKind::ArraySet { .. }
         | HirStatementKind::CompoundArraySet { .. }
+        | HirStatementKind::MultipleAssignment { .. }
         | HirStatementKind::Call(_)
         | HirStatementKind::Expression(_) => false,
     })
@@ -775,6 +817,37 @@ impl<'hir> FunctionBuilder<'hir> {
                         self.locals.insert(*local, value);
                     }
                 }
+                HirStatementKind::MultipleLocal { bindings, value } => {
+                    let value = self.lower_expression(value);
+                    for (index, binding) in bindings.iter().enumerate() {
+                        let projected = self.emit(
+                            MirInstructionKind::TupleGet {
+                                tuple: value,
+                                index: u32::try_from(index).unwrap_or(u32::MAX),
+                            },
+                            binding.local_type(),
+                            binding.span(),
+                        );
+                        if self.cell_locals.contains(&binding.local()) {
+                            let cell = self.emit(
+                                MirInstructionKind::CaptureCellAllocate {
+                                    binding: binding.binding(),
+                                    initial: projected,
+                                    value_type: binding.local_type(),
+                                    object_map: capture_cell_object_map(
+                                        self.arena,
+                                        binding.local_type(),
+                                    ),
+                                },
+                                binding.local_type(),
+                                binding.span(),
+                            );
+                            self.local_cells.insert(binding.local(), cell);
+                        } else {
+                            self.locals.insert(binding.local(), projected);
+                        }
+                    }
+                }
                 HirStatementKind::LocalSet { local, value } => {
                     let value = self.lower_expression(value);
                     if let Some(cell) = self.local_cells.get(local).copied() {
@@ -1031,6 +1104,30 @@ impl<'hir> FunctionBuilder<'hir> {
                         statement.span(),
                     );
                 }
+                HirStatementKind::MultipleAssignment { targets, value } => {
+                    let targets: Vec<_> = targets
+                        .iter()
+                        .map(|target| self.lower_assignment_target(target, statement.span()))
+                        .collect();
+                    let value = self.lower_expression(value);
+                    for (index, target) in targets.into_iter().enumerate() {
+                        let element_type = match &target {
+                            LoweredAssignmentTarget::Local { value_type, .. }
+                            | LoweredAssignmentTarget::Capture { value_type, .. } => *value_type,
+                            LoweredAssignmentTarget::Field { value_type, .. } => *value_type,
+                            LoweredAssignmentTarget::Array { element_type, .. } => *element_type,
+                        };
+                        let projected = self.emit(
+                            MirInstructionKind::TupleGet {
+                                tuple: value,
+                                index: u32::try_from(index).unwrap_or(u32::MAX),
+                            },
+                            element_type,
+                            statement.span(),
+                        );
+                        self.store_assignment_target(target, projected, statement.span());
+                    }
+                }
                 HirStatementKind::Call(call) => {
                     let kind = self.lower_call(call.dispatch(), call.arguments());
                     self.emit_effect(kind, call.span());
@@ -1038,6 +1135,140 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::Expression(expression) => {
                     self.lower_expression(expression);
                 }
+            }
+        }
+    }
+
+    fn lower_assignment_target(
+        &mut self,
+        target: &HirAssignmentTarget,
+        span: SourceSpan,
+    ) -> LoweredAssignmentTarget {
+        match target {
+            HirAssignmentTarget::Local {
+                local, value_type, ..
+            } => LoweredAssignmentTarget::Local {
+                local: *local,
+                value_type: *value_type,
+            },
+            HirAssignmentTarget::Capture {
+                capture,
+                value_type,
+                ..
+            } => LoweredAssignmentTarget::Capture {
+                capture: *capture,
+                value_type: *value_type,
+            },
+            HirAssignmentTarget::Field {
+                base,
+                field,
+                value_type,
+            } => LoweredAssignmentTarget::Field {
+                base: self.lower_expression(base),
+                field: *field,
+                value_type: *value_type,
+            },
+            HirAssignmentTarget::Array {
+                array,
+                index,
+                element_type,
+            } => {
+                let array_type = array.type_id();
+                let array = self.lower_expression(array);
+                let index = self.lower_expression(index);
+                self.emit(
+                    MirInstructionKind::ArrayGetChecked { array, index },
+                    *element_type,
+                    span,
+                );
+                LoweredAssignmentTarget::Array {
+                    array,
+                    index,
+                    array_type,
+                    element_type: *element_type,
+                }
+            }
+        }
+    }
+
+    fn store_assignment_target(
+        &mut self,
+        target: LoweredAssignmentTarget,
+        value: ValueId,
+        span: SourceSpan,
+    ) {
+        match target {
+            LoweredAssignmentTarget::Local { local, .. } => {
+                if let Some(cell) = self.local_cells.get(&local).copied() {
+                    self.emit_effect(MirInstructionKind::CaptureCellStore { cell, value }, span);
+                } else {
+                    self.locals.insert(local, value);
+                }
+            }
+            LoweredAssignmentTarget::Capture { capture, .. } => {
+                let schema = self.capture_schema[&capture];
+                self.emit_effect(
+                    MirInstructionKind::CaptureStore {
+                        capture,
+                        slot: schema.slot(),
+                        value,
+                    },
+                    span,
+                );
+            }
+            LoweredAssignmentTarget::Field {
+                base,
+                field,
+                value_type,
+            } => {
+                if let Some((slot, field_type)) = self.gc_schema.fields.get(&field).copied()
+                    && is_managed_reference_type_id(field_type, Some(self.arena))
+                {
+                    let previous = self.emit(
+                        MirInstructionKind::FieldGet { base, field },
+                        value_type,
+                        span,
+                    );
+                    self.emit_effect(
+                        MirInstructionKind::WriteBarrier {
+                            owner: base,
+                            slot,
+                            previous: Some(previous),
+                            value: Some(value),
+                        },
+                        span,
+                    );
+                }
+                let nil = self
+                    .arena
+                    .source_type("nil")
+                    .expect("validated type arena always contains nil");
+                self.emit(
+                    MirInstructionKind::FieldSet { base, field, value },
+                    nil,
+                    span,
+                );
+            }
+            LoweredAssignmentTarget::Array {
+                array,
+                index,
+                array_type,
+                ..
+            } => {
+                let nil = self
+                    .arena
+                    .source_type("nil")
+                    .expect("validated type arena always contains nil");
+                self.emit(
+                    MirInstructionKind::ArraySet {
+                        array,
+                        index,
+                        value,
+                        element_map: array_element_map(self.arena, array_type),
+                    },
+                    nil,
+                    span,
+                );
             }
         }
     }
@@ -2360,6 +2591,7 @@ pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeA
         arena.get(type_id),
         Some(
             SemanticType::Primitive(PrimitiveType::String)
+                | SemanticType::Tuple(_)
                 | SemanticType::Array(_)
                 | SemanticType::Table { .. }
                 | SemanticType::Class { .. }
@@ -2399,7 +2631,8 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
                 effects
             }
         }
-        MirInstructionKind::ArrayMake { .. }
+        MirInstructionKind::TupleMake(_)
+        | MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
         | MirInstructionKind::ClassMake { .. }
         | MirInstructionKind::CaptureCellAllocate { .. }
@@ -2460,7 +2693,7 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
         | MirInstructionKind::FunctionReference(_)
-        | MirInstructionKind::TupleMake(_)
+        | MirInstructionKind::TupleGet { .. }
         | MirInstructionKind::ArrayGet { .. }
         | MirInstructionKind::ArrayLength { .. }
         | MirInstructionKind::FloatAdd { .. }

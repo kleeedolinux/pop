@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use pop_foundation::{BubbleId, FileId, ModuleId, SymbolId};
+use pop_foundation::{BubbleId, DiagnosticArgument, FileId, ModuleId, SymbolId};
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
 use pop_source::SourceFile;
 use pop_syntax::{NodeKind, parse_file, parse_function_body, parse_function_signature};
@@ -186,6 +186,72 @@ fn omitted_return_annotation_is_an_empty_result_pack_not_inference() {
     );
     assert!(valued.result.body().is_none());
     assert!(valued.result.diagnostic_snapshot().starts_with("POP2004"));
+}
+
+#[test]
+fn checks_fixed_pack_returns_declarations_swaps_and_call_destructuring() {
+    let fixture = check_function(
+        "namespace Example\n\
+         private function split(value: Int): (Int, String)\n\
+             return value, String(value)\n\
+         end\n\
+         public function exchange(value: Int): (Int, String)\n\
+             local number: Int, text: String = split(value)\n\
+             local nextNumber = number + 1\n\
+             number, nextNumber = nextNumber, number\n\
+             return number, text\n\
+         end\n",
+        "exchange",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn rejects_fixed_pack_arity_type_and_scalar_context_mismatches() {
+    for source in [
+        "namespace Example\npublic function invalid(): (Int, String)\nreturn 1\nend\n",
+        "namespace Example\npublic function invalid(): (Int, String)\nreturn 1, 2\nend\n",
+        "namespace Example\npublic function invalid(): Int\nlocal left, right = 1\nreturn left\nend\n",
+        "namespace Example\npublic function invalid(): Int\nlocal value, value = 1, 2\nreturn value\nend\n",
+    ] {
+        let fixture = check_function(source, "invalid");
+        assert!(
+            !fixture.result.diagnostics().is_empty(),
+            "fixed packs require exact static arity and types: {source}"
+        );
+    }
+}
+
+#[test]
+fn fixed_pack_arity_diagnostic_reports_the_exact_target_count() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function invalid(): Int\n\
+             local first, second, third = 1\n\
+             return first\n\
+         end\n",
+        "invalid",
+    );
+    let diagnostic = fixture
+        .result
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code().as_str() == "POP2004")
+        .expect("fixed-pack arity diagnostic");
+
+    assert_eq!(
+        diagnostic.arguments(),
+        [
+            DiagnosticArgument::Identifier("multiple local".to_owned()),
+            DiagnosticArgument::Unsigned(3),
+            DiagnosticArgument::Unsigned(1),
+        ]
+    );
 }
 
 #[test]

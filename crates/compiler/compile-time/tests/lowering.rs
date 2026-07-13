@@ -442,7 +442,44 @@ fn immutable_locals_lower_with_lexical_identity_and_evaluate_deterministically()
 }
 
 #[test]
-fn restricted_lowering_rejects_result_packs_and_non_deterministic_body_shapes() {
+fn fixed_pack_returns_and_multiple_locals_evaluate_at_compile_time() {
+    let checked = check_program(
+        "namespace Example\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         public function sum(value: Int): Int\n\
+             local left, right = split(value)\n\
+             return left + right\n\
+         end\n",
+    );
+    let program = CompileTimeProgram::new(
+        vec![checked.lower("split"), checked.lower("sum")],
+        &checked.arena,
+    )
+    .expect("verified fixed-pack compile-time program");
+    let eligible: BTreeSet<_> = program
+        .functions()
+        .iter()
+        .map(pop_compile_time::CompileTimeFunction::function)
+        .collect();
+    assert_eq!(
+        evaluate(
+            &program,
+            &eligible,
+            function_id(&checked.functions["sum"]),
+            &[CompileTimeValue::Integer(
+                IntegerValue::parse_decimal("41", IntegerKind::Int64).expect("Int"),
+            )],
+        ),
+        CompileTimeValue::Integer(
+            IntegerValue::parse_decimal("83", IntegerKind::Int64).expect("Int"),
+        )
+    );
+}
+
+#[test]
+fn restricted_lowering_rejects_empty_results_and_non_deterministic_body_shapes() {
     let checked = check_program(
         "namespace Example\n\
          public function noResult()\n\
@@ -461,8 +498,7 @@ fn restricted_lowering_rejects_result_packs_and_non_deterministic_body_shapes() 
         checked.lower_error("noResult"),
         CompileTimeLoweringError::UnsupportedResultArity { found: 0 }
     ));
-    // A tuple is one result; this source confirms tuples stay supported rather than
-    // being confused with Pop Lang's statically typed multiple-result packs.
+    // ADR 0045 represents this exact fixed pack as one typed tuple-like value.
     assert_eq!(
         checked.lower("manyResults").body().type_id(),
         checked.functions["manyResults"].signature.results()[0]

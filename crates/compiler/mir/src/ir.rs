@@ -758,6 +758,10 @@ pub enum MirInstructionKind {
     NilConstant,
     FunctionReference(SymbolId),
     TupleMake(Vec<ValueId>),
+    TupleGet {
+        tuple: ValueId,
+        index: u32,
+    },
     ArrayMake {
         elements: Vec<ValueId>,
         element_map: ArrayElementMap,

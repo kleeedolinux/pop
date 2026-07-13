@@ -333,6 +333,11 @@ impl<'program> CompileTimeInterpreter<'program> {
                 body,
                 ..
             } => self.evaluate_let(*local, initializer, body, parameters, locals),
+            CompileTimeExpressionKind::LetTuple {
+                locals: bindings,
+                initializer,
+                body,
+            } => self.evaluate_let_tuple(bindings, initializer, body, parameters, locals),
             CompileTimeExpressionKind::Unary { operator, operand } => {
                 let operand = self.evaluate_expression(operand, parameters, locals)?;
                 evaluate_unary(*operator, operand).map_err(|error| {
@@ -510,6 +515,43 @@ impl<'program> CompileTimeInterpreter<'program> {
             locals.insert(local, previous);
         } else {
             locals.remove(&local);
+        }
+        result
+    }
+
+    fn evaluate_let_tuple(
+        &mut self,
+        bindings: &[(LocalId, TypeId)],
+        initializer: &CompileTimeExpression,
+        body: &CompileTimeExpression,
+        parameters: &[CompileTimeValue],
+        locals: &mut BTreeMap<LocalId, CompileTimeValue>,
+    ) -> Result<CompileTimeValue, EvaluationFailure> {
+        let CompileTimeValue::Tuple(values) =
+            self.evaluate_expression(initializer, parameters, locals)?
+        else {
+            return Err(self.failure(
+                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                initializer.span(),
+            ));
+        };
+        if bindings.len() != values.len() {
+            return Err(self.failure(
+                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                initializer.span(),
+            ));
+        }
+        let mut previous = Vec::with_capacity(bindings.len());
+        for ((local, _), value) in bindings.iter().zip(values) {
+            previous.push((*local, locals.insert(*local, value)));
+        }
+        let result = self.evaluate_expression(body, parameters, locals);
+        for (local, value) in previous.into_iter().rev() {
+            if let Some(value) = value {
+                locals.insert(local, value);
+            } else {
+                locals.remove(&local);
+            }
         }
         result
     }

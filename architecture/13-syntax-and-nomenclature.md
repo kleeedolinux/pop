@@ -338,6 +338,25 @@ end
 Captured state is statically typed and converted to a native environment, never
 a table.
 
+### Fixed type packs and multiple assignment
+
+Parenthesized results and comma returns describe an exact fixed pack:
+
+```luau
+private function split(value: Int): (Int, Int)
+    return value / 2, value % 2
+end
+
+local quotient: Int, remainder = split(value)
+left, right = right, left
+```
+
+Each local may carry its own annotation. The right-hand side must be one fixed
+pack of the target arity or an exact list of scalar expressions. Pop source does
+not silently add `nil`, discard extra values, or use an untyped variadic carrier.
+Multiple-assignment target locations evaluate left to right before all values;
+stores then occur left to right. See ADR 0045.
+
 ### Compound assignment
 
 Compound mutation keeps Luau's compact operator spellings:

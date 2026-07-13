@@ -300,10 +300,15 @@ Structural records have named typed fields and immutable field bindings. Typed
 retain their own mutability. Tuples have ordered typed fields. Neither silently
 becomes a heap table.
 
-Luau-style multiple returns remain an ergonomic goal. MIR represents their
-static type as a tuple or type pack with known elements/tail constraints.
-Destructuring and multiple assignment are syntax over that representation.
-There is no dynamically typed variadic result.
+Luau-style multiple returns use exact statically typed packs. A parenthesized
+result annotation such as `(Int, String)` declares a fixed pack, and
+`return count, name` constructs it. Multiple locals and assignments use comma
+syntax with either one exact fixed-pack expression or an exact list of scalar
+expressions; missing values are not padded with `nil` and extra values are not
+discarded. MIR represents a fixed pack as one typed tuple-like value with
+explicit construction and projection. Variadic tails must have known repeated
+types or generic pack constraints and are not dynamically typed bags. See ADR
+0045.
 
 ## Exhaustive tagged-union matching
 

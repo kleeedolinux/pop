@@ -14,9 +14,9 @@ use pop_resolve::Visibility;
 use pop_types::{
     CaptureMode, CaptureSource, ClassDefinition, ClassInterfaceImplementation,
     ClassMethodDefinition, InterfaceDefinition, ResolvedAttribute, ResolvedFunctionSignature,
-    TypeArena, TypedBody, TypedCall, TypedCallDispatch, TypedCapture, TypedClosure,
-    TypedExpression, TypedExpressionKind, TypedFieldValue, TypedMatchArm, TypedMatchBinding,
-    TypedStatement, TypedStatementKind, TypedTableEntry,
+    TypeArena, TypedAssignmentTarget, TypedBody, TypedCall, TypedCallDispatch, TypedCapture,
+    TypedClosure, TypedExpression, TypedExpressionKind, TypedFieldValue, TypedMatchArm,
+    TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry,
 };
 
 use crate::ir::*;
@@ -281,6 +281,19 @@ fn lower_statement(
             local_type: *local_type,
             initializer: lower_expression(initializer, interface_slots),
         },
+        TypedStatementKind::MultipleLocal { bindings, value } => HirStatementKind::MultipleLocal {
+            bindings: bindings
+                .iter()
+                .map(|binding| HirLocalBinding {
+                    binding: binding.binding(),
+                    local: binding.local(),
+                    name: binding.name().to_owned(),
+                    local_type: binding.local_type(),
+                    span: binding.span(),
+                })
+                .collect(),
+            value: lower_expression(value, interface_slots),
+        },
         TypedStatementKind::LocalSet { local, value } => HirStatementKind::LocalSet {
             local: *local,
             value: lower_expression(value, interface_slots),
@@ -404,6 +417,15 @@ fn lower_statement(
             operator: *operator,
             value: lower_expression(value, interface_slots),
         },
+        TypedStatementKind::MultipleAssignment { targets, value } => {
+            HirStatementKind::MultipleAssignment {
+                targets: targets
+                    .iter()
+                    .map(|target| lower_assignment_target(target, interface_slots))
+                    .collect(),
+                value: lower_expression(value, interface_slots),
+            }
+        }
         TypedStatementKind::Call(call) => HirStatementKind::Call(lower_call(call, interface_slots)),
         TypedStatementKind::Expression(expression) => {
             HirStatementKind::Expression(lower_expression(expression, interface_slots))
@@ -412,6 +434,50 @@ fn lower_statement(
     HirStatement {
         kind,
         span: statement.span(),
+    }
+}
+
+fn lower_assignment_target(
+    target: &TypedAssignmentTarget,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirAssignmentTarget {
+    match target {
+        TypedAssignmentTarget::Local {
+            binding,
+            local,
+            value_type,
+        } => HirAssignmentTarget::Local {
+            binding: *binding,
+            local: *local,
+            value_type: *value_type,
+        },
+        TypedAssignmentTarget::Capture {
+            binding,
+            capture,
+            value_type,
+        } => HirAssignmentTarget::Capture {
+            binding: *binding,
+            capture: *capture,
+            value_type: *value_type,
+        },
+        TypedAssignmentTarget::Field {
+            base,
+            field,
+            value_type,
+        } => HirAssignmentTarget::Field {
+            base: lower_expression(base, interface_slots),
+            field: *field,
+            value_type: *value_type,
+        },
+        TypedAssignmentTarget::Array {
+            array,
+            index,
+            element_type,
+        } => HirAssignmentTarget::Array {
+            array: lower_expression(array, interface_slots),
+            index: lower_expression(index, interface_slots),
+            element_type: *element_type,
+        },
     }
 }
 
@@ -842,6 +908,9 @@ fn first_unknown_interface_call(
             TypedStatementKind::Local { initializer, .. } => {
                 first_unknown_interface_expression(initializer, slots)
             }
+            TypedStatementKind::MultipleLocal { value, .. } => {
+                first_unknown_interface_expression(value, slots)
+            }
             TypedStatementKind::LocalSet { value, .. }
             | TypedStatementKind::ParameterSet { value, .. }
             | TypedStatementKind::CaptureSet { value, .. }
@@ -906,6 +975,10 @@ fn first_unknown_interface_call(
             } => first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
                 .or_else(|| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::MultipleAssignment { targets, value } => targets
+                .iter()
+                .find_map(|target| first_unknown_interface_target(target, slots))
+                .or_else(|| first_unknown_interface_expression(value, slots)),
             TypedStatementKind::Call(call) => {
                 if let TypedCallDispatch::InterfaceMethod {
                     interface, method, ..
@@ -941,6 +1014,22 @@ fn first_unknown_interface_call(
         }
     }
     None
+}
+
+fn first_unknown_interface_target(
+    target: &TypedAssignmentTarget,
+    slots: &HirInterfaceSlotMap,
+) -> Option<(InterfaceId, InterfaceMethodId, SourceSpan)> {
+    match target {
+        TypedAssignmentTarget::Local { .. } | TypedAssignmentTarget::Capture { .. } => None,
+        TypedAssignmentTarget::Field { base, .. } => {
+            first_unknown_interface_expression(base, slots)
+        }
+        TypedAssignmentTarget::Array { array, index, .. } => {
+            first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+    }
 }
 
 fn first_unknown_interface_expression(
@@ -1077,6 +1166,9 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
             TypedStatementKind::Local { initializer, .. } => {
                 first_compile_time_only_expression(initializer)
             }
+            TypedStatementKind::MultipleLocal { value, .. } => {
+                first_compile_time_only_expression(value)
+            }
             TypedStatementKind::LocalSet { value, .. }
             | TypedStatementKind::ParameterSet { value, .. }
             | TypedStatementKind::CaptureSet { value, .. }
@@ -1139,6 +1231,10 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
             } => first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
                 .or_else(|| first_compile_time_only_expression(value)),
+            TypedStatementKind::MultipleAssignment { targets, value } => targets
+                .iter()
+                .find_map(first_compile_time_only_target)
+                .or_else(|| first_compile_time_only_expression(value)),
             TypedStatementKind::Call(call) => first_compile_time_only_call(call),
         };
         if found.is_some() {
@@ -1146,6 +1242,17 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
         }
     }
     None
+}
+
+fn first_compile_time_only_target(target: &TypedAssignmentTarget) -> Option<SourceSpan> {
+    match target {
+        TypedAssignmentTarget::Local { .. } | TypedAssignmentTarget::Capture { .. } => None,
+        TypedAssignmentTarget::Field { base, .. } => first_compile_time_only_expression(base),
+        TypedAssignmentTarget::Array { array, index, .. } => {
+            first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+        }
+    }
 }
 
 fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {

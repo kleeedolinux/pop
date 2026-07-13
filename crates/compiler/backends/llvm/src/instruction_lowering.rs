@@ -420,6 +420,14 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::TupleMake(elements) => {
             lower_tuple_make(&result, elements, value_types, types)?
         }
+        MirInstructionKind::TupleGet { tuple, index } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            &format!("%v{}", tuple.raw()),
+            usize::try_from(*index).unwrap_or(usize::MAX) + 1,
+            types,
+        )?
+        .join("\n"),
         MirInstructionKind::ArrayGet { array, index } => runtime_call(
             &result,
             result_type,

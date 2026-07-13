@@ -967,6 +967,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
                     .all(|arm| statements_definitely_return(arm.body()))
         }
         TypedStatementKind::Local { .. }
+        | TypedStatementKind::MultipleLocal { .. }
         | TypedStatementKind::LocalSet { .. }
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
@@ -978,6 +979,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
         | TypedStatementKind::CompoundArraySet { .. }
+        | TypedStatementKind::MultipleAssignment { .. }
         | TypedStatementKind::Call(_)
         | TypedStatementKind::Expression(_) => false,
         TypedStatementKind::RepeatUntil { body, .. } => statements_definitely_return(body),
