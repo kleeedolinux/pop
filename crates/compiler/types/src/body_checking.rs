@@ -14,9 +14,32 @@ use pop_syntax::{
 use crate::capture_analysis::finalize_capture_modes;
 use crate::typed_body::*;
 use crate::{
-    AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, PrimitiveType,
-    ResolvedFunctionSignature, SemanticType, SignatureResolver,
+    AttributeConstant, AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue,
+    PrimitiveType, ResolvedFunctionSignature, SemanticType, SignatureResolver,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeConstant {
+    type_id: TypeId,
+    value: AttributeConstant,
+}
+
+impl RuntimeConstant {
+    #[must_use]
+    pub const fn new(type_id: TypeId, value: AttributeConstant) -> Self {
+        Self { type_id, value }
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn value(&self) -> &AttributeConstant {
+        &self.value
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Binding {
@@ -121,6 +144,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) module: ModuleId,
     pub(crate) resolver: &'resolver mut SignatureResolver<'index>,
     pub(crate) signatures: &'resolver BTreeMap<SymbolId, ResolvedFunctionSignature>,
+    pub(crate) constants: Option<&'resolver BTreeMap<SymbolId, RuntimeConstant>>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) scopes: Vec<BTreeMap<String, Binding>>,
     pub(crate) next_local: u32,
@@ -144,6 +168,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             module,
             resolver,
             signatures,
+            constants: None,
             diagnostics: Vec::new(),
             scopes: vec![BTreeMap::new()],
             next_local: 0,
@@ -155,6 +180,15 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             signature_stack: Vec::new(),
             loop_depth: 0,
         }
+    }
+
+    #[must_use]
+    pub const fn with_runtime_constants(
+        mut self,
+        constants: &'resolver BTreeMap<SymbolId, RuntimeConstant>,
+    ) -> Self {
+        self.constants = Some(constants);
+        self
     }
 
     #[must_use]
@@ -759,6 +793,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return None;
         }
         let symbol = resolution.symbol()?;
+        if let Some(constant) = self.constants.and_then(|constants| constants.get(&symbol)) {
+            return self.runtime_constant_expression(constant, span);
+        }
         let signature = self.signatures.get(&symbol)?;
         let parameters: Option<Vec<_>> = signature
             .parameters()
@@ -781,6 +818,49 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .ok()?;
         Some(TypedExpression {
             kind: TypedExpressionKind::Function(symbol),
+            type_id,
+            span,
+        })
+    }
+
+    fn runtime_constant_expression(
+        &self,
+        constant: &RuntimeConstant,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        self.runtime_constant_value(constant.value(), constant.type_id(), span)
+    }
+
+    fn runtime_constant_value(
+        &self,
+        value: &AttributeConstant,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let kind = match value {
+            AttributeConstant::Nil => TypedExpressionKind::Nil,
+            AttributeConstant::Boolean(value) => TypedExpressionKind::Boolean(*value),
+            AttributeConstant::Integer(value) => TypedExpressionKind::Integer(*value),
+            AttributeConstant::Float(value) => TypedExpressionKind::Float(*value),
+            AttributeConstant::String(value) => TypedExpressionKind::String(value.clone()),
+            AttributeConstant::Tuple(values) => {
+                let Some(SemanticType::Tuple(element_types)) = self.resolver.arena().get(type_id)
+                else {
+                    return None;
+                };
+                if values.len() != element_types.len() {
+                    return None;
+                }
+                let elements = values
+                    .iter()
+                    .zip(element_types)
+                    .map(|(value, type_id)| self.runtime_constant_value(value, *type_id, span))
+                    .collect::<Option<Vec<_>>>()?;
+                TypedExpressionKind::Tuple(elements)
+            }
+        };
+        Some(TypedExpression {
+            kind,
             type_id,
             span,
         })

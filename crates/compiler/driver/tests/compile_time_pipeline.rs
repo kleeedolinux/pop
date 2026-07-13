@@ -32,6 +32,30 @@ fn analyze(text: &str) -> FrontEndResult {
 }
 
 #[test]
+fn evaluated_namespace_constants_are_runtime_expressions() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function answer(): Int\n\
+             return 40 + 2\n\
+         end\n\
+         private const ANSWER: Int = answer()\n\
+         public function runtimeAnswer(): Int\n\
+             return ANSWER\n\
+         end\n",
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("verified HIR"), result.types())
+        .expect("verified MIR");
+    assert!(mir.dump().contains("const.integer Int64 42"));
+}
+
+#[test]
 fn trusted_compile_time_functions_feed_udas_and_defaults_but_not_runtime_mir() {
     let result = analyze(EXPLICIT);
     assert!(

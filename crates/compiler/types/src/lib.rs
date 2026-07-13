@@ -34,7 +34,7 @@ pub use attributes::{
     AttributeUsage, AttributeValidator, ResolvedAttribute, ResolvedAttributeArgument,
     ResolvedAttributeResult,
 };
-pub use body_checking::BodyChecker;
+pub use body_checking::{BodyChecker, RuntimeConstant};
 pub use bootstrap::{
     AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
     BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError, BootstrapStandardFunctionEntry,

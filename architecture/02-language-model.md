@@ -383,6 +383,12 @@ propagates or enters a cleanup block, and cleanup resumes unwinding explicitly.
 Expected failure remains a typed result value and is not folded into the panic
 mechanism. See ADR 0022.
 
+Namespace constants are deterministically evaluated once by the front end.
+Runtime uses substitute the resulting exact typed immutable value into HIR;
+they do not create mutable module storage or runtime name lookup. The initial
+runtime-usable set contains primitive values and recursively fixed tuples. See
+ADR 0047.
+
 ## Memory management
 
 The initial runtime uses Pop GC: a precise concurrent generational collector

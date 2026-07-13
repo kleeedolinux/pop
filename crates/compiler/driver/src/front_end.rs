@@ -26,8 +26,8 @@ use pop_types::{
 use crate::api::*;
 use crate::attributes::{classify_function_attributes, resolve_source_attributes};
 use crate::compile_time::{
-    build_compile_time_context, check_compile_time_function_bodies, evaluate_declaration_defaults,
-    evaluate_source_constants,
+    build_compile_time_context, check_compile_time_function_bodies,
+    compile_time_attribute_constant, evaluate_declaration_defaults, evaluate_source_constants,
 };
 use crate::reference::{emit_reference_metadata, hir_function_references, reference_signatures};
 use crate::work::*;
@@ -155,12 +155,24 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut compile_time_evaluations,
         &mut diagnostics,
     );
+    let runtime_constants: BTreeMap<_, _> = constants
+        .iter()
+        .filter_map(|constant| {
+            compile_time_attribute_constant(constant.value.clone()).map(|value| {
+                (
+                    constant.symbol,
+                    pop_types::RuntimeConstant::new(constant.type_id, value),
+                )
+            })
+        })
+        .collect();
     declarations = refresh_declarations(declarations, &resolver);
     let (hir_functions, hir_methods, hir_build_failed) = build_runtime_hir(
         input.bubble,
         &mut functions,
         &methods,
         &signatures,
+        &runtime_constants,
         &mut resolver,
         &mut diagnostics,
     );
@@ -309,6 +321,7 @@ fn build_runtime_hir(
     functions: &mut [FunctionWork],
     methods: &[MethodWork],
     signatures: &BTreeMap<SymbolId, ResolvedFunctionSignature>,
+    constants: &BTreeMap<SymbolId, pop_types::RuntimeConstant>,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (Vec<HirFunction>, Vec<HirMethod>, bool) {
@@ -327,6 +340,7 @@ fn build_runtime_hir(
             continue;
         }
         let typed = BodyChecker::new(function.module, resolver, signatures)
+            .with_runtime_constants(constants)
             .check(&function.signature, &function.body);
         diagnostics.extend(typed.diagnostics().iter().cloned());
         let Some(body) = typed.body() else {
@@ -347,6 +361,7 @@ fn build_runtime_hir(
     let mut hir_methods = Vec::new();
     for method in methods {
         let typed = BodyChecker::new(method.module, resolver, signatures)
+            .with_runtime_constants(constants)
             .check(&method.signature, &method.body);
         diagnostics.extend(typed.diagnostics().iter().cloned());
         let Some(body) = typed.body() else {
