@@ -201,6 +201,5 @@ jobs:
               --head "${{ steps.prep.outputs.branch }}" \
               --title "$title" \
               --body "$body" \
-              --label release \
               --assignee kleeedolinux
           fi
