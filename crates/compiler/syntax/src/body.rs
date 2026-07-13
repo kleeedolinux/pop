@@ -1,7 +1,7 @@
 use pop_foundation::{FileId, SourceSpan, TextRange, TextSize};
 use pop_source::SourceFile;
 
-use crate::signature::parse_type_tokens;
+use crate::signature::parse_type_prefix;
 use crate::{
     FunctionSignatureSyntax, NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind, TypeSyntax,
 };
@@ -53,6 +53,10 @@ pub enum StatementSyntaxKind {
         name: String,
         function: CaptureFunctionSyntax,
     },
+    MultipleLocal {
+        bindings: Vec<LocalBindingSyntax>,
+        values: Vec<ExpressionSyntax>,
+    },
     Return {
         values: Vec<ExpressionSyntax>,
     },
@@ -69,15 +73,53 @@ pub enum StatementSyntaxKind {
         body: Vec<StatementSyntax>,
         condition: ExpressionSyntax,
     },
+    NumericFor {
+        name: String,
+        first: ExpressionSyntax,
+        last: ExpressionSyntax,
+        step: Option<ExpressionSyntax>,
+        body: Vec<StatementSyntax>,
+    },
+    Break,
+    Continue,
     Match {
         scrutinee: ExpressionSyntax,
         arms: Vec<MatchArmSyntax>,
     },
     Assignment {
         target: ExpressionSyntax,
+        operator: Option<BinaryOperator>,
         value: ExpressionSyntax,
     },
+    MultipleAssignment {
+        targets: Vec<ExpressionSyntax>,
+        values: Vec<ExpressionSyntax>,
+    },
     Expression(ExpressionSyntax),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalBindingSyntax {
+    name: String,
+    annotation: Option<TypeSyntax>,
+    span: SourceSpan,
+}
+
+impl LocalBindingSyntax {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn annotation(&self) -> Option<&TypeSyntax> {
+        self.annotation.as_ref()
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,7 +143,9 @@ impl ExpressionSyntax {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExpressionSyntaxKind {
     Integer(String),
+    Float(String),
     String(String),
+    InterpolatedString(Vec<StringSegmentSyntax>),
     Boolean(bool),
     Nil,
     Function(CaptureFunctionSyntax),
@@ -146,6 +190,35 @@ pub enum ExpressionSyntaxKind {
         left: Box<ExpressionSyntax>,
         right: Box<ExpressionSyntax>,
     },
+    Conditional {
+        condition: Box<ExpressionSyntax>,
+        when_true: Box<ExpressionSyntax>,
+        when_false: Box<ExpressionSyntax>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StringSegmentSyntax {
+    pub(crate) kind: StringSegmentSyntaxKind,
+    pub(crate) span: SourceSpan,
+}
+
+impl StringSegmentSyntax {
+    #[must_use]
+    pub const fn kind(&self) -> &StringSegmentSyntaxKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StringSegmentSyntaxKind {
+    Text(String),
+    Expression(ExpressionSyntax),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -269,7 +342,10 @@ pub enum BinaryOperator {
     Equal,
     NotEqual,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
+    Concat,
     Add,
     Subtract,
     Multiply,
@@ -434,10 +510,37 @@ impl BodyParser<'_> {
             Some(TokenKind::If) => self.parse_if(),
             Some(TokenKind::While) => self.parse_while(),
             Some(TokenKind::Repeat) => self.parse_repeat_until(),
+            Some(TokenKind::For) => self.parse_numeric_for(),
+            Some(TokenKind::Break) => self.parse_loop_control(StatementSyntaxKind::Break),
+            Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
             _ => {
                 let expression = self.parse_expression(0)?;
-                if self.consume(TokenKind::Equal).is_some() {
+                if self.current_kind() == Some(TokenKind::Comma) {
+                    let mut targets = vec![expression];
+                    while self.consume(TokenKind::Comma).is_some() {
+                        targets.push(self.parse_expression(0)?);
+                    }
+                    self.expect(TokenKind::Equal, "`=`")?;
+                    let values = self.parse_expression_list()?;
+                    let span = SourceSpan::new(
+                        self.file,
+                        ordered_range(
+                            targets[0].span().range().start(),
+                            values
+                                .last()
+                                .expect("nonempty value list")
+                                .span()
+                                .range()
+                                .end(),
+                        ),
+                    );
+                    return Ok(StatementSyntax {
+                        kind: StatementSyntaxKind::MultipleAssignment { targets, values },
+                        span,
+                    });
+                }
+                if let Some(operator) = self.consume_assignment_operator() {
                     let value = self.parse_expression(0)?;
                     let span = SourceSpan::new(
                         self.file,
@@ -449,6 +552,7 @@ impl BodyParser<'_> {
                     return Ok(StatementSyntax {
                         kind: StatementSyntaxKind::Assignment {
                             target: expression,
+                            operator,
                             value,
                         },
                         span,
@@ -461,6 +565,21 @@ impl BodyParser<'_> {
                 })
             }
         }
+    }
+
+    fn consume_assignment_operator(&mut self) -> Option<Option<BinaryOperator>> {
+        let operator = match self.current_kind()? {
+            TokenKind::Equal => None,
+            TokenKind::PlusEqual => Some(BinaryOperator::Add),
+            TokenKind::MinusEqual => Some(BinaryOperator::Subtract),
+            TokenKind::StarEqual => Some(BinaryOperator::Multiply),
+            TokenKind::SlashEqual => Some(BinaryOperator::Divide),
+            TokenKind::PercentEqual => Some(BinaryOperator::Remainder),
+            TokenKind::DotDotEqual => Some(BinaryOperator::Concat),
+            _ => return None,
+        };
+        self.position = self.position.saturating_add(1);
+        Some(operator)
     }
 
     pub(crate) fn parse_statement_list(
@@ -497,48 +616,67 @@ impl BodyParser<'_> {
                 span: SourceSpan::new(self.file, ordered_range(start, end)),
             });
         }
-        let name_token = self.expect(TokenKind::Identifier, "local name")?;
-        let name = name_token.text(self.source).to_owned();
-        let annotation = if self.consume(TokenKind::Colon).is_some() {
-            let type_start = self.position;
-            let Some(equal) = self.tokens[type_start..]
-                .iter()
-                .position(|token| token.kind() == TokenKind::Equal)
-                .map(|offset| type_start + offset)
-            else {
-                return Err(self.error("`=`"));
+        let mut bindings = Vec::new();
+        loop {
+            let name_token = self.expect(TokenKind::Identifier, "local name")?;
+            let name = name_token.text(self.source).to_owned();
+            let annotation = if self.consume(TokenKind::Colon).is_some() {
+                Some(
+                    parse_type_prefix(self.source, self.node, &self.tokens, &mut self.position)
+                        .map_err(|error| FunctionBodyError {
+                            span: error.span(),
+                            expectation: error.expectation(),
+                        })?,
+                )
+            } else {
+                None
             };
-            if self.tokens[type_start..equal]
-                .iter()
-                .any(|token| token.kind() == TokenKind::Newline)
-            {
-                return Err(self.error("`=`"));
-            }
-            let parsed = parse_type_tokens(
-                self.source,
-                self.node,
-                self.tokens[type_start..equal].to_vec(),
-            )
-            .map_err(|error| FunctionBodyError {
-                span: error.span(),
-                expectation: error.expectation(),
-            })?;
-            self.position = equal;
-            Some(parsed)
-        } else {
-            None
-        };
-        self.expect(TokenKind::Equal, "`=`")?;
-        let initializer = self.parse_expression(0)?;
-        let end = initializer.span().range().end();
-        Ok(StatementSyntax {
-            kind: StatementSyntaxKind::Local {
+            let end = annotation
+                .as_ref()
+                .map_or(name_token.range().end(), |annotation| {
+                    annotation.span().range().end()
+                });
+            bindings.push(LocalBindingSyntax {
                 name,
                 annotation,
+                span: SourceSpan::new(self.file, ordered_range(name_token.range().start(), end)),
+            });
+            if self.consume(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::Equal, "`=`")?;
+        let mut values = self.parse_expression_list()?;
+        let end = values
+            .last()
+            .expect("nonempty value list")
+            .span()
+            .range()
+            .end();
+        if bindings.len() > 1 || values.len() > 1 {
+            return Ok(StatementSyntax {
+                kind: StatementSyntaxKind::MultipleLocal { bindings, values },
+                span: SourceSpan::new(self.file, ordered_range(start, end)),
+            });
+        }
+        let binding = bindings.pop().expect("one binding");
+        let initializer = values.pop().expect("one initializer");
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::Local {
+                name: binding.name,
+                annotation: binding.annotation,
                 initializer,
             },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
+    }
+
+    fn parse_expression_list(&mut self) -> Result<Vec<ExpressionSyntax>, FunctionBodyError> {
+        let mut values = vec![self.parse_expression(0)?];
+        while self.consume(TokenKind::Comma).is_some() {
+            values.push(self.parse_expression(0)?);
+        }
+        Ok(values)
     }
 
     fn parse_return(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
@@ -564,16 +702,7 @@ impl BodyParser<'_> {
 
     fn parse_if(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::If, "`if`")?.range().start();
-        let condition = self.parse_expression(0)?;
-        self.expect(TokenKind::Then, "`then`")?;
-        self.expect(TokenKind::Newline, "line break after `then`")?;
-        let then_body = self.parse_statement_list(&[TokenKind::Else, TokenKind::End])?;
-        let else_body = if self.consume(TokenKind::Else).is_some() {
-            self.expect(TokenKind::Newline, "line break after `else`")?;
-            self.parse_statement_list(&[TokenKind::End])?
-        } else {
-            Vec::new()
-        };
+        let (condition, then_body, else_body) = self.parse_if_parts()?;
         let end = self.expect(TokenKind::End, "`end`")?.range().end();
         Ok(StatementSyntax {
             kind: StatementSyntaxKind::If {
@@ -583,6 +712,41 @@ impl BodyParser<'_> {
             },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
+    }
+
+    fn parse_if_parts(
+        &mut self,
+    ) -> Result<(ExpressionSyntax, Vec<StatementSyntax>, Vec<StatementSyntax>), FunctionBodyError>
+    {
+        let condition = self.parse_expression(0)?;
+        self.expect(TokenKind::Then, "`then`")?;
+        self.expect(TokenKind::Newline, "line break after `then`")?;
+        let then_body =
+            self.parse_statement_list(&[TokenKind::ElseIf, TokenKind::Else, TokenKind::End])?;
+        let else_body = if self.consume(TokenKind::Else).is_some() {
+            self.expect(TokenKind::Newline, "line break after `else`")?;
+            self.parse_statement_list(&[TokenKind::End])?
+        } else if let Some(elseif) = self.consume(TokenKind::ElseIf) {
+            let start = elseif.range().start();
+            let (condition, then_body, else_body) = self.parse_if_parts()?;
+            let end = else_body
+                .last()
+                .or_else(|| then_body.last())
+                .map_or(condition.span().range().end(), |statement| {
+                    statement.span().range().end()
+                });
+            vec![StatementSyntax {
+                kind: StatementSyntaxKind::If {
+                    condition,
+                    then_body,
+                    else_body,
+                },
+                span: SourceSpan::new(self.file, ordered_range(start, end)),
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok((condition, then_body, else_body))
     }
 
     fn parse_while(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
@@ -608,6 +772,51 @@ impl BodyParser<'_> {
         Ok(StatementSyntax {
             kind: StatementSyntaxKind::RepeatUntil { body, condition },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
+    }
+
+    fn parse_numeric_for(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+        let start = self.expect(TokenKind::For, "`for`")?.range().start();
+        let name = self.expect(TokenKind::Identifier, "numeric `for` binding")?;
+        let name = name.text(self.source).to_owned();
+        self.expect(TokenKind::Equal, "`=` in numeric `for`")?;
+        let first = self.parse_expression(0)?;
+        self.expect(TokenKind::Comma, "`,` after numeric `for` first value")?;
+        let last = self.parse_expression(0)?;
+        let step = if self.consume(TokenKind::Comma).is_some() {
+            Some(self.parse_expression(0)?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::Do, "`do` after numeric `for` range")?;
+        self.expect(TokenKind::Newline, "line break after `do`")?;
+        let body = self.parse_statement_list(&[TokenKind::End])?;
+        let end = self
+            .expect(TokenKind::End, "numeric `for` `end`")?
+            .range()
+            .end();
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::NumericFor {
+                name,
+                first,
+                last,
+                step,
+                body,
+            },
+            span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
+    }
+
+    fn parse_loop_control(
+        &mut self,
+        kind: StatementSyntaxKind,
+    ) -> Result<StatementSyntax, FunctionBodyError> {
+        let token = self
+            .advance()
+            .ok_or_else(|| self.error("loop-control statement"))?;
+        Ok(StatementSyntax {
+            kind,
+            span: SourceSpan::new(self.file, token.range()),
         })
     }
 

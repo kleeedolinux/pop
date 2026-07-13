@@ -24,11 +24,8 @@ explicitly marks its answer provisional or a later ADR reopens it.
 
 ## Types and generics
 
-1. Are generics reified, erased with dictionaries, monomorphized, or hybrid?
-2. Can structural records be width-subtyped?
-3. How are mutable collection types kept sound under variance?
-4. Does flow narrowing cross calls, suspension points, or captured mutation?
-5. Is an internal top type useful if no operations are permitted until narrowing?
+1. Does flow narrowing cross calls, suspension points, or captured mutation?
+2. Is an internal top type useful if no operations are permitted until narrowing?
 
 ## Compile time and attributes
 

@@ -7,13 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, CaptureId, ClassId, FieldId, InterfaceId, InterfaceMethodId, LocalId, MethodId,
-    NestedFunctionId, SourceSpan, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    BindingId, CaptureId, ClassId, EnumCaseId, FieldId, InterfaceId, InterfaceMethodId, LocalId,
+    MethodId, NestedFunctionId, SourceSpan, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
-    ClassMethodDispatch, PrimitiveType, SemanticType, TypeArena, TypedBinaryOperator,
-    TypedUnaryOperator,
+    ClassMethodDispatch, FloatKind, NumericConversionKind, PrimitiveType, SemanticType, TypeArena,
+    TypedBinaryOperator, TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -99,13 +100,29 @@ pub enum HirVerificationError {
         result: TypeId,
         span: SourceSpan,
     },
+    InvalidNumericConversion {
+        conversion: NumericConversionKind,
+        source: TypeId,
+        target: TypeId,
+        span: SourceSpan,
+    },
     WrongReturnArity {
         expected: usize,
         found: usize,
         span: SourceSpan,
     },
+    InvalidFixedPack {
+        span: SourceSpan,
+    },
     InvalidConditionType {
         found: TypeId,
+        span: SourceSpan,
+    },
+    LoopControlOutsideLoop {
+        span: SourceSpan,
+    },
+    InvalidNumericForType {
+        type_id: TypeId,
         span: SourceSpan,
     },
     DuplicateSymbol(SymbolId),
@@ -117,6 +134,15 @@ pub enum HirVerificationError {
     DuplicateUnionCase {
         union: SymbolId,
         case: UnionCaseId,
+    },
+    DuplicateEnumCase {
+        enumeration: SymbolId,
+        case: EnumCaseId,
+    },
+    UnknownEnumCase {
+        enumeration: SymbolId,
+        case: EnumCaseId,
+        span: SourceSpan,
     },
     InvalidDeclarationType {
         symbol: SymbolId,
@@ -293,6 +319,7 @@ pub type HirBuildError = HirVerificationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HirCallableSignature {
+    type_parameters: Vec<TypeId>,
     parameters: Vec<TypeId>,
     results: Vec<TypeId>,
 }
@@ -300,6 +327,7 @@ struct HirCallableSignature {
 impl HirCallableSignature {
     fn from_function(function: &HirFunction) -> Self {
         Self {
+            type_parameters: function.type_parameters().to_vec(),
             parameters: function
                 .parameters()
                 .iter()
@@ -366,6 +394,7 @@ struct HirSchema {
     declared_methods: BTreeMap<MethodId, HirDeclaredMethod>,
     records: BTreeMap<SymbolId, HirAggregateSchema>,
     unions: BTreeMap<SymbolId, HirUnionSchema>,
+    enums: BTreeMap<SymbolId, (TypeId, BTreeMap<EnumCaseId, u32>)>,
     classes: BTreeMap<ClassId, HirClassSchema>,
     interfaces: BTreeMap<InterfaceId, HirInterfaceSchema>,
     interface_methods: BTreeMap<InterfaceMethodId, InterfaceId>,
@@ -385,6 +414,7 @@ impl HirSchema {
             declared_methods: BTreeMap::new(),
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
+            enums: BTreeMap::new(),
             classes: BTreeMap::new(),
             interfaces: BTreeMap::new(),
             interface_methods: BTreeMap::new(),
@@ -413,6 +443,7 @@ impl HirSchema {
             schema.function_references.insert(
                 reference.identity(),
                 HirCallableSignature {
+                    type_parameters: Vec::new(),
                     parameters: reference.parameters().to_vec(),
                     results: reference.results().to_vec(),
                 },
@@ -457,11 +488,10 @@ impl HirSchema {
                 );
             }
             HirDeclarationKind::Union(union) => {
-                if arena.get(union.type_id)
-                    != Some(&SemanticType::TaggedUnion {
-                        definition: declaration.symbol(),
-                    })
-                {
+                if !matches!(
+                    arena.get(union.type_id),
+                    Some(SemanticType::TaggedUnion { .. })
+                ) {
                     errors.push(HirVerificationError::InvalidDeclarationType {
                         symbol: declaration.symbol(),
                         type_id: union.type_id,
@@ -488,6 +518,30 @@ impl HirSchema {
                         cases,
                     },
                 );
+            }
+            HirDeclarationKind::Enum(enumeration) => {
+                if arena.get(enumeration.type_id)
+                    != Some(&SemanticType::Enum {
+                        definition: declaration.symbol(),
+                    })
+                {
+                    errors.push(HirVerificationError::InvalidDeclarationType {
+                        symbol: declaration.symbol(),
+                        type_id: enumeration.type_id,
+                        span: declaration.span(),
+                    });
+                }
+                let mut cases = BTreeMap::new();
+                for case in &enumeration.cases {
+                    if cases.insert(case.case, case.discriminant).is_some() {
+                        errors.push(HirVerificationError::DuplicateEnumCase {
+                            enumeration: declaration.symbol(),
+                            case: case.case,
+                        });
+                    }
+                }
+                self.enums
+                    .insert(declaration.symbol(), (enumeration.type_id, cases));
             }
             HirDeclarationKind::Class(class) => {
                 for field in &class.fields {
@@ -582,6 +636,7 @@ impl HirSchema {
                                 HirInterfaceMethodSchema {
                                     slot: method.slot,
                                     signature: HirCallableSignature {
+                                        type_parameters: Vec::new(),
                                         parameters: method
                                             .parameters
                                             .iter()
@@ -702,6 +757,7 @@ impl HirSchema {
                 class: class.class,
                 definition,
                 signature: HirCallableSignature {
+                    type_parameters: Vec::new(),
                     parameters,
                     results: method.results.clone(),
                 },
@@ -969,6 +1025,7 @@ fn verify_hir_callable_with_schema(
         bindings: BTreeSet::new(),
         nested_functions: BTreeSet::new(),
         cell_bindings,
+        loop_depth: 0,
         errors: Vec::new(),
     };
     for parameter in &function.parameters {
@@ -1019,6 +1076,7 @@ struct Verifier<'arena> {
     bindings: BTreeSet<BindingId>,
     nested_functions: BTreeSet<NestedFunctionId>,
     cell_bindings: BTreeSet<BindingId>,
+    loop_depth: u32,
     errors: Vec<HirVerificationError>,
 }
 
@@ -1057,6 +1115,46 @@ impl Verifier<'_> {
                     self.verify_expression(initializer, &initializer_visible);
                     self.verify_expression_type(*local_type, initializer);
                     visible.insert(*local);
+                }
+                HirStatementKind::MultipleLocal { bindings, value } => {
+                    self.verify_expression(value, &visible);
+                    let element_types = match self.arena.get(value.type_id()) {
+                        Some(SemanticType::Tuple(elements)) if elements.len() == bindings.len() => {
+                            Some(elements.clone())
+                        }
+                        _ => {
+                            self.errors.push(HirVerificationError::InvalidFixedPack {
+                                span: statement.span(),
+                            });
+                            None
+                        }
+                    };
+                    for (index, binding) in bindings.iter().enumerate() {
+                        self.verify_type(binding.local_type, binding.span);
+                        if element_types
+                            .as_ref()
+                            .and_then(|elements| elements.get(index))
+                            .is_some_and(|element| *element != binding.local_type)
+                        {
+                            self.errors.push(HirVerificationError::InvalidFixedPack {
+                                span: binding.span,
+                            });
+                        }
+                        if self
+                            .local_types
+                            .insert(binding.local, binding.local_type)
+                            .is_some()
+                        {
+                            self.errors
+                                .push(HirVerificationError::DuplicateLocal(binding.local));
+                        }
+                        self.local_bindings.insert(binding.local, binding.binding);
+                        if !self.bindings.insert(binding.binding) {
+                            self.errors
+                                .push(HirVerificationError::DuplicateBinding(binding.binding));
+                        }
+                    }
+                    visible.extend(bindings.iter().map(|binding| binding.local));
                 }
                 HirStatementKind::LocalSet { local, value } => {
                     self.verify_expression(value, &visible);
@@ -1116,10 +1214,14 @@ impl Verifier<'_> {
                 HirStatementKind::While { condition, body } => {
                     self.verify_expression(condition, &visible);
                     self.verify_condition(condition);
+                    self.loop_depth = self.loop_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
                 }
                 HirStatementKind::RepeatUntil { body, condition } => {
+                    self.loop_depth = self.loop_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
                     let mut condition_visible = visible.clone();
                     for nested in body {
                         if let HirStatementKind::Local { local, .. } = nested.kind() {
@@ -1128,6 +1230,54 @@ impl Verifier<'_> {
                     }
                     self.verify_expression(condition, &condition_visible);
                     self.verify_condition(condition);
+                }
+                HirStatementKind::NumericFor {
+                    binding,
+                    local,
+                    integer_type,
+                    first,
+                    last,
+                    step,
+                    body,
+                    ..
+                } => {
+                    self.verify_type(*integer_type, statement.span());
+                    if !matches!(
+                        self.arena.get(*integer_type),
+                        Some(SemanticType::Primitive(PrimitiveType::Integer(_)))
+                    ) {
+                        self.errors
+                            .push(HirVerificationError::InvalidNumericForType {
+                                type_id: *integer_type,
+                                span: statement.span(),
+                            });
+                    }
+                    for expression in [first, last, step] {
+                        self.verify_expression(expression, &visible);
+                        self.verify_expression_type(*integer_type, expression);
+                    }
+                    if self.local_types.insert(*local, *integer_type).is_some() {
+                        self.errors
+                            .push(HirVerificationError::DuplicateLocal(*local));
+                    }
+                    self.local_bindings.insert(*local, *binding);
+                    if !self.bindings.insert(*binding) {
+                        self.errors
+                            .push(HirVerificationError::DuplicateBinding(*binding));
+                    }
+                    let mut body_visible = visible.clone();
+                    body_visible.insert(*local);
+                    self.loop_depth = self.loop_depth.saturating_add(1);
+                    self.verify_statements(body, &body_visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
+                }
+                HirStatementKind::Break | HirStatementKind::Continue => {
+                    if self.loop_depth == 0 {
+                        self.errors
+                            .push(HirVerificationError::LoopControlOutsideLoop {
+                                span: statement.span(),
+                            });
+                    }
                 }
                 HirStatementKind::Match {
                     scrutinee,
@@ -1138,6 +1288,19 @@ impl Verifier<'_> {
                     self.verify_expression(base, &visible);
                     self.verify_expression(value, &visible);
                     self.verify_field_set(*field, base, value, statement.span());
+                }
+                HirStatementKind::CompoundFieldSet {
+                    base,
+                    field,
+                    value_type,
+                    operator,
+                    value,
+                } => {
+                    self.verify_expression(base, &visible);
+                    self.verify_expression(value, &visible);
+                    self.verify_expression_type(*value_type, value);
+                    self.verify_field_set(*field, base, value, statement.span());
+                    self.verify_compound_operator(*operator, *value_type, statement.span());
                 }
                 HirStatementKind::ArraySet {
                     array,
@@ -1150,9 +1313,72 @@ impl Verifier<'_> {
                         self.verify_expression_type(*element, value);
                     }
                 }
+                HirStatementKind::TableSet { table, key, value } => {
+                    self.verify_expression(table, &visible);
+                    self.verify_expression(key, &visible);
+                    self.verify_expression(value, &visible);
+                    if let Some(SemanticType::Table {
+                        key: key_type,
+                        value: value_type,
+                    }) = self.arena.get(table.type_id())
+                    {
+                        self.verify_expression_type(*key_type, key);
+                        self.verify_expression_type(*value_type, value);
+                    } else {
+                        self.errors
+                            .push(HirVerificationError::InvalidCollectionType {
+                                type_id: table.type_id(),
+                                span: statement.span(),
+                            });
+                    }
+                }
+                HirStatementKind::CompoundArraySet {
+                    array,
+                    index,
+                    element_type,
+                    operator,
+                    value,
+                } => {
+                    self.verify_array_get(array, index, &visible);
+                    self.verify_expression(value, &visible);
+                    self.verify_expression_type(*element_type, value);
+                    if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id())
+                        && *element != *element_type
+                    {
+                        self.errors
+                            .push(HirVerificationError::InvalidCollectionType {
+                                type_id: array.type_id(),
+                                span: statement.span(),
+                            });
+                    }
+                    self.verify_compound_operator(*operator, *element_type, statement.span());
+                }
+                HirStatementKind::MultipleAssignment { targets, value } => {
+                    let mut target_types = Vec::with_capacity(targets.len());
+                    for target in targets {
+                        target_types.push(self.verify_assignment_target(
+                            target,
+                            &visible,
+                            statement.span(),
+                        ));
+                    }
+                    self.verify_expression(value, &visible);
+                    match self.arena.get(value.type_id()) {
+                        Some(SemanticType::Tuple(elements))
+                            if elements.len() == target_types.len()
+                                && target_types
+                                    .iter()
+                                    .zip(elements)
+                                    .all(|(target, element)| target == &Some(*element)) => {}
+                        _ => self.errors.push(HirVerificationError::InvalidFixedPack {
+                            span: statement.span(),
+                        }),
+                    }
+                }
                 HirStatementKind::Call(call) => {
                     self.verify_call(
                         call.dispatch(),
+                        call.type_arguments(),
                         call.arguments(),
                         None,
                         call.span(),
@@ -1162,6 +1388,116 @@ impl Verifier<'_> {
                 HirStatementKind::Expression(expression) => {
                     self.verify_expression(expression, &visible);
                 }
+            }
+        }
+    }
+
+    fn verify_assignment_target(
+        &mut self,
+        target: &HirAssignmentTarget,
+        visible: &BTreeSet<LocalId>,
+        span: SourceSpan,
+    ) -> Option<TypeId> {
+        match target {
+            HirAssignmentTarget::Local {
+                local, value_type, ..
+            } => {
+                self.verify_type(*value_type, span);
+                if !visible.contains(local) {
+                    self.errors.push(HirVerificationError::UnknownLocal {
+                        local: *local,
+                        span,
+                    });
+                } else if self.local_types.get(local) != Some(value_type) {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*value_type)
+            }
+            HirAssignmentTarget::Capture {
+                capture,
+                value_type,
+                ..
+            } => {
+                self.verify_type(*value_type, span);
+                if self.capture_types.get(capture) != Some(value_type)
+                    || self.capture_modes.get(capture) != Some(&HirCaptureMode::Cell)
+                {
+                    self.errors.push(HirVerificationError::CaptureModeMismatch {
+                        capture: *capture,
+                        span,
+                    });
+                }
+                Some(*value_type)
+            }
+            HirAssignmentTarget::Field {
+                base,
+                field,
+                value_type,
+            } => {
+                self.verify_expression(base, visible);
+                self.verify_type(*value_type, span);
+                if let Some(declared) = self
+                    .schema
+                    .and_then(|schema| schema.fields.get(field))
+                    .cloned()
+                {
+                    self.verify_field_owner(*field, base, &declared, span);
+                    if declared.field_type != *value_type {
+                        self.errors
+                            .push(HirVerificationError::InvalidFixedPack { span });
+                    }
+                    if !declared.mutable {
+                        self.errors.push(HirVerificationError::ImmutableFieldSet {
+                            field: *field,
+                            span,
+                        });
+                    }
+                } else if self.schema.is_some() {
+                    self.errors.push(HirVerificationError::UnknownField {
+                        field: *field,
+                        span,
+                    });
+                }
+                Some(*value_type)
+            }
+            HirAssignmentTarget::Array {
+                array,
+                index,
+                element_type,
+            } => {
+                self.verify_array_get(array, index, visible);
+                self.verify_type(*element_type, span);
+                if !matches!(self.arena.get(array.type_id()), Some(SemanticType::Array(element)) if element == element_type)
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*element_type)
+            }
+            HirAssignmentTarget::Table {
+                table,
+                key,
+                value_type,
+            } => {
+                self.verify_expression(table, visible);
+                self.verify_expression(key, visible);
+                self.verify_type(*value_type, span);
+                if let Some(SemanticType::Table {
+                    key: key_type,
+                    value,
+                }) = self.arena.get(table.type_id())
+                {
+                    self.verify_expression_type(*key_type, key);
+                    if value != value_type {
+                        self.errors
+                            .push(HirVerificationError::InvalidFixedPack { span });
+                    }
+                } else {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*value_type)
             }
         }
     }
@@ -1214,8 +1550,92 @@ impl Verifier<'_> {
             | HirExpressionKind::UnionCase { .. } => {
                 self.verify_schema_expression(expression, visible);
             }
+            HirExpressionKind::EnumCase {
+                definition,
+                case,
+                discriminant,
+            } => {
+                if self.schema.is_none() {
+                    if self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Enum {
+                            definition: *definition,
+                        })
+                    {
+                        self.errors.push(HirVerificationError::InvalidType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                    }
+                    return;
+                }
+                let Some((expected_type, cases)) =
+                    self.schema.and_then(|schema| schema.enums.get(definition))
+                else {
+                    self.errors.push(HirVerificationError::UnknownEnumCase {
+                        enumeration: *definition,
+                        case: *case,
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                if cases.get(case) != Some(discriminant) || *expected_type != expression.type_id() {
+                    self.errors.push(HirVerificationError::UnknownEnumCase {
+                        enumeration: *definition,
+                        case: *case,
+                        span: expression.span(),
+                    });
+                }
+            }
             HirExpressionKind::ArrayGet { array, index } => {
                 self.verify_array_get(array, index, visible);
+            }
+            HirExpressionKind::TableGet { table, key } => {
+                self.verify_expression(table, visible);
+                self.verify_expression(key, visible);
+                let Some(SemanticType::Table {
+                    key: key_type,
+                    value: value_type,
+                }) = self.arena.get(table.type_id())
+                else {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: table.type_id(),
+                            span: table.span(),
+                        });
+                    return;
+                };
+                self.verify_expression_type(*key_type, key);
+                let nil = self.arena.source_type("nil");
+                let valid_result = matches!(
+                    self.arena.get(expression.type_id()),
+                    Some(SemanticType::Union(members))
+                        if members.len() == 2
+                            && members.contains(value_type)
+                            && nil.is_some_and(|nil| members.contains(&nil))
+                );
+                if !valid_result {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::TupleGet { tuple, index } => {
+                self.verify_expression(tuple, visible);
+                let Some(SemanticType::Tuple(elements)) = self.arena.get(tuple.type_id()) else {
+                    self.errors.push(HirVerificationError::InvalidFixedPack {
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                let Some(element) = elements.get(*index as usize) else {
+                    self.errors.push(HirVerificationError::InvalidFixedPack {
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                self.verify_expression_type(*element, expression);
             }
             HirExpressionKind::ArrayCreate {
                 length,
@@ -1299,12 +1719,26 @@ impl Verifier<'_> {
                 self.verify_expression(right, visible);
                 self.verify_binary_operator(expression, *operator, left, right);
             }
+            HirExpressionKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                self.verify_expression(condition, visible);
+                self.verify_condition(condition);
+                self.verify_expression(when_true, visible);
+                self.verify_expression(when_false, visible);
+                self.verify_expression_type(expression.type_id(), when_true);
+                self.verify_expression_type(expression.type_id(), when_false);
+            }
             HirExpressionKind::Call {
                 dispatch,
+                type_arguments,
                 arguments,
             } => {
                 self.verify_call(
                     dispatch,
+                    type_arguments,
                     arguments,
                     Some(expression.type_id()),
                     expression.span(),
@@ -1314,6 +1748,65 @@ impl Verifier<'_> {
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 self.verify_expression(value, visible);
                 self.verify_interface_upcast(*interface, value, expression);
+            }
+            HirExpressionKind::NumericConvert { value, conversion } => {
+                self.verify_expression(value, visible);
+                if !valid_numeric_conversion(
+                    *conversion,
+                    value.type_id(),
+                    expression.type_id(),
+                    self.arena,
+                ) {
+                    self.errors
+                        .push(HirVerificationError::InvalidNumericConversion {
+                            conversion: *conversion,
+                            source: value.type_id(),
+                            target: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::StringConcat { left, right } => {
+                self.verify_expression(left, visible);
+                self.verify_expression(right, visible);
+                let string = self.arena.source_type("String");
+                if string != Some(left.type_id())
+                    || string != Some(right.type_id())
+                    || string != Some(expression.type_id())
+                {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::StringFormat { kind, value } => {
+                self.verify_expression(value, visible);
+                let source_valid = match (kind, self.arena.get(value.type_id())) {
+                    (
+                        pop_types::StringFormatKind::Boolean,
+                        Some(SemanticType::Primitive(PrimitiveType::Boolean)),
+                    ) => true,
+                    (
+                        pop_types::StringFormatKind::Integer(expected),
+                        Some(SemanticType::Primitive(PrimitiveType::Integer(found))),
+                    ) => expected == found,
+                    (
+                        pop_types::StringFormatKind::Float(FloatKind::Float32),
+                        Some(SemanticType::Primitive(PrimitiveType::Float32)),
+                    )
+                    | (
+                        pop_types::StringFormatKind::Float(FloatKind::Float64),
+                        Some(SemanticType::Primitive(PrimitiveType::Float64)),
+                    ) => true,
+                    _ => false,
+                };
+                if !source_valid || self.arena.source_type("String") != Some(expression.type_id()) {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
             }
             HirExpressionKind::Integer(_) | HirExpressionKind::Float(_) => {
                 self.verify_numeric_literal(expression);
@@ -1487,6 +1980,7 @@ impl Verifier<'_> {
             &self.capture_modes,
         );
         let saved_cell_bindings = std::mem::replace(&mut self.cell_bindings, nested_cell_bindings);
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         for parameter in &closure.parameters {
             self.verify_type(parameter.type_id, parameter.span);
             if !self.bindings.insert(parameter.binding) {
@@ -1502,6 +1996,7 @@ impl Verifier<'_> {
         self.capture_bindings = saved_capture_bindings;
         self.capture_modes = saved_capture_modes;
         self.cell_bindings = saved_cell_bindings;
+        self.loop_depth = saved_loop_depth;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1817,6 +2312,36 @@ impl Verifier<'_> {
         }
     }
 
+    fn verify_compound_operator(
+        &mut self,
+        operator: pop_types::TypedCompoundOperator,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) {
+        let valid = match operator {
+            pop_types::TypedCompoundOperator::Add
+            | pop_types::TypedCompoundOperator::Subtract
+            | pop_types::TypedCompoundOperator::Multiply
+            | pop_types::TypedCompoundOperator::Divide => matches!(
+                self.arena.get(type_id),
+                Some(SemanticType::Primitive(
+                    PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64
+                ))
+            ),
+            pop_types::TypedCompoundOperator::Remainder => matches!(
+                self.arena.get(type_id),
+                Some(SemanticType::Primitive(PrimitiveType::Integer(_)))
+            ),
+            pop_types::TypedCompoundOperator::Concat => {
+                self.arena.source_type("String") == Some(type_id)
+            }
+        };
+        if !valid {
+            self.errors
+                .push(HirVerificationError::InvalidType { type_id, span });
+        }
+    }
+
     fn verify_numeric_literal(&mut self, expression: &HirExpression) {
         let matches = match expression.kind() {
             HirExpressionKind::Integer(value) => matches!(
@@ -1847,6 +2372,7 @@ impl Verifier<'_> {
     fn verify_call(
         &mut self,
         dispatch: &HirCallDispatch,
+        type_arguments: &[TypeId],
         arguments: &[HirExpression],
         result: Option<TypeId>,
         span: SourceSpan,
@@ -1858,6 +2384,7 @@ impl Verifier<'_> {
                     self.arena
                         .source_type("Int")
                         .map(|int| HirCallableSignature {
+                            type_parameters: Vec::new(),
                             parameters: vec![int],
                             results: Vec::new(),
                         })
@@ -1923,6 +2450,7 @@ impl Verifier<'_> {
                     let mut parameters = vec![receiver_type];
                     parameters.extend(method_schema.signature.parameters);
                     Some(HirCallableSignature {
+                        type_parameters: Vec::new(),
                         parameters,
                         results: method_schema.signature.results,
                     })
@@ -1947,6 +2475,7 @@ impl Verifier<'_> {
                 }) = self.arena.get(callee.type_id()).cloned()
                 {
                     Some(HirCallableSignature {
+                        type_parameters: Vec::new(),
                         parameters,
                         results,
                     })
@@ -1963,8 +2492,32 @@ impl Verifier<'_> {
             self.verify_expression(argument, visible);
         }
         if self.schema.is_some()
-            && let Some(signature) = signature
+            && let Some(mut signature) = signature
         {
+            if signature.type_parameters.len() == type_arguments.len() && !type_arguments.is_empty()
+            {
+                let substitutions = signature
+                    .type_parameters
+                    .iter()
+                    .zip(type_arguments)
+                    .filter_map(|(parameter, argument)| match self.arena.get(*parameter) {
+                        Some(SemanticType::TypeParameter(parameter)) => {
+                            Some((*parameter, *argument))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                signature.parameters = signature
+                    .parameters
+                    .iter()
+                    .filter_map(|type_id| self.arena.substitute_existing(*type_id, &substitutions))
+                    .collect();
+                signature.results = signature
+                    .results
+                    .iter()
+                    .filter_map(|type_id| self.arena.substitute_existing(*type_id, &substitutions))
+                    .collect();
+            }
             self.verify_call_signature(&signature, arguments, result, span);
         }
     }
@@ -2423,7 +2976,10 @@ fn valid_hir_binary_operator(
         TypedBinaryOperator::Equal | TypedBinaryOperator::NotEqual => {
             left == right && boolean == Some(result) && hir_supports_default_equality(arena, left)
         }
-        TypedBinaryOperator::LessThan | TypedBinaryOperator::GreaterThan => {
+        TypedBinaryOperator::LessThan
+        | TypedBinaryOperator::LessThanOrEqual
+        | TypedBinaryOperator::GreaterThan
+        | TypedBinaryOperator::GreaterThanOrEqual => {
             left == right && boolean == Some(result) && is_hir_numeric(arena, left)
         }
         TypedBinaryOperator::Add
@@ -2435,6 +2991,59 @@ fn valid_hir_binary_operator(
         TypedBinaryOperator::Remainder => {
             left == right && left == result && is_hir_integer(arena, left)
         }
+    }
+}
+
+fn valid_numeric_conversion(
+    conversion: NumericConversionKind,
+    source: TypeId,
+    target: TypeId,
+    arena: &TypeArena,
+) -> bool {
+    match conversion {
+        NumericConversionKind::IntegerToInteger {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            integer_kind(arena, source) == Some(source_kind)
+                && integer_kind(arena, target) == Some(target_kind)
+        }
+        NumericConversionKind::IntegerToFloat {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            integer_kind(arena, source) == Some(source_kind)
+                && float_kind(arena, target) == Some(target_kind)
+        }
+        NumericConversionKind::FloatToInteger {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            float_kind(arena, source) == Some(source_kind)
+                && integer_kind(arena, target) == Some(target_kind)
+        }
+        NumericConversionKind::FloatToFloat {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            float_kind(arena, source) == Some(source_kind)
+                && float_kind(arena, target) == Some(target_kind)
+        }
+    }
+}
+
+fn integer_kind(arena: &TypeArena, type_id: TypeId) -> Option<pop_types::IntegerKind> {
+    match arena.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Some(*kind),
+        _ => None,
+    }
+}
+
+fn float_kind(arena: &TypeArena, type_id: TypeId) -> Option<FloatKind> {
+    match arena.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => Some(FloatKind::Float32),
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => Some(FloatKind::Float64),
+        _ => None,
     }
 }
 
@@ -2467,7 +3076,8 @@ fn hir_supports_default_equality(arena: &TypeArena, type_id: TypeId) -> bool {
                 | PrimitiveType::Integer(_)
                 | PrimitiveType::String,
             )
-            | SemanticType::Class { .. },
+            | SemanticType::Class { .. }
+            | SemanticType::Enum { .. },
         ) => true,
         Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
             .iter()
@@ -2514,6 +3124,11 @@ fn collect_local_binding_map(
             HirStatementKind::Local { local, binding, .. } => {
                 local_bindings.insert(*local, *binding);
             }
+            HirStatementKind::MultipleLocal { bindings, .. } => {
+                for binding in bindings {
+                    local_bindings.insert(binding.local, binding.binding);
+                }
+            }
             HirStatementKind::If {
                 then_body,
                 else_body,
@@ -2523,6 +3138,15 @@ fn collect_local_binding_map(
                 collect_local_binding_map(else_body, local_bindings);
             }
             HirStatementKind::While { body, .. } | HirStatementKind::RepeatUntil { body, .. } => {
+                collect_local_binding_map(body, local_bindings);
+            }
+            HirStatementKind::NumericFor {
+                local,
+                binding,
+                body,
+                ..
+            } => {
+                local_bindings.insert(*local, *binding);
                 collect_local_binding_map(body, local_bindings);
             }
             HirStatementKind::Match { arms, .. } => {
@@ -2539,8 +3163,14 @@ fn collect_local_binding_map(
             | HirStatementKind::ParameterSet { .. }
             | HirStatementKind::CaptureSet { .. }
             | HirStatementKind::Return { .. }
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::FieldSet { .. }
+            | HirStatementKind::CompoundFieldSet { .. }
             | HirStatementKind::ArraySet { .. }
+            | HirStatementKind::TableSet { .. }
+            | HirStatementKind::CompoundArraySet { .. }
+            | HirStatementKind::MultipleAssignment { .. }
             | HirStatementKind::Call(_)
             | HirStatementKind::Expression(_) => {}
         }
@@ -2558,6 +3188,9 @@ fn collect_written_bindings(
         match statement.kind() {
             HirStatementKind::Local { initializer, .. } => {
                 collect_cell_captures(initializer, written);
+            }
+            HirStatementKind::MultipleLocal { value, .. } => {
+                collect_cell_captures(value, written);
             }
             HirStatementKind::LocalSet { local, value } => {
                 if let Some(binding) = local_bindings.get(local) {
@@ -2626,6 +3259,25 @@ fn collect_written_bindings(
                 );
                 collect_cell_captures(condition, written);
             }
+            HirStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => {
+                collect_cell_captures(first, written);
+                collect_cell_captures(last, written);
+                collect_cell_captures(step, written);
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
+            HirStatementKind::Break | HirStatementKind::Continue => {}
             HirStatementKind::Match {
                 scrutinee, arms, ..
             } => {
@@ -2644,6 +3296,10 @@ fn collect_written_bindings(
                 collect_cell_captures(base, written);
                 collect_cell_captures(value, written);
             }
+            HirStatementKind::CompoundFieldSet { base, value, .. } => {
+                collect_cell_captures(base, written);
+                collect_cell_captures(value, written);
+            }
             HirStatementKind::ArraySet {
                 array,
                 index,
@@ -2651,6 +3307,43 @@ fn collect_written_bindings(
             } => {
                 collect_cell_captures(array, written);
                 collect_cell_captures(index, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::TableSet { table, key, value } => {
+                collect_cell_captures(table, written);
+                collect_cell_captures(key, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                collect_cell_captures(array, written);
+                collect_cell_captures(index, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::MultipleAssignment { targets, value } => {
+                for target in targets {
+                    match target {
+                        HirAssignmentTarget::Local { binding, .. }
+                        | HirAssignmentTarget::Capture { binding, .. } => {
+                            written.insert(*binding);
+                        }
+                        HirAssignmentTarget::Field { base, .. } => {
+                            collect_cell_captures(base, written);
+                        }
+                        HirAssignmentTarget::Array { array, index, .. } => {
+                            collect_cell_captures(array, written);
+                            collect_cell_captures(index, written);
+                        }
+                        HirAssignmentTarget::Table { table, key, .. } => {
+                            collect_cell_captures(table, written);
+                            collect_cell_captures(key, written);
+                        }
+                    }
+                }
                 collect_cell_captures(value, written);
             }
             HirStatementKind::Call(call) => {
@@ -2678,10 +3371,15 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             }
         }
         HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
+        HirExpressionKind::TupleGet { tuple, .. } => collect_cell_captures(tuple, written),
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index } => {
             collect_cell_captures(array, written);
             collect_cell_captures(index, written);
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            collect_cell_captures(table, written);
+            collect_cell_captures(key, written);
         }
         HirExpressionKind::ArrayCreate {
             length,
@@ -2736,7 +3434,26 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             collect_cell_captures(left, written);
             collect_cell_captures(right, written);
         }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_cell_captures(condition, written);
+            collect_cell_captures(when_true, written);
+            collect_cell_captures(when_false, written);
+        }
+        HirExpressionKind::StringConcat { left, right } => {
+            collect_cell_captures(left, written);
+            collect_cell_captures(right, written);
+        }
+        HirExpressionKind::StringFormat { value, .. } => {
+            collect_cell_captures(value, written);
+        }
         HirExpressionKind::InterfaceUpcast { value, .. } => {
+            collect_cell_captures(value, written);
+        }
+        HirExpressionKind::NumericConvert { value, .. } => {
             collect_cell_captures(value, written);
         }
         HirExpressionKind::Integer(_)
@@ -2747,7 +3464,8 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Local(_)
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
-        | HirExpressionKind::Function(_) => {}
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::EnumCase { .. } => {}
     }
 }
 

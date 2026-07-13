@@ -84,6 +84,58 @@ fn tagged_union_cases_preserve_typed_payloads() {
 }
 
 #[test]
+fn records_and_unions_preserve_ordered_type_parameters() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/genericData.pop",
+        "namespace GenericData\n\
+         private record Pair<Left, Right>\n\
+             left: Left\n\
+             right: Right\n\
+         end\n\
+         private union Choice<Value>\n\
+             Some(value: Value)\n\
+             None\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    assert!(syntax.diagnostics().is_empty(), "structural syntax");
+    let record_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::RecordDeclaration)
+        .expect("record");
+    let union_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::UnionDeclaration)
+        .expect("union");
+    let record =
+        parse_record_declaration(&source, &syntax, record_node).expect("record declaration");
+    let union = parse_union_declaration(&source, &syntax, union_node).expect("union declaration");
+
+    assert_eq!(
+        record
+            .type_parameters()
+            .iter()
+            .map(pop_syntax::GenericParameterSyntax::name)
+            .collect::<Vec<_>>(),
+        ["Left", "Right"]
+    );
+    assert_eq!(
+        union
+            .type_parameters()
+            .iter()
+            .map(pop_syntax::GenericParameterSyntax::name)
+            .collect::<Vec<_>>(),
+        ["Value"]
+    );
+}
+
+#[test]
 fn malformed_record_fields_are_rejected_without_untyped_recovery() {
     let source = SourceFile::new(
         FileId::from_raw(0),

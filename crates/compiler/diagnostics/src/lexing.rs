@@ -26,3 +26,15 @@ pub fn unterminated_string(span: SourceSpan) -> Diagnostic {
         span,
     )
 }
+
+#[must_use]
+pub fn invalid_string_escape(span: SourceSpan) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP0007"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Syntax,
+        MessageKey::new("syntax.invalidStringEscape"),
+        Vec::new(),
+        span,
+    )
+}

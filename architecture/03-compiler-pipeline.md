@@ -96,7 +96,11 @@ sugar remains only when a named later HIR pass owns its desugaring.
 
 Representative HIR passes include:
 
-- desugaring compound assignment and typed iteration protocols;
+- retaining fixed-pack construction/projection and grouped multiple assignment
+  until MIR can preserve target-before-value evaluation and left-to-right stores;
+- retaining resolved compound assignment until MIR lowering can emit a typed
+  load-operation-store sequence;
+- desugaring typed iteration protocols;
 - materializing implicit numeric and subtype conversions;
 - resolving class construction and method dispatch;
 - closure capture analysis;

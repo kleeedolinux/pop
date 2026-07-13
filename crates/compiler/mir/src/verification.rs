@@ -119,6 +119,7 @@ struct DeclaredField {
 struct MirSchema<'mir> {
     records: BTreeMap<SymbolId, &'mir MirRecordDeclaration>,
     unions: BTreeMap<SymbolId, &'mir MirUnionDeclaration>,
+    enums: BTreeMap<SymbolId, &'mir MirEnumDeclaration>,
     classes: BTreeMap<ClassId, &'mir MirClassDeclaration>,
     interfaces: BTreeMap<InterfaceId, &'mir MirInterfaceDeclaration>,
     fields: BTreeMap<FieldId, DeclaredField>,
@@ -133,6 +134,7 @@ impl<'mir> MirSchema<'mir> {
         let mut schema = Self {
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
+            enums: BTreeMap::new(),
             classes: BTreeMap::new(),
             interfaces: BTreeMap::new(),
             fields: BTreeMap::new(),
@@ -156,11 +158,10 @@ impl<'mir> MirSchema<'mir> {
                     schema.collect_fields(record.type_id, &record.fields, false, errors);
                 }
                 MirDeclarationKind::Union(union) => {
-                    if arena.get(union.type_id)
-                        != Some(&SemanticType::TaggedUnion {
-                            definition: declaration.symbol,
-                        })
-                    {
+                    if !matches!(
+                        arena.get(union.type_id),
+                        Some(SemanticType::TaggedUnion { .. })
+                    ) {
                         errors.push(MirVerificationError::InvalidDeclarationType {
                             symbol: declaration.symbol,
                             type_id: union.type_id,
@@ -176,6 +177,19 @@ impl<'mir> MirSchema<'mir> {
                         }
                     }
                     schema.unions.insert(declaration.symbol, union);
+                }
+                MirDeclarationKind::Enum(enumeration) => {
+                    if arena.get(enumeration.type_id)
+                        != Some(&SemanticType::Enum {
+                            definition: declaration.symbol,
+                        })
+                    {
+                        errors.push(MirVerificationError::InvalidDeclarationType {
+                            symbol: declaration.symbol,
+                            type_id: enumeration.type_id,
+                        });
+                    }
+                    schema.enums.insert(declaration.symbol, enumeration);
                 }
                 MirDeclarationKind::Class(class) => {
                     if arena.get(class.type_id)
@@ -1230,9 +1244,77 @@ fn verify_instruction_types(
         return;
     }
     match instruction.kind() {
+        MirInstructionKind::StringConcat { left, right } => {
+            let Some(string) = arena.source_type("String") else {
+                return;
+            };
+            verify_operand_type(instruction.result(), *left, string, values, errors);
+            verify_operand_type(instruction.result(), *right, string, values, errors);
+            if instruction.result_type() != string {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::StringFormat { kind, value } => {
+            let expected = match kind {
+                pop_types::StringFormatKind::Boolean => arena.source_type("Boolean"),
+                pop_types::StringFormatKind::Integer(kind) => integer_type(arena, *kind),
+                pop_types::StringFormatKind::Float(kind) => float_type(arena, *kind),
+            };
+            if let Some(expected) = expected {
+                verify_operand_type(instruction.result(), *value, expected, values, errors);
+            }
+            if arena.source_type("String") != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::CompareEqual { left, right }
         | MirInstructionKind::CompareNotEqual { left, right } => {
             verify_equality_instruction(instruction, *left, *right, arena, values, errors);
+        }
+        MirInstructionKind::TupleMake(elements) => {
+            let Some(SemanticType::Tuple(element_types)) = arena.get(instruction.result_type())
+            else {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+                return;
+            };
+            if elements.len() != element_types.len() {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+                return;
+            }
+            for (element, expected) in elements.iter().zip(element_types) {
+                verify_operand_type(instruction.result(), *element, *expected, values, errors);
+            }
+        }
+        MirInstructionKind::TupleGet { tuple, index } => {
+            let Some(tuple_type) = values.get(tuple).copied() else {
+                return;
+            };
+            let Some(SemanticType::Tuple(element_types)) = arena.get(tuple_type) else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *tuple,
+                    found: tuple_type,
+                });
+                return;
+            };
+            if element_types.get(*index as usize) != Some(&instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
         }
         MirInstructionKind::ArrayMake { elements, .. } => {
             let Some(SemanticType::Array(element_type)) =
@@ -1292,6 +1374,63 @@ fn verify_instruction_types(
             for (entry_key, entry_value) in entries {
                 verify_operand_type(instruction.result(), *entry_key, key, values, errors);
                 verify_operand_type(instruction.result(), *entry_value, value, values, errors);
+            }
+        }
+        MirInstructionKind::TableGet { table, key } => {
+            let Some(table_type) = values.get(table).copied() else {
+                return;
+            };
+            let Some(SemanticType::Table {
+                key: key_type,
+                value: value_type,
+            }) = arena.get(table_type).cloned()
+            else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *table,
+                    found: table_type,
+                });
+                return;
+            };
+            verify_operand_type(instruction.result(), *key, key_type, values, errors);
+            if !is_optional_of(arena, instruction.result_type(), value_type) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map,
+            value_map,
+        } => {
+            let Some(table_type) = values.get(table).copied() else {
+                return;
+            };
+            let Some(SemanticType::Table {
+                key: key_type,
+                value: value_type,
+            }) = arena.get(table_type).cloned()
+            else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *table,
+                    found: table_type,
+                });
+                return;
+            };
+            verify_operand_type(instruction.result(), *key, key_type, values, errors);
+            verify_operand_type(instruction.result(), *value, value_type, values, errors);
+            if (*key_map, *value_map) != table_element_maps(arena, table_type)
+                || arena.source_type("nil") != Some(instruction.result_type())
+            {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
             }
         }
         MirInstructionKind::ArrayGet { array, index } => {
@@ -1480,8 +1619,58 @@ fn verify_numeric_instruction(
                 errors,
             );
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            integer_type(arena, *source),
+            integer_type(arena, *target),
+            values,
+            errors,
+        ),
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            integer_type(arena, *source),
+            float_type(arena, *target),
+            values,
+            errors,
+        ),
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            float_type(arena, *source),
+            integer_type(arena, *target),
+            values,
+            errors,
+        ),
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            float_type(arena, *source),
+            float_type(arena, *target),
+            values,
+            errors,
+        ),
         MirInstructionKind::CompareIntegerLess { kind, left, right }
-        | MirInstructionKind::CompareIntegerGreater { kind, left, right } => {
+        | MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right }
+        | MirInstructionKind::CompareIntegerGreater { kind, left, right }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => {
             verify_numeric_binary(
                 instruction,
                 (*left, *right),
@@ -1493,7 +1682,9 @@ fn verify_numeric_instruction(
             );
         }
         MirInstructionKind::CompareFloatLess { kind, left, right }
-        | MirInstructionKind::CompareFloatGreater { kind, left, right } => {
+        | MirInstructionKind::CompareFloatLessOrEqual { kind, left, right }
+        | MirInstructionKind::CompareFloatGreater { kind, left, right }
+        | MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => {
             verify_numeric_binary(
                 instruction,
                 (*left, *right),
@@ -1507,6 +1698,27 @@ fn verify_numeric_instruction(
         _ => return false,
     }
     true
+}
+
+fn verify_numeric_conversion(
+    instruction: &MirInstruction,
+    operand: ValueId,
+    source: Option<TypeId>,
+    target: Option<TypeId>,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let Some((source, target)) = source.zip(target) else {
+        if let Some(result_type) = instruction.optional_result_type() {
+            errors.push(MirVerificationError::InvalidInstructionType {
+                instruction: instruction.result(),
+                result_type,
+            });
+        }
+        return;
+    };
+    verify_operand_type(instruction.result(), operand, source, values, errors);
+    verify_numeric_result(instruction, Some(target), errors);
 }
 
 fn verify_numeric_binary(
@@ -1632,7 +1844,8 @@ fn mir_supports_default_equality(arena: &TypeArena, type_id: TypeId) -> bool {
                 | pop_types::PrimitiveType::Integer(_)
                 | pop_types::PrimitiveType::String,
             )
-            | SemanticType::Class { .. },
+            | SemanticType::Class { .. }
+            | SemanticType::Enum { .. },
         ) => true,
         Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
             .iter()
@@ -1652,6 +1865,24 @@ fn verify_schema_instruction(
     errors: &mut Vec<MirVerificationError>,
 ) -> bool {
     match instruction.kind() {
+        MirInstructionKind::EnumConstant {
+            definition,
+            case,
+            discriminant,
+        } => {
+            let valid = schema.enums.get(definition).is_some_and(|enumeration| {
+                enumeration.type_id == instruction.result_type()
+                    && enumeration.cases.iter().any(|candidate| {
+                        candidate.case == *case && candidate.discriminant == *discriminant
+                    })
+            });
+            if !valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::RecordMake { record, fields } => {
             let Some(declaration) = schema.records.get(record) else {
                 errors.push(MirVerificationError::UnknownRecord {
@@ -2315,6 +2546,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::GcSafePoint { .. } => Vec::new(),
         MirInstructionKind::TupleMake(values)
@@ -2339,6 +2571,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::UnionMake {
             arguments: values, ..
         } => values.clone(),
+        MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
         MirInstructionKind::ArrayCreate {
             length,
             initial_value,
@@ -2363,13 +2596,24 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareEqual { left, right }
         | MirInstructionKind::CompareNotEqual { left, right }
         | MirInstructionKind::CompareIntegerLess { left, right, .. }
+        | MirInstructionKind::CompareIntegerLessOrEqual { left, right, .. }
         | MirInstructionKind::CompareIntegerGreater { left, right, .. }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { left, right, .. }
         | MirInstructionKind::CompareFloatLess { left, right, .. }
-        | MirInstructionKind::CompareFloatGreater { left, right, .. } => vec![*left, *right],
+        | MirInstructionKind::CompareFloatLessOrEqual { left, right, .. }
+        | MirInstructionKind::CompareFloatGreater { left, right, .. }
+        | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. }
+        | MirInstructionKind::StringConcat { left, right } => vec![*left, *right],
         MirInstructionKind::BooleanNot { operand }
         | MirInstructionKind::IntegerNegate { operand, .. }
-        | MirInstructionKind::FloatNegate { operand, .. } => vec![*operand],
+        | MirInstructionKind::FloatNegate { operand, .. }
+        | MirInstructionKind::ConvertInteger { operand, .. }
+        | MirInstructionKind::ConvertIntegerToFloat { operand, .. }
+        | MirInstructionKind::ConvertFloatToInteger { operand, .. }
+        | MirInstructionKind::ConvertFloat { operand, .. }
+        | MirInstructionKind::StringFormat { value: operand, .. } => vec![*operand],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
+        MirInstructionKind::TableGet { table, key } => vec![*table, *key],
         MirInstructionKind::ArrayLength { array } => vec![*array],
         MirInstructionKind::ArrayGetChecked { array, index } => vec![*array, *index],
         MirInstructionKind::ArraySet {
@@ -2379,6 +2623,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             ..
         } => vec![*array, *index, *value],
         MirInstructionKind::ArrayFill { array, value, .. } => vec![*array, *value],
+        MirInstructionKind::TableSet {
+            table, key, value, ..
+        } => vec![*table, *key, *value],
         MirInstructionKind::RecordMake { fields, .. } => {
             fields.iter().map(|(_, value)| *value).collect()
         }

@@ -216,6 +216,15 @@ Minimum traceability matrix:
 | Decision | Owning components | Required proof |
 | --- | --- | --- |
 | Strong static typing | resolver, type checker, HIR/MIR | no dynamic fallback/opcode tests |
+| Typed string composition | lexer, type checker, HIR/MIR, runtime, backends | escape, closed formatting, effect, and cross-backend byte tests |
+| Numeric ranges and loop control | parser, type checker, HIR/MIR, backends | integer-kind, immutable binding, CFG target, safe-point, and differential tests |
+| Conditional expressions | parser, type checker, compile time, HIR/MIR, backends | Boolean/common-type, laziness, typed-join, and differential tests |
+| Compound assignment | parser, type checker, HIR/MIR, backends | exact operator/type, single-evaluation target, load-operation-store, and differential tests |
+| Fixed type packs and multiple assignment | parser, type checker, HIR/MIR, backends | exact arity/type, static tuple projection, target/value/store order, no dynamic variadics, and differential tests |
+| Typed table access and mutation | type checker, HIR/MIR, runtime, backends | exact key/value, optional missing lookup, insertion order, growth/barrier, and differential tests |
+| Evaluated runtime constants | front end, HIR/MIR, backends | exact type/value substitution, visibility, deterministic evaluation, and no runtime lookup/global tests |
+| Erased type aliases | syntax, resolver, type checker | target equivalence, visibility, chain/cycle, arity, and no-runtime-operation tests |
+| Nominal scalar enums | syntax, type checker, HIR/MIR, backends | identity/order, exact equality, invalid operators, text, differential, and fail-closed C tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |

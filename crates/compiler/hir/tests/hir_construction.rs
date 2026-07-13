@@ -461,8 +461,8 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
     assert!(matches!(
         initializer.kind(),
         HirExpressionKind::Array(elements)
-            if matches!(elements[0].kind(), HirExpressionKind::String(value) if value == "\"first\"")
-                && matches!(elements[1].kind(), HirExpressionKind::String(value) if value == "\"second\"")
+            if matches!(elements[0].kind(), HirExpressionKind::String(value) if value == "first")
+                && matches!(elements[1].kind(), HirExpressionKind::String(value) if value == "second")
     ));
     let HirStatementKind::Local { initializer, .. } = hir.body()[1].kind() else {
         panic!("table local");
@@ -470,7 +470,7 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
     assert!(matches!(
         initializer.kind(),
         HirExpressionKind::Table(entries)
-            if matches!(entries[0].key().kind(), HirExpressionKind::String(value) if value == "\"first\"")
+            if matches!(entries[0].key().kind(), HirExpressionKind::String(value) if value == "first")
                 && matches!(entries[1].value().kind(), HirExpressionKind::Integer(value) if value.to_string() == "2")
     ));
     assert!(matches!(
@@ -478,7 +478,7 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
         HirStatementKind::ArraySet { array, index, value }
             if matches!(array.kind(), HirExpressionKind::Local(_))
                 && matches!(index.kind(), HirExpressionKind::Integer(value) if value.to_string() == "2")
-                && matches!(value.kind(), HirExpressionKind::String(value) if value == "\"updated\"")
+                && matches!(value.kind(), HirExpressionKind::String(value) if value == "updated")
     ));
     let HirStatementKind::Local { initializer, .. } = hir.body()[3].kind() else {
         panic!("indexed local");

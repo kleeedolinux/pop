@@ -8,7 +8,7 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FunctionId, InterfaceId,
+    BindingId, BlockId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FunctionId, InterfaceId,
     InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
     SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
@@ -268,8 +268,45 @@ impl MirDeclaration {
 pub enum MirDeclarationKind {
     Record(MirRecordDeclaration),
     Union(MirUnionDeclaration),
+    Enum(MirEnumDeclaration),
     Class(MirClassDeclaration),
     Interface(MirInterfaceDeclaration),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirEnumDeclaration {
+    pub(crate) type_id: TypeId,
+    pub(crate) cases: Vec<MirEnumCase>,
+}
+
+impl MirEnumDeclaration {
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[MirEnumCase] {
+        &self.cases
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirEnumCase {
+    pub(crate) case: EnumCaseId,
+    pub(crate) discriminant: u32,
+}
+
+impl MirEnumCase {
+    #[must_use]
+    pub const fn case(self) -> EnumCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub const fn discriminant(self) -> u32 {
+        self.discriminant
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -746,10 +783,27 @@ pub enum MirInstructionKind {
     IntegerConstant(IntegerValue),
     FloatConstant(FloatValue),
     StringConstant(String),
+    StringConcat {
+        left: ValueId,
+        right: ValueId,
+    },
+    StringFormat {
+        kind: pop_types::StringFormatKind,
+        value: ValueId,
+    },
     BooleanConstant(bool),
     NilConstant,
+    EnumConstant {
+        definition: SymbolId,
+        case: EnumCaseId,
+        discriminant: u32,
+    },
     FunctionReference(SymbolId),
     TupleMake(Vec<ValueId>),
+    TupleGet {
+        tuple: ValueId,
+        index: u32,
+    },
     ArrayMake {
         elements: Vec<ValueId>,
         element_map: ArrayElementMap,
@@ -761,6 +815,17 @@ pub enum MirInstructionKind {
     },
     TableMake {
         entries: Vec<(ValueId, ValueId)>,
+        key_map: ArrayElementMap,
+        value_map: ArrayElementMap,
+    },
+    TableGet {
+        table: ValueId,
+        key: ValueId,
+    },
+    TableSet {
+        table: ValueId,
+        key: ValueId,
+        value: ValueId,
         key_map: ArrayElementMap,
         value_map: ArrayElementMap,
     },
@@ -842,6 +907,26 @@ pub enum MirInstructionKind {
         kind: FloatKind,
         operand: ValueId,
     },
+    ConvertInteger {
+        source: IntegerKind,
+        target: IntegerKind,
+        operand: ValueId,
+    },
+    ConvertIntegerToFloat {
+        source: IntegerKind,
+        target: FloatKind,
+        operand: ValueId,
+    },
+    ConvertFloatToInteger {
+        source: FloatKind,
+        target: IntegerKind,
+        operand: ValueId,
+    },
+    ConvertFloat {
+        source: FloatKind,
+        target: FloatKind,
+        operand: ValueId,
+    },
     BooleanAnd {
         left: ValueId,
         right: ValueId,
@@ -863,7 +948,17 @@ pub enum MirInstructionKind {
         left: ValueId,
         right: ValueId,
     },
+    CompareIntegerLessOrEqual {
+        kind: IntegerKind,
+        left: ValueId,
+        right: ValueId,
+    },
     CompareIntegerGreater {
+        kind: IntegerKind,
+        left: ValueId,
+        right: ValueId,
+    },
+    CompareIntegerGreaterOrEqual {
         kind: IntegerKind,
         left: ValueId,
         right: ValueId,
@@ -873,7 +968,17 @@ pub enum MirInstructionKind {
         left: ValueId,
         right: ValueId,
     },
+    CompareFloatLessOrEqual {
+        kind: FloatKind,
+        left: ValueId,
+        right: ValueId,
+    },
     CompareFloatGreater {
+        kind: FloatKind,
+        left: ValueId,
+        right: ValueId,
+    },
+    CompareFloatGreaterOrEqual {
         kind: FloatKind,
         left: ValueId,
         right: ValueId,
@@ -1059,6 +1164,16 @@ impl MirInstructionKind {
             Self::CheckedIntegerDivide { .. } | Self::CheckedIntegerRemainder { .. } => {
                 vec![TrapKind::IntegerOverflow, TrapKind::DivisionByZero]
             }
+            Self::ConvertInteger { source, target, .. }
+                if pop_types::NumericConversionKind::IntegerToInteger {
+                    source: *source,
+                    target: *target,
+                }
+                .may_trap() =>
+            {
+                vec![TrapKind::NumericConversion]
+            }
+            Self::ConvertFloatToInteger { .. } => vec![TrapKind::NumericConversion],
             _ => Vec::new(),
         }
     }
@@ -1109,6 +1224,11 @@ impl MirUnionSwitchArm {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirVerificationError {
+    GenericSpecializationBudgetExceeded {
+        limit: usize,
+    },
+    UnknownGenericTemplate(SymbolId),
+    InvalidGenericSpecialization(SymbolId),
     InvalidType(TypeId),
     DuplicateValue(ValueId),
     UnknownValue(ValueId),

@@ -2,9 +2,10 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
-    InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
-    SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FileId, FunctionId,
+    InterfaceId, InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan,
+    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
+    ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -14,11 +15,12 @@ use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
     MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
-    MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary, MirField,
-    MirFunction, MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
-    MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod,
-    MirNestedFunction, MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration,
-    MirUnionSwitchArm, MirUnwindAction, local_instruction_effects,
+    MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary,
+    MirEnumCase, MirEnumDeclaration, MirField, MirFunction, MirFunctionReference, MirInstruction,
+    MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation, MirInterfaceMethod,
+    MirInterfaceMethodImplementation, MirMethod, MirNestedFunction, MirRecordDeclaration,
+    MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
+    local_instruction_effects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +160,13 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             kind: MirDeclarationKind::Union(MirUnionDeclaration {
                 type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
                 cases: parse_union_cases(cases, number)?,
+            }),
+        }),
+        ["type.enum", symbol, type_id, "cases", cases] => Ok(MirDeclaration {
+            symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
+            kind: MirDeclarationKind::Enum(MirEnumDeclaration {
+                type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                cases: parse_enum_cases(cases, number)?,
             }),
         }),
         [
@@ -331,6 +340,23 @@ fn parse_union_cases(text: &str, line: usize) -> Result<Vec<MirUnionCase>, MirPa
             Ok(MirUnionCase {
                 case: UnionCaseId::from_raw(parse_hash(case, "case#", line)?),
                 parameters,
+            })
+        })
+        .collect()
+}
+
+fn parse_enum_cases(text: &str, line: usize) -> Result<Vec<MirEnumCase>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|case| {
+            let (case, discriminant) = case
+                .split_once('=')
+                .ok_or_else(|| error(line, "malformed declared enum case"))?;
+            Ok(MirEnumCase {
+                case: EnumCaseId::from_raw(parse_hash(case, "case#", line)?),
+                discriminant: parse_u32(discriminant, line)?,
             })
         })
         .collect()
@@ -665,8 +691,30 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             parse_prefixed(function, 's', line)?,
         )));
     }
+    if let Some(operands) = text.strip_prefix("string.concat ") {
+        let (left, right) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::StringConcat { left, right });
+    }
+    if let Some(rest) = text.strip_prefix("string.format ") {
+        let (kind, value) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "string format operation"))?;
+        return Ok(MirInstructionKind::StringFormat {
+            kind: parse_string_format_kind(kind, line)?,
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
     if let Some(values) = text.strip_prefix("tupleMake ") {
         return Ok(MirInstructionKind::TupleMake(parse_values(values, line)?));
+    }
+    if let Some(rest) = text.strip_prefix("tupleGet ") {
+        let (index, tuple) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "tuple projection"))?;
+        return Ok(MirInstructionKind::TupleGet {
+            tuple: ValueId::from_raw(parse_prefixed(tuple, 'v', line)?),
+            index: parse_u32(index, line)?,
+        });
     }
     if let Some(rest) = text.strip_prefix("arrayMake ") {
         let (element_map, values) = rest
@@ -697,6 +745,26 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             .ok_or_else(|| error(line, "table value allocation map"))?;
         return Ok(MirInstructionKind::TableMake {
             entries: parse_table_entries(entries, line)?,
+            key_map: parse_array_element_map(key_map, line)?,
+            value_map: parse_array_element_map(value_map, line)?,
+        });
+    }
+    if let Some(operands) = text.strip_prefix("tableGet ") {
+        let (table, key) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::TableGet { table, key });
+    }
+    if let Some(operands) = text.strip_prefix("tableSet ") {
+        let (key_map, rest) = operands
+            .split_once(' ')
+            .ok_or_else(|| error(line, "table set key map"))?;
+        let (value_map, operands) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "table set value map"))?;
+        let (table, key, value) = parse_three_values(operands, line)?;
+        return Ok(MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
             key_map: parse_array_element_map(key_map, line)?,
             value_map: parse_array_element_map(value_map, line)?,
         });
@@ -987,6 +1055,21 @@ fn parse_constant_operation(
     }
     if text == "const.nil" {
         return Ok(Some(MirInstructionKind::NilConstant));
+    }
+    if let Some(value) = text.strip_prefix("enum.case s") {
+        let components: Vec<_> = value.split_whitespace().collect();
+        if let [definition, case, discriminant] = components.as_slice() {
+            return Ok(Some(MirInstructionKind::EnumConstant {
+                definition: SymbolId::from_raw(parse_u32(definition, line)?),
+                case: EnumCaseId::from_raw(
+                    case.strip_prefix("ec")
+                        .ok_or_else(|| error(line, "enum case"))
+                        .and_then(|case| parse_u32(case, line))?,
+                ),
+                discriminant: parse_u32(discriminant, line)?,
+            }));
+        }
+        return Err(error(line, "malformed enum constant"));
     }
     Ok(None)
 }
@@ -1307,6 +1390,8 @@ fn parse_trap_kind(text: &str, line: usize) -> Result<TrapKind, MirParseError> {
     match text {
         "IntegerOverflow" => Ok(TrapKind::IntegerOverflow),
         "DivisionByZero" => Ok(TrapKind::DivisionByZero),
+        "NumericConversion" => Ok(TrapKind::NumericConversion),
+        "InvalidRangeStep" => Ok(TrapKind::InvalidRangeStep),
         "BoundsViolation" => Ok(TrapKind::BoundsViolation),
         "ImpossibleState" => Ok(TrapKind::ImpossibleState),
         _ => Err(error(line, "trap kind")),
@@ -1376,10 +1461,37 @@ fn parse_numeric_operation(
     text: &str,
     line: usize,
 ) -> Result<Option<MirInstructionKind>, MirParseError> {
-    if !(text.starts_with("integer.") || text.starts_with("float.")) {
+    if !(text.starts_with("integer.") || text.starts_with("float.") || text.starts_with("numeric."))
+    {
         return Ok(None);
     }
     let parts = text.split_whitespace().collect::<Vec<_>>();
+    if parts.len() == 4 && parts[0].starts_with("numeric.") {
+        let operand = ValueId::from_raw(parse_prefixed(parts[3], 'v', line)?);
+        return Ok(Some(match parts[0] {
+            "numeric.integerToInteger" => MirInstructionKind::ConvertInteger {
+                source: parse_integer_kind(parts[1], line)?,
+                target: parse_integer_kind(parts[2], line)?,
+                operand,
+            },
+            "numeric.integerToFloat" => MirInstructionKind::ConvertIntegerToFloat {
+                source: parse_integer_kind(parts[1], line)?,
+                target: parse_float_kind(parts[2], line)?,
+                operand,
+            },
+            "numeric.floatToInteger" => MirInstructionKind::ConvertFloatToInteger {
+                source: parse_float_kind(parts[1], line)?,
+                target: parse_integer_kind(parts[2], line)?,
+                operand,
+            },
+            "numeric.floatToFloat" => MirInstructionKind::ConvertFloat {
+                source: parse_float_kind(parts[1], line)?,
+                target: parse_float_kind(parts[2], line)?,
+                operand,
+            },
+            _ => return Err(error(line, "unknown numeric conversion")),
+        }));
+    }
     if parts.len() == 3 && matches!(parts[0], "integer.negate" | "float.negate") {
         let operand = ValueId::from_raw(parse_prefixed(parts[2], 'v', line)?);
         return Ok(Some(match parts[0] {
@@ -1430,7 +1542,17 @@ fn parse_numeric_operation(
             left,
             right,
         },
+        "integer.compareLessOrEqual" => MirInstructionKind::CompareIntegerLessOrEqual {
+            kind: parse_integer_kind(parts[1], line)?,
+            left,
+            right,
+        },
         "integer.compareGreater" => MirInstructionKind::CompareIntegerGreater {
+            kind: parse_integer_kind(parts[1], line)?,
+            left,
+            right,
+        },
+        "integer.compareGreaterOrEqual" => MirInstructionKind::CompareIntegerGreaterOrEqual {
             kind: parse_integer_kind(parts[1], line)?,
             left,
             right,
@@ -1460,7 +1582,17 @@ fn parse_numeric_operation(
             left,
             right,
         },
+        "float.compareLessOrEqual" => MirInstructionKind::CompareFloatLessOrEqual {
+            kind: parse_float_kind(parts[1], line)?,
+            left,
+            right,
+        },
         "float.compareGreater" => MirInstructionKind::CompareFloatGreater {
+            kind: parse_float_kind(parts[1], line)?,
+            left,
+            right,
+        },
+        "float.compareGreaterOrEqual" => MirInstructionKind::CompareFloatGreaterOrEqual {
             kind: parse_float_kind(parts[1], line)?,
             left,
             right,
@@ -1482,6 +1614,28 @@ fn parse_integer_kind(text: &str, line: usize) -> Result<IntegerKind, MirParseEr
         "UInt64" => Ok(IntegerKind::UInt64),
         _ => Err(error(line, "integer kind")),
     }
+}
+
+fn parse_string_format_kind(
+    text: &str,
+    line: usize,
+) -> Result<pop_types::StringFormatKind, MirParseError> {
+    if text == "Boolean" {
+        return Ok(pop_types::StringFormatKind::Boolean);
+    }
+    if let Some(kind) = text
+        .strip_prefix("Integer(")
+        .and_then(|kind| kind.strip_suffix(')'))
+    {
+        return parse_integer_kind(kind, line).map(pop_types::StringFormatKind::Integer);
+    }
+    if let Some(kind) = text
+        .strip_prefix("Float(")
+        .and_then(|kind| kind.strip_suffix(')'))
+    {
+        return parse_float_kind(kind, line).map(pop_types::StringFormatKind::Float);
+    }
+    Err(error(line, "string format kind"))
 }
 
 fn parse_float_kind(text: &str, line: usize) -> Result<FloatKind, MirParseError> {

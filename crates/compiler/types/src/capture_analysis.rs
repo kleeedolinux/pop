@@ -21,6 +21,9 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
         TypedStatementKind::Local { initializer, .. } => {
             finalize_expression_captures(initializer, written);
         }
+        TypedStatementKind::MultipleLocal { value, .. } => {
+            finalize_expression_captures(value, written);
+        }
         TypedStatementKind::LocalSet { value, .. }
         | TypedStatementKind::ParameterSet { value, .. }
         | TypedStatementKind::CaptureSet { value, .. }
@@ -52,6 +55,21 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
             }
             finalize_expression_captures(condition, written);
         }
+        TypedStatementKind::NumericFor {
+            first,
+            last,
+            step,
+            body,
+            ..
+        } => {
+            finalize_expression_captures(first, written);
+            finalize_expression_captures(last, written);
+            finalize_expression_captures(step, written);
+            for statement in body {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedStatementKind::Break | TypedStatementKind::Continue => {}
         TypedStatementKind::Match {
             scrutinee, arms, ..
         } => {
@@ -66,6 +84,10 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
             finalize_expression_captures(base, written);
             finalize_expression_captures(value, written);
         }
+        TypedStatementKind::CompoundFieldSet { base, value, .. } => {
+            finalize_expression_captures(base, written);
+            finalize_expression_captures(value, written);
+        }
         TypedStatementKind::ArraySet {
             array,
             index,
@@ -73,6 +95,41 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
         } => {
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedStatementKind::TableSet { table, key, value } => {
+            finalize_expression_captures(table, written);
+            finalize_expression_captures(key, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedStatementKind::CompoundArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            finalize_expression_captures(array, written);
+            finalize_expression_captures(index, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedStatementKind::MultipleAssignment { targets, value } => {
+            for target in targets {
+                match target {
+                    TypedAssignmentTarget::Local { .. } | TypedAssignmentTarget::Capture { .. } => {
+                    }
+                    TypedAssignmentTarget::Field { base, .. } => {
+                        finalize_expression_captures(base, written);
+                    }
+                    TypedAssignmentTarget::Array { array, index, .. } => {
+                        finalize_expression_captures(array, written);
+                        finalize_expression_captures(index, written);
+                    }
+                    TypedAssignmentTarget::Table { table, key, .. } => {
+                        finalize_expression_captures(table, written);
+                        finalize_expression_captures(key, written);
+                    }
+                }
+            }
             finalize_expression_captures(value, written);
         }
         TypedStatementKind::Call(call) => finalize_call_captures(call, written),
@@ -112,7 +169,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
-        | TypedExpressionKind::Function(_) => {}
+        | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::EnumCase { .. } => {}
         TypedExpressionKind::Closure(closure) => {
             for capture in &mut closure.captures {
                 capture.mode = if written.contains(&capture.binding) {
@@ -134,6 +192,13 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::ArrayGetChecked { array, index } => {
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);
+        }
+        TypedExpressionKind::TableGet { table, key } => {
+            finalize_expression_captures(table, written);
+            finalize_expression_captures(key, written);
+        }
+        TypedExpressionKind::TupleGet { tuple, .. } => {
+            finalize_expression_captures(tuple, written);
         }
         TypedExpressionKind::ArrayCreate {
             length,
@@ -181,6 +246,22 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
         }
+        TypedExpressionKind::StringConcat { left, right } => {
+            finalize_expression_captures(left, written);
+            finalize_expression_captures(right, written);
+        }
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            finalize_expression_captures(condition, written);
+            finalize_expression_captures(when_true, written);
+            finalize_expression_captures(when_false, written);
+        }
+        TypedExpressionKind::StringFormat { value, .. } => {
+            finalize_expression_captures(value, written);
+        }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             finalize_expression_captures(callee, written);
             for argument in arguments {
@@ -210,6 +291,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             }
         }
         TypedExpressionKind::InterfaceUpcast { value, .. } => {
+            finalize_expression_captures(value, written);
+        }
+        TypedExpressionKind::NumericConvert { value, .. } => {
             finalize_expression_captures(value, written);
         }
     }

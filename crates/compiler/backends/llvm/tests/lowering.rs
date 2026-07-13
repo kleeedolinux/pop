@@ -4,6 +4,7 @@ use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{lower_hir_bubble, parse_mir_dump};
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
+use std::fmt::Write as _;
 use std::fs;
 use std::process::{Command, Output};
 
@@ -60,6 +61,237 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
         !text.contains("pop_rt_semantic"),
         "runtime operations must use closed PLRI identities"
     );
+}
+
+#[test]
+fn nominal_enum_constants_and_equality_lower_to_i32() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/enum.pop",
+        "namespace Main\n\
+         private enum Color\n\
+             Red\n\
+             Blue\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             if Color.Red == Color.Red then\n\
+                 return 7\n\
+             end\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("add i32 0, 0"), "{text}");
+    assert!(text.contains("icmp eq i32"), "{text}");
+    let result = link_with_runtime_and_run(&module, "enum");
+    assert_eq!(result.status.code(), Some(7), "{text}");
+}
+
+#[test]
+fn specialized_generic_data_and_calls_execute_natively() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function identity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = identity<<T>>(value) }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("specialized MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+
+    let result = link_with_runtime_and_run(&module, "generics");
+    assert_eq!(result.status.code(), Some(7), "{}", module);
+}
+
+#[test]
+fn specialized_generic_data_lowers_to_concrete_native_ir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = value }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("concrete MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+    assert!(text.contains("pop_rt_allocate_mapped_object"));
+    assert!(text.contains("pop_rt_field_set"));
+    assert!(text.contains("switch i64"));
+    let input = std::env::temp_dir().join("pop-backend-llvm-generics.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-generics.bc");
+    fs::write(&input, text).expect("write generic LLVM input");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected specialized generic IR: {}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+#[test]
+fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/fixedPack.pop",
+        "namespace Main\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             local left, right = split(10)\n\
+             local result = split(10)\n\
+             left, right = right, left\n\
+             return result[1] + result[2]\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[1].symbol()),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+    assert!(
+        text.contains("call i64 @pop_rt_allocate_mapped_object"),
+        "{text}"
+    );
+    assert!(text.contains("@pop_rt_field_get"), "{text}");
+
+    let result = link_with_runtime_and_run(&module, "fixed-pack");
+    assert_eq!(result.status.code(), Some(21), "{}", module);
 }
 
 #[test]
@@ -322,6 +554,37 @@ end\n",
         result.status.code(),
         Some(42),
         "native executable misexecuted repeat-until control flow: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_numeric_ranges_break_and_continue() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(arguments: Array<String>): Int\n\
+    local total = 0\n\
+    for index = 1, 6 do\n\
+        if index == 2 then\n\
+            continue\n\
+        end\n\
+        if index == 5 then\n\
+            break\n\
+        end\n\
+        total = total + index\n\
+    end\n\
+    for reverse = 3, 1, -1 do\n\
+        total = total + reverse\n\
+    end\n\
+    return total\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "numeric-for-range");
+    assert_eq!(
+        result.status.code(),
+        Some(14),
+        "native executable misexecuted numeric ranges: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
     );
@@ -938,6 +1201,9 @@ public class Box\n\
         return not self.enabled and self.small == 9 and self.single > minimumSingle and self.wide > minimumWide\n\
     end\n\
 end\n\
+private function lookup(scores: {[String]: Float32}, key: String): Float32?\n\
+    return scores[key]\n\
+end\n\
 private function aggregates(): Boolean\n\
     local zeroSingle: Float32 = 0\n\
     local minimumWide: Float64 = 1\n\
@@ -945,6 +1211,7 @@ private function aggregates(): Boolean\n\
     local flags: {Boolean} = { true, false }\n\
     local singles: {Float32} = { 1, 3 }\n\
     local scores: {[String]: Float32} = { first = 1, second = 3 }\n\
+    scores[\"third\"] = 5\n\
     local box = Box.new()\n\
     box:mutate()\n\
     return settings.enabled and settings.small == 7 and settings.single > zeroSingle and settings.wide > minimumWide and box:isValid()\n\
@@ -961,6 +1228,10 @@ end\n",
     assert!(
         text.contains("call i64 @pop_rt_allocate_table(i64 2, i1 1, i1 0)"),
         "typed tables must use specialized managed-key/scalar-value storage: {text}"
+    );
+    assert!(
+        text.contains("@pop_rt_table_set") && text.contains("@pop_rt_table_get"),
+        "typed table access and mutation must use the closed table ABI: {text}"
     );
     let result = link_with_runtime_and_run(&module, "scalar-aggregate-storage");
     assert_eq!(
@@ -995,6 +1266,205 @@ fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
         LlvmLoweringOptions::default().with_entry_point(entry),
     )
     .expect("LLVM lowering")
+}
+
+#[test]
+fn checked_numeric_conversions_and_ordered_comparisons_execute_natively() {
+    let module = native_module(
+        "namespace Main\n\
+         private function main(): Int\n\
+             local wide: Float64 = Float64(41) + 0.75\n\
+             local converted: Int = Int(wide)\n\
+             if wide >= 41.75 and wide <= 41.75 then\n\
+                 return converted + 1\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("sitofp i64"));
+    assert!(text.contains("fptosi double"));
+    assert!(text.contains("fcmp oge double"));
+    assert!(text.contains("fcmp ole double"));
+    let result = link_with_runtime_and_run(&module, "numeric-conversions");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native numeric conversion program failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn typed_string_composition_and_formatting_execute_natively() {
+    // ADR 0041: retain runtime operations by formatting parameters in a
+    // separate function, then compare the exact UTF-8 bytes natively.
+    let module = native_module(
+        "namespace Main\n\
+         private function describe(count: Int8, ratio: Float32, enabled: Boolean): String\n\
+             return `Pop 🫧 {count} {ratio} {enabled}` .. \"!\"\n\
+         end\n\
+         private function main(): Int\n\
+             if describe(-12, 1.5, true) == \"Pop 🫧 -12 1.5 true!\" then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("@pop_rt_string_concat"));
+    assert!(text.contains("@pop_rt_string_format"));
+    let result = link_with_runtime_and_run(&module, "string-composition");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native string composition failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn conditional_expressions_and_elseif_execute_lazily_natively() {
+    let module = native_module(
+        "namespace Main\n\
+         private function fail(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         private function main(): Int\n\
+             local first = if true then 40 else fail()\n\
+             local second = if false then fail() else 1\n\
+             if false then\n\
+                 return fail()\n\
+             elseif first == 40 then\n\
+                 return first + second + 1\n\
+             else\n\
+                 return fail()\n\
+             end\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("br i1"), "{text}");
+    let result = link_with_runtime_and_run(&module, "conditional-expression");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native conditional expression failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn compound_assignment_preserves_single_evaluation_natively() {
+    let module = native_module(
+        "namespace Main\n\
+         public class State\n\
+             public log: Int = 0\n\
+         end\n\
+         public class Box\n\
+             public value: Int = 10\n\
+         end\n\
+         private function fieldRight(state: State, box: Box): Int\n\
+             state.log = state.log * 10 + 2\n\
+             box.value = 20\n\
+             return 5\n\
+         end\n\
+         private function selectArray(state: State, values: {Int}): {Int}\n\
+             state.log = state.log * 10 + 3\n\
+             return values\n\
+         end\n\
+         private function selectIndex(state: State): Int\n\
+             state.log = state.log * 10 + 4\n\
+             return 1\n\
+         end\n\
+         private function arrayRight(state: State): Int\n\
+             state.log = state.log * 10 + 5\n\
+             return 4\n\
+         end\n\
+         private function main(): Int\n\
+             local state = State {}\n\
+             local box = Box {}\n\
+             local values: {Int} = { 2 }\n\
+             box.value += fieldRight(state, box)\n\
+             selectArray(state, values)[selectIndex(state)] *= arrayRight(state)\n\
+             if state.log == 2345 and box.value == 15 and Array.get(values, 1) == 8 then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "compound-assignment");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native compound assignment failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn invalid_numeric_conversion_traps_before_native_float_to_integer_lowering() {
+    let module = native_module(
+        "namespace Main\n\
+         private function main(): Int\n\
+             local invalid: Byte = Byte(256.0)\n\
+             return Int(invalid)\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("call double @llvm.trunc.f64"));
+    assert!(text.contains("call void @pop_rt_trap()"));
+    assert!(text.contains("fptoui double"));
+    let result = link_with_runtime_and_run(&module, "numeric-conversion-trap");
+    assert!(
+        !result.status.success(),
+        "invalid conversion must trap\n{module}"
+    );
+}
+
+#[test]
+fn every_numeric_conversion_family_emits_valid_llvm() {
+    let module = native_module(&numeric_conversion_matrix_source());
+    let input = std::env::temp_dir().join("pop-backend-llvm-numeric-conversion-matrix.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-numeric-conversion-matrix.bc");
+    fs::write(&input, module.to_string()).expect("write numeric conversion LLVM");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected numeric conversion matrix: {}\n{}",
+        String::from_utf8_lossy(&assembled.stderr),
+        module
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+fn numeric_conversion_matrix_source() -> String {
+    const INTEGERS: [&str; 8] = [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+    ];
+    const FLOATS: [&str; 2] = ["Float32", "Float64"];
+    let mut source = String::from("namespace Main\n");
+    for source_type in INTEGERS.into_iter().chain(FLOATS) {
+        for target_type in INTEGERS.into_iter().chain(FLOATS) {
+            let name = format!("convert{source_type}To{target_type}");
+            writeln!(
+                source,
+                "private function {name}(value: {source_type}): {target_type}\n    return {target_type}(value)\nend"
+            )
+            .expect("source text");
+        }
+    }
+    source.push_str("private function main(): Int\n    return 0\nend\n");
+    source
 }
 
 fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {

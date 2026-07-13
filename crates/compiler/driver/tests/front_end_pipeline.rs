@@ -5,6 +5,220 @@ use pop_mir::lower_hir_bubble;
 use pop_source::SourceFile;
 
 #[test]
+fn explicit_generic_functions_records_and_unions_reach_concrete_mir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function identity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = identity<<T>>(value) }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         public function run(): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("verified HIR");
+    assert!(
+        hir.functions().iter().any(|function| {
+            function.name() == "boxed" && !function.type_parameters().is_empty()
+        })
+    );
+    let run = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run HIR");
+    let HirStatementKind::Local { initializer, .. } = run.body()[0].kind() else {
+        panic!("generic call initializer");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::Call { type_arguments, .. } if !type_arguments.is_empty()
+    ));
+    let mir = lower_hir_bubble(hir, result.types()).expect("concrete specialized MIR");
+    assert!(!mir.dump().contains("type-parameter"));
+    assert_eq!(
+        mir.functions().len(),
+        4,
+        "each concrete instance is emitted once"
+    );
+    assert!(mir.functions().iter().all(|function| {
+        function
+            .parameters()
+            .iter()
+            .chain(function.results())
+            .all(|type_id| !result.types().contains_type_parameter(*type_id))
+    }));
+}
+
+#[test]
+fn generic_calls_and_data_require_exact_static_type_arguments() {
+    for source_text in [
+        "namespace Main\nprivate function identity<T>(value: T): T\n    return value\nend\npublic function run(): Int\n    return identity(1)\nend\n",
+        "namespace Main\nprivate function identity<T>(value: T): T\n    return value\nend\npublic function run(): Int\n    return identity<<Int, String>>(1)\nend\n",
+        "namespace Main\nprivate record Box<T>\n    value: T\nend\npublic function run(value: Box<Int, String>): Int\n    return 0\nend\n",
+        "namespace Main\nprivate union Choice<T>\n    Value(value: T)\nend\npublic function run(): Choice<Int>\n    return Choice.Value<<Int>>(\"wrong\")\nend\n",
+    ] {
+        let source = SourceFile::new(FileId::from_raw(0), "src/invalidGeneric.pop", source_text)
+            .expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+
+        assert!(
+            result.hir().is_none(),
+            "invalid generic program reached HIR"
+        );
+        assert!(!result.diagnostics().is_empty());
+    }
+}
+
+#[test]
+fn erased_type_aliases_work_in_runtime_signatures_and_bodies() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+         private type Score = Int\n\
+         private type Scores = {Score}\n\
+         public function increment(score: Score): Score\n\
+             local values: Scores = { score }\n\
+             return Array.get(values, 1) + 1\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("verified HIR"), result.types())
+        .expect("verified MIR");
+    assert!(!mir.dump().contains("Score"));
+}
+
+#[test]
+fn type_alias_cycles_and_type_arguments_are_rejected() {
+    for source_text in [
+        "namespace Main\nprivate type First = Second\nprivate type Second = First\npublic function value(input: First): Int\n    return 0\nend\n",
+        "namespace Main\nprivate type Score = Int\npublic function value(input: Score<String>): Int\n    return 0\nend\n",
+    ] {
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+
+        assert!(result.hir().is_none());
+        assert!(!result.diagnostics().is_empty());
+    }
+}
+
+#[test]
+fn nominal_enum_cases_reach_verified_runtime_ir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+         public enum Color\n\
+             Red\n\
+             Blue\n\
+         end\n\
+         public function isRed(color: Color): Boolean\n\
+             return color == Color.Red\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("verified HIR"), result.types())
+        .expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("enum.case"));
+    assert_eq!(
+        pop_mir::parse_mir_dump(&dump)
+            .expect("enum MIR text")
+            .dump(),
+        dump
+    );
+}
+
+#[test]
+fn enums_reject_unknown_cases_cross_type_equality_and_arithmetic() {
+    for source_text in [
+        "namespace Main\nprivate enum Color\n    Red\nend\npublic function invalid(): Color\n    return Color.Blue\nend\n",
+        "namespace Main\nprivate enum Color\n    Red\nend\nprivate enum State\n    Ready\nend\npublic function invalid(): Boolean\n    return Color.Red == State.Ready\nend\n",
+        "namespace Main\nprivate enum Color\n    Red\nend\npublic function invalid(): Color\n    return Color.Red + Color.Red\nend\n",
+    ] {
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+        assert!(result.hir().is_none(), "{source_text}");
+        assert!(!result.diagnostics().is_empty(), "{source_text}");
+    }
+}
+
+#[test]
 fn multi_module_bubble_reaches_verified_typed_hir() {
     let models = SourceFile::new(
         FileId::from_raw(0),
@@ -493,6 +707,37 @@ fn assignment_rejects_immutable_targets_and_wrong_value_types() {
             result.diagnostic_snapshot()
         );
     }
+}
+
+#[test]
+fn compound_field_and_array_targets_remain_explicit_in_verified_hir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/compound.pop",
+        "namespace Main\n\
+         public class Counter\n\
+             public value: Int = 0\n\
+         end\n\
+         public function update(counter: Counter, values: {Int})\n\
+             counter.value += 2\n\
+             values[1] *= 3\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let dump = result.hir().expect("verified HIR").dump(result.types());
+    assert!(dump.contains("compound.fieldSet Add"), "{dump}");
+    assert!(dump.contains("compound.arraySet Multiply"), "{dump}");
 }
 
 #[test]

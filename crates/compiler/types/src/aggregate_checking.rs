@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
 use pop_foundation::{SourceSpan, TypeId};
 use pop_resolve::SymbolSpace;
-use pop_syntax::{ExpressionSyntax, FieldInitializerSyntax};
+use pop_syntax::{ExpressionSyntax, ExpressionSyntaxKind, FieldInitializerSyntax};
 
 use crate::SemanticType;
 use crate::body_checking::{
@@ -249,30 +249,111 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         index: &ExpressionSyntax,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
-        let array = self.check_expression(base)?;
-        let Some(SemanticType::Array(element_type)) =
-            self.resolver.arena().get(array.type_id()).cloned()
-        else {
-            self.diagnostics.push(type_diagnostics::invalid_operator(
-                span,
-                "[]",
-                self.type_name(array.type_id()),
-            ));
-            return None;
-        };
-        let index_type = self.resolver.arena().source_type("Int")?;
-        let typed_index =
-            self.check_expression_expected(index, Some(ExpectedExpressionType::plain(index_type)))?;
-        self.require_same_type(index_type, typed_index.type_id(), typed_index.span(), span);
-        let result_type = self.resolver.arena_mut().optional(element_type).ok()?;
-        self.diagnostics.is_empty().then_some(TypedExpression {
-            kind: TypedExpressionKind::ArrayGet {
-                array: Box::new(array),
-                index: Box::new(typed_index),
-            },
-            type_id: result_type,
-            span,
-        })
+        let base = self.check_expression(base)?;
+        match self.resolver.arena().get(base.type_id()).cloned() {
+            Some(SemanticType::Array(element_type)) => {
+                let index_type = self.resolver.arena().source_type("Int")?;
+                let typed_index = self.check_expression_expected(
+                    index,
+                    Some(ExpectedExpressionType::plain(index_type)),
+                )?;
+                self.require_same_type(index_type, typed_index.type_id(), typed_index.span(), span);
+                let result_type = self.resolver.arena_mut().optional(element_type).ok()?;
+                self.diagnostics.is_empty().then_some(TypedExpression {
+                    kind: TypedExpressionKind::ArrayGet {
+                        array: Box::new(base),
+                        index: Box::new(typed_index),
+                    },
+                    type_id: result_type,
+                    span,
+                })
+            }
+            Some(SemanticType::Tuple(elements)) => {
+                let ExpressionSyntaxKind::Integer(spelling) = index.kind() else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        index.span(),
+                        "tuple index",
+                        "non-literal index",
+                    ));
+                    return None;
+                };
+                let normalized = spelling.replace('_', "");
+                let Ok(one_based) = normalized.parse::<usize>() else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        index.span(),
+                        "tuple index",
+                        "invalid integer literal",
+                    ));
+                    return None;
+                };
+                let Some(zero_based) = one_based.checked_sub(1) else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        index.span(),
+                        "tuple index",
+                        "index zero",
+                    ));
+                    return None;
+                };
+                let Some(element_type) = elements.get(zero_based).copied() else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        index.span(),
+                        "tuple index",
+                        "index outside tuple arity",
+                    ));
+                    return None;
+                };
+                let index = u32::try_from(zero_based).ok()?;
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::TupleGet {
+                        tuple: Box::new(base),
+                        index,
+                    },
+                    type_id: element_type,
+                    span,
+                })
+            }
+            Some(SemanticType::Table { key, value }) => {
+                if !self.is_supported_table_key(key) {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        index.span(),
+                        "table index",
+                        self.type_name(key),
+                    ));
+                    return None;
+                }
+                let typed_key = self
+                    .check_expression_expected(index, Some(ExpectedExpressionType::plain(key)))?;
+                self.require_same_type(key, typed_key.type_id(), typed_key.span(), span);
+                let result_type = self.resolver.arena_mut().optional(value).ok()?;
+                self.diagnostics.is_empty().then_some(TypedExpression {
+                    kind: TypedExpressionKind::TableGet {
+                        table: Box::new(base),
+                        key: Box::new(typed_key),
+                    },
+                    type_id: result_type,
+                    span,
+                })
+            }
+            _ => {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "[]",
+                    self.type_name(base.type_id()),
+                ));
+                None
+            }
+        }
+    }
+
+    fn is_supported_table_key(&self, type_id: TypeId) -> bool {
+        matches!(
+            self.resolver.arena().get(type_id),
+            Some(SemanticType::Primitive(
+                crate::PrimitiveType::Boolean
+                    | crate::PrimitiveType::Integer(_)
+                    | crate::PrimitiveType::String
+            ))
+        )
     }
 
     pub(crate) fn check_aggregate_literal(
@@ -334,7 +415,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let mut entries = Vec::with_capacity(fields.len());
         for field in fields {
             let key = TypedExpression {
-                kind: TypedExpressionKind::String(format!("\"{}\"", field.name())),
+                kind: TypedExpressionKind::String(field.name().to_owned()),
                 type_id: string_type,
                 span: field.span(),
             };

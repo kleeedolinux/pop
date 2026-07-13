@@ -130,6 +130,19 @@ impl TypedCompileTimeLowerer<'_> {
                 first.span(),
             ));
         }
+        if let TypedStatementKind::MultipleLocal { bindings, value } = first.kind() {
+            let initializer = self.lower_expression(value)?;
+            let body = self.lower_statements(rest)?;
+            return Ok(CompileTimeExpression::let_tuple(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.local(), binding.local_type()))
+                    .collect(),
+                initializer,
+                body,
+                first.span(),
+            ));
+        }
         if rest.is_empty() {
             return self.lower_result_statement(first);
         }
@@ -202,6 +215,12 @@ impl TypedCompileTimeLowerer<'_> {
                 self.lower_parameter(parameter.raw(), type_id, span)
             }
             TypedExpressionKind::Tuple(elements) => self.lower_tuple(elements, type_id, span),
+            TypedExpressionKind::TupleGet { tuple, index } => Ok(CompileTimeExpression::tuple_get(
+                self.lower_expression(tuple)?,
+                *index,
+                type_id,
+                span,
+            )),
             TypedExpressionKind::Unary { operator, operand } => {
                 let lowered_operand = self.lower_expression(operand)?;
                 let operator = self.lower_unary_operator(*operator, operand.type_id(), span)?;
@@ -226,9 +245,29 @@ impl TypedCompileTimeLowerer<'_> {
                     span,
                 ))
             }
+            TypedExpressionKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => Ok(CompileTimeExpression::conditional(
+                self.lower_expression(condition)?,
+                self.lower_expression(when_true)?,
+                self.lower_expression(when_false)?,
+                type_id,
+                span,
+            )),
+            TypedExpressionKind::NumericConvert { value, conversion } => {
+                Ok(CompileTimeExpression::numeric_convert(
+                    *conversion,
+                    self.lower_expression(value)?,
+                    type_id,
+                    span,
+                ))
+            }
             TypedExpressionKind::DirectCall {
                 function,
                 arguments,
+                ..
             } => Ok(CompileTimeExpression::call(
                 FunctionId::from_raw(function.raw()),
                 arguments
@@ -345,7 +384,11 @@ impl TypedCompileTimeLowerer<'_> {
             TypedBinaryOperator::Equal => Ok(CompileTimeBinaryOperator::Equal),
             TypedBinaryOperator::NotEqual => Ok(CompileTimeBinaryOperator::NotEqual),
             TypedBinaryOperator::LessThan => Ok(CompileTimeBinaryOperator::LessThan),
+            TypedBinaryOperator::LessThanOrEqual => Ok(CompileTimeBinaryOperator::LessThanOrEqual),
             TypedBinaryOperator::GreaterThan => Ok(CompileTimeBinaryOperator::GreaterThan),
+            TypedBinaryOperator::GreaterThanOrEqual => {
+                Ok(CompileTimeBinaryOperator::GreaterThanOrEqual)
+            }
             TypedBinaryOperator::And => Ok(CompileTimeBinaryOperator::And),
             TypedBinaryOperator::Or => Ok(CompileTimeBinaryOperator::Or),
             TypedBinaryOperator::Add
@@ -363,9 +406,7 @@ fn lower_compile_time_literal(expression: &TypedExpression) -> CompileTimeExpres
     let value = match expression.kind() {
         TypedExpressionKind::Integer(value) => CompileTimeValue::Integer(*value),
         TypedExpressionKind::Float(value) => CompileTimeValue::Float(*value),
-        TypedExpressionKind::String(value) => {
-            CompileTimeValue::String(unquote_source_string(value))
-        }
+        TypedExpressionKind::String(value) => CompileTimeValue::String(value.clone()),
         TypedExpressionKind::Boolean(value) => CompileTimeValue::Boolean(*value),
         TypedExpressionKind::Nil => CompileTimeValue::Nil,
         _ => unreachable!("literal lowering receives only a typed literal"),
@@ -375,14 +416,20 @@ fn lower_compile_time_literal(expression: &TypedExpression) -> CompileTimeExpres
 
 fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTimeLoweringError> {
     let construct = match statement.kind() {
-        TypedStatementKind::While { .. } | TypedStatementKind::RepeatUntil { .. } => {
-            UnsupportedCompileTimeConstruct::Loop
-        }
+        TypedStatementKind::While { .. }
+        | TypedStatementKind::RepeatUntil { .. }
+        | TypedStatementKind::NumericFor { .. }
+        | TypedStatementKind::Break
+        | TypedStatementKind::Continue => UnsupportedCompileTimeConstruct::Loop,
         TypedStatementKind::LocalSet { .. }
+        | TypedStatementKind::MultipleAssignment { .. }
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::FieldSet { .. }
-        | TypedStatementKind::ArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
+        | TypedStatementKind::CompoundFieldSet { .. }
+        | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::TableSet { .. }
+        | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
@@ -396,6 +443,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
             TypedCallDispatch::Indirect { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
         },
         TypedStatementKind::Local { .. }
+        | TypedStatementKind::MultipleLocal { .. }
         | TypedStatementKind::Return { .. }
         | TypedStatementKind::If { .. }
         | TypedStatementKind::Expression(_) => return None,
@@ -438,8 +486,11 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::ClassConstruction
         }
         TypedExpressionKind::RecordUpdate { .. } => UnsupportedCompileTimeConstruct::RecordUpdate,
-        TypedExpressionKind::Table(_) => UnsupportedCompileTimeConstruct::Table,
+        TypedExpressionKind::Table(_) | TypedExpressionKind::TableGet { .. } => {
+            UnsupportedCompileTimeConstruct::Table
+        }
         TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
+        TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. } => {
             UnsupportedCompileTimeConstruct::InterfaceDispatch
@@ -452,6 +503,9 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::ReferencedCall
         }
         TypedExpressionKind::StandardCall { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
+        TypedExpressionKind::StringConcat { .. } | TypedExpressionKind::StringFormat { .. } => {
+            UnsupportedCompileTimeConstruct::StringComposition
+        }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::AttributeQuery { .. }
         | TypedExpressionKind::HasAttributeQuery { .. }
@@ -462,17 +516,13 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Tuple(_)
+        | TypedExpressionKind::TupleGet { .. }
         | TypedExpressionKind::Unary { .. }
         | TypedExpressionKind::Binary { .. }
+        | TypedExpressionKind::Conditional { .. }
+        | TypedExpressionKind::NumericConvert { .. }
         | TypedExpressionKind::DirectCall { .. } => {
             unreachable!("supported expression is not routed to the unsupported lowerer")
         }
     }
-}
-
-fn unquote_source_string(value: &str) -> String {
-    value
-        .get(1..value.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_owned()
 }

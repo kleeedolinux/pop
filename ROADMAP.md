@@ -1,0 +1,142 @@
+# Pop Lang 0.1.0 Roadmap
+
+## Release status
+
+- Current release candidate: `0.1.0-rc.3`
+- Target release: `0.1.0`
+- Goal: the first supported Pop Lang release with the complete base language,
+  runtime, standard foundation, and ordinary build workflow.
+
+This file tracks delivery. It does not define language behavior. Accepted ADRs
+and the documents under [`architecture/`](architecture/README.md) remain the
+source of truth. A checkbox closes only after its architecture, deterministic
+tests, implementation, documentation, and applicable cross-backend evidence
+agree.
+
+## Included in 0.1.0-rc.3
+
+The release candidate already establishes the backend-neutral compiler pipeline
+and executable coverage for:
+
+- typed strings, escapes, concatenation, interpolation, and primitive
+  formatting;
+- numeric ranges, `break`, `continue`, decimal floats, complete ordering,
+  casts, and checked numeric conversions;
+- fixed arrays and typed tables with indexing, mutation, and deterministic
+  table growth;
+- tuples, destructuring, fixed multiple returns, and exact multiple assignment;
+- runtime constants, erased type aliases, and nominal scalar enums;
+- explicit callable generics, generic records, and generic tagged unions through
+  deterministic concrete MIR specialization;
+- records, tagged-union matching, native classes, nominal interfaces, closures,
+  compile-time evaluation, the MIR interpreter, and LLVM native execution.
+
+The C11 transpiler remains an isolated experiment. It is not a release backend
+and does not define the work remaining for `0.1.0`.
+
+## Release blockers
+
+### 1. Complete the base language
+
+- [ ] Implement optional flow narrowing, pattern binding, defaulting, and
+  propagation operators without weakening static typing.
+- [ ] Implement the complete typed-error workflow: declarations, `Result`,
+  propagation, matching boundaries, explicit MIR failure and cleanup
+  edges, diagnostics, and checked XML documentation.
+- [ ] Finish generalized `for` over the nominal `Iterable<T>` and `Iterator<T>`
+  protocols, including deterministic `Sequence` adapters. Keep arrays
+  fixed-length; provide growth through the accepted growable collection type.
+- [ ] Complete generic behavior needed across Bubble boundaries: portable
+  reference metadata, type-argument inference, constraints, and the accepted
+  typed sharing/specialization policy. Preserve full specialization as a valid
+  bootstrap strategy.
+- [ ] Complete coroutines, async functions, awaiting, cancellation, and scoped
+  cleanup with one backend-neutral HIR/MIR contract.
+- [ ] Close the remaining accepted first-release gaps for FFI, view lifetimes,
+  checked casts, effects, and generated typed metadata adapters before exposing
+  those surfaces as stable.
+
+### 2. Finish the standard foundation
+
+- [ ] Freeze the exact `Pop.Standard` prelude, public root inventory, stable
+  identities, tier/status metadata, and API baseline.
+- [ ] Make `Option`, `Result`, essential collections, `Iterable<T>`,
+  `Iterator<T>`, `Sequence`, `String`/text, bytes, numeric helpers, and required
+  resource/task primitives usable as native Pop APIs.
+- [ ] Move portable implementations into ordinary `.pop` Modules so adding an
+  algorithm does not require compiler or backend changes.
+- [ ] Emit, verify, load, and link deterministic `.poplib` artifacts containing
+  manifests, public reference metadata, checked documentation, target
+  implementations, hashes, ABI requirements, and exact Bubble dependencies.
+- [ ] Complete checked public XML documentation, compiled examples, allocation
+  and cost notes, and interpreter/LLVM differential tests for every stabilized
+  API.
+
+The broad catalog after the standard foundation remains planned work. It is not
+necessary to implement every format, network, media, data, tooling, or AI
+Package for the first release.
+
+### 3. Make the runtime release-ready
+
+- [ ] Replace bootstrap-only stable handles with the accepted production
+  generational path: a real moving nursery, typed root/edge relocation,
+  remembered cards, promotion, and backend capability negotiation.
+- [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,
+  bounded pause work, deterministic failure behavior, and stress testing.
+- [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
+  safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
+  process arguments, and standard adapters.
+- [ ] Meet named correctness, throughput, memory, and latency gates on declared
+  supported target profiles. Report bootstrap, relocation-conformance, and
+  production collector results separately.
+- [ ] Prove representative programs behave the same through canonical MIR, the
+  MIR interpreter, optimized MIR, and LLVM native execution.
+
+### 4. Complete the ordinary user workflow
+
+- [ ] Finish deterministic Package, Bubble, and Workspace discovery;
+  `bubble.toml`; one `bubble.lock`; dependency resolution; features; target
+  selection; and reproducible caching.
+- [ ] Make the supported `pop check`, `pop build`, `pop run`, `pop test`,
+  `pop documentation`, `pop format`, `pop lint`, and `pop fix` workflows operate
+  on real Packages and Workspaces with structured machine output.
+- [ ] Complete deterministic native linking, test/example/benchmark Bubbles,
+  public reference loading, initialization order, and clear capability errors.
+- [ ] Implement stable structured diagnostics with `POP####` codes, warning
+  policy, semantic fixes, atomic safe fix-all, JSON/LSP rendering, and bounded
+  error recovery.
+- [ ] Accept or replace the still-proposed toolchain distribution design before
+  shipping installers, update metadata, signing, or self-update behavior.
+
+### 5. Pass the 0.1.0 release gates
+
+- [ ] Resolve every architecture gap affecting a shipped feature through an
+  accepted ADR before stabilization.
+- [ ] Pass formatting, unit, conformance, integration, architecture-regression,
+  documentation, interpreter/LLVM differential, GC stress, and supported-target
+  tests in CI.
+- [ ] Add parser and IR-verifier fuzzing, malformed-input/resource-limit corpora,
+  and permanent regressions for static typing, visibility, compile-time
+  capability, backend neutrality, and Lua regressions.
+- [ ] Verify all architecture links, canonical examples, naming, visibility,
+  public API snapshots, artifact reproducibility, and dependency boundaries.
+- [ ] Declare the supported operating systems and architectures, publish known
+  limitations, freeze the `0.1.0` artifact/ABI versions, and produce release
+  notes from the final conformance matrix.
+
+## Explicitly after 0.1.0
+
+- expanding the experimental C backend beyond its accepted fail-closed subset;
+- a custom VM or stable serialized MIR/bytecode compatibility promise;
+- the complete official extension and public-library catalog;
+- finalizers, weak references, unrestricted runtime reflection, and Bubble
+  unloading;
+- optimizations or platform APIs without measured and accepted contracts.
+
+## Release rule
+
+`0.1.0` is ready when every blocker above that applies to its accepted surface
+is complete, no shipped behavior relies on an unresolved design question, and
+the supported interpreter and LLVM paths satisfy the same static semantic
+contract. Schedule pressure does not turn an experimental or bootstrap-only
+path into a stable promise.

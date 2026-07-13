@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_foundation::{
     AttributeId, FieldId, FunctionId, LocalId, ModuleId, SourceSpan, SymbolId, TypeId, UnionCaseId,
 };
-use pop_types::{AttributeQuerySubject, FloatValue, IntegerValue};
+use pop_types::{AttributeQuerySubject, FloatValue, IntegerValue, NumericConversionKind};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CompileTimeValue {
@@ -143,7 +143,7 @@ pub enum CompileTimeDependency {
     },
 }
 
-pub const COMPILE_TIME_IR_VERSION: u32 = 1;
+pub const COMPILE_TIME_IR_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompileTimeBinaryOperator {
@@ -159,7 +159,9 @@ pub enum CompileTimeBinaryOperator {
     Equal,
     NotEqual,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
     And,
     Or,
 }
@@ -228,6 +230,25 @@ impl CompileTimeExpression {
     }
 
     #[must_use]
+    pub fn let_tuple(
+        locals: Vec<(LocalId, TypeId)>,
+        initializer: Self,
+        body: Self,
+        span: SourceSpan,
+    ) -> Self {
+        let type_id = body.type_id();
+        Self {
+            kind: CompileTimeExpressionKind::LetTuple {
+                locals,
+                initializer: Box::new(initializer),
+                body: Box::new(body),
+            },
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
     pub fn binary(
         operator: CompileTimeBinaryOperator,
         left: Self,
@@ -257,6 +278,23 @@ impl CompileTimeExpression {
             kind: CompileTimeExpressionKind::Unary {
                 operator,
                 operand: Box::new(operand),
+            },
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub fn numeric_convert(
+        conversion: NumericConversionKind,
+        value: Self,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            kind: CompileTimeExpressionKind::NumericConvert {
+                conversion,
+                value: Box::new(value),
             },
             type_id,
             span,
@@ -303,6 +341,18 @@ impl CompileTimeExpression {
     pub fn tuple(elements: Vec<Self>, type_id: TypeId, span: SourceSpan) -> Self {
         Self {
             kind: CompileTimeExpressionKind::Tuple(elements),
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub fn tuple_get(tuple: Self, index: u32, type_id: TypeId, span: SourceSpan) -> Self {
+        Self {
+            kind: CompileTimeExpressionKind::TupleGet {
+                tuple: Box::new(tuple),
+                index,
+            },
             type_id,
             span,
         }
@@ -356,6 +406,11 @@ pub enum CompileTimeExpressionKind {
         initializer: Box<CompileTimeExpression>,
         body: Box<CompileTimeExpression>,
     },
+    LetTuple {
+        locals: Vec<(LocalId, TypeId)>,
+        initializer: Box<CompileTimeExpression>,
+        body: Box<CompileTimeExpression>,
+    },
     Unary {
         operator: CompileTimeUnaryOperator,
         operand: Box<CompileTimeExpression>,
@@ -365,12 +420,20 @@ pub enum CompileTimeExpressionKind {
         left: Box<CompileTimeExpression>,
         right: Box<CompileTimeExpression>,
     },
+    NumericConvert {
+        conversion: NumericConversionKind,
+        value: Box<CompileTimeExpression>,
+    },
     Conditional {
         condition: Box<CompileTimeExpression>,
         when_true: Box<CompileTimeExpression>,
         when_false: Box<CompileTimeExpression>,
     },
     Tuple(Vec<CompileTimeExpression>),
+    TupleGet {
+        tuple: Box<CompileTimeExpression>,
+        index: u32,
+    },
     Call {
         function: FunctionId,
         arguments: Vec<CompileTimeExpression>,
@@ -454,6 +517,7 @@ pub enum UnsupportedCompileTimeConstruct {
     Array,
     Table,
     UnionCase,
+    StringComposition,
 }
 
 /// A deterministic failure to translate accepted typed syntax into restricted

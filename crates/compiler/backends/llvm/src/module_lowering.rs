@@ -55,7 +55,7 @@ pub(crate) fn direct_scalar_array_fill_function() -> PrivateFunction {
 }
 
 pub(crate) fn checked_integer_declarations() -> Vec<String> {
-    [8_u16, 16, 32, 64]
+    let mut declarations = [8_u16, 16, 32, 64]
         .into_iter()
         .flat_map(|bits| {
             ["sadd", "uadd", "ssub", "usub", "smul", "umul"].map(move |operation| {
@@ -64,7 +64,12 @@ pub(crate) fn checked_integer_declarations() -> Vec<String> {
                 )
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    declarations.extend([
+        "declare float @llvm.trunc.f32(float)".to_owned(),
+        "declare double @llvm.trunc.f64(double)".to_owned(),
+    ]);
+    declarations
 }
 
 pub(crate) fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {
@@ -213,6 +218,14 @@ pub(crate) fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec
 pub(crate) fn runtime_declarations() -> Vec<String> {
     vec![
         format!(
+            "declare i64 @{}(i64, i64, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::TableGet)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64, i1, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::TableSet)
+        ),
+        format!(
             "declare i64 @{}(i64, i64) nounwind",
             native_runtime_symbol(RuntimeOperation::ArrayGet)
         ),
@@ -249,7 +262,9 @@ pub(crate) fn collect_field_layout(bubble: &MirBubble) -> BTreeMap<FieldId, u32>
         let (fields, reserved_slots) = match declaration.kind() {
             MirDeclarationKind::Record(record) => (record.fields(), 0_u32),
             MirDeclarationKind::Class(class) => (class.fields(), 1_u32),
-            MirDeclarationKind::Union(_) | MirDeclarationKind::Interface(_) => continue,
+            MirDeclarationKind::Union(_)
+            | MirDeclarationKind::Enum(_)
+            | MirDeclarationKind::Interface(_) => continue,
         };
         for (slot, field) in fields.iter().enumerate() {
             if let Ok(slot) = u32::try_from(slot) {

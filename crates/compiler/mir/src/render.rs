@@ -31,6 +31,24 @@ pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration
             );
             dump_union_cases(output, &union.cases);
         }
+        MirDeclarationKind::Enum(enumeration) => {
+            let _ = write!(
+                output,
+                "type.enum s{} t{} cases ",
+                declaration.symbol.raw(),
+                enumeration.type_id.raw()
+            );
+            if enumeration.cases.is_empty() {
+                output.push('-');
+            } else {
+                for (index, case) in enumeration.cases.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    let _ = write!(output, "case#{}={}", case.case.raw(), case.discriminant);
+                }
+            }
+        }
         MirDeclarationKind::Class(class) => {
             let _ = write!(
                 output,
@@ -294,14 +312,36 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::StringConstant(value) => {
             let _ = write!(output, "const.string {value:?}");
         }
+        MirInstructionKind::StringConcat { left, right } => {
+            dump_binary(output, "string.concat", *left, *right);
+        }
+        MirInstructionKind::StringFormat { kind, value } => {
+            let _ = write!(output, "string.format {kind:?} v{}", value.raw());
+        }
         MirInstructionKind::BooleanConstant(value) => {
             let _ = write!(output, "const.boolean {value}");
         }
         MirInstructionKind::NilConstant => output.push_str("const.nil"),
+        MirInstructionKind::EnumConstant {
+            definition,
+            case,
+            discriminant,
+        } => {
+            let _ = write!(
+                output,
+                "enum.case s{} ec{} {}",
+                definition.raw(),
+                case.raw(),
+                discriminant
+            );
+        }
         MirInstructionKind::FunctionReference(function) => {
             let _ = write!(output, "functionReference s{}", function.raw());
         }
         MirInstructionKind::TupleMake(values) => dump_values(output, "tupleMake", values),
+        MirInstructionKind::TupleGet { tuple, index } => {
+            let _ = write!(output, "tupleGet {index} v{}", tuple.raw());
+        }
         MirInstructionKind::ArrayMake {
             elements,
             element_map,
@@ -332,6 +372,26 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let value_map = array_element_map_name(*value_map);
             let _ = write!(output, "tableMake {key_map} {value_map} ");
             dump_table_entries(output, entries);
+        }
+        MirInstructionKind::TableGet { table, key } => {
+            dump_binary(output, "tableGet", *table, *key);
+        }
+        MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map,
+            value_map,
+        } => {
+            let key_map = array_element_map_name(*key_map);
+            let value_map = array_element_map_name(*value_map);
+            let _ = write!(
+                output,
+                "tableSet {key_map} {value_map} v{} v{} v{}",
+                table.raw(),
+                key.raw(),
+                value.raw()
+            );
         }
         MirInstructionKind::ArrayGet { array, index } => {
             dump_binary(output, "arrayGet", *array, *index);
@@ -443,6 +503,58 @@ fn dump_numeric_instruction(output: &mut String, instruction: &MirInstructionKin
         MirInstructionKind::FloatNegate { kind, operand } => {
             dump_numeric_unary(output, "float.negate", float_kind_text(*kind), *operand);
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.integerToInteger {} {} v{}",
+                integer_kind_text(*source),
+                integer_kind_text(*target),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.integerToFloat {} {} v{}",
+                integer_kind_text(*source),
+                float_kind_text(*target),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.floatToInteger {} {} v{}",
+                float_kind_text(*source),
+                integer_kind_text(*target),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.floatToFloat {} {} v{}",
+                float_kind_text(*source),
+                float_kind_text(*target),
+                operand.raw()
+            );
+        }
         _ => return false,
     }
     true
@@ -492,8 +604,20 @@ fn dump_numeric_binary_instruction(output: &mut String, instruction: &MirInstruc
         MirInstructionKind::CompareIntegerLess { kind, left, right } => {
             ("integer.compareLess", integer_kind_text(*kind), left, right)
         }
+        MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right } => (
+            "integer.compareLessOrEqual",
+            integer_kind_text(*kind),
+            left,
+            right,
+        ),
         MirInstructionKind::CompareIntegerGreater { kind, left, right } => (
             "integer.compareGreater",
+            integer_kind_text(*kind),
+            left,
+            right,
+        ),
+        MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => (
+            "integer.compareGreaterOrEqual",
             integer_kind_text(*kind),
             left,
             right,
@@ -501,9 +625,21 @@ fn dump_numeric_binary_instruction(output: &mut String, instruction: &MirInstruc
         MirInstructionKind::CompareFloatLess { kind, left, right } => {
             ("float.compareLess", float_kind_text(*kind), left, right)
         }
+        MirInstructionKind::CompareFloatLessOrEqual { kind, left, right } => (
+            "float.compareLessOrEqual",
+            float_kind_text(*kind),
+            left,
+            right,
+        ),
         MirInstructionKind::CompareFloatGreater { kind, left, right } => {
             ("float.compareGreater", float_kind_text(*kind), left, right)
         }
+        MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => (
+            "float.compareGreaterOrEqual",
+            float_kind_text(*kind),
+            left,
+            right,
+        ),
         _ => return false,
     };
     dump_numeric_binary(output, name, kind, *left, *right);
@@ -956,6 +1092,8 @@ const fn trap_kind_text(kind: pop_runtime_interface::TrapKind) -> &'static str {
     match kind {
         pop_runtime_interface::TrapKind::IntegerOverflow => "IntegerOverflow",
         pop_runtime_interface::TrapKind::DivisionByZero => "DivisionByZero",
+        pop_runtime_interface::TrapKind::NumericConversion => "NumericConversion",
+        pop_runtime_interface::TrapKind::InvalidRangeStep => "InvalidRangeStep",
         pop_runtime_interface::TrapKind::BoundsViolation => "BoundsViolation",
         pop_runtime_interface::TrapKind::ImpossibleState => "ImpossibleState",
     }
@@ -978,11 +1116,4 @@ fn dump_unwind_reason(output: &mut String, reason: &UnwindReason) {
         UnwindReason::Panic(payload) => dump_panic_payload(output, payload),
         UnwindReason::Cancellation => output.push_str("Cancellation"),
     }
-}
-
-pub(crate) fn unquote(value: &str) -> String {
-    value
-        .get(1..value.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_owned()
 }

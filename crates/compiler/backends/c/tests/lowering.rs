@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -87,6 +88,185 @@ fn emits_deterministic_strict_c11_with_checked_direct_calls_and_entry() {
 }
 
 #[test]
+fn checked_numeric_conversions_and_complete_ordering_execute_as_strict_c11() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private function convert(value: Int): Int\n\
+             local wide: Float64 = Float64(value) + 0.75\n\
+             local converted: Int = Int(wide)\n\
+             if wide >= 41.75 and wide <= 41.75 then\n\
+                 return converted\n\
+             end\n\
+             return 0\n\
+         end\n\
+         function main(): Int\n\
+             return convert(41) + 1\n\
+         end\n",
+    );
+    let entry = mir.functions()[1].symbol();
+    let translation = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("numeric C lowering");
+    assert!(translation.as_str().contains("(long double)"));
+    assert!(translation.as_str().contains(">="));
+    assert!(translation.as_str().contains("<="));
+
+    let root = temporary_root("numeric-conversions");
+    let source_path = root.with_extension("c");
+    let executable_path = root.with_extension("out");
+    std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+    let compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+        ])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .expect("C compiler runs");
+    assert!(
+        compiler.status.success(),
+        "generated numeric C did not compile:\n{}\n{}",
+        String::from_utf8_lossy(&compiler.stderr),
+        translation.as_str()
+    );
+    let execution = Command::new(&executable_path)
+        .output()
+        .expect("generated C runs");
+    assert_eq!(execution.status.code(), Some(42));
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
+fn invalid_numeric_conversion_traps_in_strict_c11_output() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local invalid: Byte = Byte(256.0)\n\
+             return Int(invalid)\n\
+         end\n",
+    );
+    let entry = mir.functions()[0].symbol();
+    let translation = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("trapping numeric C lowering");
+    let root = temporary_root("numeric-conversion-trap");
+    let source_path = root.with_extension("c");
+    let executable_path = root.with_extension("out");
+    std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+    let compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+        ])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .expect("C compiler runs");
+    assert!(
+        compiler.status.success(),
+        "generated trapping C did not compile:\n{}\n{}",
+        String::from_utf8_lossy(&compiler.stderr),
+        translation.as_str()
+    );
+    let execution = Command::new(&executable_path)
+        .output()
+        .expect("generated C runs");
+    assert!(!execution.status.success(), "invalid conversion must trap");
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
+fn every_numeric_conversion_family_emits_warning_free_strict_c11() {
+    for source_type in [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "Float32",
+        "Float64",
+    ] {
+        let source = numeric_conversion_matrix_source(source_type);
+        let (mir, types) = lower(&source);
+        let entry = mir.functions().last().expect("main").symbol();
+        let translation = lower_mir_to_c(
+            &mir,
+            &types,
+            CLoweringOptions::default().with_entry_point(entry),
+        )
+        .expect("numeric conversion matrix C lowering");
+        let root = temporary_root(&format!("numeric-conversion-matrix-{source_type}"));
+        let source_path = root.with_extension("c");
+        let executable_path = root.with_extension("out");
+        std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+        let compiler = Command::new("cc")
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+            ])
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&executable_path)
+            .output()
+            .expect("C compiler runs");
+        assert!(
+            compiler.status.success(),
+            "{source_type} conversion matrix did not compile:\n{}\n{}",
+            String::from_utf8_lossy(&compiler.stderr),
+            translation.as_str()
+        );
+        let execution = Command::new(&executable_path)
+            .output()
+            .expect("generated C runs");
+        assert_eq!(execution.status.code(), Some(0), "{source_type}");
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(executable_path);
+    }
+}
+
+fn numeric_conversion_matrix_source(source_type: &str) -> String {
+    const INTEGERS: [&str; 8] = [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+    ];
+    const FLOATS: [&str; 2] = ["Float32", "Float64"];
+    let mut source = String::from("namespace Main\n");
+    let mut calls = Vec::new();
+    for target_type in INTEGERS.into_iter().chain(FLOATS) {
+        let name = format!("convert{source_type}To{target_type}");
+        writeln!(
+            source,
+            "private function {name}(value: {source_type}): {target_type}\n    return {target_type}(value)\nend"
+        )
+        .expect("source text");
+        calls.push(format!("    total = total + Int({name}(0))\n"));
+    }
+    source.push_str("function main(): Int\n    local total: Int = 0\n");
+    for call in calls {
+        source.push_str(&call);
+    }
+    source.push_str("    return total\nend\n");
+    source
+}
+
+#[test]
 fn rejects_managed_declarations_without_emitting_a_fallback() {
     let (mir, types) = lower(
         "namespace Main\n\
@@ -107,6 +287,38 @@ fn rejects_managed_declarations_without_emitting_a_fallback() {
 
     assert!(matches!(error, CBackendError::UnsupportedDeclarations));
     assert!(error.to_string().contains("requires the Pop runtime"));
+}
+
+#[test]
+fn rejects_specialized_generic_data_without_emitting_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = value }\n\
+             return result\n\
+         end\n\
+         function main(): Int\n\
+             local value: Box<Int> = boxed<<Int>>(7)\n\
+             return value.value\n\
+         end\n",
+    );
+    let entry = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("entry")
+        .symbol();
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect_err("experimental C must remain fail-closed for generic data");
+
+    assert!(matches!(error, CBackendError::UnsupportedDeclarations));
 }
 
 #[test]
@@ -157,6 +369,59 @@ fn typed_integer_and_literal_string_output_use_safe_c_adapters() {
         .expect("generated output C runs");
     assert!(execution.status.success());
     assert_eq!(execution.stdout, b"42\nTeste\n");
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
+fn constant_interpolation_and_concatenation_execute_as_strict_c11() {
+    // ADR 0041: the runtime-free C slice accepts composition after portable
+    // MIR proves and folds every segment to one UTF-8 literal.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main()\n\
+             print(`Pop 🫧 {12} {1.5} {true}` .. \"!\")\n\
+         end\n",
+    );
+    let entry = mir.functions()[0].symbol();
+    let translation = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("constant string C lowering");
+    assert!(!translation.as_str().contains("string.format"));
+    assert!(!translation.as_str().contains("string.concat"));
+
+    let root = temporary_root("constant-string-composition");
+    let source_path = root.with_extension("c");
+    let executable_path = root.with_extension("out");
+    std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+    let compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+        ])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .expect("C compiler runs");
+    assert!(
+        compiler.status.success(),
+        "generated string C did not compile:\n{}\n{}",
+        String::from_utf8_lossy(&compiler.stderr),
+        translation.as_str()
+    );
+    let execution = Command::new(&executable_path)
+        .output()
+        .expect("generated C runs");
+    assert!(execution.status.success());
+    assert_eq!(execution.stdout, "Pop 🫧 12 1.5 true!\n".as_bytes());
     let _ = std::fs::remove_file(source_path);
     let _ = std::fs::remove_file(executable_path);
 }
@@ -238,6 +503,51 @@ fn runtime_free_c_rejects_repeat_until_safe_points_without_a_fallback() {
         error,
         CBackendError::UnsupportedInstruction { .. }
     ));
+}
+
+#[test]
+fn runtime_free_c_rejects_numeric_range_safe_points_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local total = 0\n\
+             for index = 1, 42 do\n\
+                 total = total + index\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect_err("runtime-free C cannot erase a numeric-range safe point");
+    assert!(matches!(
+        error,
+        CBackendError::UnsupportedInstruction { .. }
+    ));
+}
+
+#[test]
+fn runtime_free_c_rejects_fixed_packs_without_a_dynamic_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         function main(): Int\n\
+             local left, right = split(20)\n\
+             return left + right\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(mir.functions()[1].symbol()),
+    )
+    .expect_err("runtime-free C cannot represent a managed fixed pack");
+    assert!(matches!(error, CBackendError::UnsupportedType(_)));
 }
 
 #[test]

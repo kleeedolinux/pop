@@ -4,9 +4,11 @@ use pop_runtime_native::{
     pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_object,
     pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
     pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
-    pop_rt_pin, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_equal, pop_rt_string_read,
-    pop_rt_unpin, request_abi_collection,
+    pop_rt_pin, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
+    pop_rt_string_format, pop_rt_string_read, pop_rt_table_get, pop_rt_table_set, pop_rt_unpin,
+    request_abi_collection,
 };
+use pop_runtime_native_abi::StringFormatTag;
 use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -21,7 +23,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 4);
+    assert_eq!(pop_rt_abi_minor(), 6);
     assert_eq!(pop_rt_gc_stage(), 1);
 }
 
@@ -151,6 +153,38 @@ fn bootstrap_string_read_rejects_invalid_handles_and_small_buffers() {
 }
 
 #[test]
+fn bootstrap_string_composition_is_typed_utf8_and_locale_independent() {
+    let _guard = abi_test_lock();
+    let left = allocate_utf8_string_literal("Pop ".as_bytes());
+    let right = allocate_utf8_string_literal("🫧".as_bytes());
+    let joined = pop_rt_string_concat(left, right);
+    assert_eq!(read_string(joined), "Pop 🫧");
+
+    let signed = pop_rt_string_format(StringFormatTag::Int8 as u32, u64::from((-12_i8) as u8));
+    let negative_zero = pop_rt_string_format(StringFormatTag::Float64 as u32, (-0.0_f64).to_bits());
+    let boolean = pop_rt_string_format(StringFormatTag::Boolean as u32, 1);
+    assert_eq!(read_string(signed), "-12");
+    assert_eq!(read_string(negative_zero), "-0");
+    assert_eq!(read_string(boolean), "true");
+    assert_eq!(pop_rt_string_format(u32::MAX, 0), 0);
+}
+
+#[allow(unsafe_code)]
+fn read_string(reference: u64) -> String {
+    // SAFETY: A null target performs the documented length query.
+    let encoded = unsafe { pop_rt_string_read(reference, std::ptr::null_mut(), 0) };
+    assert_ne!(encoded, 0);
+    let length = usize::try_from(encoded - 1).expect("portable string length");
+    let mut bytes = vec![0; length];
+    // SAFETY: `bytes` exposes exactly `length` writable bytes.
+    assert_eq!(
+        unsafe { pop_rt_string_read(reference, bytes.as_mut_ptr(), length as u64) },
+        encoded
+    );
+    String::from_utf8(bytes).expect("runtime strings are UTF-8")
+}
+
+#[test]
 fn process_arguments_preserve_order_empty_and_non_ascii_utf8() {
     let _guard = abi_test_lock();
     let arguments =
@@ -222,6 +256,42 @@ fn bootstrap_abi_allocates_and_tracks_opaque_handles() {
     assert_ne!(object, 0);
     assert_eq!(pop_rt_field_set(object, 1, 77), 1);
     assert_eq!(pop_rt_field_get(object, 1), 77);
+}
+
+#[test]
+fn typed_table_abi_replaces_and_grows_without_changing_identity() {
+    let _guard = abi_test_lock();
+    let table = pop_rt_allocate_table(1, 0, 0);
+    assert_ne!(table, 0);
+    assert_eq!(pop_rt_table_get(table, 7, 0), 0);
+    assert_eq!(pop_rt_table_set(table, 7, 10, 0, 0), 1);
+    assert_eq!(pop_rt_table_get(table, 7, 0), 10);
+    assert_eq!(pop_rt_table_set(table, 7, 11, 0, 0), 1);
+    assert_eq!(pop_rt_table_get(table, 7, 0), 11);
+    assert_eq!(pop_rt_table_set(table, 8, 12, 0, 0), 1);
+    assert_eq!(pop_rt_table_get(table, 8, 0), 12);
+
+    let first = allocate_utf8_string_literal(b"alice");
+    let equal = allocate_utf8_string_literal(b"alice");
+    let strings = pop_rt_allocate_table(0, 1, 0);
+    assert_ne!(first, 0);
+    assert_ne!(equal, 0);
+    assert_ne!(strings, 0);
+    assert_eq!(pop_rt_table_set(strings, first, 42, 1, 0), 1);
+    assert_eq!(pop_rt_table_get(strings, equal, 1), 42);
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(30, &[strings]), 1);
+    assert_eq!(abi_safe_point(31, &[first]), 1);
+    assert_eq!(abi_safe_point(32, &[equal]), 0);
+
+    let managed_values = pop_rt_allocate_table(0, 0, 1);
+    let child = pop_rt_allocate_object(0);
+    assert_ne!(managed_values, 0);
+    assert_ne!(child, 0);
+    assert_eq!(pop_rt_table_set(managed_values, 1, child, 0, 1), 1);
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(33, &[managed_values]), 1);
+    assert_eq!(abi_safe_point(34, &[child]), 1);
 }
 
 #[test]

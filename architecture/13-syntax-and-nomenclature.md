@@ -110,6 +110,29 @@ literal/keyword, not a type-naming exception.
 - Keywords are lowercase.
 - Types are not distinguished with sigils or punctuation.
 
+Decimal floating-point literals use familiar spellings such as `1.5`,
+`6.02e23`, and `1_000.25`. An expected float annotation selects `Float32` or
+`Float64`; otherwise the literal is `Float64`. Numeric casts use the concise
+target-type call form `Float64(count)` or `Int32(total)`, not an `as` operator or
+runtime conversion by type name. The complete numeric ordering operators are
+`<`, `<=`, `>`, and `>=`. See ADR 0040.
+
+String concatenation uses the Luau operator `..`. Backtick interpolation keeps
+Luau's `{expression}` shape, while `String(value)` is the explicit formatting
+form for the closed primitive set:
+
+```luau
+local path = "src" .. "/main.pop"
+local summary = `checked {count} files for {path}`
+local exact = String(total)
+```
+
+Quoted strings use the portable escapes `\\`, `\"`, `\'`, `\n`, `\r`, `\t`,
+`\0`, `\xHH`, and `\u{H...}`. Backticks additionally use `\`` and
+`\{`/`\}` for literal interpolation punctuation. There is no JavaScript `${}`
+form, universal `toString`, implicit formatting conversion, or runtime type
+inspection. See ADR 0041.
+
 ## File shape
 
 Checked documentation and typed attributes for the file-scoped namespace
@@ -302,6 +325,24 @@ end
 local name = first<<String>>(names)
 ```
 
+Records and tagged unions use the same declaration direction. Generic record
+literals receive their concrete type from expected context; generic union cases
+use explicit call arguments:
+
+```luau
+private record Box<T>
+    value: T
+end
+
+private union Choice<T>
+    Value(value: T)
+    Empty
+end
+
+local box: Box<Int> = { value = 7 }
+local choice: Choice<Int> = Choice.Value<<Int>>(box.value)
+```
+
 Local functions and anonymous expressions retain Luau's `function ... end`
 shape and may capture lexical values:
 
@@ -314,6 +355,59 @@ end
 
 Captured state is statically typed and converted to a native environment, never
 a table.
+
+### Fixed type packs and multiple assignment
+
+Parenthesized results and comma returns describe an exact fixed pack:
+
+```luau
+private function split(value: Int): (Int, Int)
+    return value / 2, value % 2
+end
+
+local quotient: Int, remainder = split(value)
+left, right = right, left
+local result = split(value)
+local first = result[1]
+```
+
+Each local may carry its own annotation. The right-hand side must be one fixed
+pack of the target arity or an exact list of scalar expressions. Pop source does
+not silently add `nil`, discard extra values, or use an untyped variadic carrier.
+Multiple-assignment target locations evaluate left to right before all values;
+stores then occur left to right. See ADR 0045.
+Tuple projection uses the same one-based `value[index]` punctuation as
+collections, but its index must be a statically in-range integer literal.
+
+### Compound assignment
+
+Compound mutation keeps Luau's compact operator spellings:
+
+```luau
+total += amount
+message ..= suffix
+values[index] *= scale
+```
+
+Only mutable locals/captures, declared class fields, and array elements are
+targets. The target receiver/index and right-hand side each evaluate once, and
+the corresponding ordinary typed operator defines the result, trap, allocation,
+and effect semantics. Pop Lang initially accepts `+=`, `-=`, `*=`, `/=`, `%=`,
+and `..=`; it does not infer absent underlying operators from other Luau
+spellings. See ADR 0044.
+
+### Conditional expressions
+
+Conditional values retain Luau's keyword form and lazy evaluation:
+
+```luau
+local description = if available then "ready" else "missing"
+```
+
+Both branches have one static type and the condition is exactly `Boolean`.
+Statement chains spell the intermediate keyword `elseif` and use one final
+`end`. Pop source does not use `?:`, truthiness, or `else if` as its canonical
+chain form. See ADR 0043.
 
 ### Loops
 
@@ -329,8 +423,22 @@ until value == 3
 
 The `until` expression must be `Boolean`. Its `true` result exits; `false`
 repeats after the body has executed. A local declared in the body remains
-visible to that condition but not after the statement. Version one deliberately
-does not add `break` or `continue` with this form. See ADR 0032.
+visible to that condition but not after the statement.
+
+Numeric ranges use Luau's compact comma clause rather than a new punctuation
+operator:
+
+```luau
+for index = 1, count do
+    process(index)
+end
+```
+
+An explicit third expression supplies the step. All range expressions have one
+fixed integer type and the loop binding is immutable. `break` and `continue`
+are standalone statements targeting the innermost loop; they do not take
+labels. `continue` reaches the natural condition or advancement point of the
+loop form. See ADR 0032 and ADR 0042.
 
 ### Tagged-union matching
 

@@ -11,20 +11,20 @@ use pop_foundation::{
     SourceSpan, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, ValueId, ValueParameterId,
 };
 use pop_hir::{
-    HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure, HirDeclaration,
-    HirDeclarationKind, HirExpression, HirExpressionKind, HirFieldValue, HirFunction, HirMatchArm,
-    HirStatement, HirStatementKind, HirTableEntry,
+    HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
+    HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirExpression, HirExpressionKind,
+    HirFieldValue, HirFunction, HirMatchArm, HirStatement, HirStatementKind, HirTableEntry,
+    hir_generic_call_instances, specialize_hir_function,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap,
+    ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
 };
 use pop_types::{
-    FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena, TypedBinaryOperator,
-    TypedUnaryOperator,
+    FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType, SemanticType,
+    TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
 };
 
 use crate::ir::*;
-use crate::render::unquote;
 use crate::verification::{
     instruction_operands, instruction_unwind_target, terminator_operands, terminator_targets,
     verify_mir_bubble,
@@ -56,12 +56,17 @@ pub fn lower_hir_bubble(
     let declarations: Vec<_> = hir
         .declarations()
         .iter()
+        .filter(|declaration| match declaration.kind() {
+            HirDeclarationKind::Record(record) => !arena.contains_type_parameter(record.type_id()),
+            HirDeclarationKind::Union(union) => !arena.contains_type_parameter(union.type_id()),
+            _ => true,
+        })
         .filter_map(lower_declaration)
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
+    let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let mut nested_functions = Vec::new();
-    let mut functions: Vec<_> = hir
-        .functions()
+    let mut functions: Vec<_> = specialized_hir_functions
         .iter()
         .map(|function| {
             let (function, mut nested) =
@@ -106,6 +111,152 @@ pub fn lower_hir_bubble(
     seal_effects(&mut mir);
     verify_mir_bubble(&mir, arena)?;
     Ok(mir)
+}
+
+fn specialize_reachable_functions(
+    hir: &HirBubble,
+    arena: &TypeArena,
+) -> Result<Vec<HirFunction>, Vec<MirVerificationError>> {
+    let templates: BTreeMap<_, _> = hir
+        .functions()
+        .iter()
+        .map(|function| (function.symbol(), function))
+        .collect();
+    let mut instances = BTreeMap::new();
+    let data_symbols: BTreeMap<_, _> = hir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            HirDeclarationKind::Record(record)
+                if !arena.contains_type_parameter(record.type_id()) =>
+            {
+                Some((record.type_id(), declaration.symbol()))
+            }
+            HirDeclarationKind::Union(union) if !arena.contains_type_parameter(union.type_id()) => {
+                Some((union.type_id(), declaration.symbol()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut data_fields = BTreeMap::new();
+    for template in hir.declarations().iter().filter(|declaration| {
+        matches!(declaration.kind(), HirDeclarationKind::Record(record)
+            if arena.contains_type_parameter(record.type_id()))
+    }) {
+        let HirDeclarationKind::Record(template_record) = template.kind() else {
+            continue;
+        };
+        for instance in hir.declarations().iter().filter(|declaration| {
+            declaration.module() == template.module()
+                && declaration.name() == template.name()
+                && matches!(declaration.kind(), HirDeclarationKind::Record(record)
+                    if !arena.contains_type_parameter(record.type_id()))
+        }) {
+            let HirDeclarationKind::Record(instance_record) = instance.kind() else {
+                continue;
+            };
+            for template_field in template_record.fields() {
+                if let Some(instance_field) = instance_record
+                    .fields()
+                    .iter()
+                    .find(|field| field.name() == template_field.name())
+                {
+                    data_fields.insert(
+                        (instance_record.type_id(), template_field.field()),
+                        instance_field.field(),
+                    );
+                }
+            }
+        }
+    }
+    let data_instances = HirDataSpecialization::new(data_symbols, data_fields);
+    let mut pending = BTreeSet::new();
+    for function in hir
+        .functions()
+        .iter()
+        .filter(|function| function.type_parameters().is_empty())
+    {
+        pending.extend(hir_generic_call_instances(function));
+    }
+    let mut next_symbol = hir
+        .functions()
+        .iter()
+        .map(HirFunction::symbol)
+        .chain(hir.declarations().iter().map(HirDeclaration::symbol))
+        .chain(
+            hir.methods()
+                .iter()
+                .map(|method| method.function().symbol()),
+        )
+        .map(SymbolId::raw)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    while let Some(key) = pending.pop_first() {
+        if instances.contains_key(&key) {
+            continue;
+        }
+        let symbol = SymbolId::from_raw(next_symbol);
+        next_symbol = next_symbol.saturating_add(1);
+        instances.insert(key.clone(), symbol);
+        let Some(template) = templates.get(&key.0) else {
+            return Err(vec![MirVerificationError::UnknownGenericTemplate(key.0)]);
+        };
+        if let Some(specialized) =
+            specialize_hir_function(template, symbol, &key.1, &instances, &data_instances, arena)
+        {
+            pending.extend(hir_generic_call_instances(&specialized));
+        } else {
+            return Err(vec![MirVerificationError::InvalidGenericSpecialization(
+                key.0,
+            )]);
+        }
+        if instances.len() >= 4096 {
+            return Err(vec![
+                MirVerificationError::GenericSpecializationBudgetExceeded { limit: 4096 },
+            ]);
+        }
+    }
+    let mut specialized = Vec::new();
+    for function in hir
+        .functions()
+        .iter()
+        .filter(|function| function.type_parameters().is_empty())
+    {
+        specialized.push(
+            specialize_hir_function(
+                function,
+                function.symbol(),
+                &[],
+                &instances,
+                &data_instances,
+                arena,
+            )
+            .ok_or_else(|| {
+                vec![MirVerificationError::InvalidGenericSpecialization(
+                    function.symbol(),
+                )]
+            })?,
+        );
+    }
+    for ((source, arguments), symbol) in &instances {
+        let template = templates
+            .get(source)
+            .ok_or_else(|| vec![MirVerificationError::UnknownGenericTemplate(*source)])?;
+        specialized.push(
+            specialize_hir_function(
+                template,
+                *symbol,
+                arguments,
+                &instances,
+                &data_instances,
+                arena,
+            )
+            .ok_or_else(|| vec![MirVerificationError::InvalidGenericSpecialization(*source)])?,
+        );
+    }
+    specialized.sort_by_key(HirFunction::symbol);
+    Ok(specialized)
 }
 
 fn seal_effects(bubble: &mut MirBubble) {
@@ -163,6 +314,17 @@ fn lower_declaration(declaration: &HirDeclaration) -> Option<MirDeclaration> {
                         .iter()
                         .map(pop_hir::HirNamedType::type_id)
                         .collect(),
+                })
+                .collect(),
+        }),
+        HirDeclarationKind::Enum(enumeration) => MirDeclarationKind::Enum(MirEnumDeclaration {
+            type_id: enumeration.type_id(),
+            cases: enumeration
+                .cases()
+                .iter()
+                .map(|case| MirEnumCase {
+                    case: case.case(),
+                    discriminant: case.discriminant(),
                 })
                 .collect(),
         }),
@@ -276,10 +438,47 @@ struct BuildingBlock {
     terminator: MirTerminator,
 }
 
+#[derive(Clone)]
 struct LiveState {
     parameters: Vec<ValueParameterId>,
     locals: Vec<LocalId>,
     specs: Vec<(TypeId, SourceSpan)>,
+}
+
+#[derive(Clone)]
+struct LoopContext {
+    break_target: BlockId,
+    break_state: LiveState,
+    continue_target: BlockId,
+    continue_state: LiveState,
+}
+
+enum LoweredAssignmentTarget {
+    Local {
+        local: LocalId,
+        value_type: TypeId,
+    },
+    Capture {
+        capture: CaptureId,
+        value_type: TypeId,
+    },
+    Field {
+        base: ValueId,
+        field: FieldId,
+        value_type: TypeId,
+    },
+    Array {
+        array: ValueId,
+        index: ValueId,
+        array_type: TypeId,
+        element_type: TypeId,
+    },
+    Table {
+        table: ValueId,
+        key: ValueId,
+        table_type: TypeId,
+        value_type: TypeId,
+    },
 }
 
 struct FunctionBuilder<'hir> {
@@ -301,6 +500,7 @@ struct FunctionBuilder<'hir> {
     cell_parameters: BTreeSet<ValueParameterId>,
     cell_locals: BTreeSet<LocalId>,
     nested_functions: Vec<MirNestedFunction>,
+    loop_stack: Vec<LoopContext>,
 }
 
 fn collect_cell_sources(
@@ -322,6 +522,9 @@ fn visit_statement_closures(
     match statement.kind() {
         HirStatementKind::Local { initializer, .. } => {
             visit_expression_closures(initializer, parameters, locals);
+        }
+        HirStatementKind::MultipleLocal { value, .. } => {
+            visit_expression_closures(value, parameters, locals);
         }
         HirStatementKind::LocalSet { value, .. }
         | HirStatementKind::ParameterSet { value, .. }
@@ -356,6 +559,21 @@ fn visit_statement_closures(
             }
             visit_expression_closures(condition, parameters, locals);
         }
+        HirStatementKind::NumericFor {
+            first,
+            last,
+            step,
+            body,
+            ..
+        } => {
+            visit_expression_closures(first, parameters, locals);
+            visit_expression_closures(last, parameters, locals);
+            visit_expression_closures(step, parameters, locals);
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
+        HirStatementKind::Break | HirStatementKind::Continue => {}
         HirStatementKind::Match {
             scrutinee, arms, ..
         } => {
@@ -370,6 +588,10 @@ fn visit_statement_closures(
             visit_expression_closures(base, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
+        HirStatementKind::CompoundFieldSet { base, value, .. } => {
+            visit_expression_closures(base, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
         HirStatementKind::ArraySet {
             array,
             index,
@@ -379,12 +601,81 @@ fn visit_statement_closures(
             visit_expression_closures(index, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
+        HirStatementKind::TableSet { table, key, value } => {
+            visit_expression_closures(table, parameters, locals);
+            visit_expression_closures(key, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirStatementKind::CompoundArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            visit_expression_closures(array, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirStatementKind::MultipleAssignment { targets, value } => {
+            for target in targets {
+                match target {
+                    HirAssignmentTarget::Local { .. } | HirAssignmentTarget::Capture { .. } => {}
+                    HirAssignmentTarget::Field { base, .. } => {
+                        visit_expression_closures(base, parameters, locals);
+                    }
+                    HirAssignmentTarget::Array { array, index, .. } => {
+                        visit_expression_closures(array, parameters, locals);
+                        visit_expression_closures(index, parameters, locals);
+                    }
+                    HirAssignmentTarget::Table { table, key, .. } => {
+                        visit_expression_closures(table, parameters, locals);
+                        visit_expression_closures(key, parameters, locals);
+                    }
+                }
+            }
+            visit_expression_closures(value, parameters, locals);
+        }
         HirStatementKind::Call(call) => {
             for argument in call.arguments() {
                 visit_expression_closures(argument, parameters, locals);
             }
         }
     }
+}
+
+fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
+    statements.iter().any(|statement| match statement.kind() {
+        HirStatementKind::Continue => true,
+        HirStatementKind::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            contains_continue_for_current_loop(then_body)
+                || contains_continue_for_current_loop(else_body)
+        }
+        HirStatementKind::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| contains_continue_for_current_loop(arm.body())),
+        HirStatementKind::While { .. }
+        | HirStatementKind::RepeatUntil { .. }
+        | HirStatementKind::NumericFor { .. }
+        | HirStatementKind::Local { .. }
+        | HirStatementKind::MultipleLocal { .. }
+        | HirStatementKind::LocalSet { .. }
+        | HirStatementKind::ParameterSet { .. }
+        | HirStatementKind::CaptureSet { .. }
+        | HirStatementKind::Return { .. }
+        | HirStatementKind::Break
+        | HirStatementKind::FieldSet { .. }
+        | HirStatementKind::CompoundFieldSet { .. }
+        | HirStatementKind::ArraySet { .. }
+        | HirStatementKind::TableSet { .. }
+        | HirStatementKind::CompoundArraySet { .. }
+        | HirStatementKind::MultipleAssignment { .. }
+        | HirStatementKind::Call(_)
+        | HirStatementKind::Expression(_) => false,
+    })
 }
 
 fn visit_expression_closures(
@@ -410,8 +701,15 @@ fn visit_expression_closures(
             }
         }
         HirExpressionKind::Field { base, .. }
-        | HirExpressionKind::InterfaceUpcast { value: base, .. } => {
+        | HirExpressionKind::TupleGet { tuple: base, .. }
+        | HirExpressionKind::InterfaceUpcast { value: base, .. }
+        | HirExpressionKind::NumericConvert { value: base, .. }
+        | HirExpressionKind::StringFormat { value: base, .. } => {
             visit_expression_closures(base, parameters, locals);
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            visit_expression_closures(table, parameters, locals);
+            visit_expression_closures(key, parameters, locals);
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
@@ -419,6 +717,10 @@ fn visit_expression_closures(
             left: array,
             right: index,
             ..
+        }
+        | HirExpressionKind::StringConcat {
+            left: array,
+            right: index,
         } => {
             visit_expression_closures(array, parameters, locals);
             visit_expression_closures(index, parameters, locals);
@@ -468,6 +770,15 @@ fn visit_expression_closures(
         HirExpressionKind::Unary { operand, .. } => {
             visit_expression_closures(operand, parameters, locals);
         }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            visit_expression_closures(condition, parameters, locals);
+            visit_expression_closures(when_true, parameters, locals);
+            visit_expression_closures(when_false, parameters, locals);
+        }
         HirExpressionKind::Call { arguments, .. } => {
             for argument in arguments {
                 visit_expression_closures(argument, parameters, locals);
@@ -482,6 +793,7 @@ fn visit_expression_closures(
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_) => {}
+        HirExpressionKind::EnumCase { .. } => {}
     }
 }
 
@@ -602,6 +914,7 @@ impl<'hir> FunctionBuilder<'hir> {
             cell_parameters,
             cell_locals,
             nested_functions: Vec::new(),
+            loop_stack: Vec::new(),
         }
     }
 
@@ -689,6 +1002,37 @@ impl<'hir> FunctionBuilder<'hir> {
                         self.locals.insert(*local, value);
                     }
                 }
+                HirStatementKind::MultipleLocal { bindings, value } => {
+                    let value = self.lower_expression(value);
+                    for (index, binding) in bindings.iter().enumerate() {
+                        let projected = self.emit(
+                            MirInstructionKind::TupleGet {
+                                tuple: value,
+                                index: u32::try_from(index).unwrap_or(u32::MAX),
+                            },
+                            binding.local_type(),
+                            binding.span(),
+                        );
+                        if self.cell_locals.contains(&binding.local()) {
+                            let cell = self.emit(
+                                MirInstructionKind::CaptureCellAllocate {
+                                    binding: binding.binding(),
+                                    initial: projected,
+                                    value_type: binding.local_type(),
+                                    object_map: capture_cell_object_map(
+                                        self.arena,
+                                        binding.local_type(),
+                                    ),
+                                },
+                                binding.local_type(),
+                                binding.span(),
+                            );
+                            self.local_cells.insert(binding.local(), cell);
+                        } else {
+                            self.locals.insert(binding.local(), projected);
+                        }
+                    }
+                }
                 HirStatementKind::LocalSet { local, value } => {
                     let value = self.lower_expression(value);
                     if let Some(cell) = self.local_cells.get(local).copied() {
@@ -741,6 +1085,44 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::RepeatUntil { body, condition } => {
                     self.lower_repeat_until(body, condition);
                 }
+                HirStatementKind::NumericFor {
+                    local,
+                    integer_type,
+                    first,
+                    last,
+                    step,
+                    body,
+                    ..
+                } => {
+                    self.lower_numeric_for(
+                        *local,
+                        *integer_type,
+                        first,
+                        last,
+                        step,
+                        body,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::Break => {
+                    let context = self
+                        .loop_stack
+                        .last()
+                        .cloned()
+                        .expect("verified HIR resolves break inside a loop");
+                    self.branch_with_state_if_open(context.break_target, &context.break_state);
+                }
+                HirStatementKind::Continue => {
+                    let context = self
+                        .loop_stack
+                        .last()
+                        .cloned()
+                        .expect("verified HIR resolves continue inside a loop");
+                    self.branch_with_state_if_open(
+                        context.continue_target,
+                        &context.continue_state,
+                    );
+                }
                 HirStatementKind::Match {
                     scrutinee,
                     union,
@@ -751,6 +1133,65 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::FieldSet { base, field, value } => {
                     let base = self.lower_expression(base);
                     let value = self.lower_expression(value);
+                    if let Some((slot, field_type)) = self.gc_schema.fields.get(field).copied()
+                        && is_managed_reference_type_id(field_type, Some(self.arena))
+                    {
+                        let previous = self.emit(
+                            MirInstructionKind::FieldGet {
+                                base,
+                                field: *field,
+                            },
+                            field_type,
+                            statement.span(),
+                        );
+                        self.emit_effect(
+                            MirInstructionKind::WriteBarrier {
+                                owner: base,
+                                slot,
+                                previous: Some(previous),
+                                value: Some(value),
+                            },
+                            statement.span(),
+                        );
+                    }
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::FieldSet {
+                            base,
+                            field: *field,
+                            value,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::CompoundFieldSet {
+                    base,
+                    field,
+                    value_type,
+                    operator,
+                    value,
+                } => {
+                    let base = self.lower_expression(base);
+                    let current = self.emit(
+                        MirInstructionKind::FieldGet {
+                            base,
+                            field: *field,
+                        },
+                        *value_type,
+                        statement.span(),
+                    );
+                    let right = self.lower_expression(value);
+                    let value = self.lower_compound_value(
+                        *operator,
+                        *value_type,
+                        current,
+                        right,
+                        statement.span(),
+                    );
                     if let Some((slot, field_type)) = self.gc_schema.fields.get(field).copied()
                         && is_managed_reference_type_id(field_type, Some(self.arena))
                     {
@@ -810,6 +1251,91 @@ impl<'hir> FunctionBuilder<'hir> {
                         statement.span(),
                     );
                 }
+                HirStatementKind::TableSet { table, key, value } => {
+                    let table_type = table.type_id();
+                    let (key_map, value_map) = table_element_maps(self.arena, table_type);
+                    let table = self.lower_expression(table);
+                    let key = self.lower_expression(key);
+                    let value = self.lower_expression(value);
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::TableSet {
+                            table,
+                            key,
+                            value,
+                            key_map,
+                            value_map,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::CompoundArraySet {
+                    array,
+                    index,
+                    element_type,
+                    operator,
+                    value,
+                } => {
+                    let element_map = array_element_map(self.arena, array.type_id());
+                    let array = self.lower_expression(array);
+                    let index = self.lower_expression(index);
+                    let current = self.emit(
+                        MirInstructionKind::ArrayGetChecked { array, index },
+                        *element_type,
+                        statement.span(),
+                    );
+                    let right = self.lower_expression(value);
+                    let value = self.lower_compound_value(
+                        *operator,
+                        *element_type,
+                        current,
+                        right,
+                        statement.span(),
+                    );
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::ArraySet {
+                            array,
+                            index,
+                            value,
+                            element_map,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::MultipleAssignment { targets, value } => {
+                    let targets: Vec<_> = targets
+                        .iter()
+                        .map(|target| self.lower_assignment_target(target, statement.span()))
+                        .collect();
+                    let value = self.lower_expression(value);
+                    for (index, target) in targets.into_iter().enumerate() {
+                        let element_type = match &target {
+                            LoweredAssignmentTarget::Local { value_type, .. }
+                            | LoweredAssignmentTarget::Capture { value_type, .. } => *value_type,
+                            LoweredAssignmentTarget::Field { value_type, .. } => *value_type,
+                            LoweredAssignmentTarget::Array { element_type, .. } => *element_type,
+                            LoweredAssignmentTarget::Table { value_type, .. } => *value_type,
+                        };
+                        let projected = self.emit(
+                            MirInstructionKind::TupleGet {
+                                tuple: value,
+                                index: u32::try_from(index).unwrap_or(u32::MAX),
+                            },
+                            element_type,
+                            statement.span(),
+                        );
+                        self.store_assignment_target(target, projected, statement.span());
+                    }
+                }
                 HirStatementKind::Call(call) => {
                     let kind = self.lower_call(call.dispatch(), call.arguments());
                     self.emit_effect(kind, call.span());
@@ -817,6 +1343,176 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::Expression(expression) => {
                     self.lower_expression(expression);
                 }
+            }
+        }
+    }
+
+    fn lower_assignment_target(
+        &mut self,
+        target: &HirAssignmentTarget,
+        span: SourceSpan,
+    ) -> LoweredAssignmentTarget {
+        match target {
+            HirAssignmentTarget::Local {
+                local, value_type, ..
+            } => LoweredAssignmentTarget::Local {
+                local: *local,
+                value_type: *value_type,
+            },
+            HirAssignmentTarget::Capture {
+                capture,
+                value_type,
+                ..
+            } => LoweredAssignmentTarget::Capture {
+                capture: *capture,
+                value_type: *value_type,
+            },
+            HirAssignmentTarget::Field {
+                base,
+                field,
+                value_type,
+            } => LoweredAssignmentTarget::Field {
+                base: self.lower_expression(base),
+                field: *field,
+                value_type: *value_type,
+            },
+            HirAssignmentTarget::Array {
+                array,
+                index,
+                element_type,
+            } => {
+                let array_type = array.type_id();
+                let array = self.lower_expression(array);
+                let index = self.lower_expression(index);
+                self.emit(
+                    MirInstructionKind::ArrayGetChecked { array, index },
+                    *element_type,
+                    span,
+                );
+                LoweredAssignmentTarget::Array {
+                    array,
+                    index,
+                    array_type,
+                    element_type: *element_type,
+                }
+            }
+            HirAssignmentTarget::Table {
+                table,
+                key,
+                value_type,
+            } => {
+                let table_type = table.type_id();
+                LoweredAssignmentTarget::Table {
+                    table: self.lower_expression(table),
+                    key: self.lower_expression(key),
+                    table_type,
+                    value_type: *value_type,
+                }
+            }
+        }
+    }
+
+    fn store_assignment_target(
+        &mut self,
+        target: LoweredAssignmentTarget,
+        value: ValueId,
+        span: SourceSpan,
+    ) {
+        match target {
+            LoweredAssignmentTarget::Local { local, .. } => {
+                if let Some(cell) = self.local_cells.get(&local).copied() {
+                    self.emit_effect(MirInstructionKind::CaptureCellStore { cell, value }, span);
+                } else {
+                    self.locals.insert(local, value);
+                }
+            }
+            LoweredAssignmentTarget::Capture { capture, .. } => {
+                let schema = self.capture_schema[&capture];
+                self.emit_effect(
+                    MirInstructionKind::CaptureStore {
+                        capture,
+                        slot: schema.slot(),
+                        value,
+                    },
+                    span,
+                );
+            }
+            LoweredAssignmentTarget::Field {
+                base,
+                field,
+                value_type,
+            } => {
+                if let Some((slot, field_type)) = self.gc_schema.fields.get(&field).copied()
+                    && is_managed_reference_type_id(field_type, Some(self.arena))
+                {
+                    let previous = self.emit(
+                        MirInstructionKind::FieldGet { base, field },
+                        value_type,
+                        span,
+                    );
+                    self.emit_effect(
+                        MirInstructionKind::WriteBarrier {
+                            owner: base,
+                            slot,
+                            previous: Some(previous),
+                            value: Some(value),
+                        },
+                        span,
+                    );
+                }
+                let nil = self
+                    .arena
+                    .source_type("nil")
+                    .expect("validated type arena always contains nil");
+                self.emit(
+                    MirInstructionKind::FieldSet { base, field, value },
+                    nil,
+                    span,
+                );
+            }
+            LoweredAssignmentTarget::Array {
+                array,
+                index,
+                array_type,
+                ..
+            } => {
+                let nil = self
+                    .arena
+                    .source_type("nil")
+                    .expect("validated type arena always contains nil");
+                self.emit(
+                    MirInstructionKind::ArraySet {
+                        array,
+                        index,
+                        value,
+                        element_map: array_element_map(self.arena, array_type),
+                    },
+                    nil,
+                    span,
+                );
+            }
+            LoweredAssignmentTarget::Table {
+                table,
+                key,
+                table_type,
+                ..
+            } => {
+                let (key_map, value_map) = table_element_maps(self.arena, table_type);
+                let nil = self
+                    .arena
+                    .source_type("nil")
+                    .expect("validated type arena always contains nil");
+                self.emit(
+                    MirInstructionKind::TableSet {
+                        table,
+                        key,
+                        value,
+                        key_map,
+                        value_map,
+                    },
+                    nil,
+                    span,
+                );
             }
         }
     }
@@ -879,13 +1575,19 @@ impl<'hir> FunctionBuilder<'hir> {
         let outer_locals = self.locals.clone();
         self.current = then_block;
         self.lower_statements(then_body);
+        let then_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
         self.branch_with_state_if_open(join_block, &state);
         self.parameters.clone_from(&outer_parameters);
         self.locals.clone_from(&outer_locals);
         self.current = else_block;
         self.lower_statements(else_body);
+        let else_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
         self.branch_with_state_if_open(join_block, &state);
         self.current = join_block;
+        if !then_reaches_join && !else_reaches_join {
+            self.terminate(MirTerminator::Unreachable);
+            return;
+        }
         self.install_state(&state, &join_arguments);
     }
 
@@ -906,7 +1608,16 @@ impl<'hir> FunctionBuilder<'hir> {
             when_false: exit_edge,
         });
         self.current = body_block;
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: state.clone(),
+            continue_target: condition_block,
+            continue_state: state.clone(),
+        });
         self.lower_statements(body);
+        self.loop_stack
+            .pop()
+            .expect("while loop context was pushed");
         self.branch_with_state_if_open(condition_block, &state);
         self.current = exit_edge;
         self.install_state(&state, &condition_arguments);
@@ -919,8 +1630,13 @@ impl<'hir> FunctionBuilder<'hir> {
         let state = self.live_state(condition.span());
         let initial_values = self.state_values(&state);
         let outer_locals = self.locals.clone();
+        let has_continue = contains_continue_for_current_loop(body);
         let (body_block, body_arguments) = self.new_block_with_arguments(&state.specs);
-        let condition_block = self.new_block();
+        let (condition_block, condition_arguments) = if has_continue {
+            self.new_block_with_arguments(&state.specs)
+        } else {
+            (self.new_block(), Vec::new())
+        };
         let repeat_edge = self.new_block();
         let exit_edge = self.new_block();
         let (exit_block, exit_arguments) = self.new_block_with_arguments(&state.specs);
@@ -928,10 +1644,26 @@ impl<'hir> FunctionBuilder<'hir> {
         self.branch_with_arguments_if_open(body_block, initial_values);
         self.current = body_block;
         self.install_state(&state, &body_arguments);
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: state.clone(),
+            continue_target: condition_block,
+            continue_state: state.clone(),
+        });
         self.lower_statements(body);
-        self.branch_if_open(condition_block);
+        self.loop_stack
+            .pop()
+            .expect("repeat loop context was pushed");
+        if has_continue {
+            self.branch_with_state_if_open(condition_block, &state);
+        } else {
+            self.branch_if_open(condition_block);
+        }
 
         self.current = condition_block;
+        if has_continue {
+            self.install_state(&state, &condition_arguments);
+        }
         let condition = self.lower_expression(condition);
         self.terminate(MirTerminator::ConditionalBranch {
             condition,
@@ -950,14 +1682,220 @@ impl<'hir> FunctionBuilder<'hir> {
         self.install_state(&state, &exit_arguments);
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn lower_numeric_for(
+        &mut self,
+        local: LocalId,
+        integer_type: TypeId,
+        first: &HirExpression,
+        last: &HirExpression,
+        step: &HirExpression,
+        body: &[HirStatement],
+        span: SourceSpan,
+    ) {
+        let first = self.lower_expression(first);
+        let last = self.lower_expression(last);
+        let step = self.lower_expression(step);
+        let kind = integer_kind(self.arena, integer_type)
+            .expect("verified numeric for range has one fixed integer type");
+        let zero = self.emit(
+            MirInstructionKind::IntegerConstant(
+                IntegerValue::parse_decimal("0", kind).expect("zero fits every integer"),
+            ),
+            integer_type,
+            span,
+        );
+        let step_is_zero = self.emit(
+            MirInstructionKind::CompareEqual {
+                left: step,
+                right: zero,
+            },
+            self.arena
+                .source_type("Boolean")
+                .expect("validated type arena contains Boolean"),
+            span,
+        );
+
+        let outer_state = self.live_state(span);
+        let initial_outer_values = self.state_values(&outer_state);
+        let outer_locals = self.locals.clone();
+        let mut loop_specs = outer_state.specs.clone();
+        loop_specs.push((integer_type, span));
+        let (condition_block, condition_arguments) = self.new_block_with_arguments(&loop_specs);
+        let initial_edge = self.new_block();
+        let positive_condition = self.new_block();
+        let negative_condition = self.new_block();
+        let body_block = self.new_block();
+        let condition_exit_edge = self.new_block();
+        let mut continue_specs = outer_state.specs.clone();
+        continue_specs.push((integer_type, span));
+        let (increment_block, increment_arguments) = self.new_block_with_arguments(&continue_specs);
+        let increment_exit_edge = self.new_block();
+        let advance_block = self.new_block();
+        let invalid_step = self.new_block();
+        let (exit_block, exit_arguments) = self.new_block_with_arguments(&outer_state.specs);
+
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: step_is_zero,
+            when_true: invalid_step,
+            when_false: initial_edge,
+        });
+        self.current = invalid_step;
+        self.terminate(MirTerminator::Trap(Trap::new(TrapKind::InvalidRangeStep)));
+
+        self.current = initial_edge;
+        let mut initial_values = initial_outer_values;
+        initial_values.push(first);
+        self.branch_with_arguments_if_open(condition_block, initial_values);
+
+        self.current = condition_block;
+        self.install_state(
+            &outer_state,
+            &condition_arguments[..outer_state.specs.len()],
+        );
+        let induction = condition_arguments[outer_state.specs.len()];
+        let condition = if kind.is_signed() {
+            self.emit(
+                MirInstructionKind::CompareIntegerGreater {
+                    kind,
+                    left: step,
+                    right: zero,
+                },
+                self.arena.source_type("Boolean").expect("Boolean"),
+                span,
+            )
+        } else {
+            self.emit(
+                MirInstructionKind::BooleanConstant(true),
+                self.arena.source_type("Boolean").expect("Boolean"),
+                span,
+            )
+        };
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition,
+            when_true: positive_condition,
+            when_false: negative_condition,
+        });
+
+        self.current = positive_condition;
+        let in_positive_range = self.emit(
+            MirInstructionKind::CompareIntegerLessOrEqual {
+                kind,
+                left: induction,
+                right: last,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: in_positive_range,
+            when_true: body_block,
+            when_false: condition_exit_edge,
+        });
+
+        self.current = negative_condition;
+        let in_negative_range = self.emit(
+            MirInstructionKind::CompareIntegerGreaterOrEqual {
+                kind,
+                left: induction,
+                right: last,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: in_negative_range,
+            when_true: body_block,
+            when_false: condition_exit_edge,
+        });
+
+        self.current = body_block;
+        self.locals.insert(local, induction);
+        let mut continue_state = outer_state.clone();
+        continue_state.locals.push(local);
+        continue_state.specs.push((integer_type, span));
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: outer_state.clone(),
+            continue_target: increment_block,
+            continue_state: continue_state.clone(),
+        });
+        self.lower_statements(body);
+        self.loop_stack
+            .pop()
+            .expect("numeric for context was pushed");
+        self.branch_with_state_if_open(increment_block, &continue_state);
+
+        self.current = increment_block;
+        self.install_state(
+            &outer_state,
+            &increment_arguments[..outer_state.specs.len()],
+        );
+        let current = increment_arguments[outer_state.specs.len()];
+        self.locals.insert(local, current);
+        let reached_last = self.emit(
+            MirInstructionKind::CompareEqual {
+                left: current,
+                right: last,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: reached_last,
+            when_true: increment_exit_edge,
+            when_false: advance_block,
+        });
+
+        self.current = advance_block;
+        let next = self.emit(
+            MirInstructionKind::CheckedIntegerAdd {
+                kind,
+                left: current,
+                right: step,
+            },
+            integer_type,
+            span,
+        );
+        let mut next_values = self.state_values(&outer_state);
+        next_values.push(next);
+        self.branch_with_arguments_if_open(condition_block, next_values);
+
+        self.current = condition_exit_edge;
+        self.install_state(
+            &outer_state,
+            &condition_arguments[..outer_state.specs.len()],
+        );
+        self.branch_with_state_if_open(exit_block, &outer_state);
+        self.current = increment_exit_edge;
+        self.install_state(
+            &outer_state,
+            &increment_arguments[..outer_state.specs.len()],
+        );
+        self.branch_with_state_if_open(exit_block, &outer_state);
+
+        self.current = exit_block;
+        self.locals = outer_locals;
+        self.install_state(&outer_state, &exit_arguments);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn lower_expression(&mut self, expression: &HirExpression) -> ValueId {
         let kind = match expression.kind() {
             HirExpressionKind::Integer(value) => MirInstructionKind::IntegerConstant(*value),
             HirExpressionKind::Float(value) => MirInstructionKind::FloatConstant(*value),
-            HirExpressionKind::String(value) => MirInstructionKind::StringConstant(unquote(value)),
+            HirExpressionKind::String(value) => MirInstructionKind::StringConstant(value.clone()),
             HirExpressionKind::Boolean(value) => MirInstructionKind::BooleanConstant(*value),
             HirExpressionKind::Nil => MirInstructionKind::NilConstant,
+            HirExpressionKind::EnumCase {
+                definition,
+                case,
+                discriminant,
+            } => MirInstructionKind::EnumConstant {
+                definition: *definition,
+                case: *case,
+                discriminant: *discriminant,
+            },
             HirExpressionKind::Closure(closure) => {
                 return self.lower_closure(closure, expression.type_id());
             }
@@ -1002,6 +1940,14 @@ impl<'hir> FunctionBuilder<'hir> {
                     .map(|element| self.lower_expression(element))
                     .collect(),
             ),
+            HirExpressionKind::StringConcat { left, right } => MirInstructionKind::StringConcat {
+                left: self.lower_expression(left),
+                right: self.lower_expression(right),
+            },
+            HirExpressionKind::StringFormat { kind, value } => MirInstructionKind::StringFormat {
+                kind: *kind,
+                value: self.lower_expression(value),
+            },
             HirExpressionKind::Array(elements) => MirInstructionKind::ArrayMake {
                 elements: elements
                     .iter()
@@ -1025,6 +1971,10 @@ impl<'hir> FunctionBuilder<'hir> {
                     entries: self.lower_table_entries(entries),
                 }
             }
+            HirExpressionKind::TableGet { table, key } => MirInstructionKind::TableGet {
+                table: self.lower_expression(table),
+                key: self.lower_expression(key),
+            },
             HirExpressionKind::Unary { operator, operand } => {
                 let operand = self.lower_expression(operand);
                 match operator {
@@ -1047,15 +1997,62 @@ impl<'hir> FunctionBuilder<'hir> {
                 left,
                 right,
             } => return self.lower_binary_expression(expression, *operator, left, right),
+            HirExpressionKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                return self.lower_conditional_expression(
+                    condition,
+                    when_true,
+                    when_false,
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
             HirExpressionKind::Call {
                 dispatch,
                 arguments,
+                ..
             } => self.lower_call(dispatch, arguments),
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
                     value,
                     interface: *interface,
+                }
+            }
+            HirExpressionKind::NumericConvert { value, conversion } => {
+                let operand = self.lower_expression(value);
+                match conversion {
+                    NumericConversionKind::IntegerToInteger { source, target } => {
+                        MirInstructionKind::ConvertInteger {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                    NumericConversionKind::IntegerToFloat { source, target } => {
+                        MirInstructionKind::ConvertIntegerToFloat {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                    NumericConversionKind::FloatToInteger { source, target } => {
+                        MirInstructionKind::ConvertFloatToInteger {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                    NumericConversionKind::FloatToFloat { source, target } => {
+                        MirInstructionKind::ConvertFloat {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
                 }
             }
             HirExpressionKind::Field { base, field } => MirInstructionKind::FieldGet {
@@ -1067,6 +2064,10 @@ impl<'hir> FunctionBuilder<'hir> {
                 let index = self.lower_expression(index);
                 MirInstructionKind::ArrayGet { array, index }
             }
+            HirExpressionKind::TupleGet { tuple, index } => MirInstructionKind::TupleGet {
+                tuple: self.lower_expression(tuple),
+                index: *index,
+            },
             HirExpressionKind::ArrayLength { array } => MirInstructionKind::ArrayLength {
                 array: self.lower_expression(array),
             },
@@ -1284,6 +2285,34 @@ impl<'hir> FunctionBuilder<'hir> {
         )
     }
 
+    fn lower_compound_value(
+        &mut self,
+        operator: TypedCompoundOperator,
+        value_type: TypeId,
+        left: ValueId,
+        right: ValueId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let kind = match operator {
+            TypedCompoundOperator::Concat => MirInstructionKind::StringConcat { left, right },
+            operator => lower_binary(
+                self.arena,
+                match operator {
+                    TypedCompoundOperator::Add => TypedBinaryOperator::Add,
+                    TypedCompoundOperator::Subtract => TypedBinaryOperator::Subtract,
+                    TypedCompoundOperator::Multiply => TypedBinaryOperator::Multiply,
+                    TypedCompoundOperator::Divide => TypedBinaryOperator::Divide,
+                    TypedCompoundOperator::Remainder => TypedBinaryOperator::Remainder,
+                    TypedCompoundOperator::Concat => unreachable!(),
+                },
+                value_type,
+                left,
+                right,
+            ),
+        };
+        self.emit(kind, value_type, span)
+    }
+
     fn lower_short_circuit(
         &mut self,
         operator: TypedBinaryOperator,
@@ -1324,6 +2353,42 @@ impl<'hir> FunctionBuilder<'hir> {
             target: join_block,
             arguments: vec![right],
         });
+        self.current = join_block;
+        result
+    }
+
+    fn lower_conditional_expression(
+        &mut self,
+        condition: &HirExpression,
+        when_true: &HirExpression,
+        when_false: &HirExpression,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let condition = self.lower_expression(condition);
+        let true_block = self.new_block();
+        let false_block = self.new_block();
+        let (join_block, result) = self.new_block_with_argument(result_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition,
+            when_true: true_block,
+            when_false: false_block,
+        });
+
+        self.current = true_block;
+        let when_true = self.lower_expression(when_true);
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![when_true],
+        });
+
+        self.current = false_block;
+        let when_false = self.lower_expression(when_false);
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![when_false],
+        });
+
         self.current = join_block;
         result
     }
@@ -1615,11 +2680,35 @@ fn lower_binary(
                 }
             }
         }
+        TypedBinaryOperator::LessThanOrEqual => {
+            if let Some(kind) = integer_kind(arena, operand_type) {
+                MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right }
+            } else {
+                MirInstructionKind::CompareFloatLessOrEqual {
+                    kind: float_kind(arena, operand_type)
+                        .expect("typed comparison has numeric operands"),
+                    left,
+                    right,
+                }
+            }
+        }
         TypedBinaryOperator::GreaterThan => {
             if let Some(kind) = integer_kind(arena, operand_type) {
                 MirInstructionKind::CompareIntegerGreater { kind, left, right }
             } else {
                 MirInstructionKind::CompareFloatGreater {
+                    kind: float_kind(arena, operand_type)
+                        .expect("typed comparison has numeric operands"),
+                    left,
+                    right,
+                }
+            }
+        }
+        TypedBinaryOperator::GreaterThanOrEqual => {
+            if let Some(kind) = integer_kind(arena, operand_type) {
+                MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right }
+            } else {
+                MirInstructionKind::CompareFloatGreaterOrEqual {
                     kind: float_kind(arena, operand_type)
                         .expect("typed comparison has numeric operands"),
                     left,
@@ -1764,6 +2853,7 @@ pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeA
         arena.get(type_id),
         Some(
             SemanticType::Primitive(PrimitiveType::String)
+                | SemanticType::Tuple(_)
                 | SemanticType::Array(_)
                 | SemanticType::Table { .. }
                 | SemanticType::Class { .. }
@@ -1781,7 +2871,17 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::CheckedIntegerDivide { .. }
         | MirInstructionKind::CheckedIntegerRemainder { .. }
         | MirInstructionKind::IntegerNegate { .. }
+        | MirInstructionKind::ConvertFloatToInteger { .. }
         | MirInstructionKind::ArrayGetChecked { .. } => {
+            MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::ConvertInteger { source, target, .. }
+            if NumericConversionKind::IntegerToInteger {
+                source: *source,
+                target: *target,
+            }
+            .may_trap() =>
+        {
             MirEffectSummary::empty().with(MirEffect::MayTrap)
         }
         MirInstructionKind::ArraySet { element_map, .. }
@@ -1793,11 +2893,35 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
                 effects
             }
         }
-        MirInstructionKind::ArrayMake { .. }
+        MirInstructionKind::TableSet {
+            key_map, value_map, ..
+        } => {
+            let effects = MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ]);
+            if *key_map == ArrayElementMap::ManagedReference
+                || *value_map == ArrayElementMap::ManagedReference
+            {
+                effects.with(MirEffect::WritesManagedReference)
+            } else {
+                effects
+            }
+        }
+        MirInstructionKind::TupleMake(_)
+        | MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
         | MirInstructionKind::ClassMake { .. }
         | MirInstructionKind::CaptureCellAllocate { .. }
         | MirInstructionKind::ClosureEnvironmentAllocate { .. } => {
+            MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ])
+        }
+        MirInstructionKind::StringConcat { .. } | MirInstructionKind::StringFormat { .. } => {
             MirEffectSummary::from_effects([
                 MirEffect::Allocates,
                 MirEffect::MayUnwind,
@@ -1846,24 +2970,33 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
-        | MirInstructionKind::TupleMake(_)
+        | MirInstructionKind::TupleGet { .. }
         | MirInstructionKind::ArrayGet { .. }
+        | MirInstructionKind::TableGet { .. }
         | MirInstructionKind::ArrayLength { .. }
         | MirInstructionKind::FloatAdd { .. }
         | MirInstructionKind::FloatSubtract { .. }
         | MirInstructionKind::FloatMultiply { .. }
         | MirInstructionKind::FloatDivide { .. }
         | MirInstructionKind::FloatNegate { .. }
+        | MirInstructionKind::ConvertInteger { .. }
+        | MirInstructionKind::ConvertIntegerToFloat { .. }
+        | MirInstructionKind::ConvertFloat { .. }
         | MirInstructionKind::BooleanNot { .. }
         | MirInstructionKind::BooleanAnd { .. }
         | MirInstructionKind::BooleanOr { .. }
         | MirInstructionKind::CompareEqual { .. }
         | MirInstructionKind::CompareNotEqual { .. }
         | MirInstructionKind::CompareIntegerLess { .. }
+        | MirInstructionKind::CompareIntegerLessOrEqual { .. }
         | MirInstructionKind::CompareIntegerGreater { .. }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
         | MirInstructionKind::CompareFloatLess { .. }
+        | MirInstructionKind::CompareFloatLessOrEqual { .. }
         | MirInstructionKind::CompareFloatGreater { .. }
+        | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
         | MirInstructionKind::RecordMake { .. }
         | MirInstructionKind::RecordUpdate { .. }
         | MirInstructionKind::FieldGet { .. }

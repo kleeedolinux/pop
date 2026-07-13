@@ -26,8 +26,16 @@ diagnostics.
 - namespaces, using directives, explicit declaration visibility, Bubble
   reference metadata, and symbol
   resolution;
-- primitive types, functions, locals, branches, `while`/`repeat` loops, tuples, immutable records,
+- primitive types, functions, locals, branches, `while`/`repeat` loops, numeric
+  `for` ranges and loop control, tuples, immutable records,
   tagged unions, and typed `with` updates;
+- decimal floating-point literals, complete numeric ordering, and explicit
+  checked numeric conversions from ADR 0040;
+- typed string concatenation, interpolation, escape decoding, and closed
+  primitive formatting from ADR 0041;
+- conditional expressions and `elseif` statement chains from ADR 0043;
+- typed compound assignment with single-evaluation targets from ADR 0044;
+- fixed type packs, comma returns, and exact multiple assignment from ADR 0045;
 - constraint-based local inference with no dynamic fallback;
 - typed UDA declarations, attachment, constant arguments, and query API;
 - deterministic compile-time constant/function evaluation with budgets;
@@ -109,7 +117,9 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 
 ## Milestone 5 — Language depth
 
-- generics and specialization strategy;
+- typed generic code sharing, portable generic reference metadata, and
+  specialization policy beyond the accepted bootstrap full-specialization
+  subset;
 - error handling;
 - coroutines/async model;
 - FFI;

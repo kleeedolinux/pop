@@ -2,7 +2,118 @@
 
 use pop_runtime_interface::{ManagedReference, ObjectSlot};
 
-use crate::state::abi_runtime;
+use crate::state::{abi_runtime, abi_tables};
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_table_get(reference: u64, key: u64, managed_key: u8) -> u64 {
+    let Ok(runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Ok(tables) = abi_tables().lock() else {
+        return 0;
+    };
+    let Some(table) = tables.get(&reference) else {
+        return 0;
+    };
+    if u8::from(table.key_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
+        != u8::from(managed_key != 0)
+    {
+        return 0;
+    }
+    let owner = ManagedReference::new(reference);
+    for entry in 0..table.length {
+        let key_slot = ObjectSlot::new(entry * 2);
+        let Ok(candidate) = runtime.load_slot_value(owner, key_slot) else {
+            return 0;
+        };
+        let equal = if managed_key == 0 || candidate == 0 || key == 0 {
+            candidate == key
+        } else {
+            runtime.strings_equal(ManagedReference::new(candidate), ManagedReference::new(key))
+        };
+        if equal {
+            return runtime
+                .load_slot_value(owner, ObjectSlot::new(entry * 2 + 1))
+                .unwrap_or(0);
+        }
+    }
+    0
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_table_set(
+    reference: u64,
+    key: u64,
+    value: u64,
+    managed_key: u8,
+    managed_value: u8,
+) -> u8 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Ok(mut tables) = abi_tables().lock() else {
+        return 0;
+    };
+    let Some(table) = tables.get_mut(&reference) else {
+        return 0;
+    };
+    if u8::from(table.key_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
+        != u8::from(managed_key != 0)
+        || u8::from(table.value_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
+            != u8::from(managed_value != 0)
+    {
+        return 0;
+    }
+    let owner = ManagedReference::new(reference);
+    for entry in 0..table.length {
+        let key_slot = ObjectSlot::new(entry * 2);
+        let Ok(candidate) = runtime.load_slot_value(owner, key_slot) else {
+            return 0;
+        };
+        let equal = if managed_key == 0 || candidate == 0 || key == 0 {
+            candidate == key
+        } else {
+            runtime.strings_equal(ManagedReference::new(candidate), ManagedReference::new(key))
+        };
+        if equal {
+            return u8::from(
+                runtime
+                    .store_slot_value(owner, ObjectSlot::new(entry * 2 + 1), value)
+                    .is_ok(),
+            );
+        }
+    }
+    if table.length == table.capacity {
+        let Some(new_capacity) = table.capacity.max(2).checked_mul(2) else {
+            return 0;
+        };
+        if runtime
+            .grow_table(
+                owner,
+                table.capacity,
+                new_capacity,
+                table.key_map,
+                table.value_map,
+            )
+            .is_err()
+        {
+            return 0;
+        }
+        table.capacity = new_capacity;
+    }
+    let key_slot = ObjectSlot::new(table.length * 2);
+    if runtime.store_slot_value(owner, key_slot, key).is_err()
+        || runtime
+            .store_slot_value(owner, ObjectSlot::new(table.length * 2 + 1), value)
+            .is_err()
+    {
+        return 0;
+    }
+    table.length += 1;
+    1
+}
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]

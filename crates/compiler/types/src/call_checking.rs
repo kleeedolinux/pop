@@ -8,11 +8,11 @@ use pop_foundation::SourceSpan;
 use pop_resolve::SymbolSpace;
 use pop_syntax::{ExpressionSyntax, ExpressionSyntaxKind};
 
-use crate::SemanticType;
 use crate::body_checking::{
     BodyChecker, CheckedCall, CheckedInvocation, ExpectedExpressionType, UnionCaseLookup,
 };
 use crate::typed_body::*;
+use crate::{NumericConversionKind, PrimitiveType, SemanticType, StringFormatKind};
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_call(
@@ -34,6 +34,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<CheckedInvocation> {
         if let ExpressionSyntaxKind::Name(path) = callee.kind() {
+            if path.as_slice() == ["String"] {
+                return self
+                    .check_string_conversion(arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
+            if matches!(path.as_slice(), [target]
+                if self.resolver.arena().source_type(target)
+                    .and_then(|type_id| self.numeric_target(type_id))
+                    .is_some())
+            {
+                return self
+                    .check_numeric_conversion(path, arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if matches!(
                 path.as_slice(),
                 [array, operation]
@@ -114,11 +128,123 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(CheckedInvocation::Call(CheckedCall {
             call: TypedCall {
                 dispatch,
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
             results,
         }))
+    }
+
+    fn check_string_conversion(
+        &mut self,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "string formatting",
+                1,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let value = self.check_expression(&arguments[0])?;
+        let string = self.resolver.arena().source_type("String")?;
+        if value.type_id() == string {
+            return Some(TypedExpression {
+                type_id: string,
+                span,
+                ..value
+            });
+        }
+        let kind = match self.resolver.arena().get(value.type_id()) {
+            Some(SemanticType::Primitive(PrimitiveType::Boolean)) => StringFormatKind::Boolean,
+            Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => {
+                StringFormatKind::Integer(*kind)
+            }
+            Some(SemanticType::Primitive(PrimitiveType::Float32)) => {
+                StringFormatKind::Float(crate::FloatKind::Float32)
+            }
+            Some(SemanticType::Primitive(PrimitiveType::Float64)) => {
+                StringFormatKind::Float(crate::FloatKind::Float64)
+            }
+            _ => {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "string formatting",
+                    self.type_name(value.type_id()),
+                ));
+                return None;
+            }
+        };
+        Some(TypedExpression {
+            kind: TypedExpressionKind::StringFormat {
+                kind,
+                value: Box::new(value),
+            },
+            type_id: string,
+            span,
+        })
+    }
+
+    fn check_numeric_conversion(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let [target_name] = path else {
+            return None;
+        };
+        let target_type = self.resolver.arena().source_type(target_name)?;
+        let target = self.numeric_target(target_type)?;
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "numeric conversion",
+                1,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let value = self.check_expression(&arguments[0])?;
+        let Some(source) = self.numeric_target(value.type_id()) else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                arguments[0].span(),
+                "numeric value",
+                self.type_name(value.type_id()),
+                span,
+            ));
+            return None;
+        };
+        let conversion = match (source, target) {
+            (
+                crate::body_checking::NumericTarget::Integer(source),
+                crate::body_checking::NumericTarget::Integer(target),
+            ) => NumericConversionKind::IntegerToInteger { source, target },
+            (
+                crate::body_checking::NumericTarget::Integer(source),
+                crate::body_checking::NumericTarget::Float(target),
+            ) => NumericConversionKind::IntegerToFloat { source, target },
+            (
+                crate::body_checking::NumericTarget::Float(source),
+                crate::body_checking::NumericTarget::Integer(target),
+            ) => NumericConversionKind::FloatToInteger { source, target },
+            (
+                crate::body_checking::NumericTarget::Float(source),
+                crate::body_checking::NumericTarget::Float(target),
+            ) => NumericConversionKind::FloatToFloat { source, target },
+        };
+        Some(TypedExpression {
+            kind: TypedExpressionKind::NumericConvert {
+                value: Box::new(value),
+                conversion,
+            },
+            type_id: target_type,
+            span,
+        })
     }
 
     pub(crate) fn call_dispatch(&self, callee: TypedExpression) -> TypedCallDispatch {
@@ -370,6 +496,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 dispatch: TypedCallDispatch::Standard {
                     function: *function,
                 },
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -532,6 +659,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     method: method.method(),
                     receiver: Box::new(receiver),
                 },
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -577,6 +705,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     method: method.method(),
                     receiver: receiver.map(Box::new),
                 },
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -600,6 +729,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let result_type = checked.results[0];
         let TypedCall {
             dispatch,
+            type_arguments,
             arguments,
             span,
         } = checked.call;
@@ -610,6 +740,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             TypedCallDispatch::Direct { function } => TypedExpressionKind::DirectCall {
                 function,
+                type_arguments,
                 arguments,
             },
             TypedCallDispatch::Referenced { function } => TypedExpressionKind::ReferencedCall {

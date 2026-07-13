@@ -8,15 +8,38 @@ use pop_foundation::{
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
     BinaryOperator as SyntaxBinaryOperator, ExpressionSyntax, ExpressionSyntaxKind,
-    FunctionBodySyntax, UnaryOperator as SyntaxUnaryOperator,
+    FunctionBodySyntax, StringSegmentSyntaxKind, UnaryOperator as SyntaxUnaryOperator,
 };
 
 use crate::capture_analysis::finalize_capture_modes;
 use crate::typed_body::*;
 use crate::{
-    AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, PrimitiveType,
-    ResolvedFunctionSignature, SemanticType, SignatureResolver,
+    AttributeConstant, AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue,
+    PrimitiveType, ResolvedFunctionSignature, SemanticType, SignatureResolver,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeConstant {
+    type_id: TypeId,
+    value: AttributeConstant,
+}
+
+impl RuntimeConstant {
+    #[must_use]
+    pub const fn new(type_id: TypeId, value: AttributeConstant) -> Self {
+        Self { type_id, value }
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn value(&self) -> &AttributeConstant {
+        &self.value
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Binding {
@@ -29,13 +52,14 @@ pub(crate) struct Binding {
 #[derive(Clone, Copy)]
 pub(crate) enum BindingKind {
     Local(LocalId),
+    LoopLocal(LocalId),
     Parameter(ValueParameterId),
 }
 
 impl BindingKind {
     pub(crate) const fn capture_source(self) -> CaptureSource {
         match self {
-            Self::Local(local) => CaptureSource::Local(local),
+            Self::Local(local) | Self::LoopLocal(local) => CaptureSource::Local(local),
             Self::Parameter(parameter) => CaptureSource::Parameter(parameter),
         }
     }
@@ -120,6 +144,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) module: ModuleId,
     pub(crate) resolver: &'resolver mut SignatureResolver<'index>,
     pub(crate) signatures: &'resolver BTreeMap<SymbolId, ResolvedFunctionSignature>,
+    pub(crate) constants: Option<&'resolver BTreeMap<SymbolId, RuntimeConstant>>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) scopes: Vec<BTreeMap<String, Binding>>,
     pub(crate) next_local: u32,
@@ -129,6 +154,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) active_functions: Vec<ActiveFunction>,
     pub(crate) written_bindings: BTreeSet<BindingId>,
     pub(crate) signature_stack: Vec<ResolvedFunctionSignature>,
+    pub(crate) loop_depth: u32,
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
@@ -142,6 +168,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             module,
             resolver,
             signatures,
+            constants: None,
             diagnostics: Vec::new(),
             scopes: vec![BTreeMap::new()],
             next_local: 0,
@@ -151,7 +178,17 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             active_functions: Vec::new(),
             written_bindings: BTreeSet::new(),
             signature_stack: Vec::new(),
+            loop_depth: 0,
         }
+    }
+
+    #[must_use]
+    pub const fn with_runtime_constants(
+        mut self,
+        constants: &'resolver BTreeMap<SymbolId, RuntimeConstant>,
+    ) -> Self {
+        self.constants = Some(constants);
+        self
     }
 
     #[must_use]
@@ -317,11 +354,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 false,
                 span,
             ),
+            ExpressionSyntaxKind::Float(value) => self.float_literal_expression(
+                value,
+                expected.map(|expected| expected.type_id),
+                span,
+            ),
             ExpressionSyntaxKind::String(value) => self.primitive_expression(
                 TypedExpressionKind::String(value.clone()),
                 "String",
                 span,
             ),
+            ExpressionSyntaxKind::InterpolatedString(segments) => {
+                self.check_interpolated_string(segments, span)
+            }
             ExpressionSyntaxKind::Boolean(value) => {
                 self.primitive_expression(TypedExpressionKind::Boolean(*value), "Boolean", span)
             }
@@ -381,6 +426,33 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 left,
                 right,
             } => self.check_binary(*operator, left, right, expected, span),
+            ExpressionSyntaxKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                let condition = self.check_condition(condition)?;
+                let when_true = self.check_expression_expected(when_true, expected)?;
+                let branch_expected =
+                    expected.unwrap_or_else(|| ExpectedExpressionType::plain(when_true.type_id()));
+                let when_false =
+                    self.check_expression_expected(when_false, Some(branch_expected))?;
+                self.require_same_type(
+                    when_true.type_id(),
+                    when_false.type_id(),
+                    when_false.span(),
+                    span,
+                );
+                Some(TypedExpression {
+                    type_id: when_true.type_id(),
+                    kind: TypedExpressionKind::Conditional {
+                        condition: Box::new(condition),
+                        when_true: Box::new(when_true),
+                        when_false: Box::new(when_false),
+                    },
+                    span,
+                })
+            }
             ExpressionSyntaxKind::Call { callee, arguments } => {
                 self.check_call(callee, arguments, span)
             }
@@ -409,6 +481,145 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         };
         if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
             return self.check_array_create(type_arguments, arguments, span);
+        }
+        if path.len() >= 2 {
+            let type_name = path[..path.len() - 1].join(".");
+            let resolution = self.resolver.database().resolve(
+                self.module,
+                &type_name,
+                SymbolSpace::Type,
+                callee.span(),
+            );
+            if let Some(definition_symbol) = resolution.symbol()
+                && let Some(expected_arity) =
+                    self.resolver.union_type_parameter_count(definition_symbol)
+            {
+                if expected_arity != type_arguments.len() {
+                    self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                        span,
+                        &type_name,
+                        u16::try_from(expected_arity).unwrap_or(u16::MAX),
+                        type_arguments.len(),
+                    ));
+                    return None;
+                }
+                let enclosing = self.signature_stack.last().cloned()?;
+                let mut resolved_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments {
+                    let (resolved, diagnostics) =
+                        self.resolver
+                            .resolve_annotation(self.module, argument, &enclosing);
+                    self.diagnostics.extend(diagnostics);
+                    resolved_arguments.push(resolved?.type_id()?);
+                }
+                let definition = self
+                    .resolver
+                    .instantiate_union(definition_symbol, &resolved_arguments)?;
+                let case_name = path.last()?;
+                let Some(case) = definition
+                    .cases()
+                    .iter()
+                    .find(|case| case.name() == case_name)
+                    .cloned()
+                else {
+                    self.diagnostics
+                        .push(resolution_diagnostics::unknown_name(span, path.join(".")));
+                    return None;
+                };
+                return self.check_union_case_call(&definition, &case, arguments, span);
+            }
+        }
+        let name = path.join(".");
+        let resolution =
+            self.resolver
+                .database()
+                .resolve(self.module, &name, SymbolSpace::Value, callee.span());
+        if let Some(symbol) = resolution.symbol()
+            && let Some(signature) = self.signatures.get(&symbol).cloned()
+        {
+            if signature.type_parameters().len() != type_arguments.len() {
+                self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                    span,
+                    &name,
+                    u16::try_from(signature.type_parameters().len()).unwrap_or(u16::MAX),
+                    type_arguments.len(),
+                ));
+                return None;
+            }
+            if signature.parameters().len() != arguments.len() {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    span,
+                    &name,
+                    signature.parameters().len(),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let enclosing = self.signature_stack.last().cloned()?;
+            let mut resolved_arguments = Vec::with_capacity(type_arguments.len());
+            for argument in type_arguments {
+                let (resolved, diagnostics) =
+                    self.resolver
+                        .resolve_annotation(self.module, argument, &enclosing);
+                self.diagnostics.extend(diagnostics);
+                resolved_arguments.push(resolved?.type_id()?);
+            }
+            let substitutions: BTreeMap<_, _> = signature
+                .type_parameters()
+                .iter()
+                .zip(&resolved_arguments)
+                .map(|(parameter, argument)| (parameter.parameter(), *argument))
+                .collect();
+            let parameter_types = signature
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    self.resolver.substitute_type_parameters(
+                        parameter.parameter_type().type_id()?,
+                        &substitutions,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let result_types = signature
+                .results()
+                .iter()
+                .map(|result| {
+                    self.resolver
+                        .substitute_type_parameters(result.type_id()?, &substitutions)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut typed_arguments = Vec::with_capacity(arguments.len());
+            for (argument, parameter_type) in arguments.iter().zip(parameter_types) {
+                let typed = self.check_expression_expected(
+                    argument,
+                    Some(ExpectedExpressionType::plain(parameter_type)),
+                )?;
+                self.require_same_type(
+                    parameter_type,
+                    typed.type_id(),
+                    typed.span(),
+                    argument.span(),
+                );
+                typed_arguments.push(typed);
+            }
+            let dispatch = self
+                .resolver
+                .database()
+                .index()
+                .declaration(symbol)
+                .and_then(pop_resolve::Declaration::reference_identity)
+                .map_or(TypedCallDispatch::Direct { function: symbol }, |function| {
+                    TypedCallDispatch::Referenced { function }
+                });
+            return self.checked_call_expression(CheckedCall {
+                call: TypedCall {
+                    dispatch,
+                    type_arguments: resolved_arguments,
+                    arguments: typed_arguments,
+                    span,
+                },
+                results: result_types,
+            });
         }
         let [query] = path.as_slice() else {
             self.diagnostics.push(resolution_diagnostics::unknown_name(
@@ -559,6 +770,38 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
     }
 
+    pub(crate) fn float_literal_expression(
+        &mut self,
+        value: &str,
+        expected: Option<TypeId>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let type_id = expected
+            .filter(|type_id| {
+                matches!(self.numeric_target(*type_id), Some(NumericTarget::Float(_)))
+            })
+            .or_else(|| self.resolver.arena().source_type("Float"))?;
+        let NumericTarget::Float(kind) = self.numeric_target(type_id)? else {
+            return None;
+        };
+        match FloatValue::parse_decimal(value, kind) {
+            Ok(value) => Some(TypedExpression {
+                kind: TypedExpressionKind::Float(value),
+                type_id,
+                span,
+            }),
+            Err(_) => {
+                self.diagnostics
+                    .push(type_diagnostics::numeric_literal_out_of_range(
+                        span,
+                        value,
+                        self.type_name(type_id),
+                    ));
+                None
+            }
+        }
+    }
+
     pub(crate) fn primitive_expression(
         &self,
         kind: TypedExpressionKind,
@@ -572,6 +815,78 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         })
     }
 
+    fn check_interpolated_string(
+        &mut self,
+        segments: &[pop_syntax::StringSegmentSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let string = self.resolver.arena().source_type("String")?;
+        let mut composed: Option<TypedExpression> = None;
+        for segment in segments {
+            let value = match segment.kind() {
+                StringSegmentSyntaxKind::Text(value) => TypedExpression {
+                    kind: TypedExpressionKind::String(value.clone()),
+                    type_id: string,
+                    span: segment.span(),
+                },
+                StringSegmentSyntaxKind::Expression(expression) => {
+                    let value = self.check_expression(expression)?;
+                    if value.type_id() == string {
+                        value
+                    } else {
+                        let kind = match self.resolver.arena().get(value.type_id()) {
+                            Some(SemanticType::Primitive(PrimitiveType::Boolean)) => {
+                                StringFormatKind::Boolean
+                            }
+                            Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => {
+                                StringFormatKind::Integer(*kind)
+                            }
+                            Some(SemanticType::Primitive(PrimitiveType::Float32)) => {
+                                StringFormatKind::Float(FloatKind::Float32)
+                            }
+                            Some(SemanticType::Primitive(PrimitiveType::Float64)) => {
+                                StringFormatKind::Float(FloatKind::Float64)
+                            }
+                            _ => {
+                                self.diagnostics.push(type_diagnostics::invalid_operator(
+                                    expression.span(),
+                                    "string interpolation",
+                                    self.type_name(value.type_id()),
+                                ));
+                                return None;
+                            }
+                        };
+                        TypedExpression {
+                            kind: TypedExpressionKind::StringFormat {
+                                kind,
+                                value: Box::new(value),
+                            },
+                            type_id: string,
+                            span: expression.span(),
+                        }
+                    }
+                }
+            };
+            composed = Some(if let Some(left) = composed {
+                TypedExpression {
+                    kind: TypedExpressionKind::StringConcat {
+                        left: Box::new(left),
+                        right: Box::new(value),
+                    },
+                    type_id: string,
+                    span,
+                }
+            } else {
+                value
+            });
+        }
+        Some(composed.unwrap_or(TypedExpression {
+            kind: TypedExpressionKind::String(String::new()),
+            type_id: string,
+            span,
+        }))
+    }
+
     pub(crate) fn check_name(
         &mut self,
         path: &[String],
@@ -581,6 +896,36 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             BoundPathLookup::Found(bound) => return Some(bound),
             BoundPathLookup::Error => return None,
             BoundPathLookup::NotBound => {}
+        }
+        if path.len() >= 2 {
+            let type_name = path[..path.len() - 1].join(".");
+            let resolution =
+                self.resolver
+                    .database()
+                    .resolve(self.module, &type_name, SymbolSpace::Type, span);
+            if let Some(symbol) = resolution.symbol()
+                && let Some(definition) = self.resolver.enum_definition(symbol).cloned()
+            {
+                let case_name = &path[path.len() - 1];
+                let Some(case) = definition
+                    .cases()
+                    .iter()
+                    .find(|case| case.name() == case_name)
+                else {
+                    self.diagnostics
+                        .push(resolution_diagnostics::unknown_name(span, path.join(".")));
+                    return None;
+                };
+                return Some(TypedExpression {
+                    kind: TypedExpressionKind::EnumCase {
+                        definition: definition.symbol(),
+                        case: case.case(),
+                        discriminant: case.discriminant(),
+                    },
+                    type_id: definition.type_id(),
+                    span,
+                });
+            }
         }
         match self.lookup_union_case(path, span) {
             UnionCaseLookup::Found(definition, case) => {
@@ -617,6 +962,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return None;
         }
         let symbol = resolution.symbol()?;
+        if let Some(constant) = self.constants.and_then(|constants| constants.get(&symbol)) {
+            return self.runtime_constant_expression(constant, span);
+        }
         let signature = self.signatures.get(&symbol)?;
         let parameters: Option<Vec<_>> = signature
             .parameters()
@@ -639,6 +987,49 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .ok()?;
         Some(TypedExpression {
             kind: TypedExpressionKind::Function(symbol),
+            type_id,
+            span,
+        })
+    }
+
+    fn runtime_constant_expression(
+        &self,
+        constant: &RuntimeConstant,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        self.runtime_constant_value(constant.value(), constant.type_id(), span)
+    }
+
+    fn runtime_constant_value(
+        &self,
+        value: &AttributeConstant,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let kind = match value {
+            AttributeConstant::Nil => TypedExpressionKind::Nil,
+            AttributeConstant::Boolean(value) => TypedExpressionKind::Boolean(*value),
+            AttributeConstant::Integer(value) => TypedExpressionKind::Integer(*value),
+            AttributeConstant::Float(value) => TypedExpressionKind::Float(*value),
+            AttributeConstant::String(value) => TypedExpressionKind::String(value.clone()),
+            AttributeConstant::Tuple(values) => {
+                let Some(SemanticType::Tuple(element_types)) = self.resolver.arena().get(type_id)
+                else {
+                    return None;
+                };
+                if values.len() != element_types.len() {
+                    return None;
+                }
+                let elements = values
+                    .iter()
+                    .zip(element_types)
+                    .map(|(value, type_id)| self.runtime_constant_value(value, *type_id, span))
+                    .collect::<Option<Vec<_>>>()?;
+                TypedExpressionKind::Tuple(elements)
+            }
+        };
+        Some(TypedExpression {
+            kind,
             type_id,
             span,
         })
@@ -736,7 +1127,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .map(TypedExpressionKind::Capture);
         }
         Some(match binding.kind {
-            BindingKind::Local(local) => TypedExpressionKind::Local(local),
+            BindingKind::Local(local) | BindingKind::LoopLocal(local) => {
+                TypedExpressionKind::Local(local)
+            }
             BindingKind::Parameter(parameter) => TypedExpressionKind::Parameter(parameter),
         })
     }
@@ -823,12 +1216,20 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
                     .all(|arm| statements_definitely_return(arm.body()))
         }
         TypedStatementKind::Local { .. }
+        | TypedStatementKind::MultipleLocal { .. }
         | TypedStatementKind::LocalSet { .. }
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::While { .. }
+        | TypedStatementKind::NumericFor { .. }
+        | TypedStatementKind::Break
+        | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }
+        | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::TableSet { .. }
+        | TypedStatementKind::CompoundArraySet { .. }
+        | TypedStatementKind::MultipleAssignment { .. }
         | TypedStatementKind::Call(_)
         | TypedStatementKind::Expression(_) => false,
         TypedStatementKind::RepeatUntil { body, .. } => statements_definitely_return(body),
@@ -874,7 +1275,10 @@ pub(crate) const fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryO
         SyntaxBinaryOperator::Equal => TypedBinaryOperator::Equal,
         SyntaxBinaryOperator::NotEqual => TypedBinaryOperator::NotEqual,
         SyntaxBinaryOperator::LessThan => TypedBinaryOperator::LessThan,
+        SyntaxBinaryOperator::LessThanOrEqual => TypedBinaryOperator::LessThanOrEqual,
         SyntaxBinaryOperator::GreaterThan => TypedBinaryOperator::GreaterThan,
+        SyntaxBinaryOperator::GreaterThanOrEqual => TypedBinaryOperator::GreaterThanOrEqual,
+        SyntaxBinaryOperator::Concat => unreachable!(),
         SyntaxBinaryOperator::Add => TypedBinaryOperator::Add,
         SyntaxBinaryOperator::Subtract => TypedBinaryOperator::Subtract,
         SyntaxBinaryOperator::Multiply => TypedBinaryOperator::Multiply,
@@ -897,7 +1301,10 @@ pub(crate) const fn binary_text(operator: SyntaxBinaryOperator) -> &'static str 
         SyntaxBinaryOperator::Equal => "==",
         SyntaxBinaryOperator::NotEqual => "~=",
         SyntaxBinaryOperator::LessThan => "<",
+        SyntaxBinaryOperator::LessThanOrEqual => "<=",
         SyntaxBinaryOperator::GreaterThan => ">",
+        SyntaxBinaryOperator::GreaterThanOrEqual => ">=",
+        SyntaxBinaryOperator::Concat => "..",
         SyntaxBinaryOperator::Add => "+",
         SyntaxBinaryOperator::Subtract => "-",
         SyntaxBinaryOperator::Multiply => "*",

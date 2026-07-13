@@ -14,9 +14,10 @@ use pop_hir::{
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
 use pop_syntax::{
     AttributeUseSyntax, NodeKind, parse_attribute_declaration, parse_attribute_use,
-    parse_class_declaration, parse_class_method_body, parse_const_declaration, parse_file,
-    parse_function_body, parse_function_signature, parse_interface_declaration,
-    parse_record_declaration, parse_union_declaration,
+    parse_class_declaration, parse_class_method_body, parse_const_declaration,
+    parse_enum_declaration, parse_file, parse_function_body, parse_function_signature,
+    parse_interface_declaration, parse_record_declaration, parse_type_alias_declaration,
+    parse_union_declaration,
 };
 use pop_types::{
     AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SignatureResolver,
@@ -26,8 +27,8 @@ use pop_types::{
 use crate::api::*;
 use crate::attributes::{classify_function_attributes, resolve_source_attributes};
 use crate::compile_time::{
-    build_compile_time_context, check_compile_time_function_bodies, evaluate_declaration_defaults,
-    evaluate_source_constants,
+    build_compile_time_context, check_compile_time_function_bodies,
+    compile_time_attribute_constant, evaluate_declaration_defaults, evaluate_source_constants,
 };
 use crate::reference::{emit_reference_metadata, hir_function_references, reference_signatures};
 use crate::work::*;
@@ -87,6 +88,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     validate_standard_native_exports(&bootstrap, pop_standard::NATIVE_EXPORTS)
         .expect("repository-validated native Standard adapters");
     let mut resolver = SignatureResolver::new(&database, bootstrap.clone());
+    define_type_aliases(&parsed, &database, &mut resolver, &mut diagnostics);
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,
         input.bubble,
@@ -155,15 +157,27 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut compile_time_evaluations,
         &mut diagnostics,
     );
-    declarations = refresh_declarations(declarations, &resolver);
+    let runtime_constants: BTreeMap<_, _> = constants
+        .iter()
+        .filter_map(|constant| {
+            compile_time_attribute_constant(constant.value.clone()).map(|value| {
+                (
+                    constant.symbol,
+                    pop_types::RuntimeConstant::new(constant.type_id, value),
+                )
+            })
+        })
+        .collect();
     let (hir_functions, hir_methods, hir_build_failed) = build_runtime_hir(
         input.bubble,
         &mut functions,
         &methods,
         &signatures,
+        &runtime_constants,
         &mut resolver,
         &mut diagnostics,
     );
+    declarations = refresh_declarations(declarations, &resolver);
     sort_diagnostics(&mut diagnostics);
     let hir = if diagnostics.is_empty() && !hir_build_failed {
         HirBubble::new_with_declarations_and_methods(
@@ -197,6 +211,36 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         constants,
         diagnostics,
         reference_metadata,
+    }
+}
+
+fn define_type_aliases(
+    modules: &[ParsedModule],
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for module in modules {
+        for node in module.syntax.root().children() {
+            if node.kind() != NodeKind::TypeAliasDeclaration {
+                continue;
+            }
+            match parse_type_alias_declaration(&module.source, &module.syntax, node) {
+                Ok(syntax) => {
+                    if let Some(symbol) = resolve_symbol(
+                        database,
+                        module.module,
+                        syntax.name(),
+                        SymbolSpace::Type,
+                        syntax.span(),
+                        diagnostics,
+                    ) {
+                        resolver.register_type_alias(module.module, symbol, &syntax);
+                    }
+                }
+                Err(error) => diagnostics.push(syntax_error(error.span(), error.expectation())),
+            }
+        }
     }
 }
 
@@ -309,6 +353,7 @@ fn build_runtime_hir(
     functions: &mut [FunctionWork],
     methods: &[MethodWork],
     signatures: &BTreeMap<SymbolId, ResolvedFunctionSignature>,
+    constants: &BTreeMap<SymbolId, pop_types::RuntimeConstant>,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (Vec<HirFunction>, Vec<HirMethod>, bool) {
@@ -327,6 +372,7 @@ fn build_runtime_hir(
             continue;
         }
         let typed = BodyChecker::new(function.module, resolver, signatures)
+            .with_runtime_constants(constants)
             .check(&function.signature, &function.body);
         diagnostics.extend(typed.diagnostics().iter().cloned());
         let Some(body) = typed.body() else {
@@ -347,6 +393,7 @@ fn build_runtime_hir(
     let mut hir_methods = Vec::new();
     for method in methods {
         let typed = BodyChecker::new(method.module, resolver, signatures)
+            .with_runtime_constants(constants)
             .check(&method.signature, &method.body);
         diagnostics.extend(typed.diagnostics().iter().cloned());
         let Some(body) = typed.body() else {
@@ -552,6 +599,15 @@ fn define_records_and_unions(
                     diagnostics,
                     std::mem::take(&mut pending_attributes),
                 ),
+                NodeKind::EnumDeclaration => define_enum(
+                    module,
+                    node,
+                    bubble,
+                    database,
+                    resolver,
+                    diagnostics,
+                    std::mem::take(&mut pending_attributes),
+                ),
                 _ => {
                     pending_attributes.clear();
                     continue;
@@ -733,6 +789,57 @@ fn define_union(
     )
 }
 
+fn define_enum(
+    module: &ParsedModule,
+    node: &pop_syntax::SyntaxNode,
+    bubble: BubbleId,
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    attribute_uses: Vec<AttributeUseSyntax>,
+) -> (Option<HirDeclaration>, Option<DeclarationAttributeWork>) {
+    let syntax = match parse_enum_declaration(&module.source, &module.syntax, node) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            diagnostics.push(syntax_error(error.span(), error.expectation()));
+            return (None, None);
+        }
+    };
+    let Some(symbol) = resolve_symbol(
+        database,
+        module.module,
+        syntax.name(),
+        SymbolSpace::Type,
+        syntax.span(),
+        diagnostics,
+    ) else {
+        return (None, None);
+    };
+    let result = resolver.define_enum(symbol, &syntax);
+    diagnostics.extend(result.diagnostics().iter().cloned());
+    let (Some(definition), Some(declaration)) =
+        (result.definition(), database.index().declaration(symbol))
+    else {
+        return (None, None);
+    };
+    (
+        Some(HirDeclaration::enumeration(
+            module.module,
+            bubble,
+            declaration.visibility(),
+            syntax.name(),
+            definition,
+        )),
+        Some(DeclarationAttributeWork {
+            module: module.module,
+            symbol,
+            target: AttributeTarget::Enum,
+            attribute_uses,
+            attributes: Vec::new(),
+        }),
+    )
+}
+
 fn define_class(
     module: &ParsedModule,
     node: &pop_syntax::SyntaxNode,
@@ -897,41 +1004,91 @@ fn refresh_declarations(
 ) -> Vec<HirDeclaration> {
     declarations
         .into_iter()
-        .map(|declaration| {
+        .flat_map(|declaration| {
             if matches!(declaration.kind(), HirDeclarationKind::Attribute(_)) {
                 if let Some(definition) = resolver.attribute_definition(declaration.symbol()) {
-                    return HirDeclaration::attribute(
+                    return vec![HirDeclaration::attribute(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),
                         declaration.name(),
                         definition,
-                    );
+                    )];
                 }
             }
             if matches!(declaration.kind(), HirDeclarationKind::Record(_)) {
+                if resolver.record_is_generic(declaration.symbol()) {
+                    let mut refreshed = resolver
+                        .record_instances(declaration.symbol())
+                        .map(|definition| {
+                            HirDeclaration::record(
+                                declaration.module(),
+                                declaration.bubble(),
+                                declaration.visibility(),
+                                declaration.name(),
+                                definition,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(template) = resolver.record_definition(declaration.symbol()) {
+                        refreshed.push(HirDeclaration::record(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            template,
+                        ));
+                    }
+                    return refreshed;
+                }
                 if let Some(definition) = resolver.record_definition(declaration.symbol()) {
-                    return HirDeclaration::record(
+                    return vec![HirDeclaration::record(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),
                         declaration.name(),
                         definition,
-                    );
+                    )];
                 }
+            }
+            if matches!(declaration.kind(), HirDeclarationKind::Union(_))
+                && resolver.union_is_generic(declaration.symbol())
+            {
+                let mut refreshed = resolver
+                    .union_instances(declaration.symbol())
+                    .map(|definition| {
+                        HirDeclaration::tagged_union(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            definition,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(template) = resolver.union_definition(declaration.symbol()) {
+                    refreshed.push(HirDeclaration::tagged_union(
+                        declaration.module(),
+                        declaration.bubble(),
+                        declaration.visibility(),
+                        declaration.name(),
+                        template,
+                    ));
+                }
+                return refreshed;
             }
             if matches!(declaration.kind(), HirDeclarationKind::Class(_)) {
                 if let Some(definition) = resolver.class_definition(declaration.symbol()) {
-                    return HirDeclaration::class(
+                    return vec![HirDeclaration::class(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),
                         declaration.name(),
                         definition,
-                    );
+                    )];
                 }
             }
-            declaration
+            vec![declaration]
         })
         .collect()
 }

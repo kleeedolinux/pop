@@ -5,6 +5,7 @@ use std::fmt;
 use pop_foundation::TypeId;
 
 use crate::{PrimitiveType, SemanticType};
+use pop_foundation::ParameterId;
 
 #[derive(Clone, Debug)]
 pub struct TypeArena {
@@ -46,6 +47,150 @@ impl TypeArena {
     #[must_use]
     pub fn get(&self, id: TypeId) -> Option<&SemanticType> {
         self.types.get(id.raw() as usize)
+    }
+
+    #[must_use]
+    pub fn find(&self, semantic: &SemanticType) -> Option<TypeId> {
+        self.interned.get(semantic).copied()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+
+    #[must_use]
+    pub fn contains_type_parameter(&self, type_id: TypeId) -> bool {
+        match self.get(type_id) {
+            Some(SemanticType::TypeParameter(_)) => true,
+            Some(semantic) => referenced_types(semantic)
+                .into_iter()
+                .any(|nested| self.contains_type_parameter(nested)),
+            None => false,
+        }
+    }
+
+    #[must_use]
+    pub fn substitute_existing(
+        &self,
+        type_id: TypeId,
+        substitutions: &BTreeMap<ParameterId, TypeId>,
+    ) -> Option<TypeId> {
+        let semantic = self.get(type_id)?.clone();
+        if let SemanticType::TypeParameter(parameter) = semantic {
+            return substitutions.get(&parameter).copied();
+        }
+        let map = |id| self.substitute_existing(id, substitutions);
+        let substituted = match semantic {
+            SemanticType::Primitive(_)
+            | SemanticType::Enum { .. }
+            | SemanticType::Opaque(_)
+            | SemanticType::Error => return Some(type_id),
+            SemanticType::TypeParameter(_) => unreachable!("handled above"),
+            SemanticType::TaggedUnion {
+                definition,
+                source,
+                arguments,
+            } => {
+                let substituted_arguments =
+                    arguments.into_iter().map(map).collect::<Option<Vec<_>>>()?;
+                if let Some((_, concrete)) = self.interned.iter().find(|(semantic, _)| {
+                    matches!(
+                        semantic,
+                        SemanticType::TaggedUnion {
+                            source: candidate_source,
+                            arguments: candidate_arguments,
+                            ..
+                        } if *candidate_source == source
+                            && candidate_arguments == &substituted_arguments
+                    )
+                }) {
+                    return Some(*concrete);
+                }
+                SemanticType::TaggedUnion {
+                    definition,
+                    source,
+                    arguments: substituted_arguments,
+                }
+            }
+            SemanticType::Tuple(values) => {
+                SemanticType::Tuple(values.into_iter().map(map).collect::<Option<_>>()?)
+            }
+            SemanticType::Union(values) => {
+                SemanticType::Union(values.into_iter().map(map).collect::<Option<_>>()?)
+            }
+            SemanticType::Record(fields) => SemanticType::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| Some((name, map(value)?)))
+                    .collect::<Option<_>>()?,
+            ),
+            SemanticType::Array(value) => SemanticType::Array(map(value)?),
+            SemanticType::Table { key, value } => SemanticType::Table {
+                key: map(key)?,
+                value: map(value)?,
+            },
+            SemanticType::Optional(value) => SemanticType::Optional(map(value)?),
+            SemanticType::Function {
+                parameters,
+                results,
+                effects,
+            } => SemanticType::Function {
+                parameters: parameters.into_iter().map(map).collect::<Option<_>>()?,
+                results: results.into_iter().map(map).collect::<Option<_>>()?,
+                effects,
+            },
+            SemanticType::Class { class, arguments } => SemanticType::Class {
+                class,
+                arguments: arguments.into_iter().map(map).collect::<Option<_>>()?,
+            },
+            SemanticType::Interface {
+                interface,
+                arguments,
+            } => SemanticType::Interface {
+                interface,
+                arguments: arguments.into_iter().map(map).collect::<Option<_>>()?,
+            },
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } => SemanticType::Builtin {
+                definition,
+                arguments: arguments.into_iter().map(map).collect::<Option<_>>()?,
+            },
+            SemanticType::Attribute {
+                attribute,
+                parameters,
+            } => SemanticType::Attribute {
+                attribute,
+                parameters: parameters.into_iter().map(map).collect::<Option<_>>()?,
+            },
+        };
+        self.find(&substituted).or_else(|| {
+            let SemanticType::TaggedUnion {
+                source, arguments, ..
+            } = &substituted
+            else {
+                return None;
+            };
+            self.interned
+                .iter()
+                .find_map(|(candidate, type_id)| match candidate {
+                    SemanticType::TaggedUnion {
+                        source: candidate_source,
+                        arguments: candidate_arguments,
+                        ..
+                    } if candidate_source == source && candidate_arguments == arguments => {
+                        Some(*type_id)
+                    }
+                    _ => None,
+                })
+        })
     }
 
     /// Interns a semantic type after validating all referenced type IDs.
@@ -151,10 +296,11 @@ impl Default for TypeArena {
 fn referenced_types(semantic: &SemanticType) -> Vec<TypeId> {
     match semantic {
         SemanticType::Primitive(_)
-        | SemanticType::TaggedUnion { .. }
+        | SemanticType::Enum { .. }
         | SemanticType::TypeParameter(_)
         | SemanticType::Opaque(_)
         | SemanticType::Error => Vec::new(),
+        SemanticType::TaggedUnion { arguments, .. } => arguments.clone(),
         SemanticType::Tuple(elements)
         | SemanticType::Union(elements)
         | SemanticType::Attribute {

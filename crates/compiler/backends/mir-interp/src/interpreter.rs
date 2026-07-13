@@ -12,14 +12,30 @@ use pop_mir::{
     verify_mir_bubble,
 };
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, BarrierKind, ObjectAllocationRequest, PinHandle,
-    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
-    TableAllocationRequest, Trap, TrapKind, WriteBarrier,
+    AllocationClass, ArrayAllocationRequest, BarrierKind, ObjectAllocationRequest, ObjectMap,
+    ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
+    RuntimeTypeId, TableAllocationRequest, Trap, TrapKind, WriteBarrier,
 };
-use pop_types::{IntegerKind, IntegerValue, TypeArena};
+use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+
+fn managed_type(arena: &TypeArena, type_id: TypeId) -> bool {
+    matches!(
+        arena.get(type_id),
+        Some(
+            SemanticType::Primitive(PrimitiveType::String)
+                | SemanticType::Tuple(_)
+                | SemanticType::Array(_)
+                | SemanticType::Table { .. }
+                | SemanticType::Class { .. }
+                | SemanticType::Interface { .. }
+                | SemanticType::Builtin { .. }
+        )
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionLimits {
     maximum_steps: u64,
@@ -51,6 +67,7 @@ pub enum ExecutionError {
     MissingValue(ValueId),
     IntegerOverflow,
     DivisionByZero,
+    NumericConversion,
     Runtime(RuntimeFailure),
     StepLimit,
     CallDepthLimit,
@@ -364,19 +381,108 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     self.runtime.raise_trap(Trap::new(TrapKind::DivisionByZero)),
                 ));
             }
+            Err(ExecutionError::NumericConversion) => {
+                return Err(ExecutionError::Runtime(
+                    self.runtime
+                        .raise_trap(Trap::new(TrapKind::NumericConversion)),
+                ));
+            }
             Err(error) => return Err(error),
         }
         let result = match instruction.kind() {
             MirInstructionKind::StringConstant(value) => MirValue::String(value.clone()),
+            MirInstructionKind::StringConcat { left, right } => {
+                let MirValue::String(left) = &value(values, *left)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let MirValue::String(right) = &value(values, *right)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let mut result = String::with_capacity(left.len().saturating_add(right.len()));
+                result.push_str(left);
+                result.push_str(right);
+                MirValue::String(result)
+            }
+            MirInstructionKind::StringFormat {
+                kind,
+                value: operand,
+            } => {
+                let operand = &value(values, *operand)?.visible;
+                let formatted = match (kind, operand) {
+                    (pop_types::StringFormatKind::Boolean, MirValue::Boolean(value)) => {
+                        value.to_string()
+                    }
+                    (pop_types::StringFormatKind::Integer(expected), MirValue::Integer(value))
+                        if expected == &value.kind() =>
+                    {
+                        value.to_string()
+                    }
+                    (pop_types::StringFormatKind::Float(expected), MirValue::Float(value))
+                        if expected == &value.kind() =>
+                    {
+                        value.format_string()
+                    }
+                    _ => return Err(ExecutionError::TypeMismatch),
+                };
+                MirValue::String(formatted)
+            }
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
+            MirInstructionKind::EnumConstant {
+                definition,
+                case,
+                discriminant,
+            } => MirValue::Enum {
+                definition: *definition,
+                case: *case,
+                discriminant: *discriminant,
+            },
             MirInstructionKind::FunctionReference(function) => MirValue::Function(*function),
-            MirInstructionKind::TupleMake(elements) => MirValue::Tuple(
-                elements
+            MirInstructionKind::TupleMake(elements) => {
+                let tuple = MirValue::Tuple(
+                    elements
+                        .iter()
+                        .map(|element| value(values, *element).map(|value| value.visible.clone()))
+                        .collect::<Result<_, _>>()?,
+                );
+                let Some(SemanticType::Tuple(element_types)) =
+                    self.arena.get(instruction.result_type())
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let references = element_types
                     .iter()
-                    .map(|element| value(values, *element).map(|value| value.visible.clone()))
-                    .collect::<Result<_, _>>()?,
-            ),
+                    .enumerate()
+                    .filter_map(|(index, type_id)| {
+                        managed_type(self.arena, *type_id)
+                            .then(|| u32::try_from(index).ok().map(ObjectSlot::new))
+                            .flatten()
+                    })
+                    .collect();
+                let object_map = ObjectMap::new(
+                    u32::try_from(element_types.len()).unwrap_or(u32::MAX),
+                    references,
+                )
+                .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map,
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                return Ok(RuntimeValue::managed(tuple, reference));
+            }
+            MirInstructionKind::TupleGet { tuple, index } => {
+                let MirValue::Tuple(elements) = &value(values, *tuple)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                elements
+                    .get(*index as usize)
+                    .cloned()
+                    .ok_or(ExecutionError::InvalidControlFlow)?
+            }
             MirInstructionKind::ArrayMake {
                 elements,
                 element_map,
@@ -463,6 +569,54 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                         .collect::<Result<_, ExecutionError>>()?,
                 );
                 return Ok(RuntimeValue::managed(visible, reference));
+            }
+            MirInstructionKind::TableGet { table, key } => {
+                let (MirValue::Table(entries), key) = (
+                    &value(values, *table)?.visible,
+                    &value(values, *key)?.visible,
+                ) else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                return Ok(RuntimeValue::visible(
+                    entries
+                        .iter()
+                        .find(|(candidate, _)| candidate == key)
+                        .map_or(MirValue::Nil, |(_, value)| value.clone()),
+                ));
+            }
+            MirInstructionKind::TableSet {
+                table,
+                key,
+                value: stored,
+                ..
+            } => {
+                let owner = value(values, *table)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let key = value(values, *key)?.visible.clone();
+                let stored = value(values, *stored)?.visible.clone();
+                let mut updated = false;
+                for candidate in values.values_mut() {
+                    if candidate.reference != Some(owner) {
+                        continue;
+                    }
+                    let MirValue::Table(entries) = &mut candidate.visible else {
+                        continue;
+                    };
+                    if let Some((_, current)) = entries
+                        .iter_mut()
+                        .find(|(candidate_key, _)| *candidate_key == key)
+                    {
+                        *current = stored.clone();
+                    } else {
+                        entries.push((key.clone(), stored.clone()));
+                    }
+                    updated = true;
+                }
+                if !updated {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                MirValue::Nil
             }
             MirInstructionKind::ArrayGet { array, index } => {
                 let (MirValue::Array(elements), MirValue::Integer(index)) = (
@@ -626,10 +780,18 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::FloatDivide { .. }
             | MirInstructionKind::IntegerNegate { .. }
             | MirInstructionKind::FloatNegate { .. }
+            | MirInstructionKind::ConvertInteger { .. }
+            | MirInstructionKind::ConvertIntegerToFloat { .. }
+            | MirInstructionKind::ConvertFloatToInteger { .. }
+            | MirInstructionKind::ConvertFloat { .. }
             | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerLessOrEqual { .. }
             | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
             | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatLessOrEqual { .. }
             | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::CallStandard { .. }
             | MirInstructionKind::CallDirect { .. }
             | MirInstructionKind::CallReferenced { .. }
@@ -757,7 +919,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 let target = captures
                     .get_mut(slot)
                     .ok_or(ExecutionError::InvalidControlFlow)?;
-                *target = stored;
+                if let MirValue::Function(symbol) = &target.visible
+                    && let Some(PrivateValue::Cell(cell)) = self.private_values.get(symbol)
+                {
+                    *cell.borrow_mut() = stored;
+                } else {
+                    *target = stored;
+                }
                 return Ok(());
             }
             MirInstructionKind::GcSafePoint {

@@ -133,11 +133,17 @@ fn collect_direct_calls(
         | CompileTimeExpressionKind::Local(_) => {}
         CompileTimeExpressionKind::Let {
             initializer, body, ..
+        }
+        | CompileTimeExpressionKind::LetTuple {
+            initializer, body, ..
         } => {
             collect_direct_calls(initializer, calls);
             collect_direct_calls(body, calls);
         }
         CompileTimeExpressionKind::Unary { operand, .. } => collect_direct_calls(operand, calls),
+        CompileTimeExpressionKind::NumericConvert { value, .. } => {
+            collect_direct_calls(value, calls);
+        }
         CompileTimeExpressionKind::Binary { left, right, .. } => {
             collect_direct_calls(left, calls);
             collect_direct_calls(right, calls);
@@ -155,6 +161,9 @@ fn collect_direct_calls(
             for element in elements {
                 collect_direct_calls(element, calls);
             }
+        }
+        CompileTimeExpressionKind::TupleGet { tuple, .. } => {
+            collect_direct_calls(tuple, calls);
         }
         CompileTimeExpressionKind::Call {
             function,
@@ -203,7 +212,9 @@ pub(crate) fn evaluate_declaration_defaults(
                 compile_time_evaluations,
                 diagnostics,
             ),
-            HirDeclarationKind::Union(_) | HirDeclarationKind::Interface(_) => {}
+            HirDeclarationKind::Union(_)
+            | HirDeclarationKind::Enum(_)
+            | HirDeclarationKind::Interface(_) => {}
         }
     }
 }

@@ -11,6 +11,7 @@ pub enum TokenKind {
     Identifier,
     Number,
     String,
+    InterpolatedString,
     Namespace,
     Using,
     Public,
@@ -34,10 +35,13 @@ pub enum TokenKind {
     If,
     Then,
     Else,
+    ElseIf,
     While,
     Repeat,
     Until,
     For,
+    Break,
+    Continue,
     Do,
     Match,
     When,
@@ -49,6 +53,8 @@ pub enum TokenKind {
     Or,
     Not,
     Dot,
+    DotDot,
+    DotDotEqual,
     Comma,
     Colon,
     Equal,
@@ -61,15 +67,22 @@ pub enum TokenKind {
     LeftBracket,
     RightBracket,
     LessThan,
+    LessThanEqual,
     GreaterThan,
+    GreaterThanEqual,
     At,
     Question,
     Pipe,
     Plus,
+    PlusEqual,
     Minus,
+    MinusEqual,
     Star,
+    StarEqual,
     Slash,
+    SlashEqual,
     Percent,
+    PercentEqual,
     Unknown,
 }
 
@@ -141,6 +154,18 @@ pub fn lex(source: &SourceFile) -> LexResult {
     Lexer {
         source,
         cursor: 0,
+        end: source.text().len(),
+        tokens: Vec::new(),
+        diagnostics: Vec::new(),
+    }
+    .run()
+}
+
+pub(crate) fn lex_range(source: &SourceFile, start: usize, end: usize) -> LexResult {
+    Lexer {
+        source,
+        cursor: start,
+        end,
         tokens: Vec::new(),
         diagnostics: Vec::new(),
     }
@@ -150,13 +175,14 @@ pub fn lex(source: &SourceFile) -> LexResult {
 struct Lexer<'source> {
     source: &'source SourceFile,
     cursor: usize,
+    end: usize,
     tokens: Vec<Token>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl Lexer<'_> {
     fn run(mut self) -> LexResult {
-        while self.cursor < self.source.text().len() {
+        while self.cursor < self.end {
             self.scan_token();
         }
         LexResult {
@@ -167,14 +193,14 @@ impl Lexer<'_> {
 
     fn scan_token(&mut self) {
         let start = self.cursor;
-        let remaining = &self.source.text()[start..];
+        let remaining = &self.source.text()[start..self.end];
         let byte = remaining.as_bytes()[0];
 
         let Some(first_character) = remaining.chars().next() else {
             return;
         };
         if first_character.is_alphabetic() || first_character == '_' {
-            while let Some(character) = self.source.text()[self.cursor..].chars().next() {
+            while let Some(character) = self.source.text()[self.cursor..self.end].chars().next() {
                 if !(character.is_alphanumeric() || character == '_') {
                     break;
                 }
@@ -205,10 +231,39 @@ impl Lexer<'_> {
                 TokenKind::LineComment
             }
             b'0'..=b'9' => {
-                self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+                self.scan_number();
                 TokenKind::Number
             }
-            b'\'' | b'"' => self.scan_string(start, byte),
+            b'\'' | b'"' => self.scan_string(start, byte, false),
+            b'`' => self.scan_string(start, byte, true),
+            b'.' if remaining.starts_with("..=") => {
+                self.cursor += 3;
+                TokenKind::DotDotEqual
+            }
+            b'.' if remaining.starts_with("..") => {
+                self.cursor += 2;
+                TokenKind::DotDot
+            }
+            b'+' if remaining.starts_with("+=") => {
+                self.cursor += 2;
+                TokenKind::PlusEqual
+            }
+            b'-' if remaining.starts_with("-=") => {
+                self.cursor += 2;
+                TokenKind::MinusEqual
+            }
+            b'*' if remaining.starts_with("*=") => {
+                self.cursor += 2;
+                TokenKind::StarEqual
+            }
+            b'/' if remaining.starts_with("/=") => {
+                self.cursor += 2;
+                TokenKind::SlashEqual
+            }
+            b'%' if remaining.starts_with("%=") => {
+                self.cursor += 2;
+                TokenKind::PercentEqual
+            }
             b'=' if remaining.starts_with("==") => {
                 self.cursor += 2;
                 TokenKind::EqualEqual
@@ -216,6 +271,14 @@ impl Lexer<'_> {
             b'~' if remaining.starts_with("~=") => {
                 self.cursor += 2;
                 TokenKind::TildeEqual
+            }
+            b'<' if remaining.starts_with("<=") => {
+                self.cursor += 2;
+                TokenKind::LessThanEqual
+            }
+            b'>' if remaining.starts_with(">=") => {
+                self.cursor += 2;
+                TokenKind::GreaterThanEqual
             }
             _ => {
                 self.cursor += char::from(byte).len_utf8();
@@ -240,23 +303,48 @@ impl Lexer<'_> {
         });
     }
 
-    fn scan_string(&mut self, start: usize, quote: u8) -> TokenKind {
+    fn scan_string(&mut self, start: usize, quote: u8, interpolated: bool) -> TokenKind {
         self.cursor += 1;
         let bytes = self.source.text().as_bytes();
-        let mut escaped = false;
-        while self.cursor < bytes.len() {
+        while self.cursor < self.end {
             let byte = bytes[self.cursor];
             if byte == b'\n' || byte == b'\r' {
                 break;
             }
-            self.cursor += 1;
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == quote {
-                return TokenKind::String;
+            if byte == quote {
+                self.cursor += 1;
+                return if interpolated {
+                    TokenKind::InterpolatedString
+                } else {
+                    TokenKind::String
+                };
             }
+            if byte == b'\\' {
+                let escape_start = self.cursor;
+                match crate::string_literal::scan_escape(
+                    &bytes[..self.end],
+                    self.cursor,
+                    interpolated,
+                ) {
+                    Ok(end) => {
+                        self.cursor = end;
+                        continue;
+                    }
+                    Err(end) => {
+                        self.cursor = end.max(self.cursor + 1).min(self.end);
+                        self.diagnostics
+                            .push(lexing::invalid_string_escape(SourceSpan::new(
+                                self.source.id(),
+                                Self::range(escape_start, self.cursor),
+                            )));
+                        continue;
+                    }
+                }
+            }
+            self.cursor += self.source.text()[self.cursor..self.end]
+                .chars()
+                .next()
+                .map_or(1, char::len_utf8);
         }
         let range = Self::range(start, self.cursor);
         self.diagnostics
@@ -267,16 +355,34 @@ impl Lexer<'_> {
         TokenKind::String
     }
 
+    fn scan_number(&mut self) {
+        self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+        let bytes = &self.source.text().as_bytes()[..self.end];
+        if bytes.get(self.cursor) == Some(&b'.')
+            && bytes.get(self.cursor + 1).is_some_and(u8::is_ascii_digit)
+        {
+            self.cursor += 1;
+            self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+        }
+        if matches!(bytes.get(self.cursor), Some(b'e' | b'E')) {
+            self.cursor += 1;
+            if matches!(bytes.get(self.cursor), Some(b'+' | b'-')) {
+                self.cursor += 1;
+            }
+            self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+        }
+    }
+
     fn consume_while(&mut self, predicate: impl Fn(u8) -> bool) {
         let bytes = self.source.text().as_bytes();
-        while self.cursor < bytes.len() && predicate(bytes[self.cursor]) {
+        while self.cursor < self.end && predicate(bytes[self.cursor]) {
             self.cursor += 1;
         }
     }
 
     fn consume_line(&mut self) {
         let bytes = self.source.text().as_bytes();
-        while self.cursor < bytes.len() && bytes[self.cursor] != b'\n' {
+        while self.cursor < self.end && bytes[self.cursor] != b'\n' {
             self.cursor += 1;
         }
     }
@@ -315,10 +421,13 @@ fn keyword(text: &str) -> TokenKind {
         "if" => TokenKind::If,
         "then" => TokenKind::Then,
         "else" => TokenKind::Else,
+        "elseif" => TokenKind::ElseIf,
         "while" => TokenKind::While,
         "repeat" => TokenKind::Repeat,
         "until" => TokenKind::Until,
         "for" => TokenKind::For,
+        "break" => TokenKind::Break,
+        "continue" => TokenKind::Continue,
         "do" => TokenKind::Do,
         "match" => TokenKind::Match,
         "when" => TokenKind::When,

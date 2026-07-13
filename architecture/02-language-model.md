@@ -24,6 +24,15 @@ The initial type families include:
 - `Never` for expressions that do not return;
 - an internal `error` type used only to recover after a diagnostic.
 
+Namespace type aliases erase to their recursively resolved target before HIR;
+they add no nominal identity or runtime operation. Alias cycles and type
+arguments on the initial non-generic alias form are rejected. See ADR 0048.
+
+Enums are closed nominal payload-free case sets. Cases such as `Color.Red`
+carry their enum type and a stable case identity; their compact discriminants
+do not implicitly convert to integers. Exact same-enum equality is supported.
+See ADR 0049.
+
 There is no user-visible `dynamic`, `any`, or unknown value on which operations
 can be performed. A top type may exist for type-theory purposes only if values
 must be narrowed to a concrete supported type before use.
@@ -38,6 +47,34 @@ must be narrowed to a concrete supported type before use.
 - Downcasts, when supported, target a named type and return an optional/result;
   they do not produce a dynamically typed value.
 - Heterogeneous collections use an explicit union or interface element type.
+
+### Numeric source semantics
+
+Decimal-point and base-ten-exponent literals are floating-point values. An
+expected `Float32` or `Float64` type selects their format; without one they use
+`Float` (`Float64`). They never implicitly become integers.
+
+Numeric values convert explicitly through target-type call syntax such as
+`Float64(count)` and `Int32(total)`. These forms are compiler-known typed
+conversions, not ordinary overloads or runtime type-name lookup. Integer target
+conversions and float-to-integer conversions are checked and use the closed
+`NumericConversion` trap for invalid or out-of-range values. Ordering includes
+`<`, `<=`, `>`, and `>=`; IEEE ordering comparisons with NaN are false. See
+ADR 0040.
+
+### String source semantics
+
+`String` is immutable UTF-8 text. The Luau `..` operator concatenates two
+strings, and backtick strings interpolate statically typed `String`, `Boolean`,
+integer, or floating-point expressions. `String(value)` explicitly formats the
+same closed primitive set; it is not an ordinary overload, universal inherited
+method, runtime type-name lookup, or implicit conversion in another call.
+
+Quoted and backtick literals decode a fixed portable escape set. Primitive
+formatting is deterministic and locale-independent, while locale-sensitive or
+user-defined formatting remains an explicit typed library concern. String
+composition and non-identity formatting may allocate and are represented by
+backend-neutral typed HIR/MIR operations. See ADR 0041.
 
 ## Luau-first syntax rule
 
@@ -162,6 +199,12 @@ Specialized ordered/persistent collections can be ordinary generic library
 values without changing literal semantics. Every read and write remains
 statically typed.
 
+`table[key]` requires the table's exact key type and returns an optional value;
+a missing key returns `nil`. `table[key] = value` inserts or replaces one entry
+and may grow the table while preserving identity and deterministic insertion
+order. Assigning `nil` stores a typed optional value rather than deleting an
+entry. See ADR 0046.
+
 Tables do not define lexical namespaces, class identity, ordinary method
 lookup, module initialization, records, or tuples. Pop Lang does not inherit the
 full Lua metamethod system. Operator customization and iteration use explicit
@@ -171,6 +214,12 @@ Indexed array assignment uses the same one-based indexing model as reads. The
 assigned value must have the array's element type, and an out-of-bounds write
 traps rather than growing the array or falling back to table semantics.
 
+Compound assignment supports `+=`, `-=`, `*=`, `/=`, and `%=` for the exact
+numeric types accepted by the corresponding operation, plus `..=` for `String`.
+Mutable locals/captures, declared class fields, and array elements are valid
+targets. Receivers and indexes evaluate once; an indexed compound read is
+checked and non-optional. See ADR 0044.
+
 Arrays have fixed length. `Array.create<<T>>(length, initialValue)` constructs a
 fully initialized array, `Array.length(array)` queries its length,
 `Array.get(array, index)` performs a trapping non-optional read, and
@@ -178,6 +227,11 @@ fully initialized array, `Array.length(array)` queries its length,
 reads remain optional. See ADR 0034.
 
 ## Control flow and loops
+
+Conditions are exactly `Boolean`. Statement `if` supports Luau-shaped `elseif`
+chains with one final `end`. Conditional values use `if condition then value
+else alternative` without a trailing `end`; exactly one branch executes and
+both branches resolve to one static result type. See ADR 0043.
 
 `while` remains the pre-condition loop. Pop Lang also has the Luau-shaped
 body-first form:
@@ -190,9 +244,23 @@ until value == 3
 
 The body executes once before each `Boolean` `until` condition. `true` exits
 and `false` repeats. The body and condition share one lexical scope, so a body
-local can contribute to the condition without escaping after the loop. The
-first loop slice has no `break` or `continue`; generalized iteration remains a
-separate typed-protocol feature. See ADR 0032.
+local can contribute to the condition without escaping after the loop.
+
+The first `for` form is an inclusive fixed-integer range:
+
+```luau
+for index = 1, limit, 2 do
+    visit(index)
+end
+```
+
+Bounds and the optional step are evaluated once from left to right and have one
+identical integer type. The loop binding is immutable and body-local. Positive
+steps use `<=`, negative steps use `>=`, zero raises `InvalidRangeStep`, and
+progression is checked.
+`break` exits the innermost loop; `continue` reaches the `while` condition, the
+`repeat` condition, or numeric-range advancement as appropriate. Generalized
+iteration remains a separate typed-protocol feature. See ADR 0032 and ADR 0042.
 
 ## Namespaces, using directives, Modules, and Bubbles
 
@@ -247,10 +315,19 @@ Structural records have named typed fields and immutable field bindings. Typed
 retain their own mutability. Tuples have ordered typed fields. Neither silently
 becomes a heap table.
 
-Luau-style multiple returns remain an ergonomic goal. MIR represents their
-static type as a tuple or type pack with known elements/tail constraints.
-Destructuring and multiple assignment are syntax over that representation.
-There is no dynamically typed variadic result.
+Luau-style multiple returns use exact statically typed packs. A parenthesized
+result annotation such as `(Int, String)` declares a fixed pack, and
+`return count, name` constructs it. Multiple locals and assignments use comma
+syntax with either one exact fixed-pack expression or an exact list of scalar
+expressions; missing values are not padded with `nil` and extra values are not
+discarded. MIR represents a fixed pack as one typed tuple-like value with
+explicit construction and projection. Variadic tails must have known repeated
+types or generic pack constraints and are not dynamically typed bags. See ADR
+0045.
+
+Tuple and fixed-pack elements use one-based static projection such as
+`result[1]`. The index is a compile-time integer literal within the exact arity,
+so the result type and MIR slot are known without runtime tuple lookup.
 
 ## Exhaustive tagged-union matching
 
@@ -314,6 +391,12 @@ Checked operations name their `TrapKind`; panic calls record whether unwinding
 propagates or enters a cleanup block, and cleanup resumes unwinding explicitly.
 Expected failure remains a typed result value and is not folded into the panic
 mechanism. See ADR 0022.
+
+Namespace constants are deterministically evaluated once by the front end.
+Runtime uses substitute the resulting exact typed immutable value into HIR;
+they do not create mutable module storage or runtime name lookup. The initial
+runtime-usable set contains primitive values and recursively fixed tuples. See
+ADR 0047.
 
 ## Memory management
 

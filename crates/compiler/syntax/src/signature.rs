@@ -46,6 +46,10 @@ pub struct GenericParameterSyntax {
 }
 
 impl GenericParameterSyntax {
+    pub(crate) fn new(name: String, span: SourceSpan) -> Self {
+        Self { name, span }
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -260,10 +264,10 @@ impl SignatureParser<'_> {
         let mut parameters = Vec::new();
         loop {
             let token = self.expect(TokenKind::Identifier, "type parameter")?;
-            parameters.push(GenericParameterSyntax {
-                name: token.text(self.source).to_owned(),
-                span: SourceSpan::new(self.file, token.range()),
-            });
+            parameters.push(GenericParameterSyntax::new(
+                token.text(self.source).to_owned(),
+                SourceSpan::new(self.file, token.range()),
+            ));
             if self.consume(TokenKind::Comma).is_none() {
                 break;
             }

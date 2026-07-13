@@ -84,10 +84,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             SyntaxBinaryOperator::Or | SyntaxBinaryOperator::And => {
                 operands_match && self.is_primitive(left.type_id(), PrimitiveType::Boolean)
             }
+            SyntaxBinaryOperator::Concat => {
+                operands_match && self.is_primitive(left.type_id(), PrimitiveType::String)
+            }
             SyntaxBinaryOperator::Equal | SyntaxBinaryOperator::NotEqual => {
                 self.equality_comparable(left.type_id(), right.type_id())
             }
-            SyntaxBinaryOperator::LessThan | SyntaxBinaryOperator::GreaterThan => {
+            SyntaxBinaryOperator::LessThan
+            | SyntaxBinaryOperator::LessThanOrEqual
+            | SyntaxBinaryOperator::GreaterThan
+            | SyntaxBinaryOperator::GreaterThanOrEqual => {
                 operands_match && self.is_numeric(left.type_id())
             }
             SyntaxBinaryOperator::Add
@@ -108,15 +114,27 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             SyntaxBinaryOperator::Equal
             | SyntaxBinaryOperator::NotEqual
             | SyntaxBinaryOperator::LessThan
+            | SyntaxBinaryOperator::LessThanOrEqual
             | SyntaxBinaryOperator::GreaterThan => self.resolver.arena().source_type("Boolean")?,
+            SyntaxBinaryOperator::GreaterThanOrEqual => {
+                self.resolver.arena().source_type("Boolean")?
+            }
             _ => left.type_id(),
         };
-        Some(TypedExpression {
-            kind: TypedExpressionKind::Binary {
+        let kind = if operator == SyntaxBinaryOperator::Concat {
+            TypedExpressionKind::StringConcat {
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        } else {
+            TypedExpressionKind::Binary {
                 operator: typed_binary(operator),
                 left: Box::new(left),
                 right: Box::new(right),
-            },
+            }
+        };
+        Some(TypedExpression {
+            kind,
             type_id,
             span,
         })
@@ -142,6 +160,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.check_expression_expected(left, boolean)?,
                 self.check_expression_expected(right, boolean)?,
             ));
+        }
+        if operator == SyntaxBinaryOperator::Concat {
+            return Some((self.check_expression(left)?, self.check_expression(right)?));
         }
         let arithmetic = matches!(
             operator,
@@ -257,7 +278,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     | PrimitiveType::Integer(_)
                     | PrimitiveType::String,
                 )
-                | SemanticType::Class { .. },
+                | SemanticType::Class { .. }
+                | SemanticType::Enum { .. },
             ) => true,
             Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
                 .iter()

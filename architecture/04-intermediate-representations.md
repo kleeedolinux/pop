@@ -55,7 +55,8 @@ HirExpr =
   | Function | Closure{functionId, captures} | Call{dispatch, effects}
   | Construct{classId}
   | FieldGet{fieldId} | FieldSet{fieldId}
-  | Record | RecordUpdate | Tuple | Array | Table | Convert{kind}
+  | Record | RecordUpdate | Tuple | Array | Table | TableGet | TableSet
+  | Convert{kind}
   | Return | Break | Continue | Await
 ```
 
@@ -79,7 +80,21 @@ HIR invariants:
   derived from declarations and is not a source-level export list;
 - every item and source origin identifies its owning `ModuleId` and `BubbleId`.
 - a `repeat` statement retains its typed body and `Boolean` exit condition until
-  CFG lowering; its body-local scope includes that condition only.
+  CFG lowering; its body-local scope includes that condition only;
+- a numeric `for` retains its immutable binding, same-kind integer bounds,
+  optional step, and body, while `break`/`continue` retain their resolved
+  innermost-loop target until CFG lowering;
+- a conditional expression retains one `Boolean` condition and two same-typed
+  lazy branches until MIR lowers them to CFG and a typed join argument;
+- compound assignment retains its resolved mutable target, typed operator, and
+  right-hand side until lowering can evaluate a receiver/index once and emit
+  ordinary MIR load-operation-store instructions.
+- a fixed result pack retains exact element types; grouped multiple assignment
+  retains resolved targets until MIR emits target locations, values, typed
+  projections, and stores in the order fixed by ADR 0045.
+- table lookup and mutation retain exact key/value types; MIR makes optional
+  lookup, insert-or-replace allocation effects, managed maps, and barriers
+  explicit under ADR 0046.
 
 ## Compile-time HIR and values
 
@@ -129,6 +144,18 @@ Debug:         debugValue, sourceScope
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
 
+HIR generic calls retain their ordered semantic type arguments. The bootstrap
+MIR lowering fully specializes reachable concrete functions and generic data
+representations, deduplicates equivalent instances, and emits only concrete
+call signatures and layouts. Type parameters and runtime type-argument lookup
+do not reach canonical MIR. See ADR 0050.
+
+Numeric conversion operations carry exact source and target integer/float
+kinds. Checked integer-target conversions name `NumericConversion`; float
+ordering uses ordered comparisons so NaN does not make `<=`/`>=` true. These
+operations never accept a runtime type name or defer conversion selection to a
+backend. See ADR 0040.
+
 Array construction always carries an explicit initial value. Checked reads and
 writes carry `BoundsViolation`; optional reads do not trap for bounds. Scalar
 and managed-element arrays remain distinguishable for optimization and precise
@@ -160,10 +187,25 @@ Body-first loops lower to ordinary CFG body, condition, exit, and backedge
 blocks. They do not introduce a backend-specific instruction; the verifier
 requires the same deterministic safe-point treatment as every other backedge.
 
+String concatenation and primitive formatting remain typed in HIR. Canonical
+MIR uses backend-neutral `StringConcat` and `StringFormat` operations, verifies
+the exact operand kind, and records their allocation and safe-point effects.
+Interpolation lowers in source order through those operations; it never becomes
+a runtime format string, type inspection, or backend-specific instruction. See
+ADR 0041.
+
+Fixed type packs lower to one typed tuple-like MIR value. `tupleMake` constructs
+an exact pack and `tupleGet` projects a statically indexed element; grouped
+multiple assignment then uses ordinary stores and barriers. MIR contains no
+dynamic variadic carrier, runtime arity adjustment, or comma semantics. See ADR
+0045.
+
 The initial portable failure/GC encoding is fixed by ADR 0022. Runtime traps
 are closed `TrapKind` values and are not ordinary exceptions. Panic uses a
 runtime-private typed payload. Expected failures continue to use typed result
-values.
+values. ADR 0040 adds `NumericConversion` for checked numeric casts that receive
+NaN, infinity, or an out-of-range value. ADR 0042 adds `InvalidRangeStep` for a
+dynamic zero step in a numeric `for` range.
 
 ## Attribute representation
 

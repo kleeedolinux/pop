@@ -8,7 +8,8 @@ use std::fmt::Write;
 use pop_foundation::{ClassId, SymbolId, TypeId, UnionCaseId};
 use pop_resolve::Visibility;
 use pop_types::{
-    AttributeConstant, FloatValue, TypeArena, TypedBinaryOperator, TypedUnaryOperator,
+    AttributeConstant, FloatValue, NumericConversionKind, TypeArena, TypedBinaryOperator,
+    TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -42,6 +43,23 @@ pub(crate) fn dump_declaration(
                 declaration.name,
                 type_text(union.type_id, arena)
             );
+        }
+        HirDeclarationKind::Enum(enumeration) => {
+            let _ = write!(
+                output,
+                "enum {}:{}",
+                declaration.name,
+                type_text(enumeration.type_id, arena)
+            );
+            for case in &enumeration.cases {
+                let _ = write!(
+                    output,
+                    " [ec{} {}={}]",
+                    case.case.raw(),
+                    case.name,
+                    case.discriminant
+                );
+            }
         }
         HirDeclarationKind::Class(class) => {
             let _ = write!(
@@ -237,6 +255,25 @@ fn dump_statements(
                 dump_expression(output, initializer, arena);
                 output.push('\n');
             }
+            HirStatementKind::MultipleLocal { bindings, value } => {
+                output.push_str("multipleLocal ");
+                for (index, binding) in bindings.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    let _ = write!(
+                        output,
+                        "bind#{} l{} {}:{}",
+                        binding.binding.raw(),
+                        binding.local.raw(),
+                        binding.name,
+                        type_text(binding.local_type, arena)
+                    );
+                }
+                output.push_str(" = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::LocalSet { local, value } => {
                 let _ = write!(output, "local.set l{} = ", local.raw());
                 dump_expression(output, value, arena);
@@ -249,6 +286,18 @@ fn dump_statements(
             }
             HirStatementKind::CaptureSet { capture, value } => {
                 let _ = write!(output, "capture.set cap{} = ", capture.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::MultipleAssignment { targets, value } => {
+                output.push_str("multipleAssignment ");
+                for (index, target) in targets.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    dump_assignment_target(output, target, arena);
+                }
+                output.push_str(" = ");
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
@@ -291,6 +340,36 @@ fn dump_statements(
                 dump_expression(output, condition, arena);
                 output.push('\n');
             }
+            HirStatementKind::NumericFor {
+                binding,
+                local,
+                name,
+                integer_type,
+                first,
+                last,
+                step,
+                body,
+            } => {
+                let _ = write!(
+                    output,
+                    "numericFor bind#{} l{} {}:{} = ",
+                    binding.raw(),
+                    local.raw(),
+                    name,
+                    type_text(*integer_type, arena)
+                );
+                dump_expression(output, first, arena);
+                output.push_str(", ");
+                dump_expression(output, last, arena);
+                output.push_str(", ");
+                dump_expression(output, step, arena);
+                output.push('\n');
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
+            HirStatementKind::Break => output.push_str("break\n"),
+            HirStatementKind::Continue => output.push_str("continue\n"),
             HirStatementKind::Match {
                 scrutinee,
                 union,
@@ -334,6 +413,19 @@ fn dump_statements(
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
+            HirStatementKind::CompoundFieldSet {
+                base,
+                field,
+                operator,
+                value,
+                ..
+            } => {
+                let _ = write!(output, "compound.fieldSet {operator:?} ");
+                dump_expression(output, base, arena);
+                let _ = write!(output, ".field#{} = ", field.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::ArraySet {
                 array,
                 index,
@@ -347,15 +439,69 @@ fn dump_statements(
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
+            HirStatementKind::TableSet { table, key, value } => {
+                output.push_str("table.set ");
+                dump_expression(output, table, arena);
+                output.push('[');
+                dump_expression(output, key, arena);
+                output.push_str("] = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::CompoundArraySet {
+                array,
+                index,
+                operator,
+                value,
+                ..
+            } => {
+                let _ = write!(output, "compound.arraySet {operator:?} ");
+                dump_expression(output, array, arena);
+                output.push('[');
+                dump_expression(output, index, arena);
+                output.push_str("] = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::Call(call) => {
                 output.push_str("do ");
-                dump_call(output, call.dispatch(), call.arguments(), arena);
+                dump_call(
+                    output,
+                    call.dispatch(),
+                    call.type_arguments(),
+                    call.arguments(),
+                    arena,
+                );
                 output.push('\n');
             }
             HirStatementKind::Expression(expression) => {
                 dump_expression(output, expression, arena);
                 output.push('\n');
             }
+        }
+    }
+}
+
+fn dump_assignment_target(output: &mut String, target: &HirAssignmentTarget, arena: &TypeArena) {
+    match target {
+        HirAssignmentTarget::Local { local, .. } => {
+            let _ = write!(output, "l{}", local.raw());
+        }
+        HirAssignmentTarget::Capture { capture, .. } => {
+            let _ = write!(output, "cap{}", capture.raw());
+        }
+        HirAssignmentTarget::Field { base, field, .. } => {
+            dump_expression(output, base, arena);
+            let _ = write!(output, ".field#{}", field.raw());
+        }
+        HirAssignmentTarget::Array { array, index, .. } => {
+            dump_array_get(output, array, index, arena);
+        }
+        HirAssignmentTarget::Table { table, key, .. } => {
+            dump_expression(output, table, arena);
+            output.push('[');
+            dump_expression(output, key, arena);
+            output.push(']');
         }
     }
 }
@@ -367,7 +513,9 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             let _ = write!(output, "{value}");
         }
         HirExpressionKind::Float(value) => dump_float_value(output, *value),
-        HirExpressionKind::String(value) => output.push_str(value),
+        HirExpressionKind::String(value) => {
+            let _ = write!(output, "{value:?}");
+        }
         HirExpressionKind::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
         HirExpressionKind::Nil => output.push_str("nil"),
         HirExpressionKind::Closure(closure) => {
@@ -436,6 +584,16 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         HirExpressionKind::ArrayGet { array, index } => {
             dump_array_get(output, array, index, arena);
         }
+        HirExpressionKind::TableGet { table, key } => {
+            output.push_str("table.get ");
+            dump_expression(output, table, arena);
+            output.push(' ');
+            dump_expression(output, key, arena);
+        }
+        HirExpressionKind::TupleGet { tuple, index } => {
+            let _ = write!(output, "tuple.get {index} ");
+            dump_expression(output, tuple, arena);
+        }
         HirExpressionKind::ArrayCreate {
             length,
             initial_value,
@@ -495,6 +653,19 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         } => {
             dump_union_case(output, *union, *case, arguments, arena);
         }
+        HirExpressionKind::EnumCase {
+            definition,
+            case,
+            discriminant,
+        } => {
+            let _ = write!(
+                output,
+                "enum.case s{} ec{} {}",
+                definition.raw(),
+                case.raw(),
+                discriminant
+            );
+        }
         HirExpressionKind::Tuple(elements) => {
             output.push('(');
             for (index, element) in elements.iter().enumerate() {
@@ -503,6 +674,18 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
                 }
                 dump_expression(output, element, arena);
             }
+            output.push(')');
+        }
+        HirExpressionKind::StringConcat { left, right } => {
+            output.push_str("string.concat(");
+            dump_expression(output, left, arena);
+            output.push_str(", ");
+            dump_expression(output, right, arena);
+            output.push(')');
+        }
+        HirExpressionKind::StringFormat { kind, value } => {
+            let _ = write!(output, "string.format {kind:?}(");
+            dump_expression(output, value, arena);
             output.push(')');
         }
         HirExpressionKind::Unary { operator, operand } => {
@@ -523,15 +706,34 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, right, arena);
             output.push(')');
         }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            output.push_str("conditional(");
+            dump_expression(output, condition, arena);
+            output.push_str(", ");
+            dump_expression(output, when_true, arena);
+            output.push_str(", ");
+            dump_expression(output, when_false, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
+            type_arguments,
             arguments,
         } => {
-            dump_call(output, dispatch, arguments, arena);
+            dump_call(output, dispatch, type_arguments, arguments, arena);
         }
         HirExpressionKind::InterfaceUpcast { value, interface } => {
             let _ = write!(output, "convert.interface i{} ", interface.raw());
             dump_expression(output, value, arena);
+        }
+        HirExpressionKind::NumericConvert { value, conversion } => {
+            let _ = write!(output, "convert.{}(", conversion_text(*conversion));
+            dump_expression(output, value, arena);
+            output.push(')');
         }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));
@@ -552,26 +754,27 @@ fn dump_float_value(output: &mut String, value: FloatValue) {
 fn dump_call(
     output: &mut String,
     dispatch: &HirCallDispatch,
+    type_arguments: &[TypeId],
     arguments: &[HirExpression],
     arena: &TypeArena,
 ) {
     match dispatch {
         HirCallDispatch::Standard { function } => {
-            let _ = write!(output, "call.standard sf{}(", function.raw());
+            let _ = write!(output, "call.standard sf{}", function.raw());
         }
         HirCallDispatch::Direct { function } => {
-            let _ = write!(output, "call.direct s{}(", function.raw());
+            let _ = write!(output, "call.direct s{}", function.raw());
         }
         HirCallDispatch::Referenced { function } => {
             let _ = write!(
                 output,
-                "call.reference b{}:s{}(",
+                "call.reference b{}:s{}",
                 function.bubble().raw(),
                 function.symbol().raw()
             );
         }
         HirCallDispatch::DirectMethod { method } => {
-            let _ = write!(output, "call.method m{}(", method.raw());
+            let _ = write!(output, "call.method m{}", method.raw());
         }
         HirCallDispatch::InterfaceMethod {
             interface,
@@ -580,7 +783,7 @@ fn dump_call(
         } => {
             let _ = write!(
                 output,
-                "call.interface i{} im{} slot{}(",
+                "call.interface i{} im{} slot{}",
                 interface.raw(),
                 method.raw(),
                 slot
@@ -589,9 +792,19 @@ fn dump_call(
         HirCallDispatch::Indirect { callee } => {
             output.push_str("call.indirect ");
             dump_expression(output, callee, arena);
-            output.push('(');
         }
     }
+    if !type_arguments.is_empty() {
+        output.push_str("<<");
+        for (index, argument) in type_arguments.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&type_text(*argument, arena));
+        }
+        output.push_str(">>");
+    }
+    output.push('(');
     for (index, argument) in arguments.iter().enumerate() {
         if index != 0 {
             output.push_str(", ");
@@ -708,11 +921,30 @@ const fn binary_text(operator: TypedBinaryOperator) -> &'static str {
         TypedBinaryOperator::Equal => "==",
         TypedBinaryOperator::NotEqual => "~=",
         TypedBinaryOperator::LessThan => "<",
+        TypedBinaryOperator::LessThanOrEqual => "<=",
         TypedBinaryOperator::GreaterThan => ">",
+        TypedBinaryOperator::GreaterThanOrEqual => ">=",
         TypedBinaryOperator::Add => "+",
         TypedBinaryOperator::Subtract => "-",
         TypedBinaryOperator::Multiply => "*",
         TypedBinaryOperator::Divide => "/",
         TypedBinaryOperator::Remainder => "%",
+    }
+}
+
+fn conversion_text(conversion: NumericConversionKind) -> String {
+    match conversion {
+        NumericConversionKind::IntegerToInteger { source, target } => {
+            format!("integerToInteger.{source:?}.{target:?}")
+        }
+        NumericConversionKind::IntegerToFloat { source, target } => {
+            format!("integerToFloat.{source:?}.{target:?}")
+        }
+        NumericConversionKind::FloatToInteger { source, target } => {
+            format!("floatToInteger.{source:?}.{target:?}")
+        }
+        NumericConversionKind::FloatToFloat { source, target } => {
+            format!("floatToFloat.{source:?}.{target:?}")
+        }
     }
 }

@@ -6,7 +6,7 @@ use pop_runtime_interface::{
     TableAllocationRequest,
 };
 
-use crate::state::abi_runtime;
+use crate::state::{TableMetadata, abi_runtime, abi_tables};
 
 /// Allocates a scalar array and returns its opaque managed handle, or zero on
 /// a typed runtime failure.
@@ -174,9 +174,23 @@ pub extern "C" fn pop_rt_allocate_table(
     let Ok(mut runtime) = abi_runtime().lock() else {
         return 0;
     };
-    runtime
-        .allocate_table(&request)
-        .map_or(0, ManagedReference::raw)
+    let Ok(reference) = runtime.allocate_table(&request) else {
+        return 0;
+    };
+    drop(runtime);
+    let Ok(mut tables) = abi_tables().lock() else {
+        return 0;
+    };
+    tables.insert(
+        reference.raw(),
+        TableMetadata {
+            length: 0,
+            capacity: entry_count,
+            key_map: request.key_map(),
+            value_map: request.value_map(),
+        },
+    );
+    reference.raw()
 }
 
 #[allow(unsafe_code)]

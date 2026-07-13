@@ -43,6 +43,9 @@ pub(crate) fn lower_instruction(
             format!("{result} = xor i1 0, {}", u8::from(*value))
         }
         MirInstructionKind::NilConstant => format!("{result} = add i64 0, 0"),
+        MirInstructionKind::EnumConstant { discriminant, .. } => {
+            format!("{result} = add i32 0, {discriminant}")
+        }
         MirInstructionKind::StringConstant(value) => {
             let symbol = string_literals
                 .get(value)
@@ -51,6 +54,15 @@ pub(crate) fn lower_instruction(
                 "{result} = call i64 @pop_rt_string_literal(ptr {symbol}, i64 {})",
                 value.len()
             )
+        }
+        MirInstructionKind::StringConcat { left, right } => format!(
+            "{result} = call i64 @{}(i64 %v{}, i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::StringConcat),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::StringFormat { kind, value } => {
+            lower_string_format(&result, instruction.result(), *kind, *value)
         }
         MirInstructionKind::CheckedIntegerAdd { kind, left, right } => {
             if proven_non_overflow_adds.contains(&instruction.result()) {
@@ -106,6 +118,36 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::FloatNegate { kind, operand } => {
             format!("{result} = fneg {} %v{}", float_type(*kind), operand.raw())
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => lower_integer_conversion(&result, *source, *target, *operand),
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => format!(
+            "{result} = {} i{} %v{} to {}",
+            if source.is_signed() {
+                "sitofp"
+            } else {
+                "uitofp"
+            },
+            source.bit_width(),
+            operand.raw(),
+            float_type(*target)
+        ),
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => lower_float_to_integer_conversion(&result, *source, *target, *operand),
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => lower_float_conversion(&result, *source, *target, *operand),
         MirInstructionKind::BooleanNot { operand } => {
             format!("{result} = xor i1 %v{}, true", operand.raw())
         }
@@ -147,6 +189,20 @@ pub(crate) fn lower_instruction(
             left.raw(),
             right.raw()
         ),
+        MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right } => format!(
+            "{result} = icmp {} i{} %v{}, %v{}",
+            if kind.is_signed() { "sle" } else { "ule" },
+            kind.bit_width(),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => format!(
+            "{result} = icmp {} i{} %v{}, %v{}",
+            if kind.is_signed() { "sge" } else { "uge" },
+            kind.bit_width(),
+            left.raw(),
+            right.raw()
+        ),
         MirInstructionKind::CompareFloatLess { kind, left, right } => format!(
             "{result} = fcmp olt {} %v{}, %v{}",
             float_type(*kind),
@@ -155,6 +211,18 @@ pub(crate) fn lower_instruction(
         ),
         MirInstructionKind::CompareFloatGreater { kind, left, right } => format!(
             "{result} = fcmp ogt {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareFloatLessOrEqual { kind, left, right } => format!(
+            "{result} = fcmp ole {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => format!(
+            "{result} = fcmp oge {} %v{}, %v{}",
             float_type(*kind),
             left.raw(),
             right.raw()
@@ -285,6 +353,25 @@ pub(crate) fn lower_instruction(
             key_map,
             value_map,
         } => lower_table_make(&result, entries, *key_map, *value_map, value_types, types)?,
+        MirInstructionKind::TableGet { table, key } => {
+            lower_table_get(&result, *table, *key, value_types, types)?
+        }
+        MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map,
+            value_map,
+        } => lower_table_set(
+            &result,
+            *table,
+            *key,
+            *value,
+            *key_map,
+            *value_map,
+            value_types,
+            types,
+        )?,
         MirInstructionKind::RecordMake { fields, .. } => {
             let slot_count = u32::try_from(fields.len())
                 .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
@@ -355,6 +442,14 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::TupleMake(elements) => {
             lower_tuple_make(&result, elements, value_types, types)?
         }
+        MirInstructionKind::TupleGet { tuple, index } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            &format!("%v{}", tuple.raw()),
+            usize::try_from(*index).unwrap_or(usize::MAX) + 1,
+            types,
+        )?
+        .join("\n"),
         MirInstructionKind::ArrayGet { array, index } => runtime_call(
             &result,
             result_type,
@@ -522,6 +617,75 @@ pub(crate) fn lower_instruction(
     Ok(line)
 }
 
+fn lower_string_format(
+    result: &str,
+    result_id: ValueId,
+    kind: pop_types::StringFormatKind,
+    value: ValueId,
+) -> String {
+    use pop_runtime_native_abi::StringFormatTag;
+
+    let temporary = format!("%string_format_bits_{}", result_id.raw());
+    let (tag, conversion, bits) = match kind {
+        pop_types::StringFormatKind::Boolean => (
+            StringFormatTag::Boolean,
+            Some(format!("{temporary} = zext i1 %v{} to i64", value.raw())),
+            temporary.clone(),
+        ),
+        pop_types::StringFormatKind::Integer(kind) => {
+            let tag = match kind {
+                IntegerKind::Int8 => StringFormatTag::Int8,
+                IntegerKind::Int16 => StringFormatTag::Int16,
+                IntegerKind::Int32 => StringFormatTag::Int32,
+                IntegerKind::Int64 => StringFormatTag::Int64,
+                IntegerKind::UInt8 => StringFormatTag::UInt8,
+                IntegerKind::UInt16 => StringFormatTag::UInt16,
+                IntegerKind::UInt32 => StringFormatTag::UInt32,
+                IntegerKind::UInt64 => StringFormatTag::UInt64,
+            };
+            if kind.bit_width() == 64 {
+                (tag, None, format!("%v{}", value.raw()))
+            } else {
+                let operation = if kind.is_signed() { "sext" } else { "zext" };
+                (
+                    tag,
+                    Some(format!(
+                        "{temporary} = {operation} i{} %v{} to i64",
+                        kind.bit_width(),
+                        value.raw()
+                    )),
+                    temporary.clone(),
+                )
+            }
+        }
+        pop_types::StringFormatKind::Float(FloatKind::Float32) => {
+            let raw = format!("%string_format_raw_{}", result_id.raw());
+            (
+                StringFormatTag::Float32,
+                Some(format!(
+                    "{raw} = bitcast float %v{} to i32\n{temporary} = zext i32 {raw} to i64",
+                    value.raw()
+                )),
+                temporary.clone(),
+            )
+        }
+        pop_types::StringFormatKind::Float(FloatKind::Float64) => (
+            StringFormatTag::Float64,
+            Some(format!(
+                "{temporary} = bitcast double %v{} to i64",
+                value.raw()
+            )),
+            temporary.clone(),
+        ),
+    };
+    let call = format!(
+        "{result} = call i64 @{}(i32 {}, i64 {bits})",
+        native_runtime_symbol(RuntimeOperation::StringFormat),
+        tag as u32
+    );
+    conversion.map_or(call.clone(), |conversion| format!("{conversion}\n{call}"))
+}
+
 pub(crate) fn lower_terminator(
     terminator: &MirTerminator,
     values: &BTreeMap<ValueId, TypeId>,
@@ -678,6 +842,157 @@ pub(crate) fn lower_checked_integer_negate(
         operand.raw(),
         lower_trap_edge(result, &overflow)
     )
+}
+
+pub(crate) fn lower_integer_conversion(
+    result: &str,
+    source: IntegerKind,
+    target: IntegerKind,
+    operand: ValueId,
+) -> String {
+    let source_bits = source.bit_width();
+    let target_bits = target.bit_width();
+    let value = format!("%v{}", operand.raw());
+    let conversion = if source_bits == target_bits {
+        format!("{result} = add i{target_bits} 0, {value}")
+    } else if source_bits < target_bits {
+        format!(
+            "{result} = {} i{source_bits} {value} to i{target_bits}",
+            if source.is_signed() { "sext" } else { "zext" }
+        )
+    } else {
+        format!("{result} = trunc i{source_bits} {value} to i{target_bits}")
+    };
+
+    let invalid = match (source.is_signed(), target.is_signed()) {
+        (true, true) if target_bits < source_bits => {
+            let below = format!("{result}_below");
+            let above = format!("{result}_above");
+            let invalid = format!("{result}_invalid");
+            let minimum = -(1_i128 << (target_bits - 1));
+            let maximum = (1_i128 << (target_bits - 1)) - 1;
+            Some((
+                vec![
+                    format!("{below} = icmp slt i{source_bits} {value}, {minimum}"),
+                    format!("{above} = icmp sgt i{source_bits} {value}, {maximum}"),
+                    format!("{invalid} = or i1 {below}, {above}"),
+                ],
+                invalid,
+            ))
+        }
+        (false, false) if target_bits < source_bits => {
+            let invalid = format!("{result}_invalid");
+            let maximum = (1_u128 << target_bits) - 1;
+            Some((
+                vec![format!(
+                    "{invalid} = icmp ugt i{source_bits} {value}, {maximum}"
+                )],
+                invalid,
+            ))
+        }
+        (true, false) => {
+            let negative = format!("{result}_negative");
+            let invalid = format!("{result}_invalid");
+            let mut lines = vec![format!("{negative} = icmp slt i{source_bits} {value}, 0")];
+            if target_bits < source_bits {
+                let above = format!("{result}_above");
+                let maximum = (1_u128 << target_bits) - 1;
+                lines.extend([
+                    format!("{above} = icmp sgt i{source_bits} {value}, {maximum}"),
+                    format!("{invalid} = or i1 {negative}, {above}"),
+                ]);
+            } else {
+                lines.push(format!("{invalid} = xor i1 {negative}, false"));
+            }
+            Some((lines, invalid))
+        }
+        (false, true) if target_bits <= source_bits => {
+            let invalid = format!("{result}_invalid");
+            let maximum = (1_u128 << (target_bits - 1)) - 1;
+            Some((
+                vec![format!(
+                    "{invalid} = icmp ugt i{source_bits} {value}, {maximum}"
+                )],
+                invalid,
+            ))
+        }
+        _ => None,
+    };
+    if let Some((mut lines, invalid)) = invalid {
+        lines.push(lower_trap_edge(result, &invalid));
+        lines.push(conversion);
+        lines.join("\n")
+    } else {
+        conversion
+    }
+}
+
+pub(crate) fn lower_float_to_integer_conversion(
+    result: &str,
+    source: FloatKind,
+    target: IntegerKind,
+    operand: ValueId,
+) -> String {
+    let float = float_type(source);
+    let intrinsic_suffix = match source {
+        FloatKind::Float32 => "f32",
+        FloatKind::Float64 => "f64",
+    };
+    let bits = target.bit_width();
+    let truncated = format!("{result}_truncated");
+    let below_limit = format!("{result}_below_limit");
+    let above_limit = format!("{result}_above_limit");
+    let in_range = format!("{result}_in_range");
+    let invalid = format!("{result}_invalid");
+    let lower = if target.is_signed() {
+        format!("-{}", 1_u128 << (bits - 1))
+    } else {
+        "0".to_owned()
+    };
+    let upper_exclusive = if target.is_signed() {
+        1_u128 << (bits - 1)
+    } else {
+        1_u128 << bits
+    };
+    let conversion = if target.is_signed() {
+        "fptosi"
+    } else {
+        "fptoui"
+    };
+    [
+        format!(
+            "{truncated} = call {float} @llvm.trunc.{intrinsic_suffix}({float} %v{})",
+            operand.raw()
+        ),
+        format!("{below_limit} = fcmp oge {float} {truncated}, {lower}.0"),
+        format!("{above_limit} = fcmp olt {float} {truncated}, {upper_exclusive}.0"),
+        format!("{in_range} = and i1 {below_limit}, {above_limit}"),
+        format!("{invalid} = xor i1 {in_range}, true"),
+        lower_trap_edge(result, &invalid),
+        format!("{result} = {conversion} {float} {truncated} to i{bits}"),
+    ]
+    .join("\n")
+}
+
+pub(crate) fn lower_float_conversion(
+    result: &str,
+    source: FloatKind,
+    target: FloatKind,
+    operand: ValueId,
+) -> String {
+    match (source, target) {
+        (FloatKind::Float32, FloatKind::Float64) => {
+            format!("{result} = fpext float %v{} to double", operand.raw())
+        }
+        (FloatKind::Float64, FloatKind::Float32) => {
+            format!("{result} = fptrunc double %v{} to float", operand.raw())
+        }
+        _ => format!(
+            "{result} = fadd {} %v{}, 0.0",
+            float_type(source),
+            operand.raw()
+        ),
+    }
 }
 
 pub(crate) fn lower_trap_edge(result: &str, condition: &str) -> String {
@@ -1989,21 +2304,92 @@ pub(crate) fn lower_table_make(
         u8::from(key_map == ArrayElementMap::ManagedReference),
         u8::from(value_map == ArrayElementMap::ManagedReference),
     )];
-    for (entry, (key, value)) in entries.iter().enumerate() {
-        for (offset, item) in [*key, *value].into_iter().enumerate() {
-            let type_id = *values
-                .get(&item)
-                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-            let (conversions, stored) =
-                lower_runtime_slot_store(item, type_id, &llvm_type(type_id, types)?)?;
-            lines.extend(conversions);
-            lines.push(format!(
-                "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-                native_runtime_symbol(RuntimeOperation::FieldSet),
-                entry * 2 + offset + 1
-            ));
-        }
+    for (key, value) in entries {
+        let key_type = *values
+            .get(key)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let value_type = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (key_conversions, stored_key) =
+            lower_runtime_slot_store(*key, key_type, &llvm_type(key_type, types)?)?;
+        let (value_conversions, stored_value) =
+            lower_runtime_slot_store(*value, value_type, &llvm_type(value_type, types)?)?;
+        lines.extend(key_conversions);
+        lines.extend(value_conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {stored_key}, i64 {stored_value}, i1 {}, i1 {})",
+            native_runtime_symbol(RuntimeOperation::TableSet),
+            u8::from(key_map == ArrayElementMap::ManagedReference),
+            u8::from(value_map == ArrayElementMap::ManagedReference),
+        ));
     }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_table_get(
+    result: &str,
+    table: ValueId,
+    key: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let key_type = *values
+        .get(&key)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored_key) =
+        lower_runtime_slot_store(key, key_type, &llvm_type(key_type, types)?)?;
+    lines.push(format!(
+        "{result} = call i64 @{}(i64 %v{}, i64 {stored_key}, i1 {})",
+        native_runtime_symbol(RuntimeOperation::TableGet),
+        table.raw(),
+        u8::from(is_managed_type(key_type, types)),
+    ));
+    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_table_set(
+    result: &str,
+    table: ValueId,
+    key: ValueId,
+    value: ValueId,
+    key_map: ArrayElementMap,
+    value_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let key_type = *values
+        .get(&key)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored_key) =
+        lower_runtime_slot_store(key, key_type, &llvm_type(key_type, types)?)?;
+    let (value_conversions, stored_value) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    lines.extend(value_conversions);
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_stored = call i8 @{}(i64 %v{}, i64 {stored_key}, i64 {stored_value}, i1 {}, i1 {})",
+            native_runtime_symbol(RuntimeOperation::TableSet),
+            table.raw(),
+            u8::from(key_map == ArrayElementMap::ManagedReference),
+            u8::from(value_map == ArrayElementMap::ManagedReference),
+        ),
+        format!("{result}_valid = icmp ne i8 {result}_stored, 0"),
+        format!("br i1 {result}_valid, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
     Ok(lines.join("\n"))
 }
 
@@ -2050,6 +2436,7 @@ pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, Ll
         SemanticType::Primitive(PrimitiveType::Float32) => Ok("float".to_owned()),
         SemanticType::Primitive(PrimitiveType::Float64) => Ok("double".to_owned()),
         SemanticType::Primitive(PrimitiveType::Never) => Ok("void".to_owned()),
+        SemanticType::Enum { .. } => Ok("i32".to_owned()),
         _ => Ok("i64".to_owned()),
     }
 }

@@ -323,6 +323,10 @@ object graphs when namespace functions and data express the design.
 
 Functions may live directly in namespaces.
 
+# About the Experimental C Back End
+
+Avoid spending significant effort on achieving full compatibility or feature parity with C. The C back end is experimental rather than a primary, mainstream back end, so it should not be treated as a development priority.
+
 ## Namespaces and visibility
 
 **Keep active:** one file-scoped namespace per Module, default-internal

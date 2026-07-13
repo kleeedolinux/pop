@@ -333,6 +333,11 @@ impl<'program> CompileTimeInterpreter<'program> {
                 body,
                 ..
             } => self.evaluate_let(*local, initializer, body, parameters, locals),
+            CompileTimeExpressionKind::LetTuple {
+                locals: bindings,
+                initializer,
+                body,
+            } => self.evaluate_let_tuple(bindings, initializer, body, parameters, locals),
             CompileTimeExpressionKind::Unary { operator, operand } => {
                 let operand = self.evaluate_expression(operand, parameters, locals)?;
                 evaluate_unary(*operator, operand).map_err(|error| {
@@ -351,6 +356,12 @@ impl<'program> CompileTimeInterpreter<'program> {
                 locals,
                 expression.span(),
             ),
+            CompileTimeExpressionKind::NumericConvert { conversion, value } => {
+                let value = self.evaluate_expression(value, parameters, locals)?;
+                evaluate_numeric_conversion(*conversion, value).map_err(|error| {
+                    self.failure(EvaluationFailureKind::Error(error), expression.span())
+                })
+            }
             CompileTimeExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -369,6 +380,22 @@ impl<'program> CompileTimeInterpreter<'program> {
             },
             CompileTimeExpressionKind::Tuple(elements) => {
                 self.evaluate_tuple(elements, parameters, locals, expression.span())
+            }
+            CompileTimeExpressionKind::TupleGet { tuple, index } => {
+                match self.evaluate_expression(tuple, parameters, locals)? {
+                    CompileTimeValue::Tuple(values) => {
+                        values.get(*index as usize).cloned().ok_or_else(|| {
+                            self.failure(
+                                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                                expression.span(),
+                            )
+                        })
+                    }
+                    _ => Err(self.failure(
+                        EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                        expression.span(),
+                    )),
+                }
             }
             CompileTimeExpressionKind::Call {
                 function,
@@ -504,6 +531,43 @@ impl<'program> CompileTimeInterpreter<'program> {
             locals.insert(local, previous);
         } else {
             locals.remove(&local);
+        }
+        result
+    }
+
+    fn evaluate_let_tuple(
+        &mut self,
+        bindings: &[(LocalId, TypeId)],
+        initializer: &CompileTimeExpression,
+        body: &CompileTimeExpression,
+        parameters: &[CompileTimeValue],
+        locals: &mut BTreeMap<LocalId, CompileTimeValue>,
+    ) -> Result<CompileTimeValue, EvaluationFailure> {
+        let CompileTimeValue::Tuple(values) =
+            self.evaluate_expression(initializer, parameters, locals)?
+        else {
+            return Err(self.failure(
+                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                initializer.span(),
+            ));
+        };
+        if bindings.len() != values.len() {
+            return Err(self.failure(
+                EvaluationFailureKind::Error(EvaluationError::TypeMismatch),
+                initializer.span(),
+            ));
+        }
+        let mut previous = Vec::with_capacity(bindings.len());
+        for ((local, _), value) in bindings.iter().zip(values) {
+            previous.push((*local, locals.insert(*local, value)));
+        }
+        let result = self.evaluate_expression(body, parameters, locals);
+        for (local, value) in previous.into_iter().rev() {
+            if let Some(value) = value {
+                locals.insert(local, value);
+            } else {
+                locals.remove(&local);
+            }
         }
         result
     }
@@ -658,7 +722,11 @@ impl<'program> CompileTimeInterpreter<'program> {
                     self.record_type_dependency(field_type);
                 }
             }
-            SemanticType::TaggedUnion { definition } => {
+            SemanticType::TaggedUnion { definition, .. } => {
+                self.dependencies
+                    .insert(CompileTimeDependency::Symbol(definition));
+            }
+            SemanticType::Enum { definition } => {
                 self.dependencies
                     .insert(CompileTimeDependency::Symbol(definition));
             }
@@ -815,9 +883,10 @@ fn evaluate_binary(
         | CompileTimeBinaryOperator::FloatDivide => evaluate_float_binary(operator, left, right),
         CompileTimeBinaryOperator::Equal => Ok(CompileTimeValue::Boolean(left == right)),
         CompileTimeBinaryOperator::NotEqual => Ok(CompileTimeValue::Boolean(left != right)),
-        CompileTimeBinaryOperator::LessThan | CompileTimeBinaryOperator::GreaterThan => {
-            evaluate_ordering(operator, left, right)
-        }
+        CompileTimeBinaryOperator::LessThan
+        | CompileTimeBinaryOperator::LessThanOrEqual
+        | CompileTimeBinaryOperator::GreaterThan
+        | CompileTimeBinaryOperator::GreaterThanOrEqual => evaluate_ordering(operator, left, right),
         CompileTimeBinaryOperator::And | CompileTimeBinaryOperator::Or => {
             evaluate_boolean_binary(operator, left, right)
         }
@@ -883,11 +952,51 @@ fn evaluate_ordering(
         (operator, ordering),
         (CompileTimeBinaryOperator::LessThan, Some(Ordering::Less))
             | (
+                CompileTimeBinaryOperator::LessThanOrEqual,
+                Some(Ordering::Less | Ordering::Equal)
+            )
+            | (
                 CompileTimeBinaryOperator::GreaterThan,
                 Some(Ordering::Greater)
             )
+            | (
+                CompileTimeBinaryOperator::GreaterThanOrEqual,
+                Some(Ordering::Greater | Ordering::Equal)
+            )
     );
     Ok(CompileTimeValue::Boolean(value))
+}
+
+fn evaluate_numeric_conversion(
+    conversion: pop_types::NumericConversionKind,
+    value: CompileTimeValue,
+) -> Result<CompileTimeValue, EvaluationError> {
+    use pop_types::NumericConversionKind;
+    match (conversion, value) {
+        (
+            NumericConversionKind::IntegerToInteger { source, target },
+            CompileTimeValue::Integer(value),
+        ) if value.kind() == source => value
+            .convert(target)
+            .map(CompileTimeValue::Integer)
+            .map_err(numeric_evaluation_error),
+        (
+            NumericConversionKind::IntegerToFloat { source, target },
+            CompileTimeValue::Integer(value),
+        ) if value.kind() == source => Ok(CompileTimeValue::Float(value.to_float(target))),
+        (
+            NumericConversionKind::FloatToInteger { source, target },
+            CompileTimeValue::Float(value),
+        ) if value.kind() == source => value
+            .to_integer(target)
+            .map(CompileTimeValue::Integer)
+            .map_err(numeric_evaluation_error),
+        (
+            NumericConversionKind::FloatToFloat { source, target },
+            CompileTimeValue::Float(value),
+        ) if value.kind() == source => Ok(CompileTimeValue::Float(value.convert(target))),
+        _ => Err(EvaluationError::TypeMismatch),
+    }
 }
 
 fn evaluate_boolean_binary(

@@ -113,7 +113,10 @@ These are distinct semantic types even if optimized layouts overlap.
   mutability semantics.
 - An array has one element type and integer indexing.
 - A table preserves selected Luau collection behavior with statically known key
-  and value types.
+  and value types. An indexed read returns an optional value; indexed assignment
+  inserts or replaces an entry without changing the invariant table type. Only
+  key types with accepted canonical equality and hashing are indexable. See ADR
+  0046.
 
 Specialized ordered/persistent maps are ordinary nominal standard-library types
 built on these primitives rather than a separate core language type.
@@ -159,6 +162,17 @@ Luau-like multiple returns use a statically described type pack. A variadic tail
 has a known repeated element type or a generic type-pack parameter with solver
 constraints. It is never an untyped bag of values.
 
+The first implemented pack form is fixed and exact. A parenthesized function
+result annotation defines its element types, comma return syntax constructs it,
+and multiple local declaration/assignment projects it by static index. A comma
+list of scalar right-hand sides must also match the target arity exactly. There
+is no Lua-style `nil` padding, extra-value truncation, or arbitrary last-value
+expansion. See ADR 0045.
+
+Indexing a tuple or fixed pack requires a positive in-range integer literal and
+produces the exact element type at that position. A computed index is rejected;
+tuple projection never introduces a common element type or dynamic lookup.
+
 Colon method syntax affects receiver insertion at parsing/HIR construction, not
 the underlying ability to type-check the call.
 
@@ -176,6 +190,13 @@ Generic instantiation:
 3. checks call arguments with expected instantiated parameter types;
 4. solves and validates all remaining variables;
 5. records canonical generic arguments in HIR.
+
+The bootstrap subset currently requires explicit function and tagged-union case
+type arguments, supports ordered invariant parameters on functions, records,
+and tagged unions, and fully specializes every reachable concrete instance in
+MIR. Equivalent instances are deduplicated. Type-argument inference, portable
+generic reference metadata, and representation-compatible typed code sharing
+remain later extensions of the same semantic model. See ADR 0050.
 
 Compile-time generic code may branch on permitted type/attribute queries. Each
 accepted branch still produces ordinary fully typed HIR.
@@ -196,6 +217,13 @@ Numeric widening, narrowing, signedness change, optional injection, interface
 upcast, and checked downcast are distinct conversion kinds in HIR. No conversion
 is labeled “dynamic.” Lossy conversions require explicit syntax unless an ADR
 proves a safe implicit rule.
+
+ADR 0040 fixes numeric conversion syntax as a call whose callee is a built-in
+numeric type, for example `UInt32(value)`. The checker resolves that type in the
+type namespace, requires one numeric operand, and records the exact source and
+target kinds. It is never an ordinary overload or runtime lookup. Decimal
+floating-point literals remain context-sensitive literal typing rather than an
+implicit conversion from an existing value.
 
 ## Effects and compile-time eligibility
 

@@ -5,12 +5,14 @@
 //! modules so downstream phases can depend on a stable typed contract.
 
 use pop_foundation::{
-    AttributeId, BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId,
+    AttributeId, BindingId, CaptureId, ClassId, Diagnostic, EnumCaseId, FieldId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan,
     StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 
-use crate::{AttributeQuerySubject, FloatValue, IntegerValue};
+use crate::{
+    AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, NumericConversionKind,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedBody {
@@ -51,6 +53,10 @@ pub enum TypedStatementKind {
         local_type: TypeId,
         initializer: TypedExpression,
     },
+    MultipleLocal {
+        bindings: Vec<TypedLocalBinding>,
+        value: TypedExpression,
+    },
     LocalSet {
         local: LocalId,
         value: TypedExpression,
@@ -79,6 +85,18 @@ pub enum TypedStatementKind {
         body: Vec<TypedStatement>,
         condition: TypedExpression,
     },
+    NumericFor {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        integer_type: TypeId,
+        first: TypedExpression,
+        last: TypedExpression,
+        step: TypedExpression,
+        body: Vec<TypedStatement>,
+    },
+    Break,
+    Continue,
     Match {
         scrutinee: TypedExpression,
         union: SymbolId,
@@ -89,9 +107,32 @@ pub enum TypedStatementKind {
         field: FieldId,
         value: TypedExpression,
     },
+    CompoundFieldSet {
+        base: TypedExpression,
+        field: FieldId,
+        value_type: TypeId,
+        operator: TypedCompoundOperator,
+        value: TypedExpression,
+    },
     ArraySet {
         array: TypedExpression,
         index: TypedExpression,
+        value: TypedExpression,
+    },
+    TableSet {
+        table: TypedExpression,
+        key: TypedExpression,
+        value: TypedExpression,
+    },
+    CompoundArraySet {
+        array: TypedExpression,
+        index: TypedExpression,
+        element_type: TypeId,
+        operator: TypedCompoundOperator,
+        value: TypedExpression,
+    },
+    MultipleAssignment {
+        targets: Vec<TypedAssignmentTarget>,
         value: TypedExpression,
     },
     Call(TypedCall),
@@ -99,8 +140,87 @@ pub enum TypedStatementKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedLocalBinding {
+    pub(crate) binding: BindingId,
+    pub(crate) local: LocalId,
+    pub(crate) name: String,
+    pub(crate) local_type: TypeId,
+    pub(crate) span: SourceSpan,
+}
+
+impl TypedLocalBinding {
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    #[must_use]
+    pub const fn local(&self) -> LocalId {
+        self.local
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn local_type(&self) -> TypeId {
+        self.local_type
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedAssignmentTarget {
+    Local {
+        binding: BindingId,
+        local: LocalId,
+        value_type: TypeId,
+    },
+    Capture {
+        binding: BindingId,
+        capture: CaptureId,
+        value_type: TypeId,
+    },
+    Field {
+        base: TypedExpression,
+        field: FieldId,
+        value_type: TypeId,
+    },
+    Array {
+        array: TypedExpression,
+        index: TypedExpression,
+        element_type: TypeId,
+    },
+    Table {
+        table: TypedExpression,
+        key: TypedExpression,
+        value_type: TypeId,
+    },
+}
+
+impl TypedAssignmentTarget {
+    #[must_use]
+    pub const fn value_type(&self) -> TypeId {
+        match self {
+            Self::Local { value_type, .. }
+            | Self::Capture { value_type, .. }
+            | Self::Field { value_type, .. }
+            | Self::Table { value_type, .. } => *value_type,
+            Self::Array { element_type, .. } => *element_type,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedCall {
     pub(crate) dispatch: TypedCallDispatch,
+    pub(crate) type_arguments: Vec<TypeId>,
     pub(crate) arguments: Vec<TypedExpression>,
     pub(crate) span: SourceSpan,
 }
@@ -109,6 +229,11 @@ impl TypedCall {
     #[must_use]
     pub const fn dispatch(&self) -> &TypedCallDispatch {
         &self.dispatch
+    }
+
+    #[must_use]
+    pub fn type_arguments(&self) -> &[TypeId] {
+        &self.type_arguments
     }
 
     #[must_use]
@@ -206,6 +331,14 @@ pub enum TypedExpressionKind {
         array: Box<TypedExpression>,
         index: Box<TypedExpression>,
     },
+    TableGet {
+        table: Box<TypedExpression>,
+        key: Box<TypedExpression>,
+    },
+    TupleGet {
+        tuple: Box<TypedExpression>,
+        index: u32,
+    },
     ArrayCreate {
         length: Box<TypedExpression>,
         initial_value: Box<TypedExpression>,
@@ -237,7 +370,20 @@ pub enum TypedExpressionKind {
         case: UnionCaseId,
         arguments: Vec<TypedExpression>,
     },
+    EnumCase {
+        definition: SymbolId,
+        case: EnumCaseId,
+        discriminant: u32,
+    },
     Tuple(Vec<TypedExpression>),
+    StringConcat {
+        left: Box<TypedExpression>,
+        right: Box<TypedExpression>,
+    },
+    StringFormat {
+        kind: StringFormatKind,
+        value: Box<TypedExpression>,
+    },
     Unary {
         operator: TypedUnaryOperator,
         operand: Box<TypedExpression>,
@@ -247,8 +393,14 @@ pub enum TypedExpressionKind {
         left: Box<TypedExpression>,
         right: Box<TypedExpression>,
     },
+    Conditional {
+        condition: Box<TypedExpression>,
+        when_true: Box<TypedExpression>,
+        when_false: Box<TypedExpression>,
+    },
     DirectCall {
         function: SymbolId,
+        type_arguments: Vec<TypeId>,
         arguments: Vec<TypedExpression>,
     },
     ReferencedCall {
@@ -277,6 +429,10 @@ pub enum TypedExpressionKind {
     InterfaceUpcast {
         value: Box<TypedExpression>,
         interface: InterfaceId,
+    },
+    NumericConvert {
+        value: Box<TypedExpression>,
+        conversion: NumericConversionKind,
     },
 }
 
@@ -540,12 +696,31 @@ pub enum TypedBinaryOperator {
     Equal,
     NotEqual,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
     Add,
     Subtract,
     Multiply,
     Divide,
     Remainder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypedCompoundOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Concat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StringFormatKind {
+    Boolean,
+    Integer(IntegerKind),
+    Float(FloatKind),
 }
 
 #[derive(Clone, Debug)]

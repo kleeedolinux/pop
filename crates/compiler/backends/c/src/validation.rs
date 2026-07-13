@@ -128,6 +128,10 @@ fn is_supported_instruction(kind: &MirInstructionKind) -> bool {
             | MirInstructionKind::FloatSubtract { .. }
             | MirInstructionKind::FloatMultiply { .. }
             | MirInstructionKind::FloatDivide { .. }
+            | MirInstructionKind::ConvertInteger { .. }
+            | MirInstructionKind::ConvertIntegerToFloat { .. }
+            | MirInstructionKind::ConvertFloatToInteger { .. }
+            | MirInstructionKind::ConvertFloat { .. }
             | MirInstructionKind::BooleanNot { .. }
             | MirInstructionKind::IntegerNegate { .. }
             | MirInstructionKind::FloatNegate { .. }
@@ -136,9 +140,13 @@ fn is_supported_instruction(kind: &MirInstructionKind) -> bool {
             | MirInstructionKind::CompareEqual { .. }
             | MirInstructionKind::CompareNotEqual { .. }
             | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerLessOrEqual { .. }
             | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
             | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatLessOrEqual { .. }
             | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::CallDirect { .. }
     )
 }

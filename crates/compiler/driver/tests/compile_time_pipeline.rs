@@ -32,6 +32,30 @@ fn analyze(text: &str) -> FrontEndResult {
 }
 
 #[test]
+fn evaluated_namespace_constants_are_runtime_expressions() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function answer(): Int\n\
+             return 40 + 2\n\
+         end\n\
+         private const ANSWER: Int = answer()\n\
+         public function runtimeAnswer(): Int\n\
+             return ANSWER\n\
+         end\n",
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("verified HIR"), result.types())
+        .expect("verified MIR");
+    assert!(mir.dump().contains("const.integer Int64 42"));
+}
+
+#[test]
 fn trusted_compile_time_functions_feed_udas_and_defaults_but_not_runtime_mir() {
     let result = analyze(EXPLICIT);
     assert!(
@@ -121,6 +145,32 @@ fn unmarked_and_spoofed_compile_time_functions_are_rejected_by_identity() {
 }
 
 #[test]
+fn fixed_pack_local_bindings_preserve_transitive_compile_time_eligibility() {
+    let result = analyze(
+        "namespace Example\n\
+         private function split(value: Int): (Int, Int)\n\
+             return value, value + 1\n\
+         end\n\
+         @CompileTime\n\
+         private function sum(value: Int): Int\n\
+             local left, right = split(value)\n\
+             return left + right\n\
+         end\n\
+         private const ANSWER = sum(20)\n",
+    );
+
+    assert!(result.hir().is_none());
+    assert!(
+        result
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "POP4004"),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+}
+
+#[test]
 fn compile_time_boolean_operators_preserve_source_short_circuiting() {
     let result = analyze(SHORT_CIRCUIT);
     assert!(
@@ -133,6 +183,38 @@ fn compile_time_boolean_operators_preserve_source_short_circuiting() {
     assert!(matches!(
         hir.functions()[0].attributes()[0].arguments()[0].value(),
         AttributeConstant::Boolean(false)
+    ));
+}
+
+#[test]
+fn compile_time_conditional_expressions_preserve_source_laziness() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function failing(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         @CompileTime\n\
+         private function choose(flag: Boolean): Int\n\
+             return if flag then 42 else failing()\n\
+         end\n\
+         @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+         public attribute Answer(value: Int)\n\
+         @Answer(choose(true))\n\
+         public function value(): Int\n\
+             return 0\n\
+         end\n",
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let function = &result.hir().expect("verified HIR").functions()[0];
+    assert!(matches!(
+        function.attributes()[0].arguments()[0].value(),
+        AttributeConstant::Integer(value)
+            if value.kind() == IntegerKind::Int64 && value.to_string() == "42"
     ));
 }
 

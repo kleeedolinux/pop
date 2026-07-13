@@ -19,6 +19,8 @@ mod expression;
 mod interface;
 mod lexer;
 mod signature;
+mod string_literal;
+mod type_alias;
 
 pub use attribute::{
     AttributeArgumentSyntax, AttributeDeclarationSyntax, AttributeParameterSyntax,
@@ -27,7 +29,8 @@ pub use attribute::{
 pub use body::{
     BinaryOperator, CaptureFunctionParameterSyntax, CaptureFunctionSyntax, ExpressionSyntax,
     ExpressionSyntaxKind, FieldInitializerSyntax, FunctionBodyError, FunctionBodySyntax,
-    MatchArmSyntax, StatementSyntax, StatementSyntaxKind, UnaryOperator, parse_function_body,
+    LocalBindingSyntax, MatchArmSyntax, StatementSyntax, StatementSyntaxKind, StringSegmentSyntax,
+    StringSegmentSyntaxKind, UnaryOperator, parse_function_body,
 };
 pub use class::{
     ClassDeclarationError, ClassDeclarationSyntax, ClassFieldSyntax, ClassMethodDispatchSyntax,
@@ -36,8 +39,9 @@ pub use class::{
 };
 pub use constant::{ConstDeclarationError, ConstDeclarationSyntax, parse_const_declaration};
 pub use data::{
-    DataDeclarationError, RecordDeclarationSyntax, RecordFieldSyntax, UnionCaseParameterSyntax,
-    UnionCaseSyntax, UnionDeclarationSyntax, parse_record_declaration, parse_union_declaration,
+    DataDeclarationError, EnumCaseSyntax, EnumDeclarationSyntax, RecordDeclarationSyntax,
+    RecordFieldSyntax, UnionCaseParameterSyntax, UnionCaseSyntax, UnionDeclarationSyntax,
+    parse_enum_declaration, parse_record_declaration, parse_union_declaration,
 };
 pub use interface::{
     InterfaceDeclarationError, InterfaceDeclarationSyntax, InterfaceMethodParameterSyntax,
@@ -47,6 +51,10 @@ pub use lexer::{LexResult, Token, TokenKind, lex};
 pub use signature::{
     FunctionParameterSyntax, FunctionSignatureError, FunctionSignatureSyntax,
     GenericParameterSyntax, TypeSyntax, TypeSyntaxKind, parse_function_signature,
+};
+pub use string_literal::{StringLiteralError, decode_string_literal};
+pub use type_alias::{
+    TypeAliasDeclarationError, TypeAliasDeclarationSyntax, parse_type_alias_declaration,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,8 +303,8 @@ impl Parser<'_, '_> {
                 {
                     depth += 1;
                 }
-                TokenKind::If
-                | TokenKind::While
+                TokenKind::If if self.if_opens_block(index) => depth += 1,
+                TokenKind::While
                 | TokenKind::For
                 | TokenKind::Record
                 | TokenKind::Class
@@ -351,6 +359,19 @@ impl Parser<'_, '_> {
             .rev()
             .find(|token| !token.kind().is_trivia())
             .is_none_or(|token| token.kind() != TokenKind::Colon)
+    }
+
+    fn if_opens_block(&self, index: usize) -> bool {
+        for token in self.tokens[..index].iter().rev() {
+            match token.kind() {
+                TokenKind::Newline => return true,
+                TokenKind::Whitespace
+                | TokenKind::LineComment
+                | TokenKind::DocumentationComment => {}
+                _ => return false,
+            }
+        }
+        true
     }
 
     fn line_end(&self, start: usize) -> usize {

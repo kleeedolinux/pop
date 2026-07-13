@@ -40,6 +40,7 @@ typed_id!(
     InterfaceId,
     InterfaceMethodId,
     FieldId,
+    EnumCaseId,
     UnionCaseId,
     MethodId,
     ParameterId,

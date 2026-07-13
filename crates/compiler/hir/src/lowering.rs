@@ -14,9 +14,9 @@ use pop_resolve::Visibility;
 use pop_types::{
     CaptureMode, CaptureSource, ClassDefinition, ClassInterfaceImplementation,
     ClassMethodDefinition, InterfaceDefinition, ResolvedAttribute, ResolvedFunctionSignature,
-    TypeArena, TypedBody, TypedCall, TypedCallDispatch, TypedCapture, TypedClosure,
-    TypedExpression, TypedExpressionKind, TypedFieldValue, TypedMatchArm, TypedMatchBinding,
-    TypedStatement, TypedStatementKind, TypedTableEntry,
+    TypeArena, TypedAssignmentTarget, TypedBody, TypedCall, TypedCallDispatch, TypedCapture,
+    TypedClosure, TypedExpression, TypedExpressionKind, TypedFieldValue, TypedMatchArm,
+    TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry,
 };
 
 use crate::ir::*;
@@ -199,6 +199,11 @@ pub fn build_hir_function_with_known_callables_and_attributes(
         bubble: context.bubble,
         visibility: context.visibility,
         name: signature.name().to_owned(),
+        type_parameters: signature
+            .type_parameters()
+            .iter()
+            .map(pop_types::ResolvedTypeParameter::type_id)
+            .collect(),
         parameters,
         results,
         body: body
@@ -281,6 +286,19 @@ fn lower_statement(
             local_type: *local_type,
             initializer: lower_expression(initializer, interface_slots),
         },
+        TypedStatementKind::MultipleLocal { bindings, value } => HirStatementKind::MultipleLocal {
+            bindings: bindings
+                .iter()
+                .map(|binding| HirLocalBinding {
+                    binding: binding.binding(),
+                    local: binding.local(),
+                    name: binding.name().to_owned(),
+                    local_type: binding.local_type(),
+                    span: binding.span(),
+                })
+                .collect(),
+            value: lower_expression(value, interface_slots),
+        },
         TypedStatementKind::LocalSet { local, value } => HirStatementKind::LocalSet {
             local: *local,
             value: lower_expression(value, interface_slots),
@@ -328,6 +346,30 @@ fn lower_statement(
                 .collect(),
             condition: lower_expression(condition, interface_slots),
         },
+        TypedStatementKind::NumericFor {
+            binding,
+            local,
+            name,
+            integer_type,
+            first,
+            last,
+            step,
+            body,
+        } => HirStatementKind::NumericFor {
+            binding: *binding,
+            local: *local,
+            name: name.clone(),
+            integer_type: *integer_type,
+            first: lower_expression(first, interface_slots),
+            last: lower_expression(last, interface_slots),
+            step: lower_expression(step, interface_slots),
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
+        TypedStatementKind::Break => HirStatementKind::Break,
+        TypedStatementKind::Continue => HirStatementKind::Continue,
         TypedStatementKind::Match {
             scrutinee,
             union,
@@ -345,6 +387,19 @@ fn lower_statement(
             field: *field,
             value: lower_expression(value, interface_slots),
         },
+        TypedStatementKind::CompoundFieldSet {
+            base,
+            field,
+            value_type,
+            operator,
+            value,
+        } => HirStatementKind::CompoundFieldSet {
+            base: lower_expression(base, interface_slots),
+            field: *field,
+            value_type: *value_type,
+            operator: *operator,
+            value: lower_expression(value, interface_slots),
+        },
         TypedStatementKind::ArraySet {
             array,
             index,
@@ -354,6 +409,33 @@ fn lower_statement(
             index: lower_expression(index, interface_slots),
             value: lower_expression(value, interface_slots),
         },
+        TypedStatementKind::TableSet { table, key, value } => HirStatementKind::TableSet {
+            table: lower_expression(table, interface_slots),
+            key: lower_expression(key, interface_slots),
+            value: lower_expression(value, interface_slots),
+        },
+        TypedStatementKind::CompoundArraySet {
+            array,
+            index,
+            element_type,
+            operator,
+            value,
+        } => HirStatementKind::CompoundArraySet {
+            array: lower_expression(array, interface_slots),
+            index: lower_expression(index, interface_slots),
+            element_type: *element_type,
+            operator: *operator,
+            value: lower_expression(value, interface_slots),
+        },
+        TypedStatementKind::MultipleAssignment { targets, value } => {
+            HirStatementKind::MultipleAssignment {
+                targets: targets
+                    .iter()
+                    .map(|target| lower_assignment_target(target, interface_slots))
+                    .collect(),
+                value: lower_expression(value, interface_slots),
+            }
+        }
         TypedStatementKind::Call(call) => HirStatementKind::Call(lower_call(call, interface_slots)),
         TypedStatementKind::Expression(expression) => {
             HirStatementKind::Expression(lower_expression(expression, interface_slots))
@@ -362,6 +444,59 @@ fn lower_statement(
     HirStatement {
         kind,
         span: statement.span(),
+    }
+}
+
+fn lower_assignment_target(
+    target: &TypedAssignmentTarget,
+    interface_slots: &HirInterfaceSlotMap,
+) -> HirAssignmentTarget {
+    match target {
+        TypedAssignmentTarget::Local {
+            binding,
+            local,
+            value_type,
+        } => HirAssignmentTarget::Local {
+            binding: *binding,
+            local: *local,
+            value_type: *value_type,
+        },
+        TypedAssignmentTarget::Capture {
+            binding,
+            capture,
+            value_type,
+        } => HirAssignmentTarget::Capture {
+            binding: *binding,
+            capture: *capture,
+            value_type: *value_type,
+        },
+        TypedAssignmentTarget::Field {
+            base,
+            field,
+            value_type,
+        } => HirAssignmentTarget::Field {
+            base: lower_expression(base, interface_slots),
+            field: *field,
+            value_type: *value_type,
+        },
+        TypedAssignmentTarget::Array {
+            array,
+            index,
+            element_type,
+        } => HirAssignmentTarget::Array {
+            array: lower_expression(array, interface_slots),
+            index: lower_expression(index, interface_slots),
+            element_type: *element_type,
+        },
+        TypedAssignmentTarget::Table {
+            table,
+            key,
+            value_type,
+        } => HirAssignmentTarget::Table {
+            table: lower_expression(table, interface_slots),
+            key: lower_expression(key, interface_slots),
+            value_type: *value_type,
+        },
     }
 }
 
@@ -379,6 +514,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
         TypedCallDispatch::DirectMethod { method, receiver } => {
             return HirCall {
                 dispatch: HirCallDispatch::DirectMethod { method: *method },
+                type_arguments: call.type_arguments().to_vec(),
                 arguments: receiver
                     .iter()
                     .map(|receiver| lower_expression(receiver, interface_slots))
@@ -402,6 +538,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                     method: *method,
                     slot: interface_slots[&(*interface, *method)],
                 },
+                type_arguments: call.type_arguments().to_vec(),
                 arguments: std::iter::once(lower_expression(receiver, interface_slots))
                     .chain(
                         call.arguments()
@@ -418,6 +555,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
     };
     HirCall {
         dispatch,
+        type_arguments: call.type_arguments().to_vec(),
         arguments: call
             .arguments()
             .iter()
@@ -456,6 +594,14 @@ fn lower_expression(
         TypedExpressionKind::ArrayGet { array, index } => HirExpressionKind::ArrayGet {
             array: Box::new(lower_expression(array, interface_slots)),
             index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::TableGet { table, key } => HirExpressionKind::TableGet {
+            table: Box::new(lower_expression(table, interface_slots)),
+            key: Box::new(lower_expression(key, interface_slots)),
+        },
+        TypedExpressionKind::TupleGet { tuple, index } => HirExpressionKind::TupleGet {
+            tuple: Box::new(lower_expression(tuple, interface_slots)),
+            index: *index,
         },
         TypedExpressionKind::ArrayCreate {
             length,
@@ -532,12 +678,29 @@ fn lower_expression(
                 .map(|argument| lower_expression(argument, interface_slots))
                 .collect(),
         },
+        TypedExpressionKind::EnumCase {
+            definition,
+            case,
+            discriminant,
+        } => HirExpressionKind::EnumCase {
+            definition: *definition,
+            case: *case,
+            discriminant: *discriminant,
+        },
         TypedExpressionKind::Tuple(elements) => HirExpressionKind::Tuple(
             elements
                 .iter()
                 .map(|element| lower_expression(element, interface_slots))
                 .collect(),
         ),
+        TypedExpressionKind::StringConcat { left, right } => HirExpressionKind::StringConcat {
+            left: Box::new(lower_expression(left, interface_slots)),
+            right: Box::new(lower_expression(right, interface_slots)),
+        },
+        TypedExpressionKind::StringFormat { kind, value } => HirExpressionKind::StringFormat {
+            kind: *kind,
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
         TypedExpressionKind::Unary { operator, operand } => HirExpressionKind::Unary {
             operator: *operator,
             operand: Box::new(lower_expression(operand, interface_slots)),
@@ -551,6 +714,15 @@ fn lower_expression(
             left: Box::new(lower_expression(left, interface_slots)),
             right: Box::new(lower_expression(right, interface_slots)),
         },
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => HirExpressionKind::Conditional {
+            condition: Box::new(lower_expression(condition, interface_slots)),
+            when_true: Box::new(lower_expression(when_true, interface_slots)),
+            when_false: Box::new(lower_expression(when_false, interface_slots)),
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -563,6 +735,12 @@ fn lower_expression(
             HirExpressionKind::InterfaceUpcast {
                 value: Box::new(lower_expression(value, interface_slots)),
                 interface: *interface,
+            }
+        }
+        TypedExpressionKind::NumericConvert { value, conversion } => {
+            HirExpressionKind::NumericConvert {
+                value: Box::new(lower_expression(value, interface_slots)),
+                conversion: *conversion,
             }
         }
     };
@@ -585,6 +763,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Standard {
                 function: *function,
             },
+            type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -592,11 +771,13 @@ fn lower_call_expression(
         },
         TypedExpressionKind::DirectCall {
             function,
+            type_arguments,
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Direct {
                 function: *function,
             },
+            type_arguments: type_arguments.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -609,6 +790,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Referenced {
                 function: *function,
             },
+            type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -618,6 +800,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Indirect {
                 callee: Box::new(lower_expression(callee, interface_slots)),
             },
+            type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -629,6 +812,7 @@ fn lower_call_expression(
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::DirectMethod { method: *method },
+            type_arguments: Vec::new(),
             arguments: receiver
                 .iter()
                 .map(|receiver| lower_expression(receiver, interface_slots))
@@ -650,6 +834,7 @@ fn lower_call_expression(
                 method: *method,
                 slot: interface_slots[&(*interface, *method)],
             },
+            type_arguments: Vec::new(),
             arguments: std::iter::once(lower_expression(receiver, interface_slots))
                 .chain(
                     arguments
@@ -769,6 +954,9 @@ fn first_unknown_interface_call(
             TypedStatementKind::Local { initializer, .. } => {
                 first_unknown_interface_expression(initializer, slots)
             }
+            TypedStatementKind::MultipleLocal { value, .. } => {
+                first_unknown_interface_expression(value, slots)
+            }
             TypedStatementKind::LocalSet { value, .. }
             | TypedStatementKind::ParameterSet { value, .. }
             | TypedStatementKind::CaptureSet { value, .. }
@@ -793,6 +981,17 @@ fn first_unknown_interface_call(
                 first_unknown_interface_call(body, slots)
                     .or_else(|| first_unknown_interface_expression(condition, slots))
             }
+            TypedStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => first_unknown_interface_expression(first, slots)
+                .or_else(|| first_unknown_interface_expression(last, slots))
+                .or_else(|| first_unknown_interface_expression(step, slots))
+                .or_else(|| first_unknown_interface_call(body, slots)),
+            TypedStatementKind::Break | TypedStatementKind::Continue => None,
             TypedStatementKind::Match {
                 scrutinee, arms, ..
             } => first_unknown_interface_expression(scrutinee, slots).or_else(|| {
@@ -803,12 +1002,33 @@ fn first_unknown_interface_call(
                 first_unknown_interface_expression(base, slots)
                     .or_else(|| first_unknown_interface_expression(value, slots))
             }
+            TypedStatementKind::CompoundFieldSet { base, value, .. } => {
+                first_unknown_interface_expression(base, slots)
+                    .or_else(|| first_unknown_interface_expression(value, slots))
+            }
             TypedStatementKind::ArraySet {
                 array,
                 index,
                 value,
             } => first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
+                .or_else(|| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::TableSet { table, key, value } => {
+                first_unknown_interface_expression(table, slots)
+                    .or_else(|| first_unknown_interface_expression(key, slots))
+                    .or_else(|| first_unknown_interface_expression(value, slots))
+            }
+            TypedStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+                .or_else(|| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::MultipleAssignment { targets, value } => targets
+                .iter()
+                .find_map(|target| first_unknown_interface_target(target, slots))
                 .or_else(|| first_unknown_interface_expression(value, slots)),
             TypedStatementKind::Call(call) => {
                 if let TypedCallDispatch::InterfaceMethod {
@@ -847,6 +1067,26 @@ fn first_unknown_interface_call(
     None
 }
 
+fn first_unknown_interface_target(
+    target: &TypedAssignmentTarget,
+    slots: &HirInterfaceSlotMap,
+) -> Option<(InterfaceId, InterfaceMethodId, SourceSpan)> {
+    match target {
+        TypedAssignmentTarget::Local { .. } | TypedAssignmentTarget::Capture { .. } => None,
+        TypedAssignmentTarget::Field { base, .. } => {
+            first_unknown_interface_expression(base, slots)
+        }
+        TypedAssignmentTarget::Array { array, index, .. } => {
+            first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedAssignmentTarget::Table { table, key, .. } => {
+            first_unknown_interface_expression(table, slots)
+                .or_else(|| first_unknown_interface_expression(key, slots))
+        }
+    }
+}
+
 fn first_unknown_interface_expression(
     expression: &TypedExpression,
     slots: &HirInterfaceSlotMap,
@@ -878,6 +1118,13 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::ArrayGet { array, index } => {
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedExpressionKind::TableGet { table, key } => {
+            first_unknown_interface_expression(table, slots)
+                .or_else(|| first_unknown_interface_expression(key, slots))
+        }
+        TypedExpressionKind::TupleGet { tuple, .. } => {
+            first_unknown_interface_expression(tuple, slots)
         }
         TypedExpressionKind::ArrayCreate {
             length,
@@ -922,6 +1169,20 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(left, slots)
                 .or_else(|| first_unknown_interface_expression(right, slots))
         }
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => first_unknown_interface_expression(condition, slots)
+            .or_else(|| first_unknown_interface_expression(when_true, slots))
+            .or_else(|| first_unknown_interface_expression(when_false, slots)),
+        TypedExpressionKind::StringConcat { left, right } => {
+            first_unknown_interface_expression(left, slots)
+                .or_else(|| first_unknown_interface_expression(right, slots))
+        }
+        TypedExpressionKind::StringFormat { value, .. } => {
+            first_unknown_interface_expression(value, slots)
+        }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             first_unknown_interface_expression(callee, slots).or_else(|| {
                 arguments
@@ -944,6 +1205,9 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::InterfaceUpcast { value, .. } => {
             first_unknown_interface_expression(value, slots)
         }
+        TypedExpressionKind::NumericConvert { value, .. } => {
+            first_unknown_interface_expression(value, slots)
+        }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::Float(_)
         | TypedExpressionKind::String(_)
@@ -954,7 +1218,8 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
-        | TypedExpressionKind::Function(_) => None,
+        | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
 
@@ -963,6 +1228,9 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
         let found = match statement.kind() {
             TypedStatementKind::Local { initializer, .. } => {
                 first_compile_time_only_expression(initializer)
+            }
+            TypedStatementKind::MultipleLocal { value, .. } => {
+                first_compile_time_only_expression(value)
             }
             TypedStatementKind::LocalSet { value, .. }
             | TypedStatementKind::ParameterSet { value, .. }
@@ -986,6 +1254,17 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 first_compile_time_only_statement(body)
                     .or_else(|| first_compile_time_only_expression(condition))
             }
+            TypedStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => first_compile_time_only_expression(first)
+                .or_else(|| first_compile_time_only_expression(last))
+                .or_else(|| first_compile_time_only_expression(step))
+                .or_else(|| first_compile_time_only_statement(body)),
+            TypedStatementKind::Break | TypedStatementKind::Continue => None,
             TypedStatementKind::Match {
                 scrutinee, arms, ..
             } => first_compile_time_only_expression(scrutinee).or_else(|| {
@@ -996,12 +1275,33 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 first_compile_time_only_expression(base)
                     .or_else(|| first_compile_time_only_expression(value))
             }
+            TypedStatementKind::CompoundFieldSet { base, value, .. } => {
+                first_compile_time_only_expression(base)
+                    .or_else(|| first_compile_time_only_expression(value))
+            }
             TypedStatementKind::ArraySet {
                 array,
                 index,
                 value,
             } => first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
+                .or_else(|| first_compile_time_only_expression(value)),
+            TypedStatementKind::TableSet { table, key, value } => {
+                first_compile_time_only_expression(table)
+                    .or_else(|| first_compile_time_only_expression(key))
+                    .or_else(|| first_compile_time_only_expression(value))
+            }
+            TypedStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+                .or_else(|| first_compile_time_only_expression(value)),
+            TypedStatementKind::MultipleAssignment { targets, value } => targets
+                .iter()
+                .find_map(first_compile_time_only_target)
                 .or_else(|| first_compile_time_only_expression(value)),
             TypedStatementKind::Call(call) => first_compile_time_only_call(call),
         };
@@ -1010,6 +1310,21 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
         }
     }
     None
+}
+
+fn first_compile_time_only_target(target: &TypedAssignmentTarget) -> Option<SourceSpan> {
+    match target {
+        TypedAssignmentTarget::Local { .. } | TypedAssignmentTarget::Capture { .. } => None,
+        TypedAssignmentTarget::Field { base, .. } => first_compile_time_only_expression(base),
+        TypedAssignmentTarget::Array { array, index, .. } => {
+            first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+        }
+        TypedAssignmentTarget::Table { table, key, .. } => {
+            first_compile_time_only_expression(table)
+                .or_else(|| first_compile_time_only_expression(key))
+        }
+    }
 }
 
 fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {
@@ -1046,6 +1361,9 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             .find_map(|field| first_compile_time_only_expression(field.value())),
         TypedExpressionKind::ArrayGet { array, index } => first_compile_time_only_expression(array)
             .or_else(|| first_compile_time_only_expression(index)),
+        TypedExpressionKind::TableGet { table, key } => first_compile_time_only_expression(table)
+            .or_else(|| first_compile_time_only_expression(key)),
+        TypedExpressionKind::TupleGet { tuple, .. } => first_compile_time_only_expression(tuple),
         TypedExpressionKind::ArrayCreate {
             length,
             initial_value,
@@ -1083,6 +1401,20 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
         TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
             .or_else(|| first_compile_time_only_expression(right)),
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => first_compile_time_only_expression(condition)
+            .or_else(|| first_compile_time_only_expression(when_true))
+            .or_else(|| first_compile_time_only_expression(when_false)),
+        TypedExpressionKind::StringConcat { left, right } => {
+            first_compile_time_only_expression(left)
+                .or_else(|| first_compile_time_only_expression(right))
+        }
+        TypedExpressionKind::StringFormat { value, .. } => {
+            first_compile_time_only_expression(value)
+        }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             first_compile_time_only_expression(callee).or_else(|| {
                 arguments
@@ -1114,6 +1446,9 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::InterfaceUpcast { value, .. } => {
             first_compile_time_only_expression(value)
         }
+        TypedExpressionKind::NumericConvert { value, .. } => {
+            first_compile_time_only_expression(value)
+        }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::Float(_)
         | TypedExpressionKind::String(_)
@@ -1122,7 +1457,8 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
-        | TypedExpressionKind::Function(_) => None,
+        | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
 

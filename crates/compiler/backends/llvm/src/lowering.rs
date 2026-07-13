@@ -166,6 +166,14 @@ pub fn lower_mir_to_llvm_ir(
             "declare void @{}()",
             native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
+        format!(
+            "declare i64 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::StringConcat)
+        ),
+        format!(
+            "declare i64 @{}(i32, i64)",
+            native_runtime_symbol(RuntimeOperation::StringFormat)
+        ),
         "declare i64 @pop_rt_string_literal(ptr, i64)".to_owned(),
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
@@ -962,15 +970,23 @@ pub(crate) fn llvm_memory_none_instruction(instruction: &MirInstructionKind) -> 
             | MirInstructionKind::CheckedIntegerDivide { .. }
             | MirInstructionKind::CheckedIntegerRemainder { .. }
             | MirInstructionKind::IntegerNegate { .. }
+            | MirInstructionKind::ConvertInteger { .. }
+            | MirInstructionKind::ConvertIntegerToFloat { .. }
+            | MirInstructionKind::ConvertFloatToInteger { .. }
+            | MirInstructionKind::ConvertFloat { .. }
             | MirInstructionKind::FloatAdd { .. }
             | MirInstructionKind::FloatSubtract { .. }
             | MirInstructionKind::FloatMultiply { .. }
             | MirInstructionKind::FloatDivide { .. }
             | MirInstructionKind::FloatNegate { .. }
             | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerLessOrEqual { .. }
             | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
             | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatLessOrEqual { .. }
             | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::BooleanNot { .. }
             | MirInstructionKind::BooleanAnd { .. }
             | MirInstructionKind::BooleanOr { .. }
@@ -1033,6 +1049,7 @@ pub(crate) fn llvm_block_exit_label(
                 | MirInstructionKind::CheckedIntegerRemainder { .. }
                 | MirInstructionKind::IntegerNegate { .. }
                 | MirInstructionKind::ArraySet { .. }
+                | MirInstructionKind::TableSet { .. }
                 | MirInstructionKind::ArrayFill { .. } => "continue",
                 MirInstructionKind::GcSafePoint { .. } => "poll_continue",
                 MirInstructionKind::ArrayCreate { .. } => "create",

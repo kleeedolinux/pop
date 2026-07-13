@@ -60,17 +60,59 @@ pub(crate) fn evaluate_numeric_instruction(
         MirInstructionKind::FloatNegate { kind, operand } => Ok(MirValue::Float(
             float_value(values, *kind, *operand)?.negate(),
         )),
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => integer(values, *source, *operand)?
+            .convert(*target)
+            .map(MirValue::Integer)
+            .map_err(conversion_numeric_error),
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => Ok(MirValue::Float(
+            integer(values, *source, *operand)?.to_float(*target),
+        )),
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => float_value(values, *source, *operand)?
+            .to_integer(*target)
+            .map(MirValue::Integer)
+            .map_err(conversion_numeric_error),
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => Ok(MirValue::Float(
+            float_value(values, *source, *operand)?.convert(*target),
+        )),
         MirInstructionKind::CompareIntegerLess { kind, left, right } => {
             compare_integer(values, *kind, *left, *right, Ordering::is_lt)
         }
         MirInstructionKind::CompareIntegerGreater { kind, left, right } => {
             compare_integer(values, *kind, *left, *right, Ordering::is_gt)
         }
+        MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right } => {
+            compare_integer(values, *kind, *left, *right, Ordering::is_le)
+        }
+        MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => {
+            compare_integer(values, *kind, *left, *right, Ordering::is_ge)
+        }
         MirInstructionKind::CompareFloatLess { kind, left, right } => {
             compare_float(values, *kind, *left, *right, Ordering::is_lt)
         }
         MirInstructionKind::CompareFloatGreater { kind, left, right } => {
             compare_float(values, *kind, *left, *right, Ordering::is_gt)
+        }
+        MirInstructionKind::CompareFloatLessOrEqual { kind, left, right } => {
+            compare_float(values, *kind, *left, *right, Ordering::is_le)
+        }
+        MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => {
+            compare_float(values, *kind, *left, *right, Ordering::is_ge)
         }
         _ => return Ok(None),
     }?;
@@ -252,11 +294,37 @@ const fn execution_numeric_error(error: NumericError) -> ExecutionError {
     }
 }
 
+const fn conversion_numeric_error(error: NumericError) -> ExecutionError {
+    match error {
+        NumericError::OutOfRange | NumericError::Overflow => ExecutionError::NumericConversion,
+        NumericError::KindMismatch => ExecutionError::TypeMismatch,
+        NumericError::DivisionByZero | NumericError::InvalidLiteral => {
+            ExecutionError::InvalidControlFlow
+        }
+    }
+}
+
 pub(crate) fn pop_value_equal(left: &MirValue, right: &MirValue) -> bool {
     match (left, right) {
         (MirValue::Nil, MirValue::Nil) => true,
         (MirValue::Boolean(left), MirValue::Boolean(right)) => left == right,
         (MirValue::Integer(left), MirValue::Integer(right)) => left == right,
+        (
+            MirValue::Enum {
+                definition: left_definition,
+                case: left_case,
+                discriminant: left_discriminant,
+            },
+            MirValue::Enum {
+                definition: right_definition,
+                case: right_case,
+                discriminant: right_discriminant,
+            },
+        ) => {
+            left_definition == right_definition
+                && left_case == right_case
+                && left_discriminant == right_discriminant
+        }
         (MirValue::String(left), MirValue::String(right)) => left == right,
         (MirValue::Tuple(left), MirValue::Tuple(right)) => values_equal(left, right),
         (
