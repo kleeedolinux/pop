@@ -1023,3 +1023,244 @@ fn source_closures_and_exhaustive_matches_reach_verified_hir() {
     assert!(dump.contains("closure"), "{dump}");
     assert!(dump.contains("match"), "{dump}");
 }
+
+#[test]
+fn typed_errors_result_propagation_and_cleanup_reach_verified_hir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/errors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError<T>\n\
+             --- <summary>No input exists.</summary>\n\
+             Missing(path: T)\n\
+             --- <summary>Access is denied.</summary>\n\
+             Denied\n\
+         end\n\
+         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
+         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         public function load(path: String): Result<Int, LoadError<String>>\n\
+             defer\n\
+                 print(path)\n\
+             end\n\
+             return Result.Error(LoadError.Missing<<String>>(path))\n\
+         end\n\
+         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
+         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         public function forward(path: String): Result<String, LoadError<String>>\n\
+             local value = try load(path)\n\
+             return Result.Ok(String(value))\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("verified HIR");
+    assert!(matches!(
+        hir.declarations()
+            .iter()
+            .find(|declaration| declaration.name() == "LoadError")
+            .map(|declaration| declaration.kind()),
+        Some(HirDeclarationKind::Error(_))
+    ));
+    let dump = hir.dump(result.types());
+    assert!(dump.contains("result.propagate"), "{dump}");
+    assert!(dump.contains("defer"), "{dump}");
+}
+
+#[test]
+fn public_result_documentation_is_checked_against_exact_error_cases() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/documentedErrors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>No file exists.</summary>\n\
+             Missing(path: String)\n\
+             --- <summary>Access is denied.</summary>\n\
+             Denied\n\
+         end\n\
+         --- <summary>Loads a value.</summary>\n\
+         --- <error type=\"LoadError.Missing\">No file exists.</error>\n\
+         public function load(path: String): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Missing(path))\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.hir().is_some(),
+        "documentation warnings do not erase typed HIR"
+    );
+    assert_eq!(
+        result
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code().as_str())
+            .collect::<Vec<_>>(),
+        ["POP6403"]
+    );
+}
+
+#[test]
+fn public_error_case_summaries_are_checked_by_the_front_end() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/errorSummaries.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>No input exists.</summary>\n\
+             Missing\n\
+             Denied\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(result.hir().is_some());
+    assert_eq!(
+        result
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code().as_str())
+            .collect::<Vec<_>>(),
+        ["POP6404"]
+    );
+}
+
+#[test]
+fn typed_error_documentation_can_be_inherited_from_a_compatible_symbol() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/inheritedErrors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>No input exists.</summary>\n\
+             Missing\n\
+             --- <summary>Access is denied.</summary>\n\
+             Denied\n\
+         end\n\
+         --- <summary>Defines the shared loading contract.</summary>\n\
+         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
+         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         private function loadContract(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Missing())\n\
+         end\n\
+         --- <inheritdoc cref=\"loadContract\"/>\n\
+         public function load(): Result<Int, LoadError>\n\
+             return loadContract()\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn typed_error_documentation_rejects_incompatible_inheritance() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/incompatibleInheritedErrors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>Loading failed.</summary>\n\
+             Failed\n\
+         end\n\
+         private function integerContract(): Int\n\
+             return 0\n\
+         end\n\
+         --- <inheritdoc cref=\"integerContract\"/>\n\
+         public function load(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(result.hir().is_some());
+    let codes: Vec<_> = result
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code().as_str())
+        .collect();
+    assert!(codes.contains(&"POP6406"), "{codes:?}");
+    assert!(codes.contains(&"POP6403"), "{codes:?}");
+}
+
+#[test]
+fn typed_error_documentation_rejects_inheritance_cycles() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/cyclicInheritedErrors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>Loading failed.</summary>\n\
+             Failed\n\
+         end\n\
+         --- <inheritdoc cref=\"second\"/>\n\
+         public function first(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n\
+         --- <inheritdoc cref=\"first\"/>\n\
+         public function second(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(result.hir().is_some());
+    let codes: Vec<_> = result
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code().as_str())
+        .collect();
+    assert!(codes.contains(&"POP6407"), "{codes:?}");
+    assert_eq!(codes.iter().filter(|code| **code == "POP6403").count(), 2);
+}

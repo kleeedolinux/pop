@@ -2,10 +2,10 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FileId, FunctionId,
-    InterfaceId, InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan,
-    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
-    ValueId,
+    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId, EnumCaseId,
+    ErrorCaseId, ErrorId, FieldId, FileId, FunctionId, InterfaceId, InterfaceMethodId, MethodId,
+    NamespaceId, NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
+    SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -15,12 +15,13 @@ use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
     MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
-    MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary,
-    MirEnumCase, MirEnumDeclaration, MirField, MirFunction, MirFunctionReference, MirInstruction,
-    MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation, MirInterfaceMethod,
-    MirInterfaceMethodImplementation, MirMethod, MirNestedFunction, MirRecordDeclaration,
-    MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
-    local_instruction_effects,
+    MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration, MirDeclarationKind,
+    MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
+    MirErrorDeclaration, MirErrorSwitchArm, MirField, MirFunction, MirFunctionReference,
+    MirInstruction, MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation,
+    MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod, MirNestedFunction,
+    MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm,
+    MirUnwindAction, local_instruction_effects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,6 +161,14 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             kind: MirDeclarationKind::Union(MirUnionDeclaration {
                 type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
                 cases: parse_union_cases(cases, number)?,
+            }),
+        }),
+        ["type.error", symbol, error_id, type_id, "cases", cases] => Ok(MirDeclaration {
+            symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
+            kind: MirDeclarationKind::Error(MirErrorDeclaration {
+                error: ErrorId::from_raw(parse_prefixed(error_id, 'e', number)?),
+                type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                cases: parse_error_cases(cases, number)?,
             }),
         }),
         ["type.enum", symbol, type_id, "cases", cases] => Ok(MirDeclaration {
@@ -339,6 +348,32 @@ fn parse_union_cases(text: &str, line: usize) -> Result<Vec<MirUnionCase>, MirPa
             };
             Ok(MirUnionCase {
                 case: UnionCaseId::from_raw(parse_hash(case, "case#", line)?),
+                parameters,
+            })
+        })
+        .collect()
+}
+
+fn parse_error_cases(text: &str, line: usize) -> Result<Vec<MirErrorCase>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|case| {
+            let (case, parameters) = case
+                .strip_suffix(')')
+                .and_then(|case| case.split_once('('))
+                .ok_or_else(|| error(line, "malformed declared error case"))?;
+            let parameters = if parameters.is_empty() {
+                Vec::new()
+            } else {
+                parameters
+                    .split(';')
+                    .map(|type_id| parse_prefixed(type_id, 't', line).map(TypeId::from_raw))
+                    .collect::<Result<_, _>>()?
+            };
+            Ok(MirErrorCase {
+                case: ErrorCaseId::from_raw(parse_hash(case, "errorCase#", line)?),
                 parameters,
             })
         })
@@ -584,10 +619,13 @@ fn parse_block(lines: &[&str], start: usize) -> Result<(MirBlock, usize), MirPar
         .strip_prefix('b')
         .ok_or_else(|| error(number, "expected block"))?;
     let (block, rest) = split_number(header, number)?;
-    let arguments = rest
+    let rest = rest
         .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix("):"))
         .ok_or_else(|| error(number, "malformed block arguments"))?;
+    let (arguments, suffix) = rest
+        .split_once(')')
+        .ok_or_else(|| error(number, "malformed block arguments"))?;
+    let cleanup = parse_cleanup_suffix(suffix, number)?;
     let arguments = parse_block_arguments(arguments, number)?;
     let mut instructions = Vec::new();
     let mut position = start + 1;
@@ -605,12 +643,43 @@ fn parse_block(lines: &[&str], start: usize) -> Result<(MirBlock, usize), MirPar
     Ok((
         MirBlock {
             block: BlockId::from_raw(block),
+            cleanup,
             arguments,
             instructions,
             terminator,
         },
         position + 1,
     ))
+}
+
+fn parse_cleanup_suffix(
+    suffix: &str,
+    line: usize,
+) -> Result<Option<MirCleanupBlock>, MirParseError> {
+    if suffix == ":" {
+        return Ok(None);
+    }
+    let cleanup = suffix
+        .strip_prefix(" cleanup scope#")
+        .and_then(|value| value.strip_suffix(':'))
+        .ok_or_else(|| error(line, "malformed cleanup block"))?;
+    let (scope, reason) = cleanup
+        .split_once(" reason ")
+        .ok_or_else(|| error(line, "malformed cleanup block"))?;
+    let reason = match reason {
+        "normal" => MirCleanupExitReason::Normal,
+        "return" => MirCleanupExitReason::Return,
+        "resultFailure" => MirCleanupExitReason::ResultFailure,
+        "break" => MirCleanupExitReason::Break,
+        "continue" => MirCleanupExitReason::Continue,
+        "unwind" => MirCleanupExitReason::Unwind,
+        "cancellation" => MirCleanupExitReason::Cancellation,
+        _ => return Err(error(line, "cleanup exit reason")),
+    };
+    Ok(Some(MirCleanupBlock {
+        scope: CleanupScopeId::from_raw(parse_u32(scope, line)?),
+        reason,
+    }))
 }
 
 fn parse_block_arguments(text: &str, line: usize) -> Result<Vec<MirBlockArgument>, MirParseError> {
@@ -633,6 +702,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
         let (instruction, operation) = effect
             .split_once(' ')
             .ok_or_else(|| error(line, "malformed effect instruction"))?;
+        let (operation, unwind) = parse_instruction_unwind(operation, line)?;
         let kind = parse_operation(operation, line)?;
         if !matches!(
             kind,
@@ -660,6 +730,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
             kind,
             effects,
             effects_explicit: true,
+            unwind,
             span: empty_span(),
         });
     }
@@ -669,6 +740,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
     let (value, type_id) = result
         .split_once(':')
         .ok_or_else(|| error(line, "malformed result"))?;
+    let (operation, unwind) = parse_instruction_unwind(operation, line)?;
     let kind = parse_operation(operation, line)?;
     let effects = local_instruction_effects(&kind);
     Ok(MirInstruction {
@@ -677,8 +749,34 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
         kind,
         effects,
         effects_explicit: true,
+        unwind,
         span: empty_span(),
     })
+}
+
+fn parse_instruction_unwind(
+    operation: &str,
+    line: usize,
+) -> Result<(&str, MirUnwindAction), MirParseError> {
+    let has_embedded_unwind = [
+        "callDirect ",
+        "callReference ",
+        "callMethod ",
+        "callInterface ",
+        "callIndirect ",
+    ]
+    .iter()
+    .any(|prefix| operation.starts_with(prefix));
+    if has_embedded_unwind {
+        return Ok((operation, MirUnwindAction::Propagate));
+    }
+    let Some((operation, target)) = operation.rsplit_once(" unwind cleanup:b") else {
+        return Ok((operation, MirUnwindAction::Propagate));
+    };
+    Ok((
+        operation,
+        MirUnwindAction::Cleanup(BlockId::from_raw(parse_u32(target, line)?)),
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -813,6 +911,55 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     if let Some(optional) = text.strip_prefix("optionalGet ") {
         return Ok(MirInstructionKind::OptionalGet {
             optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("resultMake ") {
+        let parts: Vec<_> = rest.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            return Err(error(line, "malformed Result construction"));
+        }
+        return Ok(MirInstructionKind::ResultMake {
+            result: parse_builtin_type_id(parts[0], line)?,
+            case: ResultCaseId::from_raw(parse_hash(parts[1], "resultCase#", line)?),
+            arguments: parse_values(parts[2], line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("errorMake ") {
+        let parts: Vec<_> = rest.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            return Err(error(line, "malformed error construction"));
+        }
+        return Ok(MirInstructionKind::ErrorMake {
+            error: ErrorId::from_raw(parse_prefixed(parts[0], 'e', line)?),
+            case: ErrorCaseId::from_raw(parse_hash(parts[1], "errorCase#", line)?),
+            arguments: parse_values(parts[2], line)?,
+        });
+    }
+    if let Some(value) = text.strip_prefix("resultIsOk ") {
+        let (definition, value) = value
+            .split_once(' ')
+            .ok_or_else(|| error(line, "Result test"))?;
+        return Ok(MirInstructionKind::ResultIsOk {
+            result: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+            definition: parse_builtin_type_id(definition, line)?,
+        });
+    }
+    if let Some(value) = text.strip_prefix("resultGetOk ") {
+        let (definition, value) = value
+            .split_once(' ')
+            .ok_or_else(|| error(line, "Result projection"))?;
+        return Ok(MirInstructionKind::ResultGetOk {
+            result: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+            definition: parse_builtin_type_id(definition, line)?,
+        });
+    }
+    if let Some(value) = text.strip_prefix("resultGetError ") {
+        let (definition, value) = value
+            .split_once(' ')
+            .ok_or_else(|| error(line, "Result projection"))?;
+        return Ok(MirInstructionKind::ResultGetError {
+            result: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+            definition: parse_builtin_type_id(definition, line)?,
         });
     }
     if let Some(operation) = parse_numeric_operation(text, line)? {
@@ -1342,6 +1489,9 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
             reason, line,
         )?));
     }
+    if text == "resumeCurrentUnwind" {
+        return Ok(MirTerminator::ResumeUnwind);
+    }
     if let Some(values) = text.strip_prefix("return ") {
         return Ok(MirTerminator::Return {
             values: parse_values(values, line)?,
@@ -1393,6 +1543,32 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
             arms,
         });
     }
+    if let Some(rest) = text.strip_prefix("errorSwitch ") {
+        let (head, arms_text) = rest
+            .split_once(" [")
+            .and_then(|(head, arms)| arms.strip_suffix(']').map(|arms| (head, arms)))
+            .ok_or_else(|| error(line, "malformed error switch"))?;
+        let parts: Vec<_> = head.split_whitespace().collect();
+        if parts.len() != 2 {
+            return Err(error(line, "malformed error switch header"));
+        }
+        let arms = comma_parts(arms_text)
+            .map(|arm| {
+                let (case, target) = arm
+                    .split_once(':')
+                    .ok_or_else(|| error(line, "malformed error switch arm"))?;
+                Ok(MirErrorSwitchArm {
+                    case: ErrorCaseId::from_raw(parse_hash(case, "errorCase#", line)?),
+                    target: BlockId::from_raw(parse_prefixed(target, 'b', line)?),
+                })
+            })
+            .collect::<Result<Vec<_>, MirParseError>>()?;
+        return Ok(MirTerminator::ErrorSwitch {
+            scrutinee: ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?),
+            error: ErrorId::from_raw(parse_prefixed(parts[1], 'e', line)?),
+            arms,
+        });
+    }
     Err(error(line, "unknown terminator"))
 }
 
@@ -1411,6 +1587,9 @@ fn parse_trap_kind(text: &str, line: usize) -> Result<TrapKind, MirParseError> {
 fn parse_panic_payload(text: &str, line: usize) -> Result<PanicPayload, MirParseError> {
     if text == "RuntimeInvariant" {
         return Ok(PanicPayload::new(PanicKind::RuntimeInvariant));
+    }
+    if text == "DoublePanic" {
+        return Ok(PanicPayload::new(PanicKind::DoublePanic));
     }
     let Some(values) = text
         .strip_prefix("OutOfMemory(")
@@ -1735,6 +1914,13 @@ fn parse_prefixed(text: &str, prefix: char, line: usize) -> Result<u32, MirParse
             .ok_or_else(|| error(line, "invalid ID prefix"))?,
         line,
     )
+}
+
+fn parse_builtin_type_id(text: &str, line: usize) -> Result<BuiltinTypeId, MirParseError> {
+    let value = text
+        .strip_prefix("bt")
+        .ok_or_else(|| error(line, "built-in type identity"))?;
+    Ok(BuiltinTypeId::from_raw(parse_u32(value, line)?))
 }
 
 fn parse_named_prefix(text: &str, prefix: &str, line: usize) -> Result<u32, MirParseError> {

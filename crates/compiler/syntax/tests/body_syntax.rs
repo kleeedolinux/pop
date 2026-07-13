@@ -398,6 +398,33 @@ fn parses_optional_binding_defaulting_and_propagation_without_truthiness() {
 }
 
 #[test]
+fn parses_result_propagation_and_lexical_cleanup_as_distinct_nodes() {
+    let body = parse_body(
+        "namespace Example\n\
+         private function load(path: Path): Result<String, LoadError>\n\
+             local handle = try acquire(path)\n\
+             defer\n\
+                 close(handle)\n\
+             end\n\
+             return Result.Ok(read(handle))\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("propagating local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        ExpressionSyntaxKind::ResultPropagate { operand }
+            if matches!(operand.kind(), ExpressionSyntaxKind::Call { .. })
+    ));
+    assert!(matches!(
+        body.statements()[1].kind(),
+        StatementSyntaxKind::Defer { body } if body.len() == 1
+    ));
+}
+
+#[test]
 fn malformed_optional_binding_reports_an_owned_recovery_expectation() {
     let text = "namespace Example\n\
                 private function invalid(value: String?)\n\

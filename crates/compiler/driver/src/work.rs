@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_compile_time::CompileTimeFunction;
-use pop_foundation::{FunctionId, ModuleId, SourceSpan, SymbolId};
+use pop_foundation::{FunctionId, ModuleId, SourceSpan, SymbolId, TextRange};
 use pop_resolve::ResolutionDatabase;
 use pop_source::SourceFile;
 use pop_syntax::{AttributeUseSyntax, FunctionBodySyntax, SyntaxTree};
@@ -25,6 +25,7 @@ pub(crate) struct FunctionWork {
     pub(crate) module: ModuleId,
     pub(crate) visibility: pop_resolve::Visibility,
     pub(crate) span: SourceSpan,
+    pub(crate) documentation_target: TextRange,
     pub(crate) body: FunctionBodySyntax,
     pub(crate) signature: ResolvedFunctionSignature,
     pub(crate) is_compile_time: bool,

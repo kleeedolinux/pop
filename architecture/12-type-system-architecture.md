@@ -164,6 +164,14 @@ without the clause is rejected.
 Downcasts are explicit and return a typed optional/result. There is no universal
 object type offering reflection or string member access.
 
+The reserved `Result<T, TError>` type has exact `Ok(T)` and `Error(TError)`
+cases. Prefix `try` requires an enclosing single-result function of type
+`Result<U, TError>` with the same resolved error type; neither the success type
+nor the error is inferred dynamically. Closed `error` declarations have
+distinct nominal identities and cases. Registered cleanup scopes do not change
+expression types, but every typed exit records the scopes it crosses. See ADR
+0052.
+
 ## Functions, methods, and type packs
 
 Function types include parameter types, result type pack, generic parameters,

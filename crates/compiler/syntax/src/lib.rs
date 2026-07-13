@@ -39,9 +39,10 @@ pub use class::{
 };
 pub use constant::{ConstDeclarationError, ConstDeclarationSyntax, parse_const_declaration};
 pub use data::{
-    DataDeclarationError, EnumCaseSyntax, EnumDeclarationSyntax, RecordDeclarationSyntax,
-    RecordFieldSyntax, UnionCaseParameterSyntax, UnionCaseSyntax, UnionDeclarationSyntax,
-    parse_enum_declaration, parse_record_declaration, parse_union_declaration,
+    DataDeclarationError, EnumCaseSyntax, EnumDeclarationSyntax, ErrorCaseParameterSyntax,
+    ErrorCaseSyntax, ErrorDeclarationSyntax, RecordDeclarationSyntax, RecordFieldSyntax,
+    UnionCaseParameterSyntax, UnionCaseSyntax, UnionDeclarationSyntax, parse_enum_declaration,
+    parse_error_declaration, parse_record_declaration, parse_union_declaration,
 };
 pub use interface::{
     InterfaceDeclarationError, InterfaceDeclarationSyntax, InterfaceMethodParameterSyntax,
@@ -69,6 +70,7 @@ pub enum NodeKind {
     AttributeDeclaration,
     RecordDeclaration,
     UnionDeclaration,
+    ErrorDeclaration,
     ClassDeclaration,
     InterfaceDeclaration,
     EnumDeclaration,
@@ -248,7 +250,7 @@ impl Parser<'_, '_> {
                     };
                     (index, declaration)
                 }
-                kind if declaration_node_kind(kind).is_some() || kind == TokenKind::Open => {
+                kind if self.declaration_node_kind(index).is_some() || kind == TokenKind::Open => {
                     (index, index)
                 }
                 _ => {
@@ -266,9 +268,7 @@ impl Parser<'_, '_> {
                 declaration = class;
             }
 
-            let Some((node_kind, is_block)) =
-                declaration_node_kind(self.tokens[declaration].kind())
-            else {
+            let Some((node_kind, is_block)) = self.declaration_node_kind(declaration) else {
                 let found = self.tokens[declaration].text(self.source).to_owned();
                 self.diagnostics.push(syntax_diagnostics::unexpected_token(
                     self.span(declaration),
@@ -311,7 +311,8 @@ impl Parser<'_, '_> {
                 | TokenKind::Interface
                 | TokenKind::Union
                 | TokenKind::Enum
-                | TokenKind::Match => depth += 1,
+                | TokenKind::Match
+                | TokenKind::Defer => depth += 1,
                 TokenKind::End => {
                     depth -= 1;
                     if depth == 0 {
@@ -402,6 +403,14 @@ impl Parser<'_, '_> {
 
     fn span(&self, token: usize) -> SourceSpan {
         SourceSpan::new(self.source.id(), self.tokens[token].range())
+    }
+
+    fn declaration_node_kind(&self, index: usize) -> Option<(NodeKind, bool)> {
+        let token = self.tokens.get(index)?;
+        if token.kind() == TokenKind::Identifier && token.text(self.source) == "error" {
+            return Some((NodeKind::ErrorDeclaration, true));
+        }
+        declaration_node_kind(token.kind())
     }
 }
 

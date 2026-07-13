@@ -3,8 +3,8 @@ use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{
     BubbleId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, SymbolId, UnionCaseId,
 };
-use pop_mir::{lower_hir_bubble, optimize_mir};
-use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
+use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
+use pop_runtime_interface::{PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason};
 use pop_source::SourceFile;
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
@@ -64,6 +64,61 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .expect("else branch"),
         vec![int(3)]
     );
+}
+
+#[test]
+fn cleanup_resume_preserves_the_original_unwind_reason() {
+    let mir = parse_mir_dump(concat!(
+        "mir bubble b0 namespace n0\n",
+        "dependencies\n",
+        "function s0 f0() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    panic RuntimeInvariant\n",
+        "function s1 f1() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    do v0 callDirect s0 () effects[MayUnwind] unwind cleanup:b1\n",
+        "    return ()\n",
+        "  b1() cleanup scope#1 reason unwind:\n",
+        "    branch b2 ()\n",
+        "  b2() cleanup scope#0 reason unwind:\n",
+        "    resumeCurrentUnwind\n",
+    ))
+    .expect("cleanup MIR");
+    let types = pop_types::TypeArena::new();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified cleanup MIR");
+
+    assert!(matches!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(payload))))
+            if payload.kind() == PanicKind::RuntimeInvariant
+    ));
+}
+
+#[test]
+fn panic_during_panic_cleanup_becomes_the_terminal_double_panic_kind() {
+    let mir = parse_mir_dump(concat!(
+        "mir bubble b0 namespace n0\n",
+        "dependencies\n",
+        "function s0 f0() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    panic RuntimeInvariant\n",
+        "function s1 f1() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    do v0 callDirect s0 () effects[MayUnwind] unwind cleanup:b1\n",
+        "    return ()\n",
+        "  b1() cleanup scope#0 reason unwind:\n",
+        "    do v1 callDirect s0 () effects[MayUnwind] unwind propagate\n",
+        "    resumeCurrentUnwind\n",
+    ))
+    .expect("double-panic MIR");
+    let types = pop_types::TypeArena::new();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified double-panic MIR");
+
+    assert!(matches!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(payload))))
+            if payload.kind() == PanicKind::DoublePanic
+    ));
 }
 
 #[test]

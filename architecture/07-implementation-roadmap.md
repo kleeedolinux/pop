@@ -122,7 +122,8 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - typed generic code sharing, portable generic reference metadata, and
   specialization policy beyond the accepted bootstrap full-specialization
   subset;
-- error handling;
+- reserved `Result`, nominal error declarations, exact `try` propagation,
+  exhaustive recovery boundaries, and deterministic lexical cleanup;
 - coroutines/async model;
 - FFI;
 - opt-in retained metadata and generated typed adapters where justified;

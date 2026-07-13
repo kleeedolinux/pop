@@ -99,6 +99,31 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 }
             }
         }
+        TypedStatementKind::ErrorMatch {
+            scrutinee, arms, ..
+        } => {
+            finalize_expression_captures(scrutinee, written);
+            for arm in arms {
+                for statement in &mut arm.body {
+                    finalize_statement_captures(statement, written);
+                }
+            }
+        }
+        TypedStatementKind::ResultMatch {
+            scrutinee, arms, ..
+        } => {
+            finalize_expression_captures(scrutinee, written);
+            for arm in arms {
+                for statement in &mut arm.body {
+                    finalize_statement_captures(statement, written);
+                }
+            }
+        }
+        TypedStatementKind::Defer { body } => {
+            for statement in body {
+                finalize_statement_captures(statement, written);
+            }
+        }
         TypedStatementKind::FieldSet { base, value, .. } => {
             finalize_expression_captures(base, written);
             finalize_expression_captures(value, written);
@@ -251,6 +276,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             }
         }
         TypedExpressionKind::UnionCase { arguments, .. }
+        | TypedExpressionKind::ResultCase { arguments, .. }
+        | TypedExpressionKind::ErrorCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
         | TypedExpressionKind::ReferencedCall { arguments, .. }
         | TypedExpressionKind::StandardCall { arguments, .. } => {
@@ -271,6 +298,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         }
         TypedExpressionKind::OptionalPropagate { optional, .. } => {
             finalize_expression_captures(optional, written);
+        }
+        TypedExpressionKind::ResultPropagate { result, .. } => {
+            finalize_expression_captures(result, written);
         }
         TypedExpressionKind::OptionalNarrow { optional } => {
             finalize_expression_captures(optional, written);

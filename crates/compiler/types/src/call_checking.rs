@@ -4,12 +4,13 @@
 //! exact argument/result types, and no unknown-effect or runtime lookup path.
 
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
-use pop_foundation::SourceSpan;
+use pop_foundation::{ResultCaseId, SourceSpan};
 use pop_resolve::SymbolSpace;
 use pop_syntax::{ExpressionSyntax, ExpressionSyntaxKind};
 
 use crate::body_checking::{
-    BodyChecker, CheckedCall, CheckedInvocation, ExpectedExpressionType, UnionCaseLookup,
+    BodyChecker, CheckedCall, CheckedInvocation, ErrorCaseLookup, ExpectedExpressionType,
+    UnionCaseLookup,
 };
 use crate::typed_body::*;
 use crate::{NumericConversionKind, PrimitiveType, SemanticType, StringFormatKind};
@@ -19,12 +20,68 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         &mut self,
         callee: &ExpressionSyntax,
         arguments: &[ExpressionSyntax],
+        expected: Option<ExpectedExpressionType>,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
+        if let ExpressionSyntaxKind::Name(path) = callee.kind()
+            && matches!(path.as_slice(), [result, case] if result == "Result" && matches!(case.as_str(), "Ok" | "Error"))
+        {
+            return self.check_result_case(path, arguments, expected, span);
+        }
         match self.check_call_invocation(callee, arguments, span)? {
             CheckedInvocation::Call(checked) => self.checked_call_expression(checked),
             CheckedInvocation::Value(value) => Some(value),
         }
+    }
+
+    fn check_result_case(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        expected: Option<ExpectedExpressionType>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let Some(expected) = expected else {
+            self.diagnostics
+                .push(type_diagnostics::ambiguous_result_case(
+                    span,
+                    path.join("."),
+                ));
+            return None;
+        };
+        let Some((success, error)) = self.resolver.result_parts(expected.type_id) else {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                span,
+                "Result case construction",
+                self.type_name(expected.type_id),
+            ));
+            return None;
+        };
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "Result case construction",
+                1,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let ok = path.last().is_some_and(|case| case == "Ok");
+        let payload_type = if ok { success } else { error };
+        let argument = self.check_expression_expected(
+            &arguments[0],
+            Some(ExpectedExpressionType::plain(payload_type)),
+        )?;
+        self.require_same_type(payload_type, argument.type_id(), argument.span(), span);
+        Some(TypedExpression {
+            kind: TypedExpressionKind::ResultCase {
+                result: self.resolver.result_definition()?,
+                case: ResultCaseId::from_raw(u32::from(!ok)),
+                arguments: vec![argument],
+            },
+            type_id: expected.type_id,
+            span,
+        })
     }
 
     pub(crate) fn check_call_invocation(
@@ -72,6 +129,15 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 }
                 UnionCaseLookup::Missing => return None,
                 UnionCaseLookup::NotUnion => {}
+            }
+            match self.lookup_error_case(path, callee.span()) {
+                ErrorCaseLookup::Found(definition, case) => {
+                    return self
+                        .check_error_case_call(&definition, &case, arguments, span)
+                        .map(CheckedInvocation::Value);
+                }
+                ErrorCaseLookup::Missing => return None,
+                ErrorCaseLookup::NotError => {}
             }
         }
         let callee = self.check_expression(callee)?;

@@ -4,8 +4,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::compile_time as compile_time_diagnostics;
+use pop_diagnostics::documentation as documentation_diagnostics;
 use pop_diagnostics::syntax as syntax_diagnostics;
-use pop_foundation::{BubbleId, Diagnostic, MethodId, ModuleId, SourceSpan, SymbolId};
+use pop_documentation::{
+    DocumentationAnalysis, PublicErrorDocumentationContract, TypedErrorDocumentationContract,
+    TypedReturnsDocumentationContract,
+};
+use pop_foundation::{
+    BubbleId, Diagnostic, DiagnosticSeverity, MethodId, ModuleId, SourceSpan, SymbolId,
+};
 use pop_hir::{
     HirBubble, HirDeclaration, HirDeclarationKind, HirFunction, HirFunctionContext,
     HirKnownCallables, HirMethod, build_hir_function_with_known_callables_and_attributes,
@@ -15,9 +22,9 @@ use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaratio
 use pop_syntax::{
     AttributeUseSyntax, NodeKind, parse_attribute_declaration, parse_attribute_use,
     parse_class_declaration, parse_class_method_body, parse_const_declaration,
-    parse_enum_declaration, parse_file, parse_function_body, parse_function_signature,
-    parse_interface_declaration, parse_record_declaration, parse_type_alias_declaration,
-    parse_union_declaration,
+    parse_enum_declaration, parse_error_declaration, parse_file, parse_function_body,
+    parse_function_signature, parse_interface_declaration, parse_record_declaration,
+    parse_type_alias_declaration, parse_union_declaration,
 };
 use pop_types::{
     AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SignatureResolver,
@@ -114,6 +121,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             .iter()
             .map(|function| (function.signature.symbol(), function.signature.clone())),
     );
+    validate_documentation(&parsed, &functions, &database, &resolver, &mut diagnostics);
     let preliminary_bodies = check_compile_time_function_bodies(
         &functions,
         &signatures,
@@ -168,7 +176,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             })
         })
         .collect();
-    let (hir_functions, hir_methods, hir_build_failed) = build_runtime_hir(
+    let (hir_functions, hir_methods, hir_build_errors) = build_runtime_hir(
         input.bubble,
         &mut functions,
         &methods,
@@ -179,7 +187,11 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     );
     declarations = refresh_declarations(declarations, &resolver);
     sort_diagnostics(&mut diagnostics);
-    let hir = if diagnostics.is_empty() && !hir_build_failed {
+    let hir_result = if diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.severity() != DiagnosticSeverity::Error)
+        && hir_build_errors.is_empty()
+    {
         HirBubble::new_with_declarations_and_methods(
             input.bubble,
             input.namespace,
@@ -194,9 +206,13 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
                 resolver.arena(),
             ))
         })
-        .ok()
+        .map(Some)
     } else {
-        None
+        Ok(None)
+    };
+    let (hir, hir_bubble_error) = match hir_result {
+        Ok(hir) => (hir, None),
+        Err(error) => (None, Some(error)),
     };
     let reference_metadata = hir
         .as_ref()
@@ -205,6 +221,8 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         });
     FrontEndResult {
         hir,
+        hir_bubble_error,
+        hir_build_errors,
         types: resolver.into_arena(),
         attribute_queries,
         compile_time_evaluations,
@@ -212,6 +230,231 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         diagnostics,
         reference_metadata,
     }
+}
+
+fn validate_documentation(
+    modules: &[ParsedModule],
+    functions: &[FunctionWork],
+    database: &ResolutionDatabase,
+    resolver: &SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut analyses: BTreeMap<_, _> = modules
+        .iter()
+        .map(|module| {
+            (
+                module.module,
+                DocumentationAnalysis::analyze(&module.source, &module.syntax),
+            )
+        })
+        .collect();
+    let functions_by_symbol: BTreeMap<_, _> = functions
+        .iter()
+        .map(|function| (function.signature.symbol(), function))
+        .collect();
+    let mut inherited_error_tags = BTreeMap::new();
+    let mut inheritance_stack = BTreeSet::new();
+    for function in functions {
+        effective_error_documentation(
+            function,
+            database,
+            &functions_by_symbol,
+            &analyses,
+            &mut inherited_error_tags,
+            &mut inheritance_stack,
+            diagnostics,
+        );
+    }
+
+    for module in modules {
+        let analysis = analyses
+            .get_mut(&module.module)
+            .expect("every parsed Module has documentation analysis");
+        let public_errors: Vec<_> = module
+            .syntax
+            .root()
+            .children()
+            .iter()
+            .filter(|node| node.kind() == NodeKind::ErrorDeclaration)
+            .filter_map(|node| {
+                let syntax = parse_error_declaration(&module.source, &module.syntax, node).ok()?;
+                let declaration = database.index().declarations().find(|declaration| {
+                    declaration.module() == module.module
+                        && declaration.kind() == pop_resolve::DeclarationKind::Error
+                        && declaration.name() == syntax.name()
+                })?;
+                (declaration.visibility() == pop_resolve::Visibility::Public).then(|| {
+                    PublicErrorDocumentationContract::new(
+                        node.range(),
+                        syntax.name(),
+                        syntax
+                            .cases()
+                            .iter()
+                            .map(|case| (case.name(), case.span().range())),
+                    )
+                })
+            })
+            .collect();
+        analysis.validate_public_error_summaries(&public_errors);
+        let contracts: Vec<_> = functions
+            .iter()
+            .filter(|function| function.module == module.module)
+            .map(|function| {
+                let error = function
+                    .signature
+                    .results()
+                    .first()
+                    .filter(|_| function.signature.results().len() == 1)
+                    .and_then(pop_types::ResolvedType::type_id)
+                    .and_then(|result| resolver.result_parts(result))
+                    .and_then(|(_, error)| {
+                        resolver
+                            .error_definition_for_type(error)
+                            .map(|definition| (error, definition))
+                    });
+                let Some((error_type, error)) = error else {
+                    return TypedErrorDocumentationContract::without_result(
+                        function.documentation_target,
+                    );
+                };
+                let source = match resolver.arena().get(error_type) {
+                    Some(pop_types::SemanticType::ErrorUnion { source, .. }) => *source,
+                    _ => error.symbol(),
+                };
+                let declaration = database
+                    .index()
+                    .declaration(source)
+                    .expect("resolved error definition retains its declaration");
+                let mut names = vec![declaration.qualified_name(), declaration.name().to_owned()];
+                names.sort();
+                names.dedup();
+                TypedErrorDocumentationContract::result_with_names(
+                    function.documentation_target,
+                    names,
+                    error.cases().iter().map(|case| case.name()),
+                    function.visibility == pop_resolve::Visibility::Public,
+                )
+                .with_inherited_error_tags(
+                    inherited_error_tags
+                        .get(&function.signature.symbol())
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                )
+            })
+            .collect();
+        analysis.validate_typed_errors(&contracts);
+        let returns: Vec<_> = functions
+            .iter()
+            .filter(|function| function.module == module.module)
+            .map(|function| {
+                let results = function.signature.results();
+                if results.is_empty() {
+                    TypedReturnsDocumentationContract::without_result(function.documentation_target)
+                } else if results.len() == 1
+                    && results[0]
+                        .type_id()
+                        .is_some_and(|result| resolver.result_parts(result).is_some())
+                {
+                    TypedReturnsDocumentationContract::result_ok(function.documentation_target)
+                } else {
+                    TypedReturnsDocumentationContract::values(function.documentation_target)
+                }
+            })
+            .collect();
+        analysis.validate_typed_returns(&returns);
+        diagnostics.extend(analysis.diagnostics().iter().cloned());
+    }
+}
+
+fn effective_error_documentation(
+    function: &FunctionWork,
+    database: &ResolutionDatabase,
+    functions: &BTreeMap<SymbolId, &FunctionWork>,
+    analyses: &BTreeMap<ModuleId, DocumentationAnalysis>,
+    cache: &mut BTreeMap<SymbolId, Vec<String>>,
+    stack: &mut BTreeSet<SymbolId>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<String> {
+    let symbol = function.signature.symbol();
+    if let Some(tags) = cache.get(&symbol) {
+        return tags.clone();
+    }
+    if !stack.insert(symbol) {
+        diagnostics.push(documentation_diagnostics::inheritance_cycle(
+            function.span,
+            function.signature.name(),
+        ));
+        return Vec::new();
+    }
+    let analysis = analyses
+        .get(&function.module)
+        .expect("function Module has documentation analysis");
+    let mut tags: BTreeSet<_> = analysis
+        .error_tags_for_target(function.documentation_target)
+        .into_iter()
+        .collect();
+    for reference in analysis.inheritance_references_for_target(function.documentation_target) {
+        let resolution = database.resolve(
+            function.module,
+            &reference,
+            SymbolSpace::Value,
+            function.span,
+        );
+        let Some(source) = resolution
+            .symbol()
+            .and_then(|source| functions.get(&source).copied())
+        else {
+            diagnostics.push(documentation_diagnostics::invalid_inheritance(
+                function.span,
+                reference,
+            ));
+            continue;
+        };
+        if !documentation_signatures_are_compatible(&function.signature, &source.signature) {
+            diagnostics.push(documentation_diagnostics::invalid_inheritance(
+                function.span,
+                reference,
+            ));
+            continue;
+        }
+        tags.extend(effective_error_documentation(
+            source,
+            database,
+            functions,
+            analyses,
+            cache,
+            stack,
+            diagnostics,
+        ));
+    }
+    stack.remove(&symbol);
+    let tags: Vec<_> = tags.into_iter().collect();
+    cache.insert(symbol, tags.clone());
+    tags
+}
+
+fn documentation_signatures_are_compatible(
+    target: &ResolvedFunctionSignature,
+    source: &ResolvedFunctionSignature,
+) -> bool {
+    target.type_parameters().len() == source.type_parameters().len()
+        && target.parameters().len() == source.parameters().len()
+        && target.results().len() == source.results().len()
+        && target.effects() == source.effects()
+        && target
+            .parameters()
+            .iter()
+            .zip(source.parameters())
+            .all(|(target, source)| {
+                target.name() == source.name()
+                    && target.parameter_type().type_id() == source.parameter_type().type_id()
+            })
+        && target
+            .results()
+            .iter()
+            .zip(source.results())
+            .all(|(target, source)| target.type_id() == source.type_id())
 }
 
 fn define_type_aliases(
@@ -275,6 +518,7 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
                         | NodeKind::ConstDeclaration
                         | NodeKind::RecordDeclaration
                         | NodeKind::UnionDeclaration
+                        | NodeKind::ErrorDeclaration
                         | NodeKind::ClassDeclaration
                         | NodeKind::InterfaceDeclaration
                         | NodeKind::FunctionDeclaration
@@ -356,7 +600,11 @@ fn build_runtime_hir(
     constants: &BTreeMap<SymbolId, pop_types::RuntimeConstant>,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (Vec<HirFunction>, Vec<HirMethod>, bool) {
+) -> (
+    Vec<HirFunction>,
+    Vec<HirMethod>,
+    Vec<pop_hir::HirBuildError>,
+) {
     let known_functions: BTreeSet<_> = functions
         .iter()
         .filter(|function| !function.is_compile_time)
@@ -366,7 +614,7 @@ fn build_runtime_hir(
         methods.iter().map(|work| work.method.method()).collect();
     let interfaces: Vec<_> = resolver.interface_definitions().cloned().collect();
     let mut hir_functions = Vec::new();
-    let mut hir_build_failed = false;
+    let mut hir_build_errors = Vec::new();
     for function in functions {
         if function.is_compile_time {
             continue;
@@ -387,7 +635,7 @@ fn build_runtime_hir(
             &function.attributes,
         ) {
             Ok(function) => hir_functions.push(function),
-            Err(_) => hir_build_failed = true,
+            Err(errors) => hir_build_errors.extend(errors),
         }
     }
     let mut hir_methods = Vec::new();
@@ -412,10 +660,10 @@ fn build_runtime_hir(
             HirKnownCallables::new(&known_functions, &known_methods).with_interfaces(&interfaces),
         ) {
             Ok(lowered) => hir_methods.push(lowered),
-            Err(_) => hir_build_failed = true,
+            Err(errors) => hir_build_errors.extend(errors),
         }
     }
-    (hir_functions, hir_methods, hir_build_failed)
+    (hir_functions, hir_methods, hir_build_errors)
 }
 
 fn define_declarations(
@@ -591,6 +839,15 @@ fn define_records_and_unions(
                     std::mem::take(&mut pending_attributes),
                 ),
                 NodeKind::UnionDeclaration => define_union(
+                    module,
+                    node,
+                    bubble,
+                    database,
+                    resolver,
+                    diagnostics,
+                    std::mem::take(&mut pending_attributes),
+                ),
+                NodeKind::ErrorDeclaration => define_error(
                     module,
                     node,
                     bubble,
@@ -783,6 +1040,57 @@ fn define_union(
             module: module.module,
             symbol,
             target: AttributeTarget::Union,
+            attribute_uses,
+            attributes: Vec::new(),
+        }),
+    )
+}
+
+fn define_error(
+    module: &ParsedModule,
+    node: &pop_syntax::SyntaxNode,
+    bubble: BubbleId,
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    attribute_uses: Vec<AttributeUseSyntax>,
+) -> (Option<HirDeclaration>, Option<DeclarationAttributeWork>) {
+    let syntax = match parse_error_declaration(&module.source, &module.syntax, node) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            diagnostics.push(syntax_error(error.span(), error.expectation()));
+            return (None, None);
+        }
+    };
+    let Some(symbol) = resolve_symbol(
+        database,
+        module.module,
+        syntax.name(),
+        SymbolSpace::Type,
+        syntax.span(),
+        diagnostics,
+    ) else {
+        return (None, None);
+    };
+    let result = resolver.define_error(module.module, symbol, &syntax);
+    diagnostics.extend(result.diagnostics().iter().cloned());
+    let (Some(definition), Some(declaration)) =
+        (result.definition(), database.index().declaration(symbol))
+    else {
+        return (None, None);
+    };
+    (
+        Some(HirDeclaration::error(
+            module.module,
+            bubble,
+            declaration.visibility(),
+            syntax.name(),
+            definition,
+        )),
+        Some(DeclarationAttributeWork {
+            module: module.module,
+            symbol,
+            target: AttributeTarget::Error,
             attribute_uses,
             attributes: Vec::new(),
         }),
@@ -990,6 +1298,7 @@ fn resolve_function(
         module: module.module,
         visibility: declaration.visibility(),
         span,
+        documentation_target: node.range(),
         body,
         signature: result.signature()?.clone(),
         is_compile_time,
@@ -1076,6 +1385,41 @@ fn refresh_declarations(
                     ));
                 }
                 return refreshed;
+            }
+            if matches!(declaration.kind(), HirDeclarationKind::Error(_)) {
+                if resolver.error_is_generic(declaration.symbol()) {
+                    let mut refreshed = resolver
+                        .error_instances(declaration.symbol())
+                        .map(|definition| {
+                            HirDeclaration::error(
+                                declaration.module(),
+                                declaration.bubble(),
+                                declaration.visibility(),
+                                declaration.name(),
+                                definition,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(template) = resolver.error_definition(declaration.symbol()) {
+                        refreshed.push(HirDeclaration::error(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            template,
+                        ));
+                    }
+                    return refreshed;
+                }
+                if let Some(definition) = resolver.error_definition(declaration.symbol()) {
+                    return vec![HirDeclaration::error(
+                        declaration.module(),
+                        declaration.bubble(),
+                        declaration.visibility(),
+                        declaration.name(),
+                        definition,
+                    )];
+                }
             }
             if matches!(declaration.kind(), HirDeclarationKind::Class(_)) {
                 if let Some(definition) = resolver.class_definition(declaration.symbol()) {

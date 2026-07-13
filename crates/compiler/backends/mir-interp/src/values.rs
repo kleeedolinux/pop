@@ -4,7 +4,10 @@
 //! `RuntimeValue` additionally carries PLRI managed-reference state while an
 //! execution is active; it must never leak into canonical MIR.
 use crate::interpreter::ExecutionError;
-use pop_foundation::{ClassId, EnumCaseId, FieldId, SymbolId, UnionCaseId};
+use pop_foundation::{
+    BuiltinTypeId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, ResultCaseId, SymbolId,
+    UnionCaseId,
+};
 use pop_runtime_interface::{ManagedReference, RuntimeFailure};
 use pop_types::{FloatValue, IntegerValue};
 use std::cell::RefCell;
@@ -34,6 +37,16 @@ pub enum MirValue {
     Union {
         union: SymbolId,
         case: UnionCaseId,
+        arguments: Vec<Self>,
+    },
+    Result {
+        definition: BuiltinTypeId,
+        case: ResultCaseId,
+        arguments: Vec<Self>,
+    },
+    Error {
+        error: ErrorId,
+        case: ErrorCaseId,
         arguments: Vec<Self>,
     },
 }

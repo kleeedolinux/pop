@@ -28,6 +28,7 @@ pub enum DeclarationKind {
     Attribute,
     Record,
     Union,
+    Error,
     Class,
     Interface,
     Enum,
@@ -42,6 +43,7 @@ impl DeclarationKind {
             | Self::Attribute
             | Self::Record
             | Self::Union
+            | Self::Error
             | Self::Class
             | Self::Interface
             | Self::Enum => SymbolSpace::Type,

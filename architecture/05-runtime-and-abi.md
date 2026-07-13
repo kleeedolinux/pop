@@ -171,11 +171,26 @@ The logical convention describes:
 - ownership/rooting expectations across the call;
 - whether the call is a GC safe point.
 
-Each call also carries the canonical closed effect summary and an explicit
-unwind action. An unwind action either propagates panic to the caller or enters
-a verified cleanup block that eventually continues normal control flow or
-resumes unwinding. Runtime traps use a closed `TrapKind` and do not become
+Each call carries the canonical closed effect summary, and every `MayUnwind` MIR
+instruction carries an explicit unwind action. An unwind action either
+propagates panic to the caller or enters a verified cleanup block that
+eventually continues normal control flow or resumes unwinding through canonical
+MIR's `resumeCurrentUnwind` terminator. Cleanup blocks carry their typed lexical
+scope identity and closed exit reason.
+Runtime traps use a closed `TrapKind` and do not become
 catchable expected errors.
+
+A panic raised while panic cleanup is already active becomes the non-allocating
+closed `PanicKind.DoublePanic`. It stops unwinding and reaches the nearest
+task/process panic boundary as a terminal condition; neither original payload
+is exposed as runtime reflection or nested into the terminal record. See ADR
+0052.
+
+Expected failure propagation is ordinary typed control flow, not unwinding.
+Its MIR failure edge and normal returns traverse the same active lexical
+cleanup chain as panic/cancellation exits, with an explicit exit reason and
+destination. Cleanup order is last-in, first-out and backend-neutral. See ADR
+0052.
 
 Native code can use platform ABI conventions at foreign and public boundaries
 without forcing those conventions onto internal MIR.

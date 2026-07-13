@@ -259,6 +259,7 @@ pub(crate) fn collect_field_layout(bubble: &MirBubble) -> BTreeMap<FieldId, u32>
             MirDeclarationKind::Record(record) => (record.fields(), 0_u32),
             MirDeclarationKind::Class(class) => (class.fields(), 1_u32),
             MirDeclarationKind::Union(_)
+            | MirDeclarationKind::Error(_)
             | MirDeclarationKind::Enum(_)
             | MirDeclarationKind::Interface(_) => continue,
         };

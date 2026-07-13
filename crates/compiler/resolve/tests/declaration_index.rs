@@ -1,5 +1,5 @@
 use pop_foundation::{BubbleId, FileId, ModuleId};
-use pop_resolve::{ModuleInput, SymbolSpace, Visibility, build_declaration_index};
+use pop_resolve::{DeclarationKind, ModuleInput, SymbolSpace, Visibility, build_declaration_index};
 use pop_source::SourceFile;
 use pop_syntax::parse_file;
 
@@ -109,6 +109,9 @@ fn omitted_visibility_defaults_to_internal_except_for_binary_main() {
          end\n\
          union Choice\n\
          end\n\
+         error Failure\n\
+             Invalid\n\
+         end\n\
          class Service\n\
          end\n\
          interface Reader\n\
@@ -177,4 +180,29 @@ fn omitted_visibility_defaults_to_internal_except_for_binary_main() {
             .visibility(),
         Visibility::Private
     );
+}
+
+#[test]
+fn contextual_error_declarations_have_a_distinct_type_identity() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/errors.pop",
+        "namespace Example\npublic error LoadError\n    Missing\nend\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let result = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(0),
+        &source,
+        &syntax,
+    )]);
+
+    assert!(result.diagnostics().is_empty());
+    let errors = result
+        .index()
+        .declaration_by_qualified_name("Example.LoadError", SymbolSpace::Type);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind(), DeclarationKind::Error);
+    assert_eq!(errors[0].visibility(), Visibility::Public);
 }

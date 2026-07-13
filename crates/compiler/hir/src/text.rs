@@ -44,6 +44,30 @@ pub(crate) fn dump_declaration(
                 type_text(union.type_id, arena)
             );
         }
+        HirDeclarationKind::Error(error) => {
+            let _ = write!(
+                output,
+                "error {} e{}:{}",
+                declaration.name,
+                error.error.raw(),
+                type_text(error.type_id, arena)
+            );
+            for case in &error.cases {
+                let _ = write!(output, " [errorCase#{} {}(", case.case.raw(), case.name);
+                for (index, parameter) in case.parameters.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    let _ = write!(
+                        output,
+                        "{}:{}",
+                        parameter.name,
+                        type_text(parameter.type_id, arena)
+                    );
+                }
+                output.push_str(")] ");
+            }
+        }
         HirDeclarationKind::Enum(enumeration) => {
             let _ = write!(
                 output,
@@ -454,6 +478,50 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::ErrorMatch {
+                scrutinee,
+                error,
+                arms,
+            } => {
+                let _ = write!(output, "errorMatch e{} ", error.raw());
+                dump_expression(output, scrutinee, arena);
+                output.push('\n');
+                for arm in arms {
+                    output.push_str(&indentation);
+                    let _ = write!(output, "when errorCase#{}\n", arm.case.raw());
+                    dump_statements(output, &arm.body, arena, depth + 1);
+                }
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
+            HirStatementKind::ResultMatch {
+                scrutinee,
+                result,
+                result_type,
+                arms,
+            } => {
+                let _ = write!(
+                    output,
+                    "resultMatch builtin#{}:{} ",
+                    result.raw(),
+                    type_text(*result_type, arena)
+                );
+                dump_expression(output, scrutinee, arena);
+                output.push('\n');
+                for arm in arms {
+                    output.push_str(&indentation);
+                    let _ = write!(output, "when resultCase#{}\n", arm.case.raw());
+                    dump_statements(output, &arm.body, arena, depth + 1);
+                }
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
+            HirStatementKind::Defer { body } => {
+                output.push_str("defer\n");
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 output.push_str("field.set ");
                 dump_expression(output, base, arena);
@@ -701,6 +769,29 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         } => {
             dump_union_case(output, *union, *case, arguments, arena);
         }
+        HirExpressionKind::ResultCase {
+            result,
+            case,
+            arguments,
+        } => {
+            let _ = write!(
+                output,
+                "result.case builtin#{} case#{}(",
+                result.raw(),
+                case.raw()
+            );
+            dump_expression_list(output, arguments, arena);
+            output.push(')');
+        }
+        HirExpressionKind::ErrorCase {
+            error,
+            case,
+            arguments,
+        } => {
+            let _ = write!(output, "error.case e{} case#{}(", error.raw(), case.raw());
+            dump_expression_list(output, arguments, arena);
+            output.push(')');
+        }
         HirExpressionKind::EnumCase {
             definition,
             case,
@@ -771,6 +862,21 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
                 type_text(*enclosing_result, arena)
             );
             dump_expression(output, optional, arena);
+            output.push(')');
+        }
+        HirExpressionKind::ResultPropagate {
+            result,
+            result_definition,
+            enclosing_result,
+            ..
+        } => {
+            let _ = write!(
+                output,
+                "result.propagate builtin#{} enclosing:{}(",
+                result_definition.raw(),
+                type_text(*enclosing_result, arena)
+            );
+            dump_expression(output, result, arena);
             output.push(')');
         }
         HirExpressionKind::OptionalNarrow { optional } => {
@@ -912,6 +1018,15 @@ fn dump_union_case(
         dump_expression(output, argument, arena);
     }
     output.push(')');
+}
+
+fn dump_expression_list(output: &mut String, expressions: &[HirExpression], arena: &TypeArena) {
+    for (index, expression) in expressions.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        dump_expression(output, expression, arena);
+    }
 }
 
 fn dump_array_get(

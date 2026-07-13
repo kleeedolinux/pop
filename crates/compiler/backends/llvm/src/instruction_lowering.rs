@@ -76,6 +76,38 @@ pub(crate) fn lower_instruction(
                 optional.raw()
             )
         }
+        MirInstructionKind::ResultMake {
+            case, arguments, ..
+        } => lower_union_make(
+            &result,
+            pop_foundation::UnionCaseId::from_raw(case.raw()),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ErrorMake {
+            case, arguments, ..
+        } => lower_union_make(
+            &result,
+            pop_foundation::UnionCaseId::from_raw(case.raw()),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ResultIsOk { result: value, .. } => format!(
+            "{result}_tag = call i64 @{}(i64 %v{}, i64 1)\n{result} = icmp eq i64 {result}_tag, 0",
+            native_runtime_symbol(RuntimeOperation::FieldGet),
+            value.raw()
+        ),
+        MirInstructionKind::ResultGetOk { result: value, .. }
+        | MirInstructionKind::ResultGetError { result: value, .. } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            &format!("%v{}", value.raw()),
+            2,
+            types,
+        )?
+        .join("\n"),
         MirInstructionKind::EnumConstant { discriminant, .. } => {
             format!("{result} = add i32 0, {discriminant}")
         }
@@ -755,7 +787,9 @@ pub(crate) fn lower_terminator(
             "call void @{}()\n  unreachable",
             native_runtime_symbol(RuntimeOperation::Trap)
         ),
-        MirTerminator::Panic(_) | MirTerminator::ContinueUnwind(_) => format!(
+        MirTerminator::Panic(_)
+        | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind => format!(
             "call void @{}()\n  unreachable",
             native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
@@ -764,6 +798,27 @@ pub(crate) fn lower_terminator(
             scrutinee, arms, ..
         } => {
             let tag = format!("%v{}_union_tag", scrutinee.raw());
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "    i64 {}, label %b{}",
+                        arm.case().raw(),
+                        arm.target().raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{tag} = call i64 @{}(i64 %v{}, i64 1)\n  switch i64 {tag}, label %pop_invalid_union [\n{cases}\n  ]",
+                native_runtime_symbol(RuntimeOperation::FieldGet),
+                scrutinee.raw()
+            )
+        }
+        MirTerminator::ErrorSwitch {
+            scrutinee, arms, ..
+        } => {
+            let tag = format!("%v{}_error_tag", scrutinee.raw());
             let cases = arms
                 .iter()
                 .map(|arm| {

@@ -432,6 +432,10 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
+        TypedStatementKind::ErrorMatch { .. } | TypedStatementKind::ResultMatch { .. } => {
+            UnsupportedCompileTimeConstruct::TypedFailure
+        }
+        TypedStatementKind::Defer { .. } => UnsupportedCompileTimeConstruct::TypedFailure,
         TypedStatementKind::OptionalIf { .. } => UnsupportedCompileTimeConstruct::OptionalFlow,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
@@ -492,6 +496,11 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::Table
         }
         TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
+        TypedExpressionKind::ResultCase { .. }
+        | TypedExpressionKind::ErrorCase { .. }
+        | TypedExpressionKind::ResultPropagate { .. } => {
+            UnsupportedCompileTimeConstruct::TypedFailure
+        }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. } => {

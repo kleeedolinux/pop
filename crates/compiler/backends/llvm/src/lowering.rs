@@ -566,10 +566,16 @@ impl DirectScalarArrays {
                         rejected.insert(*origin);
                     }
                 }
+                MirTerminator::ErrorSwitch { scrutinee, .. } => {
+                    if let Some(origin) = aliases.get(scrutinee) {
+                        rejected.insert(*origin);
+                    }
+                }
                 MirTerminator::Missing
                 | MirTerminator::Trap(_)
                 | MirTerminator::Panic(_)
                 | MirTerminator::ContinueUnwind(_)
+                | MirTerminator::ResumeUnwind
                 | MirTerminator::Unreachable => {}
             }
         }
@@ -657,6 +663,14 @@ pub(crate) fn lower_function_parts(
                 ));
             }
             MirTerminator::UnionSwitch {
+                scrutinee, arms, ..
+            } => {
+                has_union_switch = true;
+                for arm in arms {
+                    union_payload_sources.insert(arm.target(), *scrutinee);
+                }
+            }
+            MirTerminator::ErrorSwitch {
                 scrutinee, arms, ..
             } => {
                 has_union_switch = true;
@@ -878,11 +892,15 @@ pub(crate) fn can_reach_block(
             MirTerminator::UnionSwitch { arms, .. } => {
                 pending.extend(arms.iter().map(|arm| arm.target()));
             }
+            MirTerminator::ErrorSwitch { arms, .. } => {
+                pending.extend(arms.iter().map(|arm| arm.target()));
+            }
             MirTerminator::Missing
             | MirTerminator::Return { .. }
             | MirTerminator::Trap(_)
             | MirTerminator::Panic(_)
             | MirTerminator::ContinueUnwind(_)
+            | MirTerminator::ResumeUnwind
             | MirTerminator::Unreachable => {}
         }
     }

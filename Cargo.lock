@@ -198,6 +198,7 @@ dependencies = [
  "pop-backend-llvm",
  "pop-compile-time",
  "pop-diagnostics",
+ "pop-documentation",
  "pop-foundation",
  "pop-hir",
  "pop-library-bridge",

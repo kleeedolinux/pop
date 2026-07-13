@@ -1,7 +1,9 @@
 //! Safe XML documentation parsing and declaration attachment.
 
+use std::collections::BTreeSet;
+
 use pop_diagnostics::documentation as documentation_diagnostics;
-use pop_foundation::{Diagnostic, SourceSpan, TextRange};
+use pop_foundation::{Diagnostic, FileId, SourceSpan, TextRange};
 use pop_source::SourceFile;
 use pop_syntax::{NodeKind, SyntaxNode, SyntaxTree, TokenKind};
 
@@ -55,8 +57,148 @@ impl DocumentationBlock {
 
 #[derive(Clone, Debug)]
 pub struct DocumentationAnalysis {
+    source: SourceFile,
+    file: FileId,
     blocks: Vec<DocumentationBlock>,
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedErrorDocumentationContract {
+    target: TextRange,
+    error_names: Vec<String>,
+    cases: Vec<String>,
+    inherited_error_tags: Vec<String>,
+    require_complete: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicErrorDocumentationContract {
+    declaration: TextRange,
+    name: String,
+    cases: Vec<(String, TextRange)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentedReturnKind {
+    None,
+    Values,
+    ResultOk,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TypedReturnsDocumentationContract {
+    target: TextRange,
+    kind: DocumentedReturnKind,
+}
+
+impl TypedReturnsDocumentationContract {
+    #[must_use]
+    pub const fn without_result(target: TextRange) -> Self {
+        Self {
+            target,
+            kind: DocumentedReturnKind::None,
+        }
+    }
+
+    #[must_use]
+    pub const fn values(target: TextRange) -> Self {
+        Self {
+            target,
+            kind: DocumentedReturnKind::Values,
+        }
+    }
+
+    #[must_use]
+    pub const fn result_ok(target: TextRange) -> Self {
+        Self {
+            target,
+            kind: DocumentedReturnKind::ResultOk,
+        }
+    }
+}
+
+impl PublicErrorDocumentationContract {
+    #[must_use]
+    pub fn new<I, S>(declaration: TextRange, name: impl Into<String>, cases: I) -> Self
+    where
+        I: IntoIterator<Item = (S, TextRange)>,
+        S: Into<String>,
+    {
+        Self {
+            declaration,
+            name: name.into(),
+            cases: cases
+                .into_iter()
+                .map(|(name, range)| (name.into(), range))
+                .collect(),
+        }
+    }
+}
+
+impl TypedErrorDocumentationContract {
+    #[must_use]
+    pub fn result<I, S>(
+        target: TextRange,
+        error_name: impl Into<String>,
+        cases: I,
+        require_complete: bool,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            target,
+            error_names: vec![error_name.into()],
+            cases: cases.into_iter().map(Into::into).collect(),
+            inherited_error_tags: Vec::new(),
+            require_complete,
+        }
+    }
+
+    #[must_use]
+    pub const fn without_result(target: TextRange) -> Self {
+        Self {
+            target,
+            error_names: Vec::new(),
+            cases: Vec::new(),
+            inherited_error_tags: Vec::new(),
+            require_complete: false,
+        }
+    }
+
+    #[must_use]
+    pub fn result_with_names<I, S, C, T>(
+        target: TextRange,
+        error_names: I,
+        cases: C,
+        require_complete: bool,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        C: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        Self {
+            target,
+            error_names: error_names.into_iter().map(Into::into).collect(),
+            cases: cases.into_iter().map(Into::into).collect(),
+            inherited_error_tags: Vec::new(),
+            require_complete,
+        }
+    }
+
+    #[must_use]
+    pub fn with_inherited_error_tags<I, S>(mut self, tags: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.inherited_error_tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
 }
 
 impl DocumentationAnalysis {
@@ -108,6 +250,8 @@ impl DocumentationAnalysis {
 
         diagnostics.sort_by_key(|diagnostic| diagnostic.primary_span().range().start());
         Self {
+            source: source.clone(),
+            file: source.id(),
             blocks,
             diagnostics,
         }
@@ -137,6 +281,246 @@ impl DocumentationAnalysis {
         }
         snapshot
     }
+
+    /// Checks `<error>` tags against exact nominal result-error identities.
+    ///
+    /// Contracts are produced by semantic analysis; this phase never resolves
+    /// names dynamically and emits no runtime metadata.
+    pub fn validate_typed_errors(&mut self, contracts: &[TypedErrorDocumentationContract]) {
+        let mut diagnostics = Vec::new();
+        for contract in contracts {
+            let block = self.blocks.iter().find(|block| {
+                block
+                    .target()
+                    .is_some_and(|target| target.range() == contract.target)
+            });
+            let span = SourceSpan::new(
+                self.file,
+                block.map_or(contract.target, DocumentationBlock::range),
+            );
+            let mut tags = block
+                .and_then(DocumentationBlock::xml)
+                .map(error_tag_types)
+                .unwrap_or_default();
+            let local_tags: BTreeSet<_> = tags.iter().cloned().collect();
+            tags.extend(
+                contract
+                    .inherited_error_tags
+                    .iter()
+                    .filter(|tag| !local_tags.contains(*tag))
+                    .cloned(),
+            );
+            let Some(canonical_error_name) = contract.error_names.first() else {
+                for tag in tags {
+                    diagnostics.push(documentation_diagnostics::invalid_error_tag(span, tag));
+                }
+                continue;
+            };
+
+            let mut seen = BTreeSet::new();
+            let mut covered_cases = BTreeSet::new();
+            let mut covers_all = false;
+            for tag in tags {
+                if !seen.insert(tag.clone()) {
+                    diagnostics.push(documentation_diagnostics::invalid_error_tag(span, tag));
+                    continue;
+                }
+                if contract.error_names.iter().any(|name| tag == *name) {
+                    covers_all = true;
+                    continue;
+                }
+                let Some(case) = contract.error_names.iter().find_map(|name| {
+                    tag.strip_prefix(name)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                }) else {
+                    diagnostics.push(documentation_diagnostics::invalid_error_tag(span, tag));
+                    continue;
+                };
+                if contract.cases.iter().any(|candidate| candidate == case) {
+                    covered_cases.insert(case.to_owned());
+                } else {
+                    diagnostics.push(documentation_diagnostics::invalid_error_tag(span, tag));
+                }
+            }
+            if contract.require_complete && !covers_all {
+                for case in &contract.cases {
+                    if !covered_cases.contains(case) {
+                        diagnostics.push(documentation_diagnostics::missing_error_case(
+                            span,
+                            format!("{canonical_error_name}.{case}"),
+                        ));
+                    }
+                }
+            }
+        }
+        self.diagnostics.extend(diagnostics);
+        self.diagnostics
+            .sort_by_key(|diagnostic| diagnostic.primary_span().range().start());
+    }
+
+    /// Enforces ADR 0052's checked summary contract for public nominal errors.
+    pub fn validate_public_error_summaries(
+        &mut self,
+        contracts: &[PublicErrorDocumentationContract],
+    ) {
+        let mut diagnostics = Vec::new();
+        for contract in contracts {
+            self.validate_summary_target(
+                contract.declaration,
+                contract.name.clone(),
+                &mut diagnostics,
+            );
+            for (case, range) in &contract.cases {
+                self.validate_summary_target(
+                    *range,
+                    format!("{}.{}", contract.name, case),
+                    &mut diagnostics,
+                );
+            }
+        }
+        self.diagnostics.extend(diagnostics);
+        self.diagnostics.sort_by_key(|diagnostic| {
+            (
+                diagnostic.primary_span().range().start(),
+                diagnostic.code().as_str(),
+            )
+        });
+    }
+
+    /// Checks `<returns>` against the typed function result contract.
+    pub fn validate_typed_returns(&mut self, contracts: &[TypedReturnsDocumentationContract]) {
+        let mut diagnostics = Vec::new();
+        for contract in contracts {
+            let Some(block) = self.block_attached_to_range(contract.target) else {
+                continue;
+            };
+            let Some(xml) = block.xml() else {
+                continue;
+            };
+            let count = element_count(xml, "returns");
+            let valid = match contract.kind {
+                DocumentedReturnKind::None => count == 0,
+                DocumentedReturnKind::Values | DocumentedReturnKind::ResultOk => count <= 1,
+            };
+            if !valid {
+                let expectation = match contract.kind {
+                    DocumentedReturnKind::None => "no result",
+                    DocumentedReturnKind::Values => "function result",
+                    DocumentedReturnKind::ResultOk => "Result.Ok value",
+                };
+                diagnostics.push(documentation_diagnostics::invalid_returns(
+                    SourceSpan::new(self.file, block.range()),
+                    expectation,
+                ));
+            }
+        }
+        self.diagnostics.extend(diagnostics);
+        self.diagnostics.sort_by_key(|diagnostic| {
+            (
+                diagnostic.primary_span().range().start(),
+                diagnostic.code().as_str(),
+            )
+        });
+    }
+
+    fn validate_summary_target(
+        &self,
+        target: TextRange,
+        name: String,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let block = self.block_attached_to_range(target);
+        let Some(count) = block.and_then(|block| block.xml().map(summary_count)) else {
+            if block.is_none() {
+                diagnostics.push(documentation_diagnostics::missing_summary(
+                    SourceSpan::new(self.file, target),
+                    name,
+                ));
+            }
+            return;
+        };
+        let span = SourceSpan::new(self.file, block.map_or(target, DocumentationBlock::range));
+        if count == 0 {
+            diagnostics.push(documentation_diagnostics::missing_summary(span, name));
+        } else if count > 1 {
+            diagnostics.push(documentation_diagnostics::duplicate_summary(span, name));
+        }
+    }
+
+    fn block_attached_to_range(&self, target: TextRange) -> Option<&DocumentationBlock> {
+        self.blocks
+            .iter()
+            .find(|block| {
+                block
+                    .target()
+                    .is_some_and(|candidate| candidate.range() == target)
+            })
+            .or_else(|| {
+                self.blocks.iter().rev().find(|block| {
+                    block.range().end() <= target.start()
+                        && attachment_gap_is_valid_range(&self.source, block.range(), target)
+                })
+            })
+    }
+
+    #[must_use]
+    pub fn error_tags_for_target(&self, target: TextRange) -> Vec<String> {
+        self.block_attached_to_range(target)
+            .and_then(DocumentationBlock::xml)
+            .map(error_tag_types)
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn inheritance_references_for_target(&self, target: TextRange) -> Vec<String> {
+        self.block_attached_to_range(target)
+            .and_then(DocumentationBlock::xml)
+            .map(inheritance_references)
+            .unwrap_or_default()
+    }
+}
+
+fn summary_count(xml: &XmlFragment) -> usize {
+    element_count(xml, "summary")
+}
+
+fn element_count(xml: &XmlFragment, element: &str) -> usize {
+    xml.children()
+        .iter()
+        .filter(|node| matches!(node, XmlNode::Element { name, .. } if name == element))
+        .count()
+}
+
+fn error_tag_types(xml: &XmlFragment) -> Vec<String> {
+    xml.children()
+        .iter()
+        .filter_map(|node| match node {
+            XmlNode::Element {
+                name, attributes, ..
+            } if name == "error" => attributes
+                .iter()
+                .find(|attribute| attribute.name() == "type")
+                .map(|attribute| attribute.value().to_owned())
+                .or_else(|| Some("<missing>".to_owned())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn inheritance_references(xml: &XmlFragment) -> Vec<String> {
+    xml.children()
+        .iter()
+        .filter_map(|node| match node {
+            XmlNode::Element {
+                name, attributes, ..
+            } if name == "inheritdoc" => attributes
+                .iter()
+                .find(|attribute| attribute.name() == "cref")
+                .map(|attribute| attribute.value().to_owned())
+                .or_else(|| Some("<missing>".to_owned())),
+            _ => None,
+        })
+        .collect()
 }
 
 fn next_documentation_line(tokens: &[pop_syntax::Token], current: usize) -> Option<usize> {
@@ -191,10 +575,18 @@ fn attachment_gap_is_valid(
     documentation_range: TextRange,
     target: &SyntaxNode,
 ) -> bool {
+    attachment_gap_is_valid_range(source, documentation_range, target.range())
+}
+
+fn attachment_gap_is_valid_range(
+    source: &SourceFile,
+    documentation_range: TextRange,
+    target: TextRange,
+) -> bool {
     let Some(documentation_line) = source.line_column(documentation_range.end()) else {
         return false;
     };
-    let Some(target_line) = source.line_column(target.range().start()) else {
+    let Some(target_line) = source.line_column(target.start()) else {
         return false;
     };
     let source_lines: Vec<_> = source.text().lines().collect();
@@ -220,6 +612,7 @@ const fn is_documentable(kind: NodeKind) -> bool {
             | NodeKind::AttributeDeclaration
             | NodeKind::RecordDeclaration
             | NodeKind::UnionDeclaration
+            | NodeKind::ErrorDeclaration
             | NodeKind::ClassDeclaration
             | NodeKind::InterfaceDeclaration
             | NodeKind::EnumDeclaration

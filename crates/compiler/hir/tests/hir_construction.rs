@@ -94,6 +94,13 @@ fn typed_fixture() -> TypedFixture {
                  local narrowed = value\n\
              end\n\
              return value\n\
+         end\n\
+         private function result(input: Result<Int, String>): Result<String, String>\n\
+             defer\n\
+                 print(\"cleanup\")\n\
+             end\n\
+             local value = try input\n\
+             return Result.Ok(String(value))\n\
          end\n",
     )
     .expect("source");
@@ -236,6 +243,50 @@ fn construction_retains_typed_optional_control_until_mir() {
         HirStatementKind::OptionalWhile { body, .. } if body.len() == 2
     ));
     assert!(verify_hir_function(&hir, &fixture.arena, &known).is_ok());
+}
+
+#[test]
+fn construction_retains_result_failure_and_cleanup_scopes_until_mir() {
+    let fixture = typed_fixture();
+    let known: BTreeSet<_> = fixture
+        .functions
+        .iter()
+        .map(|(signature, _, _)| signature.symbol())
+        .collect();
+    let (signature, body, visibility) = fixture
+        .functions
+        .iter()
+        .find(|(signature, _, _)| signature.name() == "result")
+        .expect("result");
+    let hir = build_hir_function(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(4),
+        *visibility,
+        signature,
+        body,
+        &fixture.arena,
+        &known,
+    )
+    .expect("verified result HIR");
+
+    assert!(matches!(
+        hir.body()[0].kind(),
+        HirStatementKind::Defer { .. }
+    ));
+    let HirStatementKind::Local { initializer, .. } = hir.body()[1].kind() else {
+        panic!("result propagation local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::ResultPropagate { .. }
+    ));
+    let HirStatementKind::Return { values } = hir.body()[2].kind() else {
+        panic!("result return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        HirExpressionKind::ResultCase { .. }
+    ));
 }
 
 #[test]

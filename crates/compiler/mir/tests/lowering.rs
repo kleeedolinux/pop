@@ -1,8 +1,8 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{
-    MirDeclarationKind, MirInstruction, MirInstructionKind, MirTerminator, MirVerificationError,
-    lower_hir_bubble, parse_mir_dump, verify_mir_bubble,
+    MirCleanupExitReason, MirDeclarationKind, MirInstruction, MirInstructionKind, MirTerminator,
+    MirVerificationError, lower_hir_bubble, parse_mir_dump, verify_mir_bubble,
 };
 use pop_source::SourceFile;
 
@@ -67,6 +67,153 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
     assert!(matches!(
         verify_mir_bubble(&malformed, front_end.types()),
         Err(errors) if errors.contains(&MirVerificationError::InvalidBlock(pop_foundation::BlockId::from_raw(999)))
+    ));
+}
+
+#[test]
+fn typed_results_errors_and_defer_lower_to_explicit_verified_control_flow() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/errors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>No input exists.</summary>\n\
+             Missing(path: String)\n\
+             --- <summary>Access is denied.</summary>\n\
+             Denied\n\
+         end\n\
+         private function load(path: String): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Missing(path))\n\
+         end\n\
+         private function loadIndirect(path: String): Result<Int, LoadError>\n\
+             local invoke = load\n\
+             return invoke(path)\n\
+         end\n\
+         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
+         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         public function forward(path: String): Result<String, LoadError>\n\
+             defer\n\
+                 print(path)\n\
+             end\n\
+             defer\n\
+                 print(\"finished\")\n\
+             end\n\
+             local scratch: {String} = {path}\n\
+             local value = try loadIndirect(path)\n\
+             return Result.Ok(String(value))\n\
+         end\n\
+         public function describe(error: LoadError): String\n\
+             match error\n\
+             when LoadError.Missing(path) then\n\
+                 return path\n\
+             when LoadError.Denied then\n\
+                 return \"denied\"\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+
+    let forward_symbol = front_end
+        .hir()
+        .unwrap_or_else(|| {
+            panic!(
+                "HIR: {:?} {:?}",
+                front_end.hir_bubble_error(),
+                front_end.hir_build_errors()
+            )
+        })
+        .functions()
+        .iter()
+        .find(|function| function.name() == "forward")
+        .expect("forward HIR")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified typed-failure MIR");
+    let dump = mir.dump();
+    for operation in [
+        "resultMake",
+        "errorMake",
+        "resultIsOk",
+        "resultGetOk",
+        "resultGetError",
+        "errorSwitch",
+    ] {
+        assert!(dump.contains(operation), "missing {operation}:\n{dump}");
+    }
+    let forward = mir
+        .functions()
+        .iter()
+        .find(|function| function.symbol() == forward_symbol)
+        .expect("forward MIR");
+    let cleanup_calls = forward
+        .blocks()
+        .iter()
+        .flat_map(|block| block.instructions())
+        .filter(|instruction| matches!(instruction.kind(), MirInstructionKind::CallStandard { .. }))
+        .count();
+    assert_eq!(
+        cleanup_calls, 10,
+        "cleanup must cover success, propagation, and every unwind-capable operation"
+    );
+    let cleanup_reasons: Vec<_> = forward
+        .blocks()
+        .iter()
+        .filter_map(|block| block.cleanup().map(|cleanup| cleanup.reason()))
+        .collect();
+    assert!(cleanup_reasons.contains(&MirCleanupExitReason::Return));
+    assert!(cleanup_reasons.contains(&MirCleanupExitReason::ResultFailure));
+    assert!(cleanup_reasons.contains(&MirCleanupExitReason::Unwind));
+    assert!(dump.contains("unwind cleanup:"), "{dump}");
+    assert!(
+        dump.lines()
+            .any(|line| line.contains("arrayMake") && line.contains("unwind cleanup:")),
+        "allocation unwind must enter the cleanup chain:\n{dump}"
+    );
+    assert!(dump.contains("resumeCurrentUnwind"), "{dump}");
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+    let reparsed = parse_mir_dump(&dump).expect("typed-failure MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+    assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
+
+    let spoofed_result = parse_mir_dump(&dump.replacen("resultCase#0", "resultCase#99", 1))
+        .expect("structurally valid spoofed Result case");
+    assert!(matches!(
+        verify_mir_bubble(&spoofed_result, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidResultOperation { .. }
+        ))
+    ));
+    let spoofed_error = parse_mir_dump(&dump.replacen("errorCase#0", "errorCase#99", 1))
+        .expect("structurally valid spoofed error case");
+    assert!(matches!(
+        verify_mir_bubble(&spoofed_error, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidErrorOperation { .. }
+        ))
+    ));
+    let mistagged_cleanup = parse_mir_dump(&dump.replacen("reason unwind", "reason return", 1))
+        .expect("structurally valid mistagged cleanup");
+    assert!(matches!(
+        verify_mir_bubble(&mistagged_cleanup, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidCleanupBlock { .. }
+                | MirVerificationError::ResumeOutsideCleanup { .. }
+        ))
     ));
 }
 

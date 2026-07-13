@@ -6,7 +6,7 @@
 use crate::interpreter::ExecutionError;
 use crate::values::{MirValue, RuntimeValue};
 use pop_foundation::{FieldId, SymbolId, ValueId};
-use pop_mir::{MirInstructionKind, MirUnwindAction};
+use pop_mir::{MirInstruction, MirInstructionKind, MirUnwindAction};
 use pop_types::{
     FloatKind, FloatValue, IntegerKind, IntegerValue, NumericError, PrimitiveType, SemanticType,
     TypeArena,
@@ -477,22 +477,9 @@ pub(crate) fn evaluate_visible_fields(
         .collect()
 }
 
-pub(crate) fn call_cleanup_target(
-    instruction: &MirInstructionKind,
-) -> Option<pop_foundation::BlockId> {
-    match instruction {
-        MirInstructionKind::CallDirect {
-            unwind: MirUnwindAction::Cleanup(target),
-            ..
-        }
-        | MirInstructionKind::CallDirectMethod {
-            unwind: MirUnwindAction::Cleanup(target),
-            ..
-        }
-        | MirInstructionKind::CallIndirect {
-            unwind: MirUnwindAction::Cleanup(target),
-            ..
-        } => Some(*target),
-        _ => None,
+pub(crate) fn call_cleanup_target(instruction: &MirInstruction) -> Option<pop_foundation::BlockId> {
+    match instruction.unwind_action() {
+        MirUnwindAction::Cleanup(target) => Some(target),
+        MirUnwindAction::Propagate => None,
     }
 }

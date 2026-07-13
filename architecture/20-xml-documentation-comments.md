@@ -57,8 +57,8 @@ Documentation comments can attach to:
 
 - file-scoped namespaces;
 - public/internal/private functions and constants;
-- records, unions, aliases, classes, interfaces, enums, and attributes;
-- fields, union/enum cases, interface/class members, and type parameters;
+- records, unions, errors, aliases, classes, interfaces, enums, and attributes;
+- fields, union/error/enum cases, interface/class members, and type parameters;
 - Module initialization declarations if they become explicit.
 
 Private documentation is useful in source/editor views but is omitted from public
@@ -107,9 +107,13 @@ performance claims require linked reproducible benchmark baselines.
 --- <error type="Io.Error.Denied">The process lacks permission.</error>
 ```
 
-The `type` value resolves statically. It must be part of the function's declared
-error/result type or a documented nested case. This is compile-time symbol
-resolution only; no runtime error reflection is emitted.
+The `type` value resolves statically. On a function returning
+`Result<T, TError>`, it must name the exact `TError` or one of that nominal error
+declaration's cases. `<returns>` documents only the `Result.Ok` value. Every
+reachable public error case requires one non-duplicate `<error>` entry, directly
+or through checked inherited documentation; `<error>` on any other return type
+is rejected. This is compile-time symbol resolution only; no runtime error
+reflection is emitted. See ADR 0052.
 
 ### Panic conditions
 

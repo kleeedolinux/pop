@@ -151,10 +151,12 @@ impl IndexBuilder {
     ) -> Option<SymbolId> {
         let kind = declaration_kind(node.kind())?;
         let tokens = significant_tokens(input, node);
-        let Some(keyword_index) = tokens
-            .iter()
-            .position(|token| token_kind_matches_declaration(token.kind(), kind))
-        else {
+        let Some(keyword_index) = tokens.iter().position(|token| {
+            token_kind_matches_declaration(token.kind(), kind)
+                || (kind == DeclarationKind::Error
+                    && token.kind() == TokenKind::Identifier
+                    && token.text(input.source) == "error")
+        }) else {
             self.diagnostics
                 .push(diagnostics::invalid_declaration(node_span(input, node)));
             return None;
@@ -295,6 +297,7 @@ const fn declaration_kind(kind: NodeKind) -> Option<DeclarationKind> {
         NodeKind::AttributeDeclaration => DeclarationKind::Attribute,
         NodeKind::RecordDeclaration => DeclarationKind::Record,
         NodeKind::UnionDeclaration => DeclarationKind::Union,
+        NodeKind::ErrorDeclaration => DeclarationKind::Error,
         NodeKind::ClassDeclaration => DeclarationKind::Class,
         NodeKind::InterfaceDeclaration => DeclarationKind::Interface,
         NodeKind::EnumDeclaration => DeclarationKind::Enum,

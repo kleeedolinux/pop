@@ -128,6 +128,7 @@ fn evaluate_constant(
         }
         ExpressionSyntaxKind::InterpolatedString(_)
         | ExpressionSyntaxKind::OptionalPropagate { .. }
+        | ExpressionSyntaxKind::ResultPropagate { .. }
         | ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }

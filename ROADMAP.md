@@ -40,7 +40,7 @@ and does not define the work remaining for `0.1.0`.
 
 - [x] Implement optional flow narrowing, pattern binding, defaulting, and
   propagation operators without weakening static typing.
-- [ ] Implement the complete typed-error workflow: declarations, `Result`,
+- [x] Implement the complete typed-error workflow: declarations, `Result`,
   propagation, matching boundaries, explicit MIR failure and cleanup
   edges, diagnostics, and checked XML documentation.
 - [ ] Finish generalized `for` over the nominal `Iterable<T>` and `Iterator<T>`

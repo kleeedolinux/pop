@@ -84,6 +84,10 @@ attachment when the validator returns `false`. Version one exposes no target
 context to validators. Runtime projection remains a separate trusted
 `@RetainMetadata` decision. See ADR 0023.
 
+The closed declaration targets include nominal `Error` declarations as a
+distinct target. `Error` does not alias `Union`, `Class`, or another target even
+when their source attachment rules are parallel.
+
 A namespace-targeted attribute precedes the file's `namespace` header, after
 any namespace documentation. Attributes written after that header attach to the
 following Item; they are never reinterpreted as namespace attributes.

@@ -259,7 +259,7 @@ fn panic_capable_calls_propagate_or_enter_their_verified_cleanup_edge() {
         "  b0():\n",
         "    do v0 callDirect s0 () effects[MayUnwind] unwind cleanup:b1\n",
         "    return ()\n",
-        "  b1():\n",
+        "  b1() cleanup scope#0 reason unwind:\n",
         "    return ()\n",
         "function s3 f3() -> () effects[MayUnwind]\n",
         "  b0():\n",
@@ -540,4 +540,75 @@ fn interpreter_preserves_deterministic_out_of_memory_panic_unwinds() {
     assert_eq!(interpreter.call(symbol, &[]), expected);
     assert_eq!(interpreter.call(symbol, &[]), expected);
     assert_eq!(interpreter.runtime().object_count(), 0);
+}
+
+#[test]
+fn allocation_unwind_runs_the_verified_cleanup_chain_before_propagating() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public class Marker\n\
+             public count: Int = 0\n\
+         end\n\
+         private function makeMarker(): Marker\n\
+             return Marker {}\n\
+         end\n\
+         private function allocate(marker: Marker)\n\
+             defer\n\
+                 marker.count = 1\n\
+             end\n\
+             local values: {Int} = { 1, 2, 3 }\n\
+         end\n\
+         private function read(marker: Marker): Int\n\
+             return marker.count\n\
+         end\n",
+    );
+    let make_marker = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty() && function.results().len() == 1)
+        .expect("marker constructor")
+        .symbol();
+    let allocate = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().len() == 1 && function.results().is_empty())
+        .expect("allocation function")
+        .symbol();
+    let read = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().len() == 1 && function.results().len() == 1)
+        .expect("read function")
+        .symbol();
+    let interpreter = MirInterpreter::with_runtime(
+        &mir,
+        &types,
+        BootstrapRuntime::with_limits(HeapLimits::new(10, 2)),
+    )
+    .expect("verified allocation cleanup MIR");
+    let marker = interpreter
+        .call(make_marker, &[])
+        .expect("first allocation fits")
+        .into_iter()
+        .next()
+        .expect("marker result");
+
+    let allocation = interpreter.call(allocate, std::slice::from_ref(&marker));
+    assert!(
+        matches!(
+            &allocation,
+            Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(payload))))
+                if matches!(payload.kind(), PanicKind::OutOfMemory { .. })
+        ),
+        "{allocation:?}"
+    );
+    assert_eq!(
+        interpreter
+            .call(read, &[marker])
+            .expect("cleanup mutation remains visible"),
+        vec![MirValue::Integer(
+            pop_types::IntegerValue::parse_decimal("1", pop_types::IntegerKind::Int64)
+                .expect("Int")
+        )]
+    );
 }

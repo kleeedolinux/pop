@@ -227,6 +227,12 @@ fn traps_panics_and_unwinds_remain_distinct_portable_failures() {
     );
     let failure = RuntimeFailure::from_panic(panic.clone());
     assert_eq!(failure, RuntimeFailure::Unwind(UnwindReason::Panic(panic)));
+    let double_panic = PanicPayload::new(PanicKind::DoublePanic);
+    assert_eq!(double_panic.kind(), PanicKind::DoublePanic);
+    assert_eq!(
+        RuntimeFailure::from_panic(double_panic.clone()),
+        RuntimeFailure::Unwind(UnwindReason::Panic(double_panic))
+    );
     assert_ne!(
         failure,
         RuntimeFailure::Trap(Trap::new(TrapKind::DivisionByZero))

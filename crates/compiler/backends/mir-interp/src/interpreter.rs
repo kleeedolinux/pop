@@ -251,6 +251,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             values.insert(argument.value(), value.clone());
         }
         let mut block_index = 0_usize;
+        let mut pending_unwind = None;
         loop {
             self.step()?;
             let block = blocks
@@ -271,12 +272,20 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                         values.insert(instruction.result(), value);
                     }
                     Ok(None) => {}
-                    Err(error @ ExecutionError::Runtime(RuntimeFailure::Unwind(_))) => {
-                        if let Some(target) = call_cleanup_target(instruction.kind()) {
+                    Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason))) => {
+                        if pending_unwind.is_some() {
+                            return Err(ExecutionError::Runtime(self.runtime.begin_panic(
+                                pop_runtime_interface::PanicPayload::new(
+                                    pop_runtime_interface::PanicKind::DoublePanic,
+                                ),
+                            )));
+                        }
+                        if let Some(target) = call_cleanup_target(instruction) {
+                            pending_unwind = Some(reason);
                             unwound_to_cleanup = Some(target.raw() as usize);
                             break;
                         }
-                        return Err(error);
+                        return Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason)));
                     }
                     Err(error) => return Err(error),
                 }
@@ -331,6 +340,34 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     )?;
                     block_index = arm.target().raw() as usize;
                 }
+                MirTerminator::ErrorSwitch {
+                    scrutinee,
+                    error,
+                    arms,
+                } => {
+                    let MirValue::Error {
+                        error: value_error,
+                        case,
+                        arguments,
+                    } = value(&values, *scrutinee)?.visible.clone()
+                    else {
+                        return Err(ExecutionError::TypeMismatch);
+                    };
+                    if value_error != *error {
+                        return Err(ExecutionError::TypeMismatch);
+                    }
+                    let arm = arms
+                        .iter()
+                        .find(|arm| arm.case() == case)
+                        .ok_or(ExecutionError::InvalidControlFlow)?;
+                    Self::assign_runtime_block_arguments(
+                        blocks,
+                        arm.target(),
+                        &arguments,
+                        &mut values,
+                    )?;
+                    block_index = arm.target().raw() as usize;
+                }
                 MirTerminator::Return { values: returned } => {
                     let returned: Vec<_> = returned
                         .iter()
@@ -343,14 +380,34 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     return Err(ExecutionError::Runtime(self.runtime.raise_trap(*trap)));
                 }
                 MirTerminator::Panic(payload) => {
+                    if pending_unwind.is_some() {
+                        return Err(ExecutionError::Runtime(self.runtime.begin_panic(
+                            pop_runtime_interface::PanicPayload::new(
+                                pop_runtime_interface::PanicKind::DoublePanic,
+                            ),
+                        )));
+                    }
                     return Err(ExecutionError::Runtime(
                         self.runtime.begin_panic(payload.clone()),
                     ));
                 }
                 MirTerminator::ContinueUnwind(reason) => {
+                    if pending_unwind.is_some() {
+                        return Err(ExecutionError::Runtime(self.runtime.begin_panic(
+                            pop_runtime_interface::PanicPayload::new(
+                                pop_runtime_interface::PanicKind::DoublePanic,
+                            ),
+                        )));
+                    }
                     return Err(ExecutionError::Runtime(RuntimeFailure::Unwind(
                         reason.clone(),
                     )));
+                }
+                MirTerminator::ResumeUnwind => {
+                    let reason = pending_unwind
+                        .take()
+                        .ok_or(ExecutionError::InvalidControlFlow)?;
+                    return Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason)));
                 }
                 MirTerminator::Unreachable => return Err(ExecutionError::ReachedUnreachable),
                 MirTerminator::Missing => return Err(ExecutionError::InvalidControlFlow),
@@ -437,6 +494,39 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     return Err(ExecutionError::InvalidControlFlow);
                 }
                 present
+            }
+            MirInstructionKind::ResultIsOk { result, definition } => {
+                let MirValue::Result {
+                    definition: found,
+                    case,
+                    ..
+                } = &value(values, *result)?.visible
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                if found != definition {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                MirValue::Boolean(case.raw() == 0)
+            }
+            MirInstructionKind::ResultGetOk { result, definition }
+            | MirInstructionKind::ResultGetError { result, definition } => {
+                let MirValue::Result {
+                    definition: found,
+                    case,
+                    arguments,
+                } = &value(values, *result)?.visible
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let expected = u32::from(matches!(
+                    instruction.kind(),
+                    MirInstructionKind::ResultGetError { .. }
+                ));
+                if found != definition || case.raw() != expected || arguments.len() != 1 {
+                    return Err(ExecutionError::InvalidControlFlow);
+                }
+                arguments[0].clone()
             }
             MirInstructionKind::EnumConstant {
                 definition,
@@ -814,6 +904,8 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::FieldGet { .. }
             | MirInstructionKind::FieldSet { .. }
             | MirInstructionKind::UnionMake { .. }
+            | MirInstructionKind::ResultMake { .. }
+            | MirInstructionKind::ErrorMake { .. }
             | MirInstructionKind::InterfaceUpcast { .. }
             | MirInstructionKind::CaptureCellAllocate { .. }
             | MirInstructionKind::CaptureCellLoad { .. }
@@ -1230,6 +1322,30 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
             } => Ok(RuntimeValue::visible(MirValue::Union {
                 union: *union,
+                case: *case,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| value(values, *argument).map(|value| value.visible.clone()))
+                    .collect::<Result<_, _>>()?,
+            })),
+            MirInstructionKind::ResultMake {
+                result,
+                case,
+                arguments,
+            } => Ok(RuntimeValue::visible(MirValue::Result {
+                definition: *result,
+                case: *case,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| value(values, *argument).map(|value| value.visible.clone()))
+                    .collect::<Result<_, _>>()?,
+            })),
+            MirInstructionKind::ErrorMake {
+                error,
+                case,
+                arguments,
+            } => Ok(RuntimeValue::visible(MirValue::Error {
+                error: *error,
                 case: *case,
                 arguments: arguments
                     .iter()

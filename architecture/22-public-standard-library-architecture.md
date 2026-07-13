@@ -19,8 +19,8 @@ local bytes = File.read(path)
 local response = Http.send(request, options)
 ```
 
-These sketches show API shape; `Result` propagation remains explicit until the
-language accepts propagation syntax. Advanced control remains available through
+These sketches show API shape. Prefix `try` provides exact typed `Result`
+propagation under ADR 0052. Advanced control remains available through
 typed options, streams, views, buffers, and resource handles without replacing
 the simple path.
 

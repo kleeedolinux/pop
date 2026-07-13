@@ -17,7 +17,8 @@
 Compiler entities use explicit IDs rather than pointers as public identity:
 
 - `WorkspaceId`, `PackageId`, `BubbleId`, `ModuleId`, `FileId`, and `SpanId`;
-- `SymbolId`, `TypeId`, `ClassId`, `AttributeId`, and `FunctionId`;
+- `SymbolId`, `TypeId`, `ClassId`, `ErrorId`, `ErrorCaseId`, `AttributeId`, and
+  `FunctionId`;
 - `InterfaceId`, `InterfaceMethodId`, and `CaptureId`;
 - `BlockId`, `ValueId`, `SafePointId`, and `StackMapId` in MIR.
 
@@ -137,6 +138,9 @@ Types:         typeTest, checkedDowncast, makeUnion, projectUnion
 Collections:   arrayCreate, arrayLength, arrayGetOptional, arrayGetChecked,
                arraySet, arrayFill, tableGet, tableSet
 Optionals:     optionalIsPresent, optionalGet
+Results:       resultMake, resultIsOk, resultGetOk, resultGetError
+Errors:        errorMake, errorSwitch
+Cleanup:       cleanup{CleanupScopeId, exitReason}, resumeCurrentUnwind
 Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume
 Debug:         debugValue, sourceScope
 ```
@@ -151,6 +155,19 @@ and typed joins. `optionalGet` names the exact optional value and inner type and
 is verified only on paths dominated by the matching successful
 `optionalIsPresent`; it is never an unchecked fallback. Optional propagation's
 absent edge is an ordinary typed `return nil`. See ADR 0051.
+
+`Result<T, TError>` construction, prefix `try`, error declarations, and
+`defer ... end` remain typed HIR concepts. Canonical MIR lowers propagation to
+`resultIsOk`, dominated `resultGetOk`/`resultGetError`, typed branches, and one
+named failure edge. That edge traverses all active lexical cleanup blocks in
+last-in, first-out order before constructing the exact `Result.Error` return.
+Every cleanup entry and its internal CFG blocks retain the same typed
+`CleanupScopeId` and one closed exit reason: `Normal`, `Return`,
+`ResultFailure`, `Break`, `Continue`, `Unwind`, or `Cancellation`. A cleanup
+chain may stay in the same scope or move to an earlier registered scope but
+never reverses that order. The final panic-cleanup block uses
+`resumeCurrentUnwind`; no backend reconstructs cleanup from source. See ADR
+0052.
 
 HIR generic calls retain their ordered semantic type arguments. The bootstrap
 MIR lowering fully specializes reachable concrete functions and generic data
@@ -175,12 +192,18 @@ MIR invariants:
 - each value dominates its uses, or arrives as a block argument;
 - each `optionalGet` is dominated by a successful presence test of the same
   optional value and exact inner type;
+- each result payload extraction is dominated by the corresponding successful
+  or error test of the same result value and exact type arguments;
+- every edge leaving a registered cleanup scope traverses each required cleanup
+  exactly once in last-in, first-out order;
 - operand and result types are valid for the operation;
 - control-flow edges pass declared block arguments;
 - potentially failing operations have explicit trap/unwind/result semantics;
 - calls declare effects relevant to optimization and safe points;
 - call effects are a known subset of the caller's declared effects;
-- a panic-capable call explicitly propagates unwind or names a cleanup block;
+- every `MayUnwind` instruction explicitly propagates unwind or names a cleanup
+  block; call instructions retain the same action as part of their exact call
+  contract;
 - stack maps contain exactly the live managed values at each safe point and
   logical object maps contain exactly the managed fields of allocations;
 - a collecting safe point may change the physical token for every live managed

@@ -95,6 +95,17 @@ impl BodyParser<'_> {
     }
 
     fn parse_unary(&mut self) -> Result<ExpressionSyntax, FunctionBodyError> {
+        if let Some(keyword) = self.consume(TokenKind::Try) {
+            let operand = self.parse_unary()?;
+            let end = operand.span().range().end();
+            return Ok(self.expression(
+                ExpressionSyntaxKind::ResultPropagate {
+                    operand: Box::new(operand),
+                },
+                keyword.range().start(),
+                end,
+            ));
+        }
         let operator = match self.current_kind() {
             Some(TokenKind::Not) => UnaryOperator::Not,
             Some(TokenKind::Minus) => UnaryOperator::Negate,

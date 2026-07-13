@@ -97,6 +97,9 @@ pub enum StatementSyntaxKind {
         scrutinee: ExpressionSyntax,
         arms: Vec<MatchArmSyntax>,
     },
+    Defer {
+        body: Vec<StatementSyntax>,
+    },
     Assignment {
         target: ExpressionSyntax,
         operator: Option<BinaryOperator>,
@@ -197,6 +200,9 @@ pub enum ExpressionSyntaxKind {
         operand: Box<ExpressionSyntax>,
     },
     OptionalPropagate {
+        operand: Box<ExpressionSyntax>,
+    },
+    ResultPropagate {
         operand: Box<ExpressionSyntax>,
     },
     Binary {
@@ -529,6 +535,7 @@ impl BodyParser<'_> {
             Some(TokenKind::Break) => self.parse_loop_control(StatementSyntaxKind::Break),
             Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
+            Some(TokenKind::Defer) => self.parse_defer(),
             _ => {
                 let expression = self.parse_expression(0)?;
                 if self.current_kind() == Some(TokenKind::Comma) {
@@ -595,6 +602,17 @@ impl BodyParser<'_> {
         };
         self.position = self.position.saturating_add(1);
         Some(operator)
+    }
+
+    fn parse_defer(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+        let start = self.expect(TokenKind::Defer, "`defer`")?.range().start();
+        self.expect(TokenKind::Newline, "line break after `defer`")?;
+        let body = self.parse_statement_list(&[TokenKind::End])?;
+        let end = self.expect(TokenKind::End, "cleanup `end`")?.range().end();
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::Defer { body },
+            span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
     }
 
     pub(crate) fn parse_statement_list(

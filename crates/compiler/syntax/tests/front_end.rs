@@ -44,6 +44,25 @@ fn lexer_preserves_unicode_identifiers_without_an_ascii_only_policy() {
 }
 
 #[test]
+fn lexer_reserves_typed_error_workflow_words() {
+    let source = source("error try defer\n");
+    let result = lex(&source);
+
+    assert!(result.diagnostics().is_empty());
+    assert_eq!(result.reconstruct(&source), source.text());
+    let significant = result
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind().is_trivia())
+        .map(|token| token.kind())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        significant,
+        [TokenKind::Identifier, TokenKind::Try, TokenKind::Defer]
+    );
+}
+
+#[test]
 fn lexer_keeps_decimal_exponents_complete_and_member_dots_separate() {
     // ADR 0040: decimal fractions and exponents are one lossless number token,
     // while a dot without a following digit remains member punctuation.

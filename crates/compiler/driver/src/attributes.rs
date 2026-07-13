@@ -240,6 +240,7 @@ fn parse_attribute_targets(
                 "Attribute" => Some(AttributeTarget::Attribute),
                 "Record" => Some(AttributeTarget::Record),
                 "Union" => Some(AttributeTarget::Union),
+                "Error" => Some(AttributeTarget::Error),
                 "Class" => Some(AttributeTarget::Class),
                 "Interface" => Some(AttributeTarget::Interface),
                 "Enum" => Some(AttributeTarget::Enum),

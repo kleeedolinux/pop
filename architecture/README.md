@@ -113,6 +113,9 @@ transplanted into a Luau-shaped file.
 - Records/functions/composition are preferred over class hierarchies and fluent
   object APIs.
 - Diagnostics have stable `POP####` identities and structured safe quick fixes.
+- Expected failures use the reserved typed `Result` union, nominal error
+  declarations, exact prefix propagation, exhaustive recovery, and lexical
+  last-in, first-out cleanup.
 - Lua-shaped `---` XML documentation comments are parsed, signature-checked,
   emitted with library metadata, and available to editors/doc tools.
 - Accepted architecture is a binding baseline. Undocumented semantic expansion

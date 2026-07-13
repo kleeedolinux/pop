@@ -1,7 +1,7 @@
 use pop_backend_mir_interp::{MirInterpreter, MirValue, ReferenceRuntimeEvent};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
-use pop_mir::{MirBubble, lower_hir_bubble, optimize_mir};
+use pop_mir::{MirBubble, MirCleanupExitReason, lower_hir_bubble, optimize_mir};
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
 use pop_source::SourceFile;
 use pop_types::{IntegerKind, IntegerValue, TypeArena};
@@ -476,4 +476,104 @@ fn nominal_interface_upcast_and_call_use_verified_slots_in_both_mir_forms() {
     assert!(dump.contains("interface.upcast"));
     assert!(dump.contains("call.interface"));
     assert!(!dump.to_ascii_lowercase().contains("lookup name"));
+}
+
+#[test]
+fn typed_failure_and_cleanup_execute_identically_before_and_after_optimization() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>Loading failed.</summary>\n\
+             Failed\n\
+         end\n\
+         public class Marker\n\
+             public count: Int = 0\n\
+         end\n\
+         private function fail(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n\
+         private function forward(marker: Marker): Result<Int, LoadError>\n\
+             defer\n\
+                 marker.count = marker.count + 1\n\
+             end\n\
+             local value = try fail()\n\
+             return Result.Ok(value)\n\
+         end\n\
+         public function run(): Int\n\
+             local marker = Marker {}\n\
+             local result = forward(marker)\n\
+             match result\n\
+             when Result.Ok(value) then\n\
+                 return value\n\
+             when Result.Error(error) then\n\
+                 match error\n\
+                 when LoadError.Failed then\n\
+                     return marker.count\n\
+                 end\n\
+             end\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("1")]);
+}
+
+#[test]
+fn cleanup_registration_is_conditional_lifo_and_covers_fallthrough_and_loop_exits() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public class Marker\n\
+             public count: Int = 0\n\
+         end\n\
+         private function exercise(marker: Marker): Int\n\
+             if true then\n\
+                 defer\n\
+                     marker.count = marker.count * 10 + 1\n\
+                 end\n\
+                 defer\n\
+                     marker.count = marker.count * 10 + 2\n\
+                 end\n\
+             end\n\
+             if false then\n\
+                 defer\n\
+                     marker.count = marker.count * 10 + 9\n\
+                 end\n\
+             end\n\
+             local index = 0\n\
+             while index < 3 do\n\
+                 index += 1\n\
+                 defer\n\
+                     marker.count = marker.count * 10 + 3\n\
+                 end\n\
+                 if index == 1 then\n\
+                     continue\n\
+                 end\n\
+                 defer\n\
+                     marker.count = marker.count * 10 + 4\n\
+                 end\n\
+                 break\n\
+             end\n\
+             return marker.count\n\
+         end\n\
+         public function run(): Int\n\
+             return exercise(Marker {})\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("21343")]);
+    let cleanup_reasons: Vec<_> = mir
+        .functions()
+        .iter()
+        .flat_map(|function| function.blocks())
+        .filter_map(|block| block.cleanup().map(|cleanup| cleanup.reason()))
+        .collect();
+    for reason in [
+        MirCleanupExitReason::Normal,
+        MirCleanupExitReason::Break,
+        MirCleanupExitReason::Continue,
+    ] {
+        assert!(cleanup_reasons.contains(&reason), "missing {reason:?}");
+    }
 }

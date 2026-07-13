@@ -42,6 +42,9 @@ typed_id!(
     FieldId,
     EnumCaseId,
     UnionCaseId,
+    ErrorId,
+    ErrorCaseId,
+    ResultCaseId,
     MethodId,
     ParameterId,
     ValueParameterId,
@@ -53,6 +56,7 @@ typed_id!(
     NamespaceId,
     AttributeId,
     FunctionId,
+    CleanupScopeId,
     BlockId,
     ValueId,
 );

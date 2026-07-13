@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BlockId, ClassId, FieldId, InterfaceId, MethodId, SymbolId, SymbolIdentity, TypeId,
+    BlockId, ClassId, ErrorId, FieldId, InterfaceId, MethodId, SymbolId, SymbolIdentity, TypeId,
     UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{ObjectMap, ObjectSlot};
@@ -119,6 +119,7 @@ struct DeclaredField {
 struct MirSchema<'mir> {
     records: BTreeMap<SymbolId, &'mir MirRecordDeclaration>,
     unions: BTreeMap<SymbolId, &'mir MirUnionDeclaration>,
+    errors: BTreeMap<ErrorId, &'mir MirErrorDeclaration>,
     enums: BTreeMap<SymbolId, &'mir MirEnumDeclaration>,
     classes: BTreeMap<ClassId, &'mir MirClassDeclaration>,
     interfaces: BTreeMap<InterfaceId, &'mir MirInterfaceDeclaration>,
@@ -134,6 +135,7 @@ impl<'mir> MirSchema<'mir> {
         let mut schema = Self {
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
+            errors: BTreeMap::new(),
             enums: BTreeMap::new(),
             classes: BTreeMap::new(),
             interfaces: BTreeMap::new(),
@@ -177,6 +179,27 @@ impl<'mir> MirSchema<'mir> {
                         }
                     }
                     schema.unions.insert(declaration.symbol, union);
+                }
+                MirDeclarationKind::Error(error) => {
+                    if !matches!(
+                        arena.get(error.type_id),
+                        Some(SemanticType::ErrorUnion { definition, .. }) if *definition == error.error
+                    ) {
+                        errors.push(MirVerificationError::InvalidDeclarationType {
+                            symbol: declaration.symbol,
+                            type_id: error.type_id,
+                        });
+                    }
+                    let mut cases = BTreeSet::new();
+                    for case in &error.cases {
+                        if !cases.insert(case.case) {
+                            errors.push(MirVerificationError::DuplicateErrorCase {
+                                error: error.error,
+                                case: case.case,
+                            });
+                        }
+                    }
+                    schema.errors.insert(error.error, error);
                 }
                 MirDeclarationKind::Enum(enumeration) => {
                     if arena.get(enumeration.type_id)
@@ -266,6 +289,24 @@ fn verify_function(
 ) {
     verify_entry_parameters(function, errors);
     let blocks = collect_blocks(function, errors);
+    let cleanup_targets: BTreeSet<_> = function
+        .blocks()
+        .iter()
+        .flat_map(|block| block.instructions())
+        .filter_map(instruction_unwind_target)
+        .collect();
+    let mut unwind_cleanup_reachable = cleanup_targets.clone();
+    let mut pending_cleanup_blocks: Vec<_> = cleanup_targets.iter().copied().collect();
+    while let Some(block) = pending_cleanup_blocks.pop() {
+        let Some(block) = blocks.get(&block) else {
+            continue;
+        };
+        for target in terminator_targets(block.terminator()) {
+            if unwind_cleanup_reachable.insert(target) {
+                pending_cleanup_blocks.push(target);
+            }
+        }
+    }
     let mut definitions = DefinitionTables::default();
     for block in &function.blocks {
         for argument in &block.arguments {
@@ -327,6 +368,26 @@ fn verify_function(
     };
     let mut required_function_effects = MirEffectSummary::empty();
     for block in &function.blocks {
+        if let Some(cleanup) = block.cleanup() {
+            if block.block() == BlockId::from_raw(0)
+                || matches!(block.terminator(), MirTerminator::ResumeUnwind)
+                    && cleanup.reason() != MirCleanupExitReason::Unwind
+            {
+                errors.push(MirVerificationError::InvalidCleanupBlock {
+                    block: block.block(),
+                });
+            }
+            for target in terminator_targets(block.terminator()) {
+                if let Some(target_cleanup) = blocks.get(&target).and_then(|block| block.cleanup())
+                    && (target_cleanup.reason() != cleanup.reason()
+                        || target_cleanup.scope() > cleanup.scope())
+                {
+                    errors.push(MirVerificationError::InvalidCleanupBlock {
+                        block: block.block(),
+                    });
+                }
+            }
+        }
         for (index, instruction) in block.instructions.iter().enumerate() {
             for operand in instruction_operands(&instruction.kind) {
                 verify_value_use(operand, block.block, index, &facts, errors);
@@ -392,6 +453,16 @@ fn verify_function(
         required_function_effects =
             required_function_effects.union(terminator_effects(block.terminator()));
         verify_terminator(block, function, arena, schema, &facts, errors);
+        if matches!(block.terminator(), MirTerminator::ResumeUnwind)
+            && (!unwind_cleanup_reachable.contains(&block.block())
+                || !block
+                    .cleanup()
+                    .is_some_and(|cleanup| cleanup.reason() == MirCleanupExitReason::Unwind))
+        {
+            errors.push(MirVerificationError::ResumeOutsideCleanup {
+                block: block.block(),
+            });
+        }
     }
     if !required_function_effects.is_subset_of(function.effects()) {
         errors.push(MirVerificationError::FunctionEffectMismatch {
@@ -457,13 +528,7 @@ fn verify_unwind_action(
     blocks: &BTreeMap<BlockId, &MirBlock>,
     errors: &mut Vec<MirVerificationError>,
 ) {
-    let unwind = match instruction.kind() {
-        MirInstructionKind::CallDirect { unwind, .. }
-        | MirInstructionKind::CallReferenced { unwind, .. }
-        | MirInstructionKind::CallDirectMethod { unwind, .. }
-        | MirInstructionKind::CallIndirect { unwind, .. } => *unwind,
-        _ => return,
-    };
+    let unwind = instruction.unwind_action();
     if let MirUnwindAction::Cleanup(target) = unwind {
         if !instruction.effects().contains(MirEffect::MayUnwind) {
             errors.push(MirVerificationError::InvalidUnwindAction {
@@ -481,6 +546,12 @@ fn verify_unwind_action(
             errors.push(MirVerificationError::InvalidUnwindAction {
                 instruction: instruction.result(),
             });
+        }
+        if !cleanup
+            .cleanup()
+            .is_some_and(|cleanup| cleanup.reason() == MirCleanupExitReason::Unwind)
+        {
+            errors.push(MirVerificationError::InvalidCleanupBlock { block: target });
         }
     }
 }
@@ -892,19 +963,7 @@ fn verify_handle_balance(
             {
                 errors.push(kind.release_without_acquire(instruction.result(), handle));
             }
-            let catches_unwind = matches!(
-                instruction.kind(),
-                MirInstructionKind::CallDirect {
-                    unwind: MirUnwindAction::Cleanup(_),
-                    ..
-                } | MirInstructionKind::CallDirectMethod {
-                    unwind: MirUnwindAction::Cleanup(_),
-                    ..
-                } | MirInstructionKind::CallIndirect {
-                    unwind: MirUnwindAction::Cleanup(_),
-                    ..
-                }
-            );
+            let catches_unwind = instruction_unwind_target(instruction).is_some();
             let propagates_unwind =
                 instruction.effects().contains(MirEffect::MayUnwind) && !catches_unwind;
             if instruction.effects().contains(MirEffect::MayTrap) || propagates_unwind {
@@ -912,7 +971,7 @@ fn verify_handle_balance(
                     errors.push(kind.unreleased(block_id, *value));
                 }
             }
-            if let Some(target) = instruction_unwind_target(instruction.kind()) {
+            if let Some(target) = instruction_unwind_target(instruction) {
                 merge_handle_state(target, &retained, &mut incoming, &mut pending, kind, errors);
             }
         }
@@ -1266,11 +1325,13 @@ pub(crate) fn terminator_targets(terminator: &MirTerminator) -> Vec<BlockId> {
             ..
         } => vec![*when_true, *when_false],
         MirTerminator::UnionSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
+        MirTerminator::ErrorSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind
         | MirTerminator::Unreachable => Vec::new(),
     }
 }
@@ -1280,30 +1341,21 @@ pub(crate) fn terminator_operands(terminator: &MirTerminator) -> Vec<ValueId> {
         MirTerminator::Return { values } => values.clone(),
         MirTerminator::ConditionalBranch { condition, .. } => vec![*condition],
         MirTerminator::UnionSwitch { scrutinee, .. } => vec![*scrutinee],
+        MirTerminator::ErrorSwitch { scrutinee, .. } => vec![*scrutinee],
         MirTerminator::Missing
         | MirTerminator::Branch { .. }
         | MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind
         | MirTerminator::Unreachable => Vec::new(),
     }
 }
 
-pub(crate) fn instruction_unwind_target(instruction: &MirInstructionKind) -> Option<BlockId> {
-    match instruction {
-        MirInstructionKind::CallDirect {
-            unwind: MirUnwindAction::Cleanup(target),
-            ..
-        }
-        | MirInstructionKind::CallDirectMethod {
-            unwind: MirUnwindAction::Cleanup(target),
-            ..
-        }
-        | MirInstructionKind::CallIndirect {
-            unwind: MirUnwindAction::Cleanup(target),
-            ..
-        } => Some(*target),
-        _ => None,
+pub(crate) fn instruction_unwind_target(instruction: &MirInstruction) -> Option<BlockId> {
+    match instruction.unwind_action() {
+        MirUnwindAction::Cleanup(target) => Some(target),
+        MirUnwindAction::Propagate => None,
     }
 }
 
@@ -1313,7 +1365,7 @@ pub(crate) fn block_targets(block: &MirBlock) -> Vec<BlockId> {
         block
             .instructions
             .iter()
-            .filter_map(|instruction| instruction_unwind_target(&instruction.kind)),
+            .filter_map(instruction_unwind_target),
     );
     targets.sort_unstable();
     targets.dedup();
@@ -1392,6 +1444,62 @@ fn verify_instruction_types(
                 errors.push(MirVerificationError::InvalidInstructionType {
                     instruction: instruction.result(),
                     result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ResultMake {
+            result,
+            case,
+            arguments,
+        } => {
+            let expected = match arena.get(instruction.result_type()) {
+                Some(SemanticType::Builtin {
+                    definition,
+                    arguments: types,
+                }) if definition == result => usize::try_from(case.raw())
+                    .ok()
+                    .and_then(|index| types.get(index))
+                    .copied(),
+                _ => None,
+            };
+            let valid = arguments.len() == 1
+                && expected.is_some_and(|expected| values.get(&arguments[0]) == Some(&expected));
+            if !valid {
+                errors.push(MirVerificationError::InvalidResultOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::ResultIsOk { result, definition } => {
+            let valid = values.get(result).is_some_and(|type_id| {
+                matches!(arena.get(*type_id), Some(SemanticType::Builtin { definition: found, arguments }) if found == definition && arguments.len() == 2)
+            }) && arena.source_type("Boolean") == Some(instruction.result_type());
+            if !valid {
+                errors.push(MirVerificationError::InvalidResultOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::ResultGetOk { result, definition }
+        | MirInstructionKind::ResultGetError { result, definition } => {
+            let index = usize::from(matches!(
+                instruction.kind(),
+                MirInstructionKind::ResultGetError { .. }
+            ));
+            let expected = values
+                .get(result)
+                .and_then(|type_id| match arena.get(*type_id) {
+                    Some(SemanticType::Builtin {
+                        definition: found,
+                        arguments,
+                    }) if found == definition && arguments.len() == 2 => {
+                        arguments.get(index).copied()
+                    }
+                    _ => None,
+                });
+            if expected != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidResultOperation {
+                    instruction: instruction.result(),
                 });
             }
         }
@@ -2129,6 +2237,37 @@ fn verify_schema_instruction(
             values,
             errors,
         ),
+        MirInstructionKind::ErrorMake {
+            error,
+            case,
+            arguments,
+        } => {
+            let declaration = schema.errors.get(error);
+            let expected = declaration.and_then(|declaration| {
+                declaration
+                    .cases()
+                    .iter()
+                    .find(|candidate| candidate.case() == *case)
+            });
+            let valid_type = matches!(
+                arena.get(instruction.result_type()),
+                Some(SemanticType::ErrorUnion { definition, .. }) if *definition == *error
+            );
+            let valid_arguments = expected.is_some_and(|case| {
+                case.parameters().len() == arguments.len()
+                    && case
+                        .parameters()
+                        .iter()
+                        .zip(arguments)
+                        .all(|(expected, argument)| values.get(argument) == Some(expected))
+            });
+            if !valid_type || !valid_arguments {
+                errors.push(MirVerificationError::InvalidErrorOperation {
+                    instruction: instruction.result(),
+                    error: *error,
+                });
+            }
+        }
         _ => return false,
     }
     true
@@ -2637,6 +2776,51 @@ fn verify_terminator(
                 }
             }
         }
+        MirTerminator::ErrorSwitch {
+            scrutinee,
+            error,
+            arms,
+        } => {
+            verify_value_use(*scrutinee, block.block, use_instruction, facts, errors);
+            let Some(declaration) = schema.errors.get(error) else {
+                errors.push(MirVerificationError::InvalidErrorSwitch { error: *error });
+                return;
+            };
+            if !matches!(
+                facts.values.get(scrutinee).and_then(|type_id| arena.get(*type_id)),
+                Some(SemanticType::ErrorUnion { definition, .. }) if *definition == *error
+            ) {
+                errors.push(MirVerificationError::InvalidErrorSwitch { error: *error });
+            }
+            let expected: BTreeSet<_> =
+                declaration.cases().iter().map(MirErrorCase::case).collect();
+            let found: BTreeSet<_> = arms.iter().map(|arm| arm.case).collect();
+            if expected != found || found.len() != arms.len() {
+                errors.push(MirVerificationError::InvalidErrorSwitch { error: *error });
+            }
+            for arm in arms {
+                verify_target(arm.target, facts.blocks, errors);
+                let Some(case) = declaration
+                    .cases()
+                    .iter()
+                    .find(|case| case.case == arm.case)
+                else {
+                    continue;
+                };
+                let Some(target) = facts.blocks.get(&arm.target) else {
+                    continue;
+                };
+                if target.arguments.len() != case.parameters.len()
+                    || target
+                        .arguments
+                        .iter()
+                        .map(|argument| argument.type_id)
+                        .ne(case.parameters.iter().copied())
+                {
+                    errors.push(MirVerificationError::InvalidErrorSwitch { error: *error });
+                }
+            }
+        }
         MirTerminator::Return { values: returned } => {
             if returned.len() != function.results.len() {
                 errors.push(MirVerificationError::WrongReturnArity {
@@ -2661,6 +2845,7 @@ fn verify_terminator(
         MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind
         | MirTerminator::Unreachable => {}
     }
 }
@@ -2741,6 +2926,12 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         }
         | MirInstructionKind::UnionMake {
             arguments: values, ..
+        }
+        | MirInstructionKind::ResultMake {
+            arguments: values, ..
+        }
+        | MirInstructionKind::ErrorMake {
+            arguments: values, ..
         } => values.clone(),
         MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
         MirInstructionKind::ArrayCreate {
@@ -2785,6 +2976,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::ConvertFloatToInteger { operand, .. }
         | MirInstructionKind::ConvertFloat { operand, .. }
         | MirInstructionKind::StringFormat { value: operand, .. } => vec![*operand],
+        MirInstructionKind::ResultIsOk { result, .. }
+        | MirInstructionKind::ResultGetOk { result, .. }
+        | MirInstructionKind::ResultGetError { result, .. } => vec![*result],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
         MirInstructionKind::TableGet { table, key } => vec![*table, *key],
         MirInstructionKind::ArrayLength { array } => vec![*array],

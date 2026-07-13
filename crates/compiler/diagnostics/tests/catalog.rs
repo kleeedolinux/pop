@@ -23,8 +23,9 @@ fn catalog_is_sorted_unique_and_partitioned_by_compiler_phase() {
             "POP1002", "POP1003", "POP1004", "POP2001", "POP2002", "POP2003", "POP2004", "POP2005",
             "POP2006", "POP2007", "POP2008", "POP2009", "POP2010", "POP2011", "POP2012", "POP2013",
             "POP2014", "POP2015", "POP2016", "POP2017", "POP2018", "POP2019", "POP2020", "POP2021",
-            "POP2022", "POP2023", "POP4001", "POP4002", "POP4003", "POP4004", "POP4005", "POP4006",
-            "POP4007", "POP6400", "POP6401"
+            "POP2022", "POP2023", "POP2024", "POP2025", "POP2026", "POP4001", "POP4002", "POP4003",
+            "POP4004", "POP4005", "POP4006", "POP4007", "POP6400", "POP6401", "POP6402", "POP6403",
+            "POP6404", "POP6405", "POP6406", "POP6407", "POP6408"
         ]
     );
     assert!(codes.windows(2).all(|pair| pair[0] < pair[1]));
@@ -39,22 +40,22 @@ fn catalog_is_sorted_unique_and_partitioned_by_compiler_phase() {
             .all(|entry| entry.category() == DiagnosticCategory::Resolution)
     );
     assert!(
-        entries[11..34]
+        entries[11..37]
             .iter()
             .all(|entry| entry.category() == DiagnosticCategory::Type)
     );
     assert!(
-        entries[34..41]
+        entries[37..44]
             .iter()
             .all(|entry| entry.category() == DiagnosticCategory::CompileTime)
     );
     assert!(
-        entries[..41]
+        entries[..44]
             .iter()
             .all(|entry| entry.warning_wave().is_none())
     );
-    assert!(entries[..41].iter().all(|entry| !entry.is_suppressible()));
-    assert!(entries[41..].iter().all(|entry| {
+    assert!(entries[..44].iter().all(|entry| !entry.is_suppressible()));
+    assert!(entries[44..].iter().all(|entry| {
         entry.category() == DiagnosticCategory::Style
             && entry.severity() == DiagnosticSeverity::Warning
             && entry.warning_wave() == Some(1)

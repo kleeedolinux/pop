@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
-    BuiltinTypeId, Diagnostic, EnumCaseId, FieldId, ModuleId, ParameterId, SourceSpan, SymbolId,
-    TypeId, UnionCaseId,
+    BuiltinTypeId, Diagnostic, EnumCaseId, ErrorCaseId, ErrorId, FieldId, ModuleId, ParameterId,
+    SourceSpan, SymbolId, TypeId, UnionCaseId,
 };
 use pop_resolve::{ResolutionDatabase, SymbolSpace};
 use pop_syntax::{
-    EnumDeclarationSyntax, FunctionSignatureSyntax, GenericParameterSyntax,
+    EnumDeclarationSyntax, ErrorDeclarationSyntax, FunctionSignatureSyntax, GenericParameterSyntax,
     RecordDeclarationSyntax, TypeAliasDeclarationSyntax, TypeSyntax, TypeSyntaxKind,
     UnionDeclarationSyntax,
 };
@@ -389,6 +389,95 @@ pub struct UnionDefinitionResult {
     diagnostics: Vec<Diagnostic>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorDefinition {
+    error: ErrorId,
+    symbol: SymbolId,
+    type_id: TypeId,
+    cases: Vec<ErrorCaseDefinition>,
+    span: SourceSpan,
+}
+
+impl ErrorDefinition {
+    #[must_use]
+    pub const fn error(&self) -> ErrorId {
+        self.error
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[ErrorCaseDefinition] {
+        &self.cases
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorCaseDefinition {
+    case: ErrorCaseId,
+    name: String,
+    parameters: Vec<(String, TypeId, SourceSpan)>,
+    span: SourceSpan,
+}
+
+impl ErrorCaseDefinition {
+    #[must_use]
+    pub const fn case(&self) -> ErrorCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[(String, TypeId, SourceSpan)] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ErrorDefinitionResult {
+    definition: Option<ErrorDefinition>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl ErrorDefinitionResult {
+    #[must_use]
+    pub const fn definition(&self) -> Option<&ErrorDefinition> {
+        self.definition.as_ref()
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    #[must_use]
+    pub fn diagnostic_snapshot(&self) -> String {
+        diagnostic_snapshot(&self.diagnostics)
+    }
+}
+
 impl UnionDefinitionResult {
     #[must_use]
     pub const fn definition(&self) -> Option<&UnionDefinition> {
@@ -518,6 +607,8 @@ pub struct SignatureResolver<'index> {
     next_parameter: u32,
     pub(crate) next_field: u32,
     next_union_case: u32,
+    next_error: u32,
+    next_error_case: u32,
     next_enum_case: u32,
     pub(crate) next_class: u32,
     pub(crate) next_method: u32,
@@ -535,6 +626,10 @@ pub struct SignatureResolver<'index> {
     union_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
     union_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
     union_instance_sources: BTreeMap<SymbolId, SymbolId>,
+    error_definitions: BTreeMap<SymbolId, ErrorDefinition>,
+    errors_by_type: BTreeMap<TypeId, SymbolId>,
+    error_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
+    error_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
     enum_definitions: BTreeMap<SymbolId, EnumDefinition>,
     pub(crate) class_types: BTreeMap<SymbolId, TypeId>,
     pub(crate) class_definitions: BTreeMap<SymbolId, crate::ClassDefinition>,
@@ -565,6 +660,8 @@ impl<'index> SignatureResolver<'index> {
             next_parameter: 0,
             next_field: 0,
             next_union_case: 0,
+            next_error: 0,
+            next_error_case: 0,
             next_enum_case: 0,
             next_class: 0,
             next_method: 0,
@@ -582,6 +679,10 @@ impl<'index> SignatureResolver<'index> {
             union_type_parameters: BTreeMap::new(),
             union_instances: BTreeMap::new(),
             union_instance_sources: BTreeMap::new(),
+            error_definitions: BTreeMap::new(),
+            errors_by_type: BTreeMap::new(),
+            error_type_parameters: BTreeMap::new(),
+            error_instances: BTreeMap::new(),
             enum_definitions: BTreeMap::new(),
             class_types: BTreeMap::new(),
             class_definitions: BTreeMap::new(),
@@ -602,6 +703,35 @@ impl<'index> SignatureResolver<'index> {
 
     pub(crate) const fn schema(&self) -> &BootstrapSchema {
         &self.schema
+    }
+
+    #[must_use]
+    pub fn result_parts(&self, type_id: TypeId) -> Option<(TypeId, TypeId)> {
+        let result = self.schema.type_by_source_name("Result")?;
+        match self.arena.get(type_id)? {
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if *definition == result.id() && arguments.len() == 2 => {
+                Some((arguments[0], arguments[1]))
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn result_definition(&self) -> Option<BuiltinTypeId> {
+        Some(self.schema.type_by_source_name("Result")?.id())
+    }
+
+    pub(crate) fn result_type(&mut self, success: TypeId, error: TypeId) -> Option<TypeId> {
+        let definition = self.result_definition()?;
+        self.arena
+            .intern(SemanticType::Builtin {
+                definition,
+                arguments: vec![success, error],
+            })
+            .ok()
     }
 
     #[must_use]
@@ -647,6 +777,26 @@ impl<'index> SignatureResolver<'index> {
                         .map(|instance| instance.type_id());
                 }
                 SemanticType::TaggedUnion {
+                    definition,
+                    source,
+                    arguments,
+                }
+            }
+            SemanticType::ErrorUnion {
+                definition,
+                source,
+                arguments,
+            } => {
+                let arguments = arguments
+                    .into_iter()
+                    .map(|argument| self.substitute_type_parameters(argument, substitutions))
+                    .collect::<Option<Vec<_>>>()?;
+                if self.error_type_parameters.contains_key(&source) {
+                    return self
+                        .instantiate_error(source, &arguments)
+                        .map(|instance| instance.type_id());
+                }
+                SemanticType::ErrorUnion {
                     definition,
                     source,
                     arguments,
@@ -784,6 +934,20 @@ impl<'index> SignatureResolver<'index> {
             .is_some_and(|parameters| !parameters.is_empty())
     }
 
+    pub fn error_instances(&self, definition: SymbolId) -> impl Iterator<Item = &ErrorDefinition> {
+        self.error_instances
+            .iter()
+            .filter(move |((source, _), _)| *source == definition)
+            .filter_map(|(_, symbol)| self.error_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub fn error_is_generic(&self, definition: SymbolId) -> bool {
+        self.error_type_parameters
+            .get(&definition)
+            .is_some_and(|parameters| !parameters.is_empty())
+    }
+
     pub(crate) fn instantiate_record(
         &mut self,
         definition: SymbolId,
@@ -887,6 +1051,62 @@ impl<'index> SignatureResolver<'index> {
         Some(instance)
     }
 
+    pub(crate) fn instantiate_error(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+    ) -> Option<ErrorDefinition> {
+        let key = (definition, arguments.to_vec());
+        if let Some(symbol) = self.error_instances.get(&key) {
+            return self.error_definitions.get(symbol).cloned();
+        }
+        let parameters = self.error_type_parameters.get(&definition)?.clone();
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        if parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .eq(arguments.iter().copied())
+        {
+            return self.error_definitions.get(&definition).cloned();
+        }
+        let substitutions = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        let template = self.error_definitions.get(&definition)?.clone();
+        let symbol = SymbolId::from_raw(self.next_instance_symbol);
+        self.next_instance_symbol = self.next_instance_symbol.saturating_add(1);
+        let mut cases = template.cases.clone();
+        for case in &mut cases {
+            for (_, parameter_type, _) in &mut case.parameters {
+                *parameter_type =
+                    self.substitute_type_parameters(*parameter_type, &substitutions)?;
+            }
+        }
+        let type_id = self
+            .arena
+            .intern(SemanticType::ErrorUnion {
+                definition: template.error,
+                source: definition,
+                arguments: arguments.to_vec(),
+            })
+            .ok()?;
+        let instance = ErrorDefinition {
+            error: template.error,
+            symbol,
+            type_id,
+            cases,
+            span: template.span,
+        };
+        self.error_instances.insert(key, symbol);
+        self.errors_by_type.insert(type_id, symbol);
+        self.error_definitions.insert(symbol, instance.clone());
+        Some(instance)
+    }
+
     #[must_use]
     pub fn declaration_type(&self, symbol: SymbolId) -> Option<TypeId> {
         self.record_definitions
@@ -896,6 +1116,11 @@ impl<'index> SignatureResolver<'index> {
                 self.union_definitions
                     .get(&symbol)
                     .map(UnionDefinition::type_id)
+            })
+            .or_else(|| {
+                self.error_definitions
+                    .get(&symbol)
+                    .map(ErrorDefinition::type_id)
             })
             .or_else(|| {
                 self.enum_definitions
@@ -933,6 +1158,23 @@ impl<'index> SignatureResolver<'index> {
         self.unions_by_type
             .get(&type_id)
             .and_then(|symbol| self.union_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub fn error_definition(&self, symbol: SymbolId) -> Option<&ErrorDefinition> {
+        self.error_definitions.get(&symbol)
+    }
+
+    #[must_use]
+    pub fn error_definition_for_type(&self, type_id: TypeId) -> Option<&ErrorDefinition> {
+        self.errors_by_type
+            .get(&type_id)
+            .and_then(|symbol| self.error_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub(crate) fn error_type_parameter_count(&self, symbol: SymbolId) -> Option<usize> {
+        self.error_type_parameters.get(&symbol).map(Vec::len)
     }
 
     #[must_use]
@@ -1252,6 +1494,87 @@ impl<'index> SignatureResolver<'index> {
             self.union_definitions.insert(symbol, definition.clone());
         }
         UnionDefinitionResult {
+            definition,
+            diagnostics,
+        }
+    }
+
+    #[must_use]
+    pub fn define_error(
+        &mut self,
+        module: ModuleId,
+        symbol: SymbolId,
+        syntax: &ErrorDeclarationSyntax,
+    ) -> ErrorDefinitionResult {
+        let mut diagnostics = Vec::new();
+        let (type_parameters, generics) =
+            self.resolve_data_type_parameters(syntax.type_parameters(), &mut diagnostics);
+        let error = ErrorId::from_raw(self.next_error);
+        self.next_error = self.next_error.saturating_add(1);
+        let mut cases = Vec::new();
+        let mut names = BTreeMap::new();
+        for case in syntax.cases() {
+            if let Some(original) = names.insert(case.name().to_owned(), case.span()) {
+                diagnostics.push(type_diagnostics::duplicate_record_field(
+                    case.span(),
+                    case.name(),
+                    original,
+                ));
+                continue;
+            }
+            let mut parameters = Vec::new();
+            for parameter in case.payload() {
+                let Some(resolved) = self.resolve_type(
+                    module,
+                    parameter.parameter_type(),
+                    &generics,
+                    &mut diagnostics,
+                ) else {
+                    continue;
+                };
+                let Some(type_id) = resolved.type_id() else {
+                    continue;
+                };
+                parameters.push((parameter.name().to_owned(), type_id, parameter.span()));
+            }
+            let case_id = ErrorCaseId::from_raw(self.next_error_case);
+            self.next_error_case = self.next_error_case.saturating_add(1);
+            cases.push(ErrorCaseDefinition {
+                case: case_id,
+                name: case.name().to_owned(),
+                parameters,
+                span: case.span(),
+            });
+        }
+        let generic_arguments = type_parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .collect();
+        let type_id = self
+            .arena
+            .intern(SemanticType::ErrorUnion {
+                definition: error,
+                source: symbol,
+                arguments: generic_arguments,
+            })
+            .ok();
+        let definition = if diagnostics.is_empty() {
+            type_id.map(|type_id| ErrorDefinition {
+                error,
+                symbol,
+                type_id,
+                cases,
+                span: syntax.span(),
+            })
+        } else {
+            None
+        };
+        if let Some(definition) = &definition {
+            self.error_type_parameters.insert(symbol, type_parameters);
+            self.errors_by_type.insert(definition.type_id(), symbol);
+            self.error_definitions.insert(symbol, definition.clone());
+        }
+        ErrorDefinitionResult {
             definition,
             diagnostics,
         }
@@ -1646,6 +1969,34 @@ impl<'index> SignatureResolver<'index> {
                 syntax.span(),
             ));
         }
+        if let Some(parameters) = self.error_type_parameters.get(&symbol).cloned() {
+            if parameters.len() != arguments.len() {
+                diagnostics.push(type_diagnostics::wrong_type_arity(
+                    syntax.span(),
+                    &name,
+                    u16::try_from(parameters.len()).unwrap_or(u16::MAX),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let template_arguments: Vec<_> = parameters
+                .iter()
+                .map(ResolvedTypeParameter::type_id)
+                .collect();
+            let definition = if canonical_arguments == template_arguments {
+                self.error_definitions.get(&symbol).cloned()
+            } else {
+                self.instantiate_error(symbol, &canonical_arguments)
+            }?;
+            return Some(resolved(
+                ResolvedTypeKind::Declaration {
+                    symbol: definition.symbol(),
+                    arguments,
+                },
+                Some(definition.type_id()),
+                syntax.span(),
+            ));
+        }
         if !arguments.is_empty() {
             diagnostics.push(type_diagnostics::wrong_type_arity(
                 syntax.span(),
@@ -1663,6 +2014,11 @@ impl<'index> SignatureResolver<'index> {
                 self.union_definitions
                     .get(&symbol)
                     .map(UnionDefinition::type_id)
+            })
+            .or_else(|| {
+                self.error_definitions
+                    .get(&symbol)
+                    .map(ErrorDefinition::type_id)
             })
             .or_else(|| {
                 self.enum_definitions
