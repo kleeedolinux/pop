@@ -19,7 +19,7 @@ env:
 
 jobs:
   build:
-    if: github.repository == 'poplanguages/pop'
+    if: github.repository == 'poplanguage/pop'
     name: Build workspace
     strategy:
       matrix:
