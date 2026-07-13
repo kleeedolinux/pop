@@ -1,0 +1,2069 @@
+//! Canonical MIR instruction and terminator lowering into private LLVM text.
+//!
+//! Checked arithmetic, runtime calls, aggregates, collections, closures, GC
+//! operations, and physical types are isolated here. Nothing in this module
+//! is a canonical MIR instruction or a source-language semantic rule.
+
+use pop_foundation::{BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_mir::{MirInstructionKind, MirTerminator};
+use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
+use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::api::LlvmLoweringError;
+use crate::lowering::*;
+
+pub(crate) fn lower_instruction(
+    bubble: BubbleId,
+    instruction: &pop_mir::MirInstruction,
+    value_types: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+    record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+    string_literals: &BTreeMap<String, String>,
+    environment: Option<(&str, &BTreeSet<u32>)>,
+    proven_non_overflow_adds: &BTreeSet<ValueId>,
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> Result<String, LlvmLoweringError> {
+    let result = format!("%v{}", instruction.result().raw());
+    let result_type = instruction.optional_result_type();
+    let line = match instruction.kind() {
+        MirInstructionKind::IntegerConstant(value) => format!(
+            "{result} = add i{} 0, {}",
+            value.kind().bit_width(),
+            integer_literal(*value)
+        ),
+        MirInstructionKind::FloatConstant(value) => format!(
+            "{result} = fadd {} 0.0, 0x{:016X}",
+            float_type(value.kind()),
+            value.as_f64().to_bits()
+        ),
+        MirInstructionKind::BooleanConstant(value) => {
+            format!("{result} = xor i1 0, {}", u8::from(*value))
+        }
+        MirInstructionKind::NilConstant => format!("{result} = add i64 0, 0"),
+        MirInstructionKind::StringConstant(value) => {
+            let symbol = string_literals
+                .get(value)
+                .ok_or(LlvmLoweringError::InvalidType(instruction.result_type()))?;
+            format!(
+                "{result} = call i64 @pop_rt_string_literal(ptr {symbol}, i64 {})",
+                value.len()
+            )
+        }
+        MirInstructionKind::CheckedIntegerAdd { kind, left, right } => {
+            if proven_non_overflow_adds.contains(&instruction.result()) {
+                format!(
+                    "{result} = add nsw i{} %v{}, %v{}",
+                    kind.bit_width(),
+                    left.raw(),
+                    right.raw()
+                )
+            } else {
+                lower_checked_integer_binary(&result, "add", *kind, *left, *right)
+            }
+        }
+        MirInstructionKind::CheckedIntegerSubtract { kind, left, right } => {
+            lower_checked_integer_binary(&result, "sub", *kind, *left, *right)
+        }
+        MirInstructionKind::CheckedIntegerMultiply { kind, left, right } => {
+            lower_checked_integer_binary(&result, "mul", *kind, *left, *right)
+        }
+        MirInstructionKind::CheckedIntegerDivide { kind, left, right } => {
+            lower_checked_integer_division(&result, "div", *kind, *left, *right)
+        }
+        MirInstructionKind::CheckedIntegerRemainder { kind, left, right } => {
+            lower_checked_integer_division(&result, "rem", *kind, *left, *right)
+        }
+        MirInstructionKind::IntegerNegate { kind, operand } => {
+            lower_checked_integer_negate(&result, *kind, *operand)
+        }
+        MirInstructionKind::FloatAdd { kind, left, right } => format!(
+            "{result} = fadd {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::FloatSubtract { kind, left, right } => format!(
+            "{result} = fsub {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::FloatMultiply { kind, left, right } => format!(
+            "{result} = fmul {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::FloatDivide { kind, left, right } => format!(
+            "{result} = fdiv {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::FloatNegate { kind, operand } => {
+            format!("{result} = fneg {} %v{}", float_type(*kind), operand.raw())
+        }
+        MirInstructionKind::BooleanNot { operand } => {
+            format!("{result} = xor i1 %v{}, true", operand.raw())
+        }
+        MirInstructionKind::BooleanAnd { left, right } => {
+            format!("{result} = and i1 %v{}, %v{}", left.raw(), right.raw())
+        }
+        MirInstructionKind::BooleanOr { left, right } => {
+            format!("{result} = or i1 %v{}, %v{}", left.raw(), right.raw())
+        }
+        MirInstructionKind::CompareEqual { left, right } => lower_equality(
+            &result,
+            *left,
+            *right,
+            false,
+            value_types,
+            types,
+            record_field_types,
+        )?,
+        MirInstructionKind::CompareNotEqual { left, right } => lower_equality(
+            &result,
+            *left,
+            *right,
+            true,
+            value_types,
+            types,
+            record_field_types,
+        )?,
+        MirInstructionKind::CompareIntegerLess { kind, left, right } => format!(
+            "{result} = icmp {} i{} %v{}, %v{}",
+            if kind.is_signed() { "slt" } else { "ult" },
+            kind.bit_width(),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareIntegerGreater { kind, left, right } => format!(
+            "{result} = icmp {} i{} %v{}, %v{}",
+            if kind.is_signed() { "sgt" } else { "ugt" },
+            kind.bit_width(),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareFloatLess { kind, left, right } => format!(
+            "{result} = fcmp olt {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareFloatGreater { kind, left, right } => format!(
+            "{result} = fcmp ogt {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::FunctionReference(symbol) => {
+            format!("{result} = add i64 0, {}", direct_function_tag(*symbol))
+        }
+        MirInstructionKind::CallDirect {
+            function: callee,
+            arguments,
+            ..
+        } => call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(bubble, *callee)),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::CallReferenced {
+            function: callee,
+            arguments,
+            ..
+        } => call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(callee.bubble(), callee.symbol())),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::CallStandard {
+            function,
+            arguments,
+            ..
+        } => {
+            if arguments.len() != 1 {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                });
+            }
+            match function.raw() {
+                0 => format!("call void @pop_std_print_int(i64 %v{})", arguments[0].raw()),
+                1 => format!(
+                    "call void @pop_std_print_string(i64 %v{})",
+                    arguments[0].raw()
+                ),
+                _ => {
+                    return Err(LlvmLoweringError::UnsupportedInstruction {
+                        function: FunctionId::from_raw(u32::MAX),
+                        value: instruction.result(),
+                    });
+                }
+            }
+        }
+        MirInstructionKind::GcSafePoint {
+            safe_point, roots, ..
+        } => lower_gc_safe_point(&result, safe_point.raw(), roots, direct_scalar_arrays),
+        MirInstructionKind::RetainRoot { value } => format!(
+            "{result} = call i64 @{}(i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::RetainRoot),
+            value.raw()
+        ),
+        MirInstructionKind::ReleaseRoot { handle } => format!(
+            "call i8 @{}(i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::ReleaseRoot),
+            handle.raw()
+        ),
+        MirInstructionKind::Pin { value } => format!(
+            "{result} = call i64 @{}(i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::Pin),
+            value.raw()
+        ),
+        MirInstructionKind::Unpin { handle } => format!(
+            "call i8 @{}(i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::Unpin),
+            handle.raw()
+        ),
+        MirInstructionKind::WriteBarrier { owner, .. } => format!(
+            "call void @{}(i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::SatbWriteBarrier),
+            owner.raw()
+        ),
+        MirInstructionKind::CaptureCellAllocate { initial, .. } => {
+            lower_capture_cell_allocate(&result, *initial, value_types, types)?
+        }
+        MirInstructionKind::ClosureEnvironmentAllocate {
+            owner,
+            function,
+            captures,
+            ..
+        } => lower_closure_environment_allocate(
+            &result,
+            *owner,
+            *function,
+            captures,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ArrayMake {
+            elements,
+            element_map,
+        } => lower_array_make(&result, elements, *element_map, value_types, types)?,
+        MirInstructionKind::ArrayCreate {
+            length,
+            initial_value,
+            element_map,
+        } => {
+            if let Some((origin, allocation)) =
+                direct_scalar_arrays.allocation(instruction.result())
+            {
+                debug_assert_eq!(origin, instruction.result());
+                lower_direct_array_create(&result, allocation, value_types, types)?
+            } else {
+                lower_array_create(
+                    &result,
+                    *length,
+                    *initial_value,
+                    *element_map,
+                    value_types,
+                    types,
+                )?
+            }
+        }
+        MirInstructionKind::TableMake {
+            entries,
+            key_map,
+            value_map,
+        } => lower_table_make(&result, entries, *key_map, *value_map, value_types, types)?,
+        MirInstructionKind::RecordMake { fields, .. } => {
+            let slot_count = u32::try_from(fields.len())
+                .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            lower_object_make(
+                &result,
+                fields,
+                slot_count,
+                value_types,
+                types,
+                field_layout,
+            )?
+        }
+        MirInstructionKind::ClassMake {
+            class,
+            fields,
+            object_map,
+        } => lower_class_make(
+            &result,
+            *class,
+            fields,
+            object_map.slot_count() + 1,
+            value_types,
+            types,
+            field_layout,
+        )?,
+        MirInstructionKind::CallDirectMethod {
+            method, arguments, ..
+        } => call_line(
+            &result,
+            result_type,
+            &format!("@{}", method_name(bubble, *method)),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::CallInterface {
+            interface,
+            method,
+            arguments,
+            ..
+        } => call_line(
+            &result,
+            result_type,
+            &format!("@{}", interface_name(bubble, *interface, *method)),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::CallIndirect {
+            callee, arguments, ..
+        } => {
+            let callee_type = value_types
+                .get(callee)
+                .copied()
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let arguments = std::iter::once(*callee)
+                .chain(arguments.iter().copied())
+                .collect::<Vec<_>>();
+            call_line(
+                &result,
+                result_type,
+                &format!("@{}", indirect_name(bubble, callee_type)),
+                &arguments,
+                value_types,
+                types,
+            )?
+        }
+        MirInstructionKind::TupleMake(elements) => {
+            lower_tuple_make(&result, elements, value_types, types)?
+        }
+        MirInstructionKind::ArrayGet { array, index } => runtime_call(
+            &result,
+            result_type,
+            RuntimeOperation::ArrayGet,
+            &[*array, *index],
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ArrayLength { array } => {
+            if let Some((_, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_length(&result, allocation)
+            } else {
+                lower_array_output_call(
+                    &result,
+                    instruction.result_type(),
+                    RuntimeOperation::ArrayLength,
+                    &[*array],
+                    value_types,
+                    types,
+                )?
+            }
+        }
+        MirInstructionKind::ArrayGetChecked { array, index } => {
+            if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_get(
+                    &result,
+                    origin,
+                    allocation,
+                    *index,
+                    instruction.result_type(),
+                    types,
+                )?
+            } else {
+                lower_array_output_call(
+                    &result,
+                    instruction.result_type(),
+                    RuntimeOperation::ArrayGetChecked,
+                    &[*array, *index],
+                    value_types,
+                    types,
+                )?
+            }
+        }
+        MirInstructionKind::ArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_set(
+                    &result,
+                    origin,
+                    allocation,
+                    *index,
+                    *value,
+                    value_types,
+                    types,
+                )?
+            } else {
+                lower_array_set(&result, *array, *index, *value, value_types, types)?
+            }
+        }
+        MirInstructionKind::ArrayFill { array, value, .. } => {
+            if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
+                lower_direct_array_fill(&result, origin, allocation, *value, value_types, types)?
+            } else {
+                lower_array_fill(&result, *array, *value, value_types, types)?
+            }
+        }
+        MirInstructionKind::RecordUpdate {
+            record,
+            base,
+            fields,
+        } => lower_record_update(
+            &result,
+            *record,
+            *base,
+            fields,
+            record_fields,
+            record_field_types,
+            field_layout,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::FieldGet { base, field } => runtime_field_call(
+            &result,
+            result_type,
+            RuntimeOperation::FieldGet,
+            *base,
+            *field,
+            None,
+            value_types,
+            types,
+            field_layout,
+        )?,
+        MirInstructionKind::FieldSet { base, field, value } => runtime_field_call(
+            &result,
+            result_type,
+            RuntimeOperation::FieldSet,
+            *base,
+            *field,
+            Some(*value),
+            value_types,
+            types,
+            field_layout,
+        )?,
+        MirInstructionKind::UnionMake {
+            case, arguments, ..
+        } => lower_union_make(&result, *case, arguments, value_types, types)?,
+        MirInstructionKind::InterfaceUpcast { value, .. } => {
+            format!("{result} = add i64 %v{}, 0", value.raw())
+        }
+        MirInstructionKind::CaptureCellLoad { cell } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            &format!("%v{}", cell.raw()),
+            1,
+            types,
+        )?
+        .join("\n"),
+        MirInstructionKind::CaptureCellStore { cell, value } => {
+            lower_capture_store(&format!("%v{}", cell.raw()), *value, value_types, types)?
+        }
+        MirInstructionKind::CaptureLoad { slot, mode, .. } => lower_capture_load(
+            instruction.result(),
+            instruction.result_type(),
+            environment
+                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                })?
+                .0,
+            *slot,
+            *mode,
+            environment.is_some_and(|(_, self_slots)| self_slots.contains(slot)),
+            types,
+        )?,
+        MirInstructionKind::CaptureCellReference { slot, .. } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            environment
+                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                })?
+                .0,
+            *slot as usize + 2,
+            types,
+        )?
+        .join("\n"),
+        MirInstructionKind::CaptureStore { slot, value, .. } => lower_nested_capture_store(
+            environment
+                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                    function: FunctionId::from_raw(u32::MAX),
+                    value: instruction.result(),
+                })?
+                .0,
+            *slot,
+            *value,
+            value_types,
+            types,
+        )?,
+    };
+    Ok(line)
+}
+
+pub(crate) fn lower_terminator(
+    terminator: &MirTerminator,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> Result<String, LlvmLoweringError> {
+    let lowered = match terminator {
+        MirTerminator::Branch { target, .. } => format!("br label %b{}", target.raw()),
+        MirTerminator::ConditionalBranch {
+            condition,
+            when_true,
+            when_false,
+        } => format!(
+            "br i1 %v{}, label %b{}, label %b{}",
+            condition.raw(),
+            when_true.raw(),
+            when_false.raw()
+        ),
+        MirTerminator::Return { values: returned } if returned.is_empty() => "ret void".to_owned(),
+        MirTerminator::Return { values: returned } => {
+            let value = returned[0];
+            format!(
+                "ret {} %v{}",
+                llvm_value_type(values, value, types)?,
+                value.raw()
+            )
+        }
+        MirTerminator::Trap(_) => format!(
+            "call void @{}()\n  unreachable",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        MirTerminator::Panic(_) | MirTerminator::ContinueUnwind(_) => format!(
+            "call void @{}()\n  unreachable",
+            native_runtime_symbol(RuntimeOperation::ContinueUnwind)
+        ),
+        MirTerminator::Unreachable | MirTerminator::Missing => "unreachable".to_owned(),
+        MirTerminator::UnionSwitch {
+            scrutinee, arms, ..
+        } => {
+            let tag = format!("%v{}_union_tag", scrutinee.raw());
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "    i64 {}, label %b{}",
+                        arm.case().raw(),
+                        arm.target().raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{tag} = call i64 @{}(i64 %v{}, i64 1)\n  switch i64 {tag}, label %pop_invalid_union [\n{cases}\n  ]",
+                native_runtime_symbol(RuntimeOperation::FieldGet),
+                scrutinee.raw()
+            )
+        }
+    };
+    if matches!(terminator, MirTerminator::Return { .. })
+        && !direct_scalar_arrays.allocations.is_empty()
+    {
+        let releases = direct_scalar_arrays
+            .allocations
+            .keys()
+            .map(|origin| {
+                format!(
+                    "%pop_direct_array_{}_storage = inttoptr i64 %v{} to ptr\n  call void @free(ptr %pop_direct_array_{}_storage)",
+                    origin.raw(),
+                    origin.raw(),
+                    origin.raw()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        Ok(format!("{releases}\n  {lowered}"))
+    } else {
+        Ok(lowered)
+    }
+}
+
+pub(crate) fn lower_checked_integer_binary(
+    result: &str,
+    operation: &str,
+    kind: IntegerKind,
+    left: ValueId,
+    right: ValueId,
+) -> String {
+    let bits = kind.bit_width();
+    let signed = if kind.is_signed() { 's' } else { 'u' };
+    let pair = format!("{result}_checked");
+    let overflow = format!("{result}_overflow");
+    format!(
+        "{pair} = call {{ i{bits}, i1 }} @llvm.{signed}{operation}.with.overflow.i{bits}(i{bits} %v{}, i{bits} %v{})\n{result} = extractvalue {{ i{bits}, i1 }} {pair}, 0\n{overflow} = extractvalue {{ i{bits}, i1 }} {pair}, 1\n{}",
+        left.raw(),
+        right.raw(),
+        lower_trap_edge(result, &overflow)
+    )
+}
+
+pub(crate) fn lower_checked_integer_division(
+    result: &str,
+    operation: &str,
+    kind: IntegerKind,
+    left: ValueId,
+    right: ValueId,
+) -> String {
+    let bits = kind.bit_width();
+    let zero = format!("{result}_zero");
+    let mut lines = vec![format!("{zero} = icmp eq i{bits} %v{}, 0", right.raw())];
+    let invalid = if kind.is_signed() {
+        let minimum = -(1_i128 << (bits - 1));
+        let minimum_value = format!("{result}_minimum");
+        let negative_one = format!("{result}_negative_one");
+        let overflow = format!("{result}_overflow");
+        let invalid = format!("{result}_invalid");
+        lines.extend([
+            format!(
+                "{minimum_value} = icmp eq i{bits} %v{}, {minimum}",
+                left.raw()
+            ),
+            format!("{negative_one} = icmp eq i{bits} %v{}, -1", right.raw()),
+            format!("{overflow} = and i1 {minimum_value}, {negative_one}"),
+            format!("{invalid} = or i1 {zero}, {overflow}"),
+        ]);
+        invalid
+    } else {
+        zero
+    };
+    lines.push(lower_trap_edge(result, &invalid));
+    lines.push(format!(
+        "{result} = {} i{bits} %v{}, %v{}",
+        if kind.is_signed() {
+            format!("s{operation}")
+        } else {
+            format!("u{operation}")
+        },
+        left.raw(),
+        right.raw()
+    ));
+    lines.join("\n")
+}
+
+pub(crate) fn lower_checked_integer_negate(
+    result: &str,
+    kind: IntegerKind,
+    operand: ValueId,
+) -> String {
+    let bits = kind.bit_width();
+    let signed = if kind.is_signed() { 's' } else { 'u' };
+    let pair = format!("{result}_checked");
+    let overflow = format!("{result}_overflow");
+    format!(
+        "{pair} = call {{ i{bits}, i1 }} @llvm.{signed}sub.with.overflow.i{bits}(i{bits} 0, i{bits} %v{})\n{result} = extractvalue {{ i{bits}, i1 }} {pair}, 0\n{overflow} = extractvalue {{ i{bits}, i1 }} {pair}, 1\n{}",
+        operand.raw(),
+        lower_trap_edge(result, &overflow)
+    )
+}
+
+pub(crate) fn lower_trap_edge(result: &str, condition: &str) -> String {
+    let label = result.trim_start_matches('%');
+    let expected = format!("{condition}_expected");
+    format!(
+        "{expected} = call i1 @llvm.expect.i1(i1 {condition}, i1 false)\nbr i1 {expected}, label %{label}_trap, label %{label}_continue\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_continue:",
+        native_runtime_symbol(RuntimeOperation::Trap)
+    )
+}
+
+pub(crate) fn lower_equality(
+    result: &str,
+    left: ValueId,
+    right: ValueId,
+    negated: bool,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let type_id = *values
+        .get(&left)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    if types.get(type_id) == Some(&SemanticType::Primitive(PrimitiveType::String)) {
+        let equal = format!("{result}_string_equal");
+        return Ok(format!(
+            "{equal} = call i8 @pop_rt_string_equal(i64 %v{}, i64 %v{})\n{result} = icmp {} i8 {equal}, 0",
+            left.raw(),
+            right.raw(),
+            if negated { "eq" } else { "ne" }
+        ));
+    }
+    if matches!(
+        types.get(type_id),
+        Some(SemanticType::Tuple(_) | SemanticType::Record(_))
+    ) {
+        return lower_aggregate_equality(
+            result,
+            left,
+            right,
+            type_id,
+            negated,
+            types,
+            record_field_types,
+        );
+    }
+    let ty = llvm_value_type(values, left, types)?;
+    let operator = match (ty.as_str(), negated) {
+        ("float" | "double", false) => "fcmp oeq",
+        ("float" | "double", true) => "fcmp une",
+        (_, false) => "icmp eq",
+        (_, true) => "icmp ne",
+    };
+    Ok(format!(
+        "{result} = {operator} {ty} %v{}, %v{}",
+        left.raw(),
+        right.raw()
+    ))
+}
+
+pub(crate) fn lower_aggregate_equality(
+    result: &str,
+    left: ValueId,
+    right: ValueId,
+    type_id: TypeId,
+    negated: bool,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = Vec::new();
+    let condition = emit_aggregate_equality(
+        &mut lines,
+        result.trim_start_matches('%'),
+        &format!("%v{}", left.raw()),
+        &format!("%v{}", right.raw()),
+        type_id,
+        types,
+        record_field_types,
+    )?;
+    lines.push(if negated {
+        format!("{result} = xor i1 {condition}, true")
+    } else {
+        format!("{result} = xor i1 {condition}, false")
+    });
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn emit_aggregate_equality(
+    lines: &mut Vec<String>,
+    prefix: &str,
+    left: &str,
+    right: &str,
+    type_id: TypeId,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let field_types = match types
+        .get(type_id)
+        .ok_or(LlvmLoweringError::InvalidType(type_id))?
+    {
+        SemanticType::Tuple(elements) => elements.clone(),
+        SemanticType::Record(_) => record_field_types
+            .get(&type_id)
+            .cloned()
+            .ok_or(LlvmLoweringError::InvalidType(type_id))?,
+        _ => return Err(LlvmLoweringError::InvalidType(type_id)),
+    };
+    let mut conditions = Vec::new();
+    for (index, field_type) in field_types.into_iter().enumerate() {
+        let left_field = format!("%{prefix}_{index}_left");
+        let right_field = format!("%{prefix}_{index}_right");
+        lines.extend([
+            format!(
+                "{left_field} = call i64 @{}(i64 {left}, i64 {})",
+                native_runtime_symbol(RuntimeOperation::FieldGet),
+                index + 1
+            ),
+            format!(
+                "{right_field} = call i64 @{}(i64 {right}, i64 {})",
+                native_runtime_symbol(RuntimeOperation::FieldGet),
+                index + 1
+            ),
+        ]);
+        conditions.push(emit_stored_value_equality(
+            lines,
+            &format!("{prefix}_{index}"),
+            &left_field,
+            &right_field,
+            field_type,
+            types,
+            record_field_types,
+        )?);
+    }
+    if conditions.is_empty() {
+        let condition = format!("%{prefix}_empty");
+        lines.push(format!("{condition} = xor i1 0, true"));
+        return Ok(condition);
+    }
+    let mut combined = conditions[0].clone();
+    for (index, condition) in conditions.into_iter().enumerate().skip(1) {
+        let next = format!("%{prefix}_and_{index}");
+        lines.push(format!("{next} = and i1 {combined}, {condition}"));
+        combined = next;
+    }
+    Ok(combined)
+}
+
+pub(crate) fn emit_stored_value_equality(
+    lines: &mut Vec<String>,
+    prefix: &str,
+    left: &str,
+    right: &str,
+    type_id: TypeId,
+    types: &TypeArena,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+) -> Result<String, LlvmLoweringError> {
+    let semantic = types
+        .get(type_id)
+        .ok_or(LlvmLoweringError::InvalidType(type_id))?;
+    if matches!(semantic, SemanticType::Tuple(_) | SemanticType::Record(_)) {
+        return emit_aggregate_equality(
+            lines,
+            prefix,
+            left,
+            right,
+            type_id,
+            types,
+            record_field_types,
+        );
+    }
+    let condition = format!("%{prefix}_equal");
+    match semantic {
+        SemanticType::Primitive(PrimitiveType::String) => {
+            let raw = format!("%{prefix}_string_equal");
+            lines.extend([
+                format!("{raw} = call i8 @pop_rt_string_equal(i64 {left}, i64 {right})"),
+                format!("{condition} = icmp ne i8 {raw}, 0"),
+            ]);
+        }
+        SemanticType::Primitive(PrimitiveType::Float32) => {
+            let left_bits = format!("%{prefix}_left_bits");
+            let right_bits = format!("%{prefix}_right_bits");
+            let left_float = format!("%{prefix}_left_float");
+            let right_float = format!("%{prefix}_right_float");
+            lines.extend([
+                format!("{left_bits} = trunc i64 {left} to i32"),
+                format!("{right_bits} = trunc i64 {right} to i32"),
+                format!("{left_float} = bitcast i32 {left_bits} to float"),
+                format!("{right_float} = bitcast i32 {right_bits} to float"),
+                format!("{condition} = fcmp oeq float {left_float}, {right_float}"),
+            ]);
+        }
+        SemanticType::Primitive(PrimitiveType::Float64) => {
+            let left_float = format!("%{prefix}_left_float");
+            let right_float = format!("%{prefix}_right_float");
+            lines.extend([
+                format!("{left_float} = bitcast i64 {left} to double"),
+                format!("{right_float} = bitcast i64 {right} to double"),
+                format!("{condition} = fcmp oeq double {left_float}, {right_float}"),
+            ]);
+        }
+        _ => lines.push(format!("{condition} = icmp eq i64 {left}, {right}")),
+    }
+    Ok(condition)
+}
+
+pub(crate) fn call_line(
+    result: &str,
+    result_type: Option<TypeId>,
+    callee: &str,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let args = arguments
+        .iter()
+        .map(|value| {
+            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
+    let return_type =
+        result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
+    Ok(format!(
+        "{assignment}call {return_type} {callee}({})",
+        args.join(", ")
+    ))
+}
+
+pub(crate) fn runtime_call(
+    result: &str,
+    result_type: Option<TypeId>,
+    operation: RuntimeOperation,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let args = arguments
+        .iter()
+        .map(|value| {
+            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let return_type =
+        result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
+    let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
+    Ok(format!(
+        "{assignment}call {return_type} @{}({})",
+        native_runtime_symbol(operation),
+        args.join(", ")
+    ))
+}
+
+pub(crate) fn lower_array_create(
+    result: &str,
+    length: ValueId,
+    initial_value: ValueId,
+    element_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let initial_type = *values
+        .get(&initial_value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) = lower_runtime_slot_store(
+        initial_value,
+        initial_type,
+        &llvm_type(initial_type, types)?,
+    )?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!("{result}_length_valid = icmp sge i64 %v{}, 0", length.raw()),
+        format!(
+            "{result}_length_expected = call i1 @llvm.expect.i1(i1 {result}_length_valid, i1 true)"
+        ),
+        format!(
+            "br i1 {result}_length_expected, label %{label}_create, label %{label}_length_trap"
+        ),
+        format!("{label}_length_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_create:"),
+        format!(
+            "  {result} = call i64 @{}(i64 %v{}, i1 {}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::AllocateArrayFilled),
+            length.raw(),
+            u8::from(element_map == ArrayElementMap::ManagedReference)
+        ),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_direct_array_create(
+    result: &str,
+    allocation: DirectScalarArray,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let initial_type = *values
+        .get(&allocation.initial_value)
+        .ok_or(LlvmLoweringError::InvalidType(allocation.element_type))?;
+    if initial_type != allocation.element_type {
+        return Err(LlvmLoweringError::InvalidType(allocation.element_type));
+    }
+    let (mut lines, stored) = lower_runtime_slot_store(
+        allocation.initial_value,
+        initial_type,
+        &llvm_type(initial_type, types)?,
+    )?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_size_pair = call {{ i64, i1 }} @llvm.umul.with.overflow.i64(i64 %v{}, i64 8)",
+            allocation.length.raw()
+        ),
+        format!("{result}_size = extractvalue {{ i64, i1 }} {result}_size_pair, 0"),
+        format!("{result}_size_overflow = extractvalue {{ i64, i1 }} {result}_size_pair, 1"),
+        format!(
+            "{result}_length_nonnegative = icmp sge i64 %v{}, 0",
+            allocation.length.raw()
+        ),
+        format!("{result}_size_valid = xor i1 {result}_size_overflow, true"),
+        format!(
+            "{result}_shape_valid = and i1 {result}_length_nonnegative, {result}_size_valid"
+        ),
+        format!(
+            "{result}_shape_expected = call i1 @llvm.expect.i1(i1 {result}_shape_valid, i1 true)"
+        ),
+        format!(
+            "br i1 {result}_shape_expected, label %{label}_allocate, label %{label}_length_trap"
+        ),
+        format!("{label}_length_trap:"),
+        format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
+        "  unreachable".to_owned(),
+        format!("{label}_allocate:"),
+        format!("  {result}_storage = call noalias ptr @malloc(i64 {result}_size)"),
+        format!(
+            "  {result}_empty = icmp eq i64 %v{}, 0",
+            allocation.length.raw()
+        ),
+        format!("  {result}_allocated = icmp ne ptr {result}_storage, null"),
+        format!(
+            "  {result}_allocation_valid = or i1 {result}_empty, {result}_allocated"
+        ),
+        format!(
+            "  {result}_allocation_expected = call i1 @llvm.expect.i1(i1 {result}_allocation_valid, i1 true)"
+        ),
+        format!(
+            "  br i1 {result}_allocation_expected, label %{label}_initialize, label %{label}_allocation_trap"
+        ),
+        format!("{label}_allocation_trap:"),
+        format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
+        "  unreachable".to_owned(),
+        format!("{label}_initialize:"),
+        format!(
+            "  call void @pop_llvm_fill_scalar_array(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            allocation.length.raw()
+        ),
+        format!("  br label %{label}_create"),
+        format!("{label}_create:"),
+        format!("  {result} = ptrtoint ptr {result}_storage to i64"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_direct_array_length(result: &str, allocation: DirectScalarArray) -> String {
+    let label = result.trim_start_matches('%');
+    format!(
+        "br label %{label}_load\n{label}_load:\n  {result} = add i64 %v{}, 0",
+        allocation.length.raw()
+    )
+}
+
+pub(crate) fn lower_direct_array_get(
+    result: &str,
+    origin: ValueId,
+    allocation: DirectScalarArray,
+    index: ValueId,
+    result_type: TypeId,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let element_type = llvm_type(result_type, types)?;
+    let expected_type = llvm_type(allocation.element_type, types)?;
+    if element_type != expected_type {
+        return Err(LlvmLoweringError::InvalidType(result_type));
+    }
+    let label = result.trim_start_matches('%');
+    let mut lines = vec![
+        format!("{result}_zero_index = sub i64 %v{}, 1", index.raw()),
+        format!(
+            "{result}_in_bounds = icmp ult i64 {result}_zero_index, %v{}",
+            allocation.length.raw()
+        ),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+        format!(
+            "  {result}_storage = inttoptr i64 %v{} to ptr",
+            origin.raw()
+        ),
+        format!(
+            "  {result}_slot = getelementptr i64, ptr {result}_storage, i64 {result}_zero_index"
+        ),
+    ];
+    lines.extend(lower_array_output_load(
+        result,
+        result_type,
+        &format!("{result}_slot"),
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_direct_array_set(
+    result: &str,
+    origin: ValueId,
+    allocation: DirectScalarArray,
+    index: ValueId,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(allocation.element_type))?;
+    if value_type != allocation.element_type {
+        return Err(LlvmLoweringError::InvalidType(allocation.element_type));
+    }
+    let (mut conversion, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    conversion.extend([
+        format!("{result}_zero_index = sub i64 %v{}, 1", index.raw()),
+        format!(
+            "{result}_in_bounds = icmp ult i64 {result}_zero_index, %v{}",
+            allocation.length.raw()
+        ),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!(
+            "  {result}_storage = inttoptr i64 %v{} to ptr",
+            origin.raw()
+        ),
+        format!(
+            "  {result}_slot = getelementptr i64, ptr {result}_storage, i64 {result}_zero_index"
+        ),
+        format!("  store i64 {stored}, ptr {result}_slot, align 8"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(conversion.join("\n"))
+}
+
+pub(crate) fn lower_direct_array_fill(
+    result: &str,
+    origin: ValueId,
+    allocation: DirectScalarArray,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(allocation.element_type))?;
+    if value_type != allocation.element_type {
+        return Err(LlvmLoweringError::InvalidType(allocation.element_type));
+    }
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!("{result}_storage = inttoptr i64 %v{} to ptr", origin.raw()),
+        format!(
+            "call void @pop_llvm_fill_scalar_array(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            allocation.length.raw()
+        ),
+        format!("br label %{label}_continue"),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_array_output_call(
+    result: &str,
+    result_type: TypeId,
+    operation: RuntimeOperation,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let output = format!("{result}_output");
+    let success = format!("{result}_success");
+    let expected = format!("{result}_success_expected");
+    let label = result.trim_start_matches('%');
+    let arguments = arguments
+        .iter()
+        .map(|value| {
+            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut lines = Vec::new();
+    lines.extend([
+        format!(
+            "{success} = call i8 @{}({}, ptr {output})",
+            native_runtime_symbol(operation),
+            arguments.join(", ")
+        ),
+        format!("{success}_condition = icmp ne i8 {success}, 0"),
+        format!("{expected} = call i1 @llvm.expect.i1(i1 {success}_condition, i1 true)"),
+        format!("br i1 {expected}, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+    ]);
+    lines.extend(lower_array_output_load(
+        result,
+        result_type,
+        &output,
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_array_output_load(
+    result: &str,
+    result_type: TypeId,
+    output: &str,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let ty = llvm_type(result_type, types)?;
+    let loaded = format!("{result}_slot");
+    Ok(match ty.as_str() {
+        "i64" => vec![format!("  {result} = load i64, ptr {output}")],
+        "i1" | "i8" | "i16" | "i32" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {result} = trunc i64 {loaded} to {ty}"),
+        ],
+        "float" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {loaded}_bits = trunc i64 {loaded} to i32"),
+            format!("  {result} = bitcast i32 {loaded}_bits to float"),
+        ],
+        "double" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {result} = bitcast i64 {loaded} to double"),
+        ],
+        "ptr" => vec![
+            format!("  {loaded} = load i64, ptr {output}"),
+            format!("  {result} = inttoptr i64 {loaded} to ptr"),
+        ],
+        _ => return Err(LlvmLoweringError::InvalidType(result_type)),
+    })
+}
+
+pub(crate) fn lower_array_fill(
+    result: &str,
+    array: ValueId,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_filled = call i8 @{}(i64 %v{}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::ArrayFill),
+            array.raw()
+        ),
+        format!("{result}_success = icmp ne i8 {result}_filled, 0"),
+        format!("{result}_expected = call i1 @llvm.expect.i1(i1 {result}_success, i1 true)"),
+        format!("br i1 {result}_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_array_set(
+    result: &str,
+    array: ValueId,
+    index: ValueId,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_stored = call i8 @{}(i64 %v{}, i64 %v{}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::ArraySet),
+            array.raw(),
+            index.raw()
+        ),
+        format!("{result}_in_bounds = icmp ne i8 {result}_stored, 0"),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_object_make(
+    result: &str,
+    fields: &[(FieldId, ValueId)],
+    slot_count: u32,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+) -> Result<String, LlvmLoweringError> {
+    let reference_slots = fields
+        .iter()
+        .filter_map(|(field, value)| {
+            values
+                .get(value)
+                .copied()
+                .filter(|type_id| is_managed_type(*type_id, types))
+                .and_then(|_| field_layout.get(field).copied())
+                .map(|slot| slot - 1)
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(result, slot_count, &reference_slots);
+    for (field, value) in fields {
+        let slot = field_layout
+            .get(field)
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (conversions, stored) =
+            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::FieldSet),
+            slot
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_mapped_allocation(
+    result: &str,
+    slot_count: u32,
+    reference_slots: &[u32],
+) -> Vec<String> {
+    if reference_slots.is_empty() {
+        return vec![format!(
+            "{result} = call i64 @pop_rt_allocate_mapped_object(i64 {slot_count}, ptr null, i64 0)"
+        )];
+    }
+    let map = format!("{result}_object_map");
+    let mut lines = vec![format!("{map} = alloca [{} x i32]", reference_slots.len())];
+    for (index, slot) in reference_slots.iter().enumerate() {
+        let entry = format!("{map}_{index}");
+        lines.extend([
+            format!(
+                "{entry} = getelementptr [{} x i32], ptr {map}, i64 0, i64 {index}",
+                reference_slots.len()
+            ),
+            format!("store i32 {slot}, ptr {entry}"),
+        ]);
+    }
+    lines.push(format!(
+        "{result} = call i64 @pop_rt_allocate_mapped_object(i64 {slot_count}, ptr {map}, i64 {})",
+        reference_slots.len()
+    ));
+    lines
+}
+
+pub(crate) fn lower_gc_safe_point(
+    result: &str,
+    safe_point: u32,
+    roots: &[ValueId],
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> String {
+    let roots = roots
+        .iter()
+        .copied()
+        .filter(|root| direct_scalar_arrays.origin(*root).is_none())
+        .collect::<Vec<_>>();
+    let label = result.trim_start_matches('%');
+    let budget = format!("{result}_poll_budget");
+    let remaining = format!("{result}_poll_remaining");
+    let expired = format!("{result}_poll_expired");
+    let expected = format!("{result}_poll_expired_expected");
+    let slow = format!("{label}_poll_slow");
+    let continuation = format!("{label}_poll_continue");
+    let mut lines = vec![
+        format!("{budget} = load i32, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("{remaining} = sub i32 {budget}, 1"),
+        format!("store i32 {remaining}, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("{expired} = icmp eq i32 {remaining}, 0"),
+        format!("{expected} = call i1 @llvm.expect.i1(i1 {expired}, i1 false)"),
+        format!("br i1 {expected}, label %{slow}, label %{continuation}"),
+        format!("{slow}:"),
+        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
+    ];
+    if roots.is_empty() {
+        lines.extend([
+            format!(
+                "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
+                native_runtime_symbol(RuntimeOperation::GcSafePoint)
+            ),
+            format!("br label %{continuation}"),
+            format!("{continuation}:"),
+        ]);
+        return lines.join("\n");
+    }
+    let root_array = format!("{result}_roots");
+    lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
+    for (index, root) in roots.iter().enumerate() {
+        let entry = format!("{root_array}_{index}");
+        lines.extend([
+            format!(
+                "{entry} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                roots.len()
+            ),
+            format!("store i64 %v{}, ptr {entry}", root.raw()),
+        ]);
+    }
+    lines.push(format!(
+        "call i8 @{}(i32 {safe_point}, ptr {root_array}, i64 {})",
+        native_runtime_symbol(RuntimeOperation::GcSafePoint),
+        roots.len()
+    ));
+    lines.extend([
+        format!("br label %{continuation}"),
+        format!("{continuation}:"),
+    ]);
+    lines.join("\n")
+}
+
+pub(crate) fn is_managed_type(type_id: TypeId, types: &TypeArena) -> bool {
+    !matches!(
+        types.get(type_id),
+        Some(
+            SemanticType::Primitive(
+                PrimitiveType::Nil
+                    | PrimitiveType::Boolean
+                    | PrimitiveType::Integer(_)
+                    | PrimitiveType::Float32
+                    | PrimitiveType::Float64
+                    | PrimitiveType::Never
+            ) | SemanticType::Function { .. }
+        )
+    )
+}
+
+pub(crate) fn lower_tuple_make(
+    result: &str,
+    elements: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let reference_slots = elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            values
+                .get(value)
+                .copied()
+                .filter(|type_id| is_managed_type(*type_id, types))
+                .and_then(|_| u32::try_from(index).ok())
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(elements.len())
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        &reference_slots,
+    );
+    for (index, value) in elements.iter().enumerate() {
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (conversions, stored) =
+            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::FieldSet),
+            index + 1
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_record_update(
+    result: &str,
+    record: SymbolId,
+    base: ValueId,
+    updates: &[(FieldId, ValueId)],
+    record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
+    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
+    field_layout: &BTreeMap<FieldId, u32>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let fields = record_fields
+        .get(&record)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let base_type = *values
+        .get(&base)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let reference_slots = record_field_types
+        .get(&base_type)
+        .ok_or(LlvmLoweringError::InvalidType(base_type))?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, type_id)| {
+            is_managed_type(*type_id, types)
+                .then(|| u32::try_from(index).ok())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(fields.len()).map_err(|_| LlvmLoweringError::InvalidType(base_type))?,
+        &reference_slots,
+    );
+    for field in fields {
+        let slot = *field_layout
+            .get(field)
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let stored = if let Some((_, value)) = updates.iter().find(|(updated, _)| updated == field)
+        {
+            let type_id = *values
+                .get(value)
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let (conversions, stored) =
+                lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+            lines.extend(conversions);
+            stored
+        } else {
+            let loaded = format!("{result}_field_{slot}");
+            lines.push(format!(
+                "{loaded} = call i64 @{}(i64 %v{}, i64 {slot})",
+                native_runtime_symbol(RuntimeOperation::FieldGet),
+                base.raw()
+            ));
+            loaded
+        };
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {slot}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::FieldSet)
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_class_make(
+    result: &str,
+    class: ClassId,
+    fields: &[(FieldId, ValueId)],
+    slot_count: u32,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+) -> Result<String, LlvmLoweringError> {
+    let lowered = lower_object_make(result, fields, slot_count, values, types, field_layout)?;
+    let mut lines = lowered.lines().map(str::to_owned).collect::<Vec<_>>();
+    lines.insert(
+        1,
+        format!(
+            "call i8 @{}(i64 {result}, i64 1, i64 {})",
+            native_runtime_symbol(RuntimeOperation::FieldSet),
+            class.raw()
+        ),
+    );
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_union_make(
+    result: &str,
+    case: pop_foundation::UnionCaseId,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let reference_slots = arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            values
+                .get(value)
+                .copied()
+                .filter(|type_id| is_managed_type(*type_id, types))
+                .and_then(|_| u32::try_from(index + 1).ok())
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(arguments.len() + 1)
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        &reference_slots,
+    );
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {})",
+        native_runtime_symbol(RuntimeOperation::FieldSet),
+        case.raw()
+    ));
+    for (index, value) in arguments.iter().enumerate() {
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let ty = llvm_type(type_id, types)?;
+        let (conversions, stored) = lower_runtime_slot_store(*value, type_id, &ty)?;
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::FieldSet),
+            index + 2
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn direct_function_tag(symbol: SymbolId) -> u64 {
+    (1_u64 << 63) | u64::from(symbol.raw())
+}
+
+pub(crate) fn nested_function_tag(
+    owner: SymbolId,
+    function: pop_foundation::NestedFunctionId,
+) -> u64 {
+    ((u64::from(owner.raw()) << 32) | u64::from(function.raw())).saturating_add(1)
+}
+
+pub(crate) fn lower_capture_cell_allocate(
+    result: &str,
+    initial: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let type_id = *values
+        .get(&initial)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (conversions, stored) =
+        lower_runtime_slot_store(initial, type_id, &llvm_type(type_id, types)?)?;
+    let reference_slots = is_managed_type(type_id, types)
+        .then_some(0)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(result, 1, &reference_slots);
+    lines.extend(conversions);
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {stored})",
+        native_runtime_symbol(RuntimeOperation::FieldSet)
+    ));
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_closure_environment_allocate(
+    result: &str,
+    owner: SymbolId,
+    function: pop_foundation::NestedFunctionId,
+    captures: &[pop_mir::MirClosureCapture],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let reference_slots = captures
+        .iter()
+        .filter_map(|capture| {
+            (capture.self_reference()
+                || capture.mode() == pop_mir::MirCaptureMode::Cell
+                || is_managed_type(capture.type_id(), types))
+            .then_some(capture.slot() + 1)
+        })
+        .collect::<Vec<_>>();
+    let mut lines = lower_mapped_allocation(
+        result,
+        u32::try_from(captures.len() + 1)
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        &reference_slots,
+    );
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {})",
+        native_runtime_symbol(RuntimeOperation::FieldSet),
+        nested_function_tag(owner, function)
+    ));
+    for capture in captures {
+        let (conversions, stored) = if capture.self_reference() {
+            (Vec::new(), result.to_owned())
+        } else {
+            let value = capture.value();
+            let type_id = *values
+                .get(&value)
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?
+        };
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::FieldSet),
+            capture.slot() + 2
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_capture_store(
+    owner: &str,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let type_id = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
+    lines.push(format!(
+        "call i8 @{}(i64 {owner}, i64 1, i64 {stored})",
+        native_runtime_symbol(RuntimeOperation::FieldSet)
+    ));
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_capture_load(
+    result: ValueId,
+    result_type: TypeId,
+    environment: &str,
+    slot: u32,
+    mode: pop_mir::MirCaptureMode,
+    self_reference: bool,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    if mode == pop_mir::MirCaptureMode::Value || self_reference {
+        return lower_runtime_slot_load_from(
+            result,
+            result_type,
+            environment,
+            slot as usize + 2,
+            types,
+        )
+        .map(|lines| lines.join("\n"));
+    }
+    let cell = format!("%v{}_cell", result.raw());
+    let mut lines = vec![format!(
+        "{cell} = call i64 @{}(i64 {environment}, i64 {})",
+        native_runtime_symbol(RuntimeOperation::FieldGet),
+        slot + 2
+    )];
+    lines.extend(lower_runtime_slot_load_from(
+        result,
+        result_type,
+        &cell,
+        1,
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_nested_capture_store(
+    environment: &str,
+    slot: u32,
+    value: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let cell = format!("%capture_cell_{}", value.raw());
+    let mut lines = vec![format!(
+        "{cell} = call i64 @{}(i64 {environment}, i64 {})",
+        native_runtime_symbol(RuntimeOperation::FieldGet),
+        slot + 2
+    )];
+    lines.push(lower_capture_store(&cell, value, values, types)?);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_runtime_slot_store(
+    value: ValueId,
+    type_id: TypeId,
+    ty: &str,
+) -> Result<(Vec<String>, String), LlvmLoweringError> {
+    let source = format!("%v{}", value.raw());
+    let converted = format!("%v{}_slot", value.raw());
+    match ty {
+        "i64" => Ok((Vec::new(), source)),
+        "i1" | "i8" | "i16" | "i32" => Ok((
+            vec![format!("{converted} = zext {ty} {source} to i64")],
+            converted,
+        )),
+        "float" => Ok((
+            vec![
+                format!("{converted}_bits = bitcast float {source} to i32"),
+                format!("{converted} = zext i32 {converted}_bits to i64"),
+            ],
+            converted,
+        )),
+        "double" => Ok((
+            vec![format!("{converted} = bitcast double {source} to i64")],
+            converted,
+        )),
+        "ptr" => Ok((
+            vec![format!("{converted} = ptrtoint ptr {source} to i64")],
+            converted,
+        )),
+        _ => Err(LlvmLoweringError::InvalidType(type_id)),
+    }
+}
+
+pub(crate) fn lower_runtime_slot_load(
+    result: ValueId,
+    result_type: TypeId,
+    owner: ValueId,
+    slot: usize,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    lower_runtime_slot_load_from(
+        result,
+        result_type,
+        &format!("%v{}", owner.raw()),
+        slot,
+        types,
+    )
+}
+
+pub(crate) fn lower_runtime_slot_load_from(
+    result: ValueId,
+    result_type: TypeId,
+    owner: &str,
+    slot: usize,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let result = format!("%v{}", result.raw());
+    lower_runtime_slot_load_named(&result, result_type, owner, slot, types)
+}
+
+pub(crate) fn lower_runtime_slot_load_named(
+    result: &str,
+    result_type: TypeId,
+    owner: &str,
+    slot: usize,
+    types: &TypeArena,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let ty = llvm_type(result_type, types)?;
+    let loaded = format!("{result}_slot");
+    let call = format!(
+        "call i64 @{}(i64 {owner}, i64 {slot})",
+        native_runtime_symbol(RuntimeOperation::FieldGet),
+    );
+    Ok(match ty.as_str() {
+        "i64" => vec![format!("{result} = {call}")],
+        "i1" | "i8" | "i16" | "i32" => vec![
+            format!("{loaded} = {call}"),
+            format!("{result} = trunc i64 {loaded} to {ty}"),
+        ],
+        "float" => vec![
+            format!("{loaded} = {call}"),
+            format!("{loaded}_bits = trunc i64 {loaded} to i32"),
+            format!("{result} = bitcast i32 {loaded}_bits to float"),
+        ],
+        "double" => vec![
+            format!("{loaded} = {call}"),
+            format!("{result} = bitcast i64 {loaded} to double"),
+        ],
+        "ptr" => vec![
+            format!("{loaded} = {call}"),
+            format!("{result} = inttoptr i64 {loaded} to ptr"),
+        ],
+        _ => return Err(LlvmLoweringError::InvalidType(result_type)),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn runtime_field_call(
+    result: &str,
+    result_type: Option<TypeId>,
+    operation: RuntimeOperation,
+    base: ValueId,
+    field: FieldId,
+    value: Option<ValueId>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+) -> Result<String, LlvmLoweringError> {
+    let slot = field_layout
+        .get(&field)
+        .ok_or(LlvmLoweringError::InvalidFieldLayout(field))?;
+    let base_type = llvm_value_type(values, base, types)?;
+    if base_type != "i64" {
+        return Err(LlvmLoweringError::InvalidType(*values.get(&base).ok_or(
+            LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)),
+        )?));
+    }
+    if let Some(value) = value {
+        let type_id = *values
+            .get(&value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (mut lines, stored) =
+            lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
+        lines.push(format!(
+            "call i8 @{}(i64 %v{}, i64 {}, i64 {stored})",
+            native_runtime_symbol(operation),
+            base.raw(),
+            slot
+        ));
+        return Ok(lines.join("\n"));
+    }
+    let result_type =
+        result_type.ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    lower_runtime_slot_load_named(
+        result,
+        result_type,
+        &format!("%v{}", base.raw()),
+        *slot as usize,
+        types,
+    )
+    .map(|lines| lines.join("\n"))
+}
+
+pub(crate) fn lower_array_make(
+    result: &str,
+    elements: &[ValueId],
+    element_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {}, {})",
+        native_runtime_symbol(RuntimeOperation::AllocateArray),
+        elements.len(),
+        if matches!(element_map, ArrayElementMap::ManagedReference) {
+            "i1 1"
+        } else {
+            "i1 0"
+        }
+    )];
+    for (index, value) in elements.iter().enumerate() {
+        let type_id = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (conversions, stored) =
+            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
+        lines.extend(conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+            native_runtime_symbol(RuntimeOperation::ArraySet),
+            index + 1
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_table_make(
+    result: &str,
+    entries: &[(ValueId, ValueId)],
+    key_map: ArrayElementMap,
+    value_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let mut lines = vec![format!(
+        "{result} = call i64 @{}(i64 {}, i1 {}, i1 {})",
+        native_runtime_symbol(RuntimeOperation::AllocateTable),
+        entries.len(),
+        u8::from(key_map == ArrayElementMap::ManagedReference),
+        u8::from(value_map == ArrayElementMap::ManagedReference),
+    )];
+    for (entry, (key, value)) in entries.iter().enumerate() {
+        for (offset, item) in [*key, *value].into_iter().enumerate() {
+            let type_id = *values
+                .get(&item)
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let (conversions, stored) =
+                lower_runtime_slot_store(item, type_id, &llvm_type(type_id, types)?)?;
+            lines.extend(conversions);
+            lines.push(format!(
+                "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
+                native_runtime_symbol(RuntimeOperation::FieldSet),
+                entry * 2 + offset + 1
+            ));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn llvm_results(
+    results: &[TypeId],
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    match results {
+        [] => Ok("void".to_owned()),
+        [result] => llvm_type(*result, types),
+        _ => Ok(format!(
+            "{{ {} }}",
+            results
+                .iter()
+                .map(|id| llvm_type(*id, types))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+    }
+}
+
+pub(crate) fn llvm_value_type(
+    values: &BTreeMap<ValueId, TypeId>,
+    value: ValueId,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    llvm_type(
+        *values
+            .get(&value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
+        types,
+    )
+}
+
+pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, LlvmLoweringError> {
+    match types
+        .get(type_id)
+        .ok_or(LlvmLoweringError::InvalidType(type_id))?
+    {
+        SemanticType::Primitive(PrimitiveType::Boolean) => Ok("i1".to_owned()),
+        SemanticType::Primitive(PrimitiveType::Integer(kind)) => {
+            Ok(format!("i{}", kind.bit_width()))
+        }
+        SemanticType::Primitive(PrimitiveType::Float32) => Ok("float".to_owned()),
+        SemanticType::Primitive(PrimitiveType::Float64) => Ok("double".to_owned()),
+        SemanticType::Primitive(PrimitiveType::Never) => Ok("void".to_owned()),
+        _ => Ok("i64".to_owned()),
+    }
+}
+
+pub(crate) fn integer_literal(value: pop_types::IntegerValue) -> String {
+    if value.kind().is_signed() {
+        value.signed().unwrap_or_default().to_string()
+    } else {
+        value.unsigned().unwrap_or_default().to_string()
+    }
+}
+pub(crate) fn float_type(kind: FloatKind) -> &'static str {
+    match kind {
+        FloatKind::Float32 => "float",
+        FloatKind::Float64 => "double",
+    }
+}

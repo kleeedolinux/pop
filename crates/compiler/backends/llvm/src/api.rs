@@ -1,0 +1,215 @@
+//! Public LLVM artifact options, verified emission, and typed backend errors.
+//!
+//! The public boundary exposes artifacts and structured failures, never
+//! Inkwell values or the backend-private lowering representation.
+
+use std::fmt;
+use std::path::Path;
+
+use inkwell::OptimizationLevel;
+use inkwell::context::Context;
+use inkwell::memory_buffer::MemoryBuffer;
+use inkwell::passes::PassBuilderOptions;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
+
+use inkwell::targets::TargetTriple;
+
+use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
+
+use crate::lowering::PrivateModule;
+
+const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LlvmLoweringOptions {
+    pub(crate) emit_comments: bool,
+    pub(crate) entry_point: Option<SymbolId>,
+}
+
+impl LlvmLoweringOptions {
+    #[must_use]
+    pub const fn emit_comments(mut self, emit: bool) -> Self {
+        self.emit_comments = emit;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_entry_point(mut self, symbol: SymbolId) -> Self {
+        self.entry_point = Some(symbol);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmModule {
+    pub(crate) triple: String,
+    pub(crate) private: PrivateModule,
+}
+
+impl LlvmModule {
+    #[must_use]
+    pub fn triple(&self) -> &str {
+        &self.triple
+    }
+
+    /// Parses and verifies the generated textual LLVM module.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when LLVM rejects the backend-private IR.
+    pub fn verify(&self) -> Result<(), LlvmEmissionError> {
+        let context = Context::create();
+        let module = self.parse_module(&context)?;
+        module
+            .verify()
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))
+    }
+
+    /// Verifies this module through LLVM and emits a native object with Inkwell.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if LLVM rejects the private emission, target setup
+    /// fails, or the object cannot be written.
+    pub fn emit_object(&self, path: &Path) -> Result<(), LlvmEmissionError> {
+        Target::initialize_native(&InitializationConfig::default())
+            .map_err(LlvmEmissionError::TargetInitialization)?;
+        let context = Context::create();
+        let module = self.parse_module(&context)?;
+        let triple = TargetTriple::create(&self.triple);
+        module.set_triple(&triple);
+        let target = Target::from_triple(&triple)
+            .map_err(|error| LlvmEmissionError::UnsupportedTarget(error.to_string()))?;
+        let cpu = TargetMachine::get_host_cpu_name().to_string();
+        let features = TargetMachine::get_host_cpu_features().to_string();
+        let machine = target
+            .create_target_machine(
+                &triple,
+                &cpu,
+                &features,
+                OptimizationLevel::Aggressive,
+                RelocMode::PIC,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| LlvmEmissionError::UnsupportedTarget(self.triple.clone()))?;
+        module.set_data_layout(&machine.get_target_data().get_data_layout());
+        module
+            .verify()
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
+
+        let pass_options = PassBuilderOptions::create();
+        pass_options.set_verify_each(true);
+        pass_options.set_loop_interleaving(true);
+        pass_options.set_loop_vectorization(true);
+        pass_options.set_loop_slp_vectorization(true);
+        pass_options.set_loop_unrolling(true);
+        pass_options.set_merge_functions(true);
+        module
+            .run_passes(LLVM_OPTIMIZATION_PIPELINE, &machine, pass_options)
+            .map_err(|error| LlvmEmissionError::Optimization(error.to_string()))?;
+        module
+            .verify()
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))?;
+        machine
+            .write_to_file(&module, FileType::Object, path)
+            .map_err(|error| LlvmEmissionError::ObjectEmission(error.to_string()))
+    }
+
+    fn parse_module<'context>(
+        &self,
+        context: &'context Context,
+    ) -> Result<inkwell::module::Module<'context>, LlvmEmissionError> {
+        let mut text = self.to_string().into_bytes();
+        text.push(0);
+        let buffer = MemoryBuffer::create_from_memory_range_copy(&text, "pop-module");
+        context
+            .create_module_from_ir(buffer)
+            .map_err(|error| LlvmEmissionError::InvalidModule(error.to_string()))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LlvmEmissionError {
+    TargetInitialization(String),
+    UnsupportedTarget(String),
+    InvalidModule(String),
+    Optimization(String),
+    ObjectEmission(String),
+}
+
+impl fmt::Display for LlvmEmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TargetInitialization(error) => {
+                write!(formatter, "LLVM target initialization failed: {error}")
+            }
+            Self::UnsupportedTarget(error) => write!(formatter, "unsupported LLVM target: {error}"),
+            Self::InvalidModule(error) => write!(formatter, "LLVM rejected generated IR: {error}"),
+            Self::Optimization(error) => {
+                write!(formatter, "LLVM optimization failed: {error}")
+            }
+            Self::ObjectEmission(error) => {
+                write!(formatter, "LLVM object emission failed: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LlvmEmissionError {}
+
+impl fmt::Display for LlvmModule {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "; Pop Lang native module")?;
+        writeln!(formatter, "target triple = \"{}\"", self.triple)?;
+        self.private.render(formatter)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LlvmLoweringError {
+    MirVerification(Vec<pop_mir::MirVerificationError>),
+    UnsupportedInstruction {
+        function: FunctionId,
+        value: ValueId,
+    },
+    InvalidType(TypeId),
+    InvalidFieldLayout(FieldId),
+    InvalidEntryPoint(SymbolId),
+    UnsupportedEntryPointSignature(SymbolId),
+}
+
+impl fmt::Display for LlvmLoweringError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MirVerification(errors) => {
+                write!(formatter, "MIR verification failed: {errors:?}")
+            }
+            Self::UnsupportedInstruction { function, value } => write!(
+                formatter,
+                "LLVM backend does not support MIR instruction f{} v{}",
+                function.raw(),
+                value.raw()
+            ),
+            Self::InvalidType(type_id) => write!(formatter, "invalid MIR type t{}", type_id.raw()),
+            Self::InvalidFieldLayout(field) => {
+                write!(formatter, "no LLVM field layout for field f{}", field.raw())
+            }
+            Self::InvalidEntryPoint(symbol) => {
+                write!(
+                    formatter,
+                    "entry point symbol s{} is not defined",
+                    symbol.raw()
+                )
+            }
+            Self::UnsupportedEntryPointSignature(symbol) => write!(
+                formatter,
+                "entry point s{} must accept () or (Array<String>) and return () or Int",
+                symbol.raw()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LlvmLoweringError {}
