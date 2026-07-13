@@ -11,7 +11,7 @@
   <a href="#why-not-luau">Why not Luau?</a> •
   <a href="#language-tour">Language tour</a> •
   <a href="#runtime">Runtime</a> •
-  <a href="#project-status">Status</a>
+  <a href="#project-status">Status</a> •
   <a href="https://discord.gg/m5nUXdTRbh">Discord</a>
 </p>
 
