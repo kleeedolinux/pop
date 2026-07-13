@@ -101,6 +101,7 @@ impl ExpressionSyntax {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExpressionSyntaxKind {
     Integer(String),
+    Float(String),
     String(String),
     Boolean(bool),
     Nil,
@@ -269,7 +270,9 @@ pub enum BinaryOperator {
     Equal,
     NotEqual,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
     Add,
     Subtract,
     Multiply,

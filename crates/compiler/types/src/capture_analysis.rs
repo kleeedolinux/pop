@@ -212,5 +212,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::InterfaceUpcast { value, .. } => {
             finalize_expression_captures(value, written);
         }
+        TypedExpressionKind::NumericConvert { value, .. } => {
+            finalize_expression_captures(value, written);
+        }
     }
 }

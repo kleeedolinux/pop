@@ -129,6 +129,12 @@ Debug:         debugValue, sourceScope
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
 
+Numeric conversion operations carry exact source and target integer/float
+kinds. Checked integer-target conversions name `NumericConversion`; float
+ordering uses ordered comparisons so NaN does not make `<=`/`>=` true. These
+operations never accept a runtime type name or defer conversion selection to a
+backend. See ADR 0040.
+
 Array construction always carries an explicit initial value. Checked reads and
 writes carry `BoundsViolation`; optional reads do not trap for bounds. Scalar
 and managed-element arrays remain distinguishable for optimization and precise
@@ -163,7 +169,8 @@ requires the same deterministic safe-point treatment as every other backedge.
 The initial portable failure/GC encoding is fixed by ADR 0022. Runtime traps
 are closed `TrapKind` values and are not ordinary exceptions. Panic uses a
 runtime-private typed payload. Expected failures continue to use typed result
-values.
+values. ADR 0040 adds `NumericConversion` for checked numeric casts that receive
+NaN, infinity, or an out-of-range value.
 
 ## Attribute representation
 

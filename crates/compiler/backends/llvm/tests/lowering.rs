@@ -4,6 +4,7 @@ use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{lower_hir_bubble, parse_mir_dump};
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
+use std::fmt::Write as _;
 use std::fs;
 use std::process::{Command, Output};
 
@@ -995,6 +996,96 @@ fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
         LlvmLoweringOptions::default().with_entry_point(entry),
     )
     .expect("LLVM lowering")
+}
+
+#[test]
+fn checked_numeric_conversions_and_ordered_comparisons_execute_natively() {
+    let module = native_module(
+        "namespace Main\n\
+         private function main(): Int\n\
+             local wide: Float64 = Float64(41) + 0.75\n\
+             local converted: Int = Int(wide)\n\
+             if wide >= 41.75 and wide <= 41.75 then\n\
+                 return converted + 1\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("sitofp i64"));
+    assert!(text.contains("fptosi double"));
+    assert!(text.contains("fcmp oge double"));
+    assert!(text.contains("fcmp ole double"));
+    let result = link_with_runtime_and_run(&module, "numeric-conversions");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native numeric conversion program failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn invalid_numeric_conversion_traps_before_native_float_to_integer_lowering() {
+    let module = native_module(
+        "namespace Main\n\
+         private function main(): Int\n\
+             local invalid: Byte = Byte(256.0)\n\
+             return Int(invalid)\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("call double @llvm.trunc.f64"));
+    assert!(text.contains("call void @pop_rt_trap()"));
+    assert!(text.contains("fptoui double"));
+    let result = link_with_runtime_and_run(&module, "numeric-conversion-trap");
+    assert!(
+        !result.status.success(),
+        "invalid conversion must trap\n{module}"
+    );
+}
+
+#[test]
+fn every_numeric_conversion_family_emits_valid_llvm() {
+    let module = native_module(&numeric_conversion_matrix_source());
+    let input = std::env::temp_dir().join("pop-backend-llvm-numeric-conversion-matrix.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-numeric-conversion-matrix.bc");
+    fs::write(&input, module.to_string()).expect("write numeric conversion LLVM");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected numeric conversion matrix: {}\n{}",
+        String::from_utf8_lossy(&assembled.stderr),
+        module
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+fn numeric_conversion_matrix_source() -> String {
+    const INTEGERS: [&str; 8] = [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+    ];
+    const FLOATS: [&str; 2] = ["Float32", "Float64"];
+    let mut source = String::from("namespace Main\n");
+    for source_type in INTEGERS.into_iter().chain(FLOATS) {
+        for target_type in INTEGERS.into_iter().chain(FLOATS) {
+            let name = format!("convert{source_type}To{target_type}");
+            writeln!(
+                source,
+                "private function {name}(value: {source_type}): {target_type}\n    return {target_type}(value)\nend"
+            )
+            .expect("source text");
+        }
+    }
+    source.push_str("private function main(): Int\n    return 0\nend\n");
+    source
 }
 
 fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {

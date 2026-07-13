@@ -64,6 +64,7 @@ impl WriteBarrier {
 pub enum TrapKind {
     IntegerOverflow,
     DivisionByZero,
+    NumericConversion,
     BoundsViolation,
     ImpossibleState,
 }

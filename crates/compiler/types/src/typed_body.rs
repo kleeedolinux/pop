@@ -10,7 +10,7 @@ use pop_foundation::{
     StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 
-use crate::{AttributeQuerySubject, FloatValue, IntegerValue};
+use crate::{AttributeQuerySubject, FloatValue, IntegerValue, NumericConversionKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedBody {
@@ -278,6 +278,10 @@ pub enum TypedExpressionKind {
         value: Box<TypedExpression>,
         interface: InterfaceId,
     },
+    NumericConvert {
+        value: Box<TypedExpression>,
+        conversion: NumericConversionKind,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -540,7 +544,9 @@ pub enum TypedBinaryOperator {
     Equal,
     NotEqual,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
     Add,
     Subtract,
     Multiply,

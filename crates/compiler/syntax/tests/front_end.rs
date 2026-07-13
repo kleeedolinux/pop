@@ -44,6 +44,39 @@ fn lexer_preserves_unicode_identifiers_without_an_ascii_only_policy() {
 }
 
 #[test]
+fn lexer_keeps_decimal_exponents_complete_and_member_dots_separate() {
+    // ADR 0040: decimal fractions and exponents are one lossless number token,
+    // while a dot without a following digit remains member punctuation.
+    let source = source("1.5 6.02e23 1_000.25 2e-3 1.value <= 2 >= 1\n");
+    let result = lex(&source);
+
+    assert!(result.diagnostics().is_empty());
+    assert_eq!(result.reconstruct(&source), source.text());
+    let significant = result
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind().is_trivia())
+        .map(|token| (token.kind(), token.text(&source)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        significant,
+        [
+            (TokenKind::Number, "1.5"),
+            (TokenKind::Number, "6.02e23"),
+            (TokenKind::Number, "1_000.25"),
+            (TokenKind::Number, "2e-3"),
+            (TokenKind::Number, "1"),
+            (TokenKind::Dot, "."),
+            (TokenKind::Identifier, "value"),
+            (TokenKind::LessThanEqual, "<="),
+            (TokenKind::Number, "2"),
+            (TokenKind::GreaterThanEqual, ">="),
+            (TokenKind::Number, "1"),
+        ]
+    );
+}
+
+#[test]
 fn parser_builds_header_and_declaration_nodes_without_losing_source() {
     let text = "namespace Demo\n\nusing Pop.Text\n\npublic function greet(name: String): String\n    return name\nend\n";
     let source = source(text);

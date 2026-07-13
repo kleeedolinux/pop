@@ -8,7 +8,8 @@ use std::fmt::Write;
 use pop_foundation::{ClassId, SymbolId, TypeId, UnionCaseId};
 use pop_resolve::Visibility;
 use pop_types::{
-    AttributeConstant, FloatValue, TypeArena, TypedBinaryOperator, TypedUnaryOperator,
+    AttributeConstant, FloatValue, NumericConversionKind, TypeArena, TypedBinaryOperator,
+    TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -533,6 +534,11 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             let _ = write!(output, "convert.interface i{} ", interface.raw());
             dump_expression(output, value, arena);
         }
+        HirExpressionKind::NumericConvert { value, conversion } => {
+            let _ = write!(output, "convert.{}(", conversion_text(*conversion));
+            dump_expression(output, value, arena);
+            output.push(')');
+        }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));
 }
@@ -708,11 +714,30 @@ const fn binary_text(operator: TypedBinaryOperator) -> &'static str {
         TypedBinaryOperator::Equal => "==",
         TypedBinaryOperator::NotEqual => "~=",
         TypedBinaryOperator::LessThan => "<",
+        TypedBinaryOperator::LessThanOrEqual => "<=",
         TypedBinaryOperator::GreaterThan => ">",
+        TypedBinaryOperator::GreaterThanOrEqual => ">=",
         TypedBinaryOperator::Add => "+",
         TypedBinaryOperator::Subtract => "-",
         TypedBinaryOperator::Multiply => "*",
         TypedBinaryOperator::Divide => "/",
         TypedBinaryOperator::Remainder => "%",
+    }
+}
+
+fn conversion_text(conversion: NumericConversionKind) -> String {
+    match conversion {
+        NumericConversionKind::IntegerToInteger { source, target } => {
+            format!("integerToInteger.{source:?}.{target:?}")
+        }
+        NumericConversionKind::IntegerToFloat { source, target } => {
+            format!("integerToFloat.{source:?}.{target:?}")
+        }
+        NumericConversionKind::FloatToInteger { source, target } => {
+            format!("floatToInteger.{source:?}.{target:?}")
+        }
+        NumericConversionKind::FloatToFloat { source, target } => {
+            format!("floatToFloat.{source:?}.{target:?}")
+        }
     }
 }

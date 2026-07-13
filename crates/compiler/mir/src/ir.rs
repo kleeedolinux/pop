@@ -842,6 +842,26 @@ pub enum MirInstructionKind {
         kind: FloatKind,
         operand: ValueId,
     },
+    ConvertInteger {
+        source: IntegerKind,
+        target: IntegerKind,
+        operand: ValueId,
+    },
+    ConvertIntegerToFloat {
+        source: IntegerKind,
+        target: FloatKind,
+        operand: ValueId,
+    },
+    ConvertFloatToInteger {
+        source: FloatKind,
+        target: IntegerKind,
+        operand: ValueId,
+    },
+    ConvertFloat {
+        source: FloatKind,
+        target: FloatKind,
+        operand: ValueId,
+    },
     BooleanAnd {
         left: ValueId,
         right: ValueId,
@@ -863,7 +883,17 @@ pub enum MirInstructionKind {
         left: ValueId,
         right: ValueId,
     },
+    CompareIntegerLessOrEqual {
+        kind: IntegerKind,
+        left: ValueId,
+        right: ValueId,
+    },
     CompareIntegerGreater {
+        kind: IntegerKind,
+        left: ValueId,
+        right: ValueId,
+    },
+    CompareIntegerGreaterOrEqual {
         kind: IntegerKind,
         left: ValueId,
         right: ValueId,
@@ -873,7 +903,17 @@ pub enum MirInstructionKind {
         left: ValueId,
         right: ValueId,
     },
+    CompareFloatLessOrEqual {
+        kind: FloatKind,
+        left: ValueId,
+        right: ValueId,
+    },
     CompareFloatGreater {
+        kind: FloatKind,
+        left: ValueId,
+        right: ValueId,
+    },
+    CompareFloatGreaterOrEqual {
         kind: FloatKind,
         left: ValueId,
         right: ValueId,
@@ -1059,6 +1099,16 @@ impl MirInstructionKind {
             Self::CheckedIntegerDivide { .. } | Self::CheckedIntegerRemainder { .. } => {
                 vec![TrapKind::IntegerOverflow, TrapKind::DivisionByZero]
             }
+            Self::ConvertInteger { source, target, .. }
+                if pop_types::NumericConversionKind::IntegerToInteger {
+                    source: *source,
+                    target: *target,
+                }
+                .may_trap() =>
+            {
+                vec![TrapKind::NumericConversion]
+            }
+            Self::ConvertFloatToInteger { .. } => vec![TrapKind::NumericConversion],
             _ => Vec::new(),
         }
     }

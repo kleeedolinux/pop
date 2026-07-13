@@ -55,7 +55,7 @@ pub(crate) fn direct_scalar_array_fill_function() -> PrivateFunction {
 }
 
 pub(crate) fn checked_integer_declarations() -> Vec<String> {
-    [8_u16, 16, 32, 64]
+    let mut declarations = [8_u16, 16, 32, 64]
         .into_iter()
         .flat_map(|bits| {
             ["sadd", "uadd", "ssub", "usub", "smul", "umul"].map(move |operation| {
@@ -64,7 +64,12 @@ pub(crate) fn checked_integer_declarations() -> Vec<String> {
                 )
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    declarations.extend([
+        "declare float @llvm.trunc.f32(float)".to_owned(),
+        "declare double @llvm.trunc.f64(double)".to_owned(),
+    ]);
+    declarations
 }
 
 pub(crate) fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {

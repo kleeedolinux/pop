@@ -251,11 +251,15 @@ impl BodyParser<'_> {
         let start = token.range().start();
         let end = token.range().end();
         match token.kind() {
-            TokenKind::Number => Ok(self.expression(
-                ExpressionSyntaxKind::Integer(token.text(self.source).to_owned()),
-                start,
-                end,
-            )),
+            TokenKind::Number => {
+                let value = token.text(self.source).to_owned();
+                let kind = if value.contains(['.', 'e', 'E']) {
+                    ExpressionSyntaxKind::Float(value)
+                } else {
+                    ExpressionSyntaxKind::Integer(value)
+                };
+                Ok(self.expression(kind, start, end))
+            }
             TokenKind::String => Ok(self.expression(
                 ExpressionSyntaxKind::String(token.text(self.source).to_owned()),
                 start,
@@ -393,7 +397,9 @@ impl BodyParser<'_> {
             TokenKind::EqualEqual => (BinaryOperator::Equal, 3),
             TokenKind::TildeEqual => (BinaryOperator::NotEqual, 3),
             TokenKind::LessThan => (BinaryOperator::LessThan, 3),
+            TokenKind::LessThanEqual => (BinaryOperator::LessThanOrEqual, 3),
             TokenKind::GreaterThan => (BinaryOperator::GreaterThan, 3),
+            TokenKind::GreaterThanEqual => (BinaryOperator::GreaterThanOrEqual, 3),
             TokenKind::Plus => (BinaryOperator::Add, 4),
             TokenKind::Minus => (BinaryOperator::Subtract, 4),
             TokenKind::Star => (BinaryOperator::Multiply, 5),

@@ -200,3 +200,43 @@ fn optimization_preserves_narrow_overflow_and_folds_unsigned_ordering() {
     assert!(dump.contains("const.boolean true"));
     assert!(verify_mir_bubble(&optimized, front_end.types()).is_ok());
 }
+
+#[test]
+fn optimization_folds_valid_numeric_conversions_and_preserves_conversion_traps() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/conversionOptimization.pop",
+        "namespace Main\n\
+         public function valid(): (Float64, Int, Boolean)\n\
+             return (Float64(41), Int(2.75), 1.5 <= 2.0)\n\
+         end\n\
+         public function invalid(): UInt8\n\
+             return UInt8(256)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let construction =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(construction, front_end.types()).expect("optimized MIR");
+    let dump = optimized.dump();
+
+    assert!(dump.contains("const.float Float64 0x4044800000000000"));
+    assert!(dump.contains("const.integer Int64 2"));
+    assert!(dump.contains("const.boolean true"));
+    assert!(dump.contains("numeric.integerToInteger Int64 UInt8"));
+    assert!(!dump.contains("numeric.integerToFloat"));
+    assert!(!dump.contains("numeric.floatToInteger Float64 Int64"));
+    assert!(!dump.contains("float.compareLessOrEqual"));
+    assert!(verify_mir_bubble(&optimized, front_end.types()).is_ok());
+}

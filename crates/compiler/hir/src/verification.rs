@@ -12,8 +12,8 @@ use pop_foundation::{
 };
 use pop_resolve::Visibility;
 use pop_types::{
-    ClassMethodDispatch, PrimitiveType, SemanticType, TypeArena, TypedBinaryOperator,
-    TypedUnaryOperator,
+    ClassMethodDispatch, FloatKind, NumericConversionKind, PrimitiveType, SemanticType, TypeArena,
+    TypedBinaryOperator, TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -97,6 +97,12 @@ pub enum HirVerificationError {
         left: TypeId,
         right: TypeId,
         result: TypeId,
+        span: SourceSpan,
+    },
+    InvalidNumericConversion {
+        conversion: NumericConversionKind,
+        source: TypeId,
+        target: TypeId,
         span: SourceSpan,
     },
     WrongReturnArity {
@@ -1315,6 +1321,23 @@ impl Verifier<'_> {
                 self.verify_expression(value, visible);
                 self.verify_interface_upcast(*interface, value, expression);
             }
+            HirExpressionKind::NumericConvert { value, conversion } => {
+                self.verify_expression(value, visible);
+                if !valid_numeric_conversion(
+                    *conversion,
+                    value.type_id(),
+                    expression.type_id(),
+                    self.arena,
+                ) {
+                    self.errors
+                        .push(HirVerificationError::InvalidNumericConversion {
+                            conversion: *conversion,
+                            source: value.type_id(),
+                            target: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::Integer(_) | HirExpressionKind::Float(_) => {
                 self.verify_numeric_literal(expression);
             }
@@ -2423,7 +2446,10 @@ fn valid_hir_binary_operator(
         TypedBinaryOperator::Equal | TypedBinaryOperator::NotEqual => {
             left == right && boolean == Some(result) && hir_supports_default_equality(arena, left)
         }
-        TypedBinaryOperator::LessThan | TypedBinaryOperator::GreaterThan => {
+        TypedBinaryOperator::LessThan
+        | TypedBinaryOperator::LessThanOrEqual
+        | TypedBinaryOperator::GreaterThan
+        | TypedBinaryOperator::GreaterThanOrEqual => {
             left == right && boolean == Some(result) && is_hir_numeric(arena, left)
         }
         TypedBinaryOperator::Add
@@ -2435,6 +2461,59 @@ fn valid_hir_binary_operator(
         TypedBinaryOperator::Remainder => {
             left == right && left == result && is_hir_integer(arena, left)
         }
+    }
+}
+
+fn valid_numeric_conversion(
+    conversion: NumericConversionKind,
+    source: TypeId,
+    target: TypeId,
+    arena: &TypeArena,
+) -> bool {
+    match conversion {
+        NumericConversionKind::IntegerToInteger {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            integer_kind(arena, source) == Some(source_kind)
+                && integer_kind(arena, target) == Some(target_kind)
+        }
+        NumericConversionKind::IntegerToFloat {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            integer_kind(arena, source) == Some(source_kind)
+                && float_kind(arena, target) == Some(target_kind)
+        }
+        NumericConversionKind::FloatToInteger {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            float_kind(arena, source) == Some(source_kind)
+                && integer_kind(arena, target) == Some(target_kind)
+        }
+        NumericConversionKind::FloatToFloat {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            float_kind(arena, source) == Some(source_kind)
+                && float_kind(arena, target) == Some(target_kind)
+        }
+    }
+}
+
+fn integer_kind(arena: &TypeArena, type_id: TypeId) -> Option<pop_types::IntegerKind> {
+    match arena.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Some(*kind),
+        _ => None,
+    }
+}
+
+fn float_kind(arena: &TypeArena, type_id: TypeId) -> Option<FloatKind> {
+    match arena.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => Some(FloatKind::Float32),
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => Some(FloatKind::Float64),
+        _ => None,
     }
 }
 
@@ -2737,6 +2816,9 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             collect_cell_captures(right, written);
         }
         HirExpressionKind::InterfaceUpcast { value, .. } => {
+            collect_cell_captures(value, written);
+        }
+        HirExpressionKind::NumericConvert { value, .. } => {
             collect_cell_captures(value, written);
         }
         HirExpressionKind::Integer(_)

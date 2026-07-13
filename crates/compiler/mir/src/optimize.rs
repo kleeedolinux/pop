@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{BlockId, ValueId};
-use pop_types::{IntegerKind, IntegerValue, TypeArena};
+use pop_types::{FloatValue, IntegerKind, IntegerValue, TypeArena};
 
 use super::{
     MirBubble, MirInstruction, MirInstructionKind, MirTerminator, MirVerificationError,
@@ -11,6 +11,7 @@ use super::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Constant {
     Integer(IntegerValue),
+    Float(FloatValue),
     Boolean(bool),
     String(String),
 }
@@ -346,6 +347,10 @@ fn fold_instruction(
         Some(Constant::Boolean(value)) => Some(*value),
         _ => None,
     };
+    let float = |value| match constants.get(&value) {
+        Some(Constant::Float(value)) => Some(*value),
+        _ => None,
+    };
     Some(match kind {
         MirInstructionKind::CheckedIntegerAdd { left, right, .. } => {
             MirInstructionKind::IntegerConstant(integer(*left)?.checked_add(integer(*right)?).ok()?)
@@ -373,6 +378,33 @@ fn fold_instruction(
         MirInstructionKind::IntegerNegate { operand, .. } => {
             MirInstructionKind::IntegerConstant(integer(*operand)?.checked_negate().ok()?)
         }
+        MirInstructionKind::FloatAdd { left, right, .. } => {
+            MirInstructionKind::FloatConstant(float(*left)?.checked_add(float(*right)?).ok()?)
+        }
+        MirInstructionKind::FloatSubtract { left, right, .. } => {
+            MirInstructionKind::FloatConstant(float(*left)?.checked_subtract(float(*right)?).ok()?)
+        }
+        MirInstructionKind::FloatMultiply { left, right, .. } => {
+            MirInstructionKind::FloatConstant(float(*left)?.checked_multiply(float(*right)?).ok()?)
+        }
+        MirInstructionKind::FloatDivide { left, right, .. } => {
+            MirInstructionKind::FloatConstant(float(*left)?.checked_divide(float(*right)?).ok()?)
+        }
+        MirInstructionKind::FloatNegate { operand, .. } => {
+            MirInstructionKind::FloatConstant(float(*operand)?.negate())
+        }
+        MirInstructionKind::ConvertInteger {
+            target, operand, ..
+        } => MirInstructionKind::IntegerConstant(integer(*operand)?.convert(*target).ok()?),
+        MirInstructionKind::ConvertIntegerToFloat {
+            target, operand, ..
+        } => MirInstructionKind::FloatConstant(integer(*operand)?.to_float(*target)),
+        MirInstructionKind::ConvertFloatToInteger {
+            target, operand, ..
+        } => MirInstructionKind::IntegerConstant(float(*operand)?.to_integer(*target).ok()?),
+        MirInstructionKind::ConvertFloat {
+            target, operand, ..
+        } => MirInstructionKind::FloatConstant(float(*operand)?.convert(*target)),
         MirInstructionKind::BooleanNot { operand } => {
             MirInstructionKind::BooleanConstant(!boolean(*operand)?)
         }
@@ -382,12 +414,12 @@ fn fold_instruction(
         MirInstructionKind::BooleanOr { left, right } => {
             MirInstructionKind::BooleanConstant(boolean(*left)? || boolean(*right)?)
         }
-        MirInstructionKind::CompareEqual { left, right } => {
-            MirInstructionKind::BooleanConstant(constants.get(left)? == constants.get(right)?)
-        }
-        MirInstructionKind::CompareNotEqual { left, right } => {
-            MirInstructionKind::BooleanConstant(constants.get(left)? != constants.get(right)?)
-        }
+        MirInstructionKind::CompareEqual { left, right } => MirInstructionKind::BooleanConstant(
+            constant_equal(constants.get(left)?, constants.get(right)?),
+        ),
+        MirInstructionKind::CompareNotEqual { left, right } => MirInstructionKind::BooleanConstant(
+            !constant_equal(constants.get(left)?, constants.get(right)?),
+        ),
         MirInstructionKind::CompareIntegerLess { left, right, .. } => {
             MirInstructionKind::BooleanConstant(
                 integer(*left)?.compare(integer(*right)?).ok()?.is_lt(),
@@ -398,6 +430,48 @@ fn fold_instruction(
                 integer(*left)?.compare(integer(*right)?).ok()?.is_gt(),
             )
         }
+        MirInstructionKind::CompareIntegerLessOrEqual { left, right, .. } => {
+            MirInstructionKind::BooleanConstant(
+                integer(*left)?.compare(integer(*right)?).ok()?.is_le(),
+            )
+        }
+        MirInstructionKind::CompareIntegerGreaterOrEqual { left, right, .. } => {
+            MirInstructionKind::BooleanConstant(
+                integer(*left)?.compare(integer(*right)?).ok()?.is_ge(),
+            )
+        }
+        MirInstructionKind::CompareFloatLess { left, right, .. } => {
+            MirInstructionKind::BooleanConstant(
+                float(*left)?
+                    .partial_compare(float(*right)?)
+                    .ok()?
+                    .is_some_and(std::cmp::Ordering::is_lt),
+            )
+        }
+        MirInstructionKind::CompareFloatLessOrEqual { left, right, .. } => {
+            MirInstructionKind::BooleanConstant(
+                float(*left)?
+                    .partial_compare(float(*right)?)
+                    .ok()?
+                    .is_some_and(std::cmp::Ordering::is_le),
+            )
+        }
+        MirInstructionKind::CompareFloatGreater { left, right, .. } => {
+            MirInstructionKind::BooleanConstant(
+                float(*left)?
+                    .partial_compare(float(*right)?)
+                    .ok()?
+                    .is_some_and(std::cmp::Ordering::is_gt),
+            )
+        }
+        MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. } => {
+            MirInstructionKind::BooleanConstant(
+                float(*left)?
+                    .partial_compare(float(*right)?)
+                    .ok()?
+                    .is_some_and(std::cmp::Ordering::is_ge),
+            )
+        }
         _ => return None,
     })
 }
@@ -405,10 +479,20 @@ fn fold_instruction(
 fn constant_from_instruction(kind: &MirInstructionKind) -> Option<Constant> {
     Some(match kind {
         MirInstructionKind::IntegerConstant(value) => Constant::Integer(*value),
+        MirInstructionKind::FloatConstant(value) => Constant::Float(*value),
         MirInstructionKind::BooleanConstant(value) => Constant::Boolean(*value),
         MirInstructionKind::StringConstant(value) => Constant::String(value.clone()),
         _ => return None,
     })
+}
+
+fn constant_equal(left: &Constant, right: &Constant) -> bool {
+    match (left, right) {
+        (Constant::Float(left), Constant::Float(right)) => left
+            .partial_compare(*right)
+            .is_ok_and(|ordering| ordering.is_some_and(std::cmp::Ordering::is_eq)),
+        _ => left == right,
+    }
 }
 
 fn remove_unreachable_blocks(function: &mut super::MirFunction) {

@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use pop_foundation::{AttributeId, FieldId, FunctionId, LocalId, TypeId};
 use pop_types::{
-    AttributeConstant, AttributeQueryIndex, FloatKind, PrimitiveType, ResolvedAttribute,
-    SemanticType, TypeArena,
+    AttributeConstant, AttributeQueryIndex, FloatKind, NumericConversionKind, PrimitiveType,
+    ResolvedAttribute, SemanticType, TypeArena,
 };
 
 use crate::model::*;
@@ -160,6 +160,11 @@ pub enum ProgramError {
         right: TypeId,
         result: TypeId,
     },
+    InvalidNumericConversion {
+        conversion: NumericConversionKind,
+        source: TypeId,
+        target: TypeId,
+    },
 }
 
 struct ExpressionVerifier<'program> {
@@ -227,6 +232,21 @@ impl ExpressionVerifier<'_> {
                 left,
                 right,
             } => self.verify_binary(*operator, left, right, expression.type_id(), locals)?,
+            CompileTimeExpressionKind::NumericConvert { conversion, value } => {
+                self.verify(value, locals)?;
+                if !valid_numeric_conversion(
+                    *conversion,
+                    value.type_id(),
+                    expression.type_id(),
+                    self.types,
+                ) {
+                    return Err(ProgramError::InvalidNumericConversion {
+                        conversion: *conversion,
+                        source: value.type_id(),
+                        target: expression.type_id(),
+                    });
+                }
+            }
             CompileTimeExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -559,7 +579,10 @@ fn valid_binary_operator(
         | CompileTimeBinaryOperator::FloatSubtract
         | CompileTimeBinaryOperator::FloatMultiply
         | CompileTimeBinaryOperator::FloatDivide => left == result && is_float_type(types, left),
-        CompileTimeBinaryOperator::LessThan | CompileTimeBinaryOperator::GreaterThan => {
+        CompileTimeBinaryOperator::LessThan
+        | CompileTimeBinaryOperator::LessThanOrEqual
+        | CompileTimeBinaryOperator::GreaterThan
+        | CompileTimeBinaryOperator::GreaterThanOrEqual => {
             (is_integer_type(types, left) || is_float_type(types, left))
                 && boolean_type(types) == Ok(result)
         }
@@ -569,6 +592,59 @@ fn valid_binary_operator(
         CompileTimeBinaryOperator::And | CompileTimeBinaryOperator::Or => {
             boolean_type(types) == Ok(left) && left == result
         }
+    }
+}
+
+fn valid_numeric_conversion(
+    conversion: NumericConversionKind,
+    source: TypeId,
+    target: TypeId,
+    types: &TypeArena,
+) -> bool {
+    match conversion {
+        NumericConversionKind::IntegerToInteger {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            integer_kind(types, source) == Some(source_kind)
+                && integer_kind(types, target) == Some(target_kind)
+        }
+        NumericConversionKind::IntegerToFloat {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            integer_kind(types, source) == Some(source_kind)
+                && float_kind(types, target) == Some(target_kind)
+        }
+        NumericConversionKind::FloatToInteger {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            float_kind(types, source) == Some(source_kind)
+                && integer_kind(types, target) == Some(target_kind)
+        }
+        NumericConversionKind::FloatToFloat {
+            source: source_kind,
+            target: target_kind,
+        } => {
+            float_kind(types, source) == Some(source_kind)
+                && float_kind(types, target) == Some(target_kind)
+        }
+    }
+}
+
+fn integer_kind(types: &TypeArena, type_id: TypeId) -> Option<pop_types::IntegerKind> {
+    match types.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Some(*kind),
+        _ => None,
+    }
+}
+
+fn float_kind(types: &TypeArena, type_id: TypeId) -> Option<FloatKind> {
+    match types.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => Some(FloatKind::Float32),
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => Some(FloatKind::Float64),
+        _ => None,
     }
 }
 

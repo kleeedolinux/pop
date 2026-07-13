@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_foundation::{
     AttributeId, FieldId, FunctionId, LocalId, ModuleId, SourceSpan, SymbolId, TypeId, UnionCaseId,
 };
-use pop_types::{AttributeQuerySubject, FloatValue, IntegerValue};
+use pop_types::{AttributeQuerySubject, FloatValue, IntegerValue, NumericConversionKind};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CompileTimeValue {
@@ -143,7 +143,7 @@ pub enum CompileTimeDependency {
     },
 }
 
-pub const COMPILE_TIME_IR_VERSION: u32 = 1;
+pub const COMPILE_TIME_IR_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompileTimeBinaryOperator {
@@ -159,7 +159,9 @@ pub enum CompileTimeBinaryOperator {
     Equal,
     NotEqual,
     LessThan,
+    LessThanOrEqual,
     GreaterThan,
+    GreaterThanOrEqual,
     And,
     Or,
 }
@@ -257,6 +259,23 @@ impl CompileTimeExpression {
             kind: CompileTimeExpressionKind::Unary {
                 operator,
                 operand: Box::new(operand),
+            },
+            type_id,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub fn numeric_convert(
+        conversion: NumericConversionKind,
+        value: Self,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            kind: CompileTimeExpressionKind::NumericConvert {
+                conversion,
+                value: Box::new(value),
             },
             type_id,
             span,
@@ -364,6 +383,10 @@ pub enum CompileTimeExpressionKind {
         operator: CompileTimeBinaryOperator,
         left: Box<CompileTimeExpression>,
         right: Box<CompileTimeExpression>,
+    },
+    NumericConvert {
+        conversion: NumericConversionKind,
+        value: Box<CompileTimeExpression>,
     },
     Conditional {
         condition: Box<CompileTimeExpression>,

@@ -16,7 +16,8 @@ use pop_resolve::Visibility;
 use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
     ClassMethodDispatch, FieldDefault, FloatValue, IntegerValue, InterfaceDefinition,
-    RecordDefinition, TypeArena, TypedBinaryOperator, TypedUnaryOperator, UnionDefinition,
+    NumericConversionKind, RecordDefinition, TypeArena, TypedBinaryOperator, TypedUnaryOperator,
+    UnionDefinition,
 };
 
 use crate::lowering::lower_interface_implementation;
@@ -1522,6 +1523,10 @@ pub enum HirExpressionKind {
     InterfaceUpcast {
         value: Box<HirExpression>,
         interface: InterfaceId,
+    },
+    NumericConvert {
+        value: Box<HirExpression>,
+        conversion: NumericConversionKind,
     },
 }
 

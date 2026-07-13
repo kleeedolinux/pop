@@ -106,6 +106,36 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::FloatNegate { kind, operand } => {
             format!("{result} = fneg {} %v{}", float_type(*kind), operand.raw())
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => lower_integer_conversion(&result, *source, *target, *operand),
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => format!(
+            "{result} = {} i{} %v{} to {}",
+            if source.is_signed() {
+                "sitofp"
+            } else {
+                "uitofp"
+            },
+            source.bit_width(),
+            operand.raw(),
+            float_type(*target)
+        ),
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => lower_float_to_integer_conversion(&result, *source, *target, *operand),
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => lower_float_conversion(&result, *source, *target, *operand),
         MirInstructionKind::BooleanNot { operand } => {
             format!("{result} = xor i1 %v{}, true", operand.raw())
         }
@@ -147,6 +177,20 @@ pub(crate) fn lower_instruction(
             left.raw(),
             right.raw()
         ),
+        MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right } => format!(
+            "{result} = icmp {} i{} %v{}, %v{}",
+            if kind.is_signed() { "sle" } else { "ule" },
+            kind.bit_width(),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => format!(
+            "{result} = icmp {} i{} %v{}, %v{}",
+            if kind.is_signed() { "sge" } else { "uge" },
+            kind.bit_width(),
+            left.raw(),
+            right.raw()
+        ),
         MirInstructionKind::CompareFloatLess { kind, left, right } => format!(
             "{result} = fcmp olt {} %v{}, %v{}",
             float_type(*kind),
@@ -155,6 +199,18 @@ pub(crate) fn lower_instruction(
         ),
         MirInstructionKind::CompareFloatGreater { kind, left, right } => format!(
             "{result} = fcmp ogt {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareFloatLessOrEqual { kind, left, right } => format!(
+            "{result} = fcmp ole {} %v{}, %v{}",
+            float_type(*kind),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => format!(
+            "{result} = fcmp oge {} %v{}, %v{}",
             float_type(*kind),
             left.raw(),
             right.raw()
@@ -678,6 +734,157 @@ pub(crate) fn lower_checked_integer_negate(
         operand.raw(),
         lower_trap_edge(result, &overflow)
     )
+}
+
+pub(crate) fn lower_integer_conversion(
+    result: &str,
+    source: IntegerKind,
+    target: IntegerKind,
+    operand: ValueId,
+) -> String {
+    let source_bits = source.bit_width();
+    let target_bits = target.bit_width();
+    let value = format!("%v{}", operand.raw());
+    let conversion = if source_bits == target_bits {
+        format!("{result} = add i{target_bits} 0, {value}")
+    } else if source_bits < target_bits {
+        format!(
+            "{result} = {} i{source_bits} {value} to i{target_bits}",
+            if source.is_signed() { "sext" } else { "zext" }
+        )
+    } else {
+        format!("{result} = trunc i{source_bits} {value} to i{target_bits}")
+    };
+
+    let invalid = match (source.is_signed(), target.is_signed()) {
+        (true, true) if target_bits < source_bits => {
+            let below = format!("{result}_below");
+            let above = format!("{result}_above");
+            let invalid = format!("{result}_invalid");
+            let minimum = -(1_i128 << (target_bits - 1));
+            let maximum = (1_i128 << (target_bits - 1)) - 1;
+            Some((
+                vec![
+                    format!("{below} = icmp slt i{source_bits} {value}, {minimum}"),
+                    format!("{above} = icmp sgt i{source_bits} {value}, {maximum}"),
+                    format!("{invalid} = or i1 {below}, {above}"),
+                ],
+                invalid,
+            ))
+        }
+        (false, false) if target_bits < source_bits => {
+            let invalid = format!("{result}_invalid");
+            let maximum = (1_u128 << target_bits) - 1;
+            Some((
+                vec![format!(
+                    "{invalid} = icmp ugt i{source_bits} {value}, {maximum}"
+                )],
+                invalid,
+            ))
+        }
+        (true, false) => {
+            let negative = format!("{result}_negative");
+            let invalid = format!("{result}_invalid");
+            let mut lines = vec![format!("{negative} = icmp slt i{source_bits} {value}, 0")];
+            if target_bits < source_bits {
+                let above = format!("{result}_above");
+                let maximum = (1_u128 << target_bits) - 1;
+                lines.extend([
+                    format!("{above} = icmp sgt i{source_bits} {value}, {maximum}"),
+                    format!("{invalid} = or i1 {negative}, {above}"),
+                ]);
+            } else {
+                lines.push(format!("{invalid} = xor i1 {negative}, false"));
+            }
+            Some((lines, invalid))
+        }
+        (false, true) if target_bits <= source_bits => {
+            let invalid = format!("{result}_invalid");
+            let maximum = (1_u128 << (target_bits - 1)) - 1;
+            Some((
+                vec![format!(
+                    "{invalid} = icmp ugt i{source_bits} {value}, {maximum}"
+                )],
+                invalid,
+            ))
+        }
+        _ => None,
+    };
+    if let Some((mut lines, invalid)) = invalid {
+        lines.push(lower_trap_edge(result, &invalid));
+        lines.push(conversion);
+        lines.join("\n")
+    } else {
+        conversion
+    }
+}
+
+pub(crate) fn lower_float_to_integer_conversion(
+    result: &str,
+    source: FloatKind,
+    target: IntegerKind,
+    operand: ValueId,
+) -> String {
+    let float = float_type(source);
+    let intrinsic_suffix = match source {
+        FloatKind::Float32 => "f32",
+        FloatKind::Float64 => "f64",
+    };
+    let bits = target.bit_width();
+    let truncated = format!("{result}_truncated");
+    let below_limit = format!("{result}_below_limit");
+    let above_limit = format!("{result}_above_limit");
+    let in_range = format!("{result}_in_range");
+    let invalid = format!("{result}_invalid");
+    let lower = if target.is_signed() {
+        format!("-{}", 1_u128 << (bits - 1))
+    } else {
+        "0".to_owned()
+    };
+    let upper_exclusive = if target.is_signed() {
+        1_u128 << (bits - 1)
+    } else {
+        1_u128 << bits
+    };
+    let conversion = if target.is_signed() {
+        "fptosi"
+    } else {
+        "fptoui"
+    };
+    [
+        format!(
+            "{truncated} = call {float} @llvm.trunc.{intrinsic_suffix}({float} %v{})",
+            operand.raw()
+        ),
+        format!("{below_limit} = fcmp oge {float} {truncated}, {lower}.0"),
+        format!("{above_limit} = fcmp olt {float} {truncated}, {upper_exclusive}.0"),
+        format!("{in_range} = and i1 {below_limit}, {above_limit}"),
+        format!("{invalid} = xor i1 {in_range}, true"),
+        lower_trap_edge(result, &invalid),
+        format!("{result} = {conversion} {float} {truncated} to i{bits}"),
+    ]
+    .join("\n")
+}
+
+pub(crate) fn lower_float_conversion(
+    result: &str,
+    source: FloatKind,
+    target: FloatKind,
+    operand: ValueId,
+) -> String {
+    match (source, target) {
+        (FloatKind::Float32, FloatKind::Float64) => {
+            format!("{result} = fpext float %v{} to double", operand.raw())
+        }
+        (FloatKind::Float64, FloatKind::Float32) => {
+            format!("{result} = fptrunc double %v{} to float", operand.raw())
+        }
+        _ => format!(
+            "{result} = fadd {} %v{}, 0.0",
+            float_type(source),
+            operand.raw()
+        ),
+    }
 }
 
 pub(crate) fn lower_trap_edge(result: &str, condition: &str) -> String {

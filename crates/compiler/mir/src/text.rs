@@ -1307,6 +1307,7 @@ fn parse_trap_kind(text: &str, line: usize) -> Result<TrapKind, MirParseError> {
     match text {
         "IntegerOverflow" => Ok(TrapKind::IntegerOverflow),
         "DivisionByZero" => Ok(TrapKind::DivisionByZero),
+        "NumericConversion" => Ok(TrapKind::NumericConversion),
         "BoundsViolation" => Ok(TrapKind::BoundsViolation),
         "ImpossibleState" => Ok(TrapKind::ImpossibleState),
         _ => Err(error(line, "trap kind")),
@@ -1376,10 +1377,37 @@ fn parse_numeric_operation(
     text: &str,
     line: usize,
 ) -> Result<Option<MirInstructionKind>, MirParseError> {
-    if !(text.starts_with("integer.") || text.starts_with("float.")) {
+    if !(text.starts_with("integer.") || text.starts_with("float.") || text.starts_with("numeric."))
+    {
         return Ok(None);
     }
     let parts = text.split_whitespace().collect::<Vec<_>>();
+    if parts.len() == 4 && parts[0].starts_with("numeric.") {
+        let operand = ValueId::from_raw(parse_prefixed(parts[3], 'v', line)?);
+        return Ok(Some(match parts[0] {
+            "numeric.integerToInteger" => MirInstructionKind::ConvertInteger {
+                source: parse_integer_kind(parts[1], line)?,
+                target: parse_integer_kind(parts[2], line)?,
+                operand,
+            },
+            "numeric.integerToFloat" => MirInstructionKind::ConvertIntegerToFloat {
+                source: parse_integer_kind(parts[1], line)?,
+                target: parse_float_kind(parts[2], line)?,
+                operand,
+            },
+            "numeric.floatToInteger" => MirInstructionKind::ConvertFloatToInteger {
+                source: parse_float_kind(parts[1], line)?,
+                target: parse_integer_kind(parts[2], line)?,
+                operand,
+            },
+            "numeric.floatToFloat" => MirInstructionKind::ConvertFloat {
+                source: parse_float_kind(parts[1], line)?,
+                target: parse_float_kind(parts[2], line)?,
+                operand,
+            },
+            _ => return Err(error(line, "unknown numeric conversion")),
+        }));
+    }
     if parts.len() == 3 && matches!(parts[0], "integer.negate" | "float.negate") {
         let operand = ValueId::from_raw(parse_prefixed(parts[2], 'v', line)?);
         return Ok(Some(match parts[0] {
@@ -1430,7 +1458,17 @@ fn parse_numeric_operation(
             left,
             right,
         },
+        "integer.compareLessOrEqual" => MirInstructionKind::CompareIntegerLessOrEqual {
+            kind: parse_integer_kind(parts[1], line)?,
+            left,
+            right,
+        },
         "integer.compareGreater" => MirInstructionKind::CompareIntegerGreater {
+            kind: parse_integer_kind(parts[1], line)?,
+            left,
+            right,
+        },
+        "integer.compareGreaterOrEqual" => MirInstructionKind::CompareIntegerGreaterOrEqual {
             kind: parse_integer_kind(parts[1], line)?,
             left,
             right,
@@ -1460,7 +1498,17 @@ fn parse_numeric_operation(
             left,
             right,
         },
+        "float.compareLessOrEqual" => MirInstructionKind::CompareFloatLessOrEqual {
+            kind: parse_float_kind(parts[1], line)?,
+            left,
+            right,
+        },
         "float.compareGreater" => MirInstructionKind::CompareFloatGreater {
+            kind: parse_float_kind(parts[1], line)?,
+            left,
+            right,
+        },
+        "float.compareGreaterOrEqual" => MirInstructionKind::CompareFloatGreaterOrEqual {
             kind: parse_float_kind(parts[1], line)?,
             left,
             right,

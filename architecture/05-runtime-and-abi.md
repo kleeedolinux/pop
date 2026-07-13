@@ -112,6 +112,12 @@ The runtime is expected to own or coordinate:
 Arithmetic on unboxed primitives, direct calls, fixed field access, and other
 simple operations should not require runtime calls.
 
+The closed portable trap vocabulary includes `NumericConversion` for a checked
+integer target that cannot represent its input. Backends perform the conversion
+directly where possible, but must raise that same trap for out-of-range integer
+casts and for NaN, infinity, or out-of-range float-to-integer casts. See ADR
+0040.
+
 ## Object model
 
 An ordinary class instance has a backend-selected header followed by declared

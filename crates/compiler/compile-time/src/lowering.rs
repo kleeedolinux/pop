@@ -226,6 +226,14 @@ impl TypedCompileTimeLowerer<'_> {
                     span,
                 ))
             }
+            TypedExpressionKind::NumericConvert { value, conversion } => {
+                Ok(CompileTimeExpression::numeric_convert(
+                    *conversion,
+                    self.lower_expression(value)?,
+                    type_id,
+                    span,
+                ))
+            }
             TypedExpressionKind::DirectCall {
                 function,
                 arguments,
@@ -345,7 +353,11 @@ impl TypedCompileTimeLowerer<'_> {
             TypedBinaryOperator::Equal => Ok(CompileTimeBinaryOperator::Equal),
             TypedBinaryOperator::NotEqual => Ok(CompileTimeBinaryOperator::NotEqual),
             TypedBinaryOperator::LessThan => Ok(CompileTimeBinaryOperator::LessThan),
+            TypedBinaryOperator::LessThanOrEqual => Ok(CompileTimeBinaryOperator::LessThanOrEqual),
             TypedBinaryOperator::GreaterThan => Ok(CompileTimeBinaryOperator::GreaterThan),
+            TypedBinaryOperator::GreaterThanOrEqual => {
+                Ok(CompileTimeBinaryOperator::GreaterThanOrEqual)
+            }
             TypedBinaryOperator::And => Ok(CompileTimeBinaryOperator::And),
             TypedBinaryOperator::Or => Ok(CompileTimeBinaryOperator::Or),
             TypedBinaryOperator::Add
@@ -464,6 +476,7 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::Tuple(_)
         | TypedExpressionKind::Unary { .. }
         | TypedExpressionKind::Binary { .. }
+        | TypedExpressionKind::NumericConvert { .. }
         | TypedExpressionKind::DirectCall { .. } => {
             unreachable!("supported expression is not routed to the unsupported lowerer")
         }

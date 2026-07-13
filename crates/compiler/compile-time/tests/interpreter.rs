@@ -2,9 +2,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use pop_compile_time::{
-    CompileTimeBinaryOperator, CompileTimeBudget, CompileTimeDependency, CompileTimeExpression,
-    CompileTimeFunction, CompileTimeHandleKind, CompileTimeInterpreter, CompileTimeProgram,
-    CompileTimeTypeMetadata, CompileTimeUnaryOperator, CompileTimeValue,
+    COMPILE_TIME_IR_VERSION, CompileTimeBinaryOperator, CompileTimeBudget, CompileTimeDependency,
+    CompileTimeExpression, CompileTimeFunction, CompileTimeHandleKind, CompileTimeInterpreter,
+    CompileTimeProgram, CompileTimeTypeMetadata, CompileTimeUnaryOperator, CompileTimeValue,
     DEFAULT_MAXIMUM_DIAGNOSTICS, DEFAULT_MAXIMUM_LIVE_VALUES, DEFAULT_MAXIMUM_OUTPUT_BYTES,
     EvaluationError, EvaluationFailureKind, ProgramError,
 };
@@ -13,7 +13,10 @@ use pop_foundation::{
     UnionCaseId,
 };
 use pop_query::{BudgetError, QueryBudget};
-use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue, SemanticType, TypeArena};
+use pop_types::{
+    FloatKind, FloatValue, IntegerKind, IntegerValue, NumericConversionKind, SemanticType,
+    TypeArena,
+};
 
 fn span() -> SourceSpan {
     SourceSpan::new(FileId::from_raw(0), TextRange::empty(TextSize::from_u32(0)))
@@ -423,7 +426,7 @@ fn canonical_arguments_are_explicit_transitive_dependencies() {
             .dependencies()
             .contains(&CompileTimeDependency::Compiler {
                 compiler_version: env!("CARGO_PKG_VERSION"),
-                compile_time_ir_version: 1,
+                compile_time_ir_version: COMPILE_TIME_IR_VERSION,
             })
     );
     assert!(
@@ -808,6 +811,76 @@ fn float_evaluation_preserves_ieee_width_without_adding_float_equality() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn explicit_numeric_conversions_and_complete_ordering_evaluate_at_compile_time() {
+    let arena = TypeArena::new();
+    let int = arena.source_type("Int").expect("Int");
+    let uint8 = arena.source_type("UInt8").expect("UInt8");
+    let float64 = arena.source_type("Float64").expect("Float64");
+    let boolean = arena.source_type("Boolean").expect("Boolean");
+    let conversion = CompileTimeFunction::new(
+        FunctionId::from_raw(0),
+        Vec::new(),
+        int,
+        CompileTimeExpression::numeric_convert(
+            NumericConversionKind::FloatToInteger {
+                source: FloatKind::Float64,
+                target: IntegerKind::Int64,
+            },
+            constant(float("-12.75", FloatKind::Float64), float64),
+            int,
+            span(),
+        ),
+    );
+    let ordering = CompileTimeFunction::new(
+        FunctionId::from_raw(1),
+        Vec::new(),
+        boolean,
+        CompileTimeExpression::binary(
+            CompileTimeBinaryOperator::LessThanOrEqual,
+            constant(float("1.5", FloatKind::Float64), float64),
+            constant(float("1.5", FloatKind::Float64), float64),
+            boolean,
+            span(),
+        ),
+    );
+    let invalid = CompileTimeFunction::new(
+        FunctionId::from_raw(2),
+        Vec::new(),
+        uint8,
+        CompileTimeExpression::numeric_convert(
+            NumericConversionKind::IntegerToInteger {
+                source: IntegerKind::Int64,
+                target: IntegerKind::UInt8,
+            },
+            constant(integer("256", IntegerKind::Int64), int),
+            uint8,
+            span(),
+        ),
+    );
+    let program = CompileTimeProgram::new(vec![conversion, ordering, invalid], &arena)
+        .expect("verified conversions");
+    let eligible = BTreeSet::from([
+        FunctionId::from_raw(0),
+        FunctionId::from_raw(1),
+        FunctionId::from_raw(2),
+    ]);
+    let evaluate = |function| {
+        CompileTimeInterpreter::new(&program, &eligible, QueryBudget::new(100, 1024, 8))
+            .evaluate(FunctionId::from_raw(function), &[])
+    };
+
+    assert_eq!(
+        evaluate(0).expect("conversion").value(),
+        &integer("-12", IntegerKind::Int64)
+    );
+    assert_eq!(
+        evaluate(1).expect("ordering").value(),
+        &CompileTimeValue::Boolean(true)
+    );
+    assert_eq!(evaluate(2), Err(EvaluationError::IntegerOverflow));
 }
 
 #[test]

@@ -5,8 +5,8 @@ use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaratio
 use pop_source::SourceFile;
 use pop_syntax::{NodeKind, parse_file, parse_function_body, parse_function_signature};
 use pop_types::{
-    BodyChecker, CaptureMode, SemanticType, SignatureResolver, TypedExpressionKind,
-    TypedStatementKind, embedded_bootstrap_schema,
+    BodyChecker, CaptureMode, FloatKind, NumericConversionKind, SemanticType, SignatureResolver,
+    TypedBinaryOperator, TypedExpressionKind, TypedStatementKind, embedded_bootstrap_schema,
 };
 
 struct CheckedFixture {
@@ -221,6 +221,109 @@ fn reports_unknown_values_wrong_call_arity_and_invalid_operands() {
                 .result
                 .diagnostic_snapshot()
                 .starts_with(expected_code)
+        );
+    }
+}
+
+#[test]
+fn types_decimal_literals_ordering_and_explicit_numeric_conversions() {
+    // ADR 0040: an unhinted decimal is Float64, an annotation may select
+    // Float32, and target-type calls become explicit typed conversions.
+    let fixture = check_function(
+        "namespace Example\n\
+         public function convert(count: Int): Boolean\n\
+             local defaultRatio = 1.5\n\
+             local compactRatio: Float32 = 1.5\n\
+             local converted = Float64(count)\n\
+             local narrowed = Int32(converted)\n\
+             return converted <= defaultRatio and converted >= Float64(compactRatio)\n\
+         end\n",
+        "convert",
+    );
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let body = fixture.result.body().expect("typed body");
+    let float64 = fixture.arena.source_type("Float64").expect("Float64");
+    let float32 = fixture.arena.source_type("Float32").expect("Float32");
+    let local_initializer = |index: usize| -> &pop_types::TypedExpression {
+        let TypedStatementKind::Local { initializer, .. } = body.statements()[index].kind() else {
+            panic!("local initializer");
+        };
+        initializer
+    };
+    assert_eq!(local_initializer(0).type_id(), float64);
+    assert_eq!(local_initializer(1).type_id(), float32);
+    assert!(matches!(
+        local_initializer(2).kind(),
+        TypedExpressionKind::NumericConvert {
+            conversion: NumericConversionKind::IntegerToFloat {
+                target: FloatKind::Float64,
+                ..
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        local_initializer(3).kind(),
+        TypedExpressionKind::NumericConvert {
+            conversion: NumericConversionKind::FloatToInteger { .. },
+            ..
+        }
+    ));
+    let TypedStatementKind::Return { values } = body.statements()[4].kind() else {
+        panic!("return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        TypedExpressionKind::Binary {
+            operator: TypedBinaryOperator::And,
+            left,
+            right,
+        } if matches!(left.kind(), TypedExpressionKind::Binary {
+            operator: TypedBinaryOperator::LessThanOrEqual,
+            ..
+        }) && matches!(right.kind(), TypedExpressionKind::Binary {
+            operator: TypedBinaryOperator::GreaterThanOrEqual,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rejects_decimal_integer_targets_and_nonnumeric_cast_arguments() {
+    for (source, expected_code) in [
+        (
+            "namespace Example\n\
+         public function invalid(): Int\n\
+             local value: Int = 1.5\n\
+             return value\n\
+         end\n",
+            "POP2003",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid(): Int\n\
+             return Int(\"1\")\n\
+         end\n",
+            "POP2003",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid(): Int\n\
+             return Int(1, 2)\n\
+         end\n",
+            "POP2004",
+        ),
+    ] {
+        let fixture = check_function(source, "invalid");
+        assert!(fixture.result.body().is_none());
+        assert_eq!(fixture.result.diagnostics().len(), 1);
+        assert_eq!(
+            fixture.result.diagnostics()[0].code().as_str(),
+            expected_code
         );
     }
 }

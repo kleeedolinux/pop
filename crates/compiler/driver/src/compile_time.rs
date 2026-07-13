@@ -138,6 +138,9 @@ fn collect_direct_calls(
             collect_direct_calls(body, calls);
         }
         CompileTimeExpressionKind::Unary { operand, .. } => collect_direct_calls(operand, calls),
+        CompileTimeExpressionKind::NumericConvert { value, .. } => {
+            collect_direct_calls(value, calls);
+        }
         CompileTimeExpressionKind::Binary { left, right, .. } => {
             collect_direct_calls(left, calls);
             collect_direct_calls(right, calls);

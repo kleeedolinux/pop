@@ -351,6 +351,12 @@ impl<'program> CompileTimeInterpreter<'program> {
                 locals,
                 expression.span(),
             ),
+            CompileTimeExpressionKind::NumericConvert { conversion, value } => {
+                let value = self.evaluate_expression(value, parameters, locals)?;
+                evaluate_numeric_conversion(*conversion, value).map_err(|error| {
+                    self.failure(EvaluationFailureKind::Error(error), expression.span())
+                })
+            }
             CompileTimeExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -815,9 +821,10 @@ fn evaluate_binary(
         | CompileTimeBinaryOperator::FloatDivide => evaluate_float_binary(operator, left, right),
         CompileTimeBinaryOperator::Equal => Ok(CompileTimeValue::Boolean(left == right)),
         CompileTimeBinaryOperator::NotEqual => Ok(CompileTimeValue::Boolean(left != right)),
-        CompileTimeBinaryOperator::LessThan | CompileTimeBinaryOperator::GreaterThan => {
-            evaluate_ordering(operator, left, right)
-        }
+        CompileTimeBinaryOperator::LessThan
+        | CompileTimeBinaryOperator::LessThanOrEqual
+        | CompileTimeBinaryOperator::GreaterThan
+        | CompileTimeBinaryOperator::GreaterThanOrEqual => evaluate_ordering(operator, left, right),
         CompileTimeBinaryOperator::And | CompileTimeBinaryOperator::Or => {
             evaluate_boolean_binary(operator, left, right)
         }
@@ -883,11 +890,51 @@ fn evaluate_ordering(
         (operator, ordering),
         (CompileTimeBinaryOperator::LessThan, Some(Ordering::Less))
             | (
+                CompileTimeBinaryOperator::LessThanOrEqual,
+                Some(Ordering::Less | Ordering::Equal)
+            )
+            | (
                 CompileTimeBinaryOperator::GreaterThan,
                 Some(Ordering::Greater)
             )
+            | (
+                CompileTimeBinaryOperator::GreaterThanOrEqual,
+                Some(Ordering::Greater | Ordering::Equal)
+            )
     );
     Ok(CompileTimeValue::Boolean(value))
+}
+
+fn evaluate_numeric_conversion(
+    conversion: pop_types::NumericConversionKind,
+    value: CompileTimeValue,
+) -> Result<CompileTimeValue, EvaluationError> {
+    use pop_types::NumericConversionKind;
+    match (conversion, value) {
+        (
+            NumericConversionKind::IntegerToInteger { source, target },
+            CompileTimeValue::Integer(value),
+        ) if value.kind() == source => value
+            .convert(target)
+            .map(CompileTimeValue::Integer)
+            .map_err(numeric_evaluation_error),
+        (
+            NumericConversionKind::IntegerToFloat { source, target },
+            CompileTimeValue::Integer(value),
+        ) if value.kind() == source => Ok(CompileTimeValue::Float(value.to_float(target))),
+        (
+            NumericConversionKind::FloatToInteger { source, target },
+            CompileTimeValue::Float(value),
+        ) if value.kind() == source => value
+            .to_integer(target)
+            .map(CompileTimeValue::Integer)
+            .map_err(numeric_evaluation_error),
+        (
+            NumericConversionKind::FloatToFloat { source, target },
+            CompileTimeValue::Float(value),
+        ) if value.kind() == source => Ok(CompileTimeValue::Float(value.convert(target))),
+        _ => Err(EvaluationError::TypeMismatch),
+    }
 }
 
 fn evaluate_boolean_binary(

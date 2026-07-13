@@ -19,8 +19,8 @@ use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap,
 };
 use pop_types::{
-    FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena, TypedBinaryOperator,
-    TypedUnaryOperator,
+    FloatKind, IntegerKind, NumericConversionKind, PrimitiveType, SemanticType, TypeArena,
+    TypedBinaryOperator, TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -410,7 +410,8 @@ fn visit_expression_closures(
             }
         }
         HirExpressionKind::Field { base, .. }
-        | HirExpressionKind::InterfaceUpcast { value: base, .. } => {
+        | HirExpressionKind::InterfaceUpcast { value: base, .. }
+        | HirExpressionKind::NumericConvert { value: base, .. } => {
             visit_expression_closures(base, parameters, locals);
         }
         HirExpressionKind::ArrayGet { array, index }
@@ -1058,6 +1059,39 @@ impl<'hir> FunctionBuilder<'hir> {
                     interface: *interface,
                 }
             }
+            HirExpressionKind::NumericConvert { value, conversion } => {
+                let operand = self.lower_expression(value);
+                match conversion {
+                    NumericConversionKind::IntegerToInteger { source, target } => {
+                        MirInstructionKind::ConvertInteger {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                    NumericConversionKind::IntegerToFloat { source, target } => {
+                        MirInstructionKind::ConvertIntegerToFloat {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                    NumericConversionKind::FloatToInteger { source, target } => {
+                        MirInstructionKind::ConvertFloatToInteger {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                    NumericConversionKind::FloatToFloat { source, target } => {
+                        MirInstructionKind::ConvertFloat {
+                            source: *source,
+                            target: *target,
+                            operand,
+                        }
+                    }
+                }
+            }
             HirExpressionKind::Field { base, field } => MirInstructionKind::FieldGet {
                 base: self.lower_expression(base),
                 field: *field,
@@ -1615,11 +1649,35 @@ fn lower_binary(
                 }
             }
         }
+        TypedBinaryOperator::LessThanOrEqual => {
+            if let Some(kind) = integer_kind(arena, operand_type) {
+                MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right }
+            } else {
+                MirInstructionKind::CompareFloatLessOrEqual {
+                    kind: float_kind(arena, operand_type)
+                        .expect("typed comparison has numeric operands"),
+                    left,
+                    right,
+                }
+            }
+        }
         TypedBinaryOperator::GreaterThan => {
             if let Some(kind) = integer_kind(arena, operand_type) {
                 MirInstructionKind::CompareIntegerGreater { kind, left, right }
             } else {
                 MirInstructionKind::CompareFloatGreater {
+                    kind: float_kind(arena, operand_type)
+                        .expect("typed comparison has numeric operands"),
+                    left,
+                    right,
+                }
+            }
+        }
+        TypedBinaryOperator::GreaterThanOrEqual => {
+            if let Some(kind) = integer_kind(arena, operand_type) {
+                MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right }
+            } else {
+                MirInstructionKind::CompareFloatGreaterOrEqual {
                     kind: float_kind(arena, operand_type)
                         .expect("typed comparison has numeric operands"),
                     left,
@@ -1781,7 +1839,17 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::CheckedIntegerDivide { .. }
         | MirInstructionKind::CheckedIntegerRemainder { .. }
         | MirInstructionKind::IntegerNegate { .. }
+        | MirInstructionKind::ConvertFloatToInteger { .. }
         | MirInstructionKind::ArrayGetChecked { .. } => {
+            MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::ConvertInteger { source, target, .. }
+            if NumericConversionKind::IntegerToInteger {
+                source: *source,
+                target: *target,
+            }
+            .may_trap() =>
+        {
             MirEffectSummary::empty().with(MirEffect::MayTrap)
         }
         MirInstructionKind::ArraySet { element_map, .. }
@@ -1855,15 +1923,22 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::FloatMultiply { .. }
         | MirInstructionKind::FloatDivide { .. }
         | MirInstructionKind::FloatNegate { .. }
+        | MirInstructionKind::ConvertInteger { .. }
+        | MirInstructionKind::ConvertIntegerToFloat { .. }
+        | MirInstructionKind::ConvertFloat { .. }
         | MirInstructionKind::BooleanNot { .. }
         | MirInstructionKind::BooleanAnd { .. }
         | MirInstructionKind::BooleanOr { .. }
         | MirInstructionKind::CompareEqual { .. }
         | MirInstructionKind::CompareNotEqual { .. }
         | MirInstructionKind::CompareIntegerLess { .. }
+        | MirInstructionKind::CompareIntegerLessOrEqual { .. }
         | MirInstructionKind::CompareIntegerGreater { .. }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
         | MirInstructionKind::CompareFloatLess { .. }
+        | MirInstructionKind::CompareFloatLessOrEqual { .. }
         | MirInstructionKind::CompareFloatGreater { .. }
+        | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
         | MirInstructionKind::RecordMake { .. }
         | MirInstructionKind::RecordUpdate { .. }
         | MirInstructionKind::FieldGet { .. }

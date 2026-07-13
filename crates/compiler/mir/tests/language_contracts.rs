@@ -1,6 +1,6 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{lower_hir_bubble, parse_mir_dump, verify_mir_bubble};
+use pop_mir::{MirEffect, lower_hir_bubble, parse_mir_dump, verify_mir_bubble};
 use pop_source::SourceFile;
 
 fn lower(source: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
@@ -81,6 +81,48 @@ fn exhaustive_union_match_is_one_resolved_switch_with_typed_payload_blocks() {
     assert!(dump.contains("case#1"), "{dump}");
     assert!(dump.contains(&format!(":t{}", integer.raw())), "{dump}");
     assert!(!dump.to_ascii_lowercase().contains("tag name"), "{dump}");
+    assert_verified_round_trip(&mir, &types);
+}
+
+#[test]
+fn numeric_conversions_and_complete_ordering_are_explicit_and_round_trip() {
+    // ADR 0040: conversions preserve exact source/target kinds in canonical
+    // MIR, and <=/>= are not reconstructed by a backend.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function convert(value: Int): Float32\n\
+             return Float32(value)\n\
+         end\n\
+         public function narrow(value: Float64): Int16\n\
+             return Int16(value)\n\
+         end\n\
+         public function ordered(left: Float64, right: Float64): Boolean\n\
+             return left <= right and left >= right\n\
+         end\n",
+    );
+
+    let dump = mir.dump();
+    assert!(
+        dump.contains("numeric.integerToFloat Int64 Float32"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("numeric.floatToInteger Float64 Int16"),
+        "{dump}"
+    );
+    assert!(dump.contains("float.compareLessOrEqual Float64"), "{dump}");
+    assert!(
+        dump.contains("float.compareGreaterOrEqual Float64"),
+        "{dump}"
+    );
+    assert!(!dump.to_ascii_lowercase().contains("dynamic"), "{dump}");
+    assert!(!mir.functions()[0].effects().contains(MirEffect::MayTrap));
+    assert!(mir.functions()[1].effects().contains(MirEffect::MayTrap));
+    let narrowing = mir.functions()[1].blocks()[0].instructions()[0].kind();
+    assert_eq!(
+        narrowing.possible_traps(),
+        vec![pop_runtime_interface::TrapKind::NumericConversion]
+    );
     assert_verified_round_trip(&mir, &types);
 }
 

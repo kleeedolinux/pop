@@ -4,6 +4,43 @@ use std::fmt;
 
 use crate::IntegerKind;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum NumericConversionKind {
+    IntegerToInteger {
+        source: IntegerKind,
+        target: IntegerKind,
+    },
+    IntegerToFloat {
+        source: IntegerKind,
+        target: FloatKind,
+    },
+    FloatToInteger {
+        source: FloatKind,
+        target: IntegerKind,
+    },
+    FloatToFloat {
+        source: FloatKind,
+        target: FloatKind,
+    },
+}
+
+impl NumericConversionKind {
+    #[must_use]
+    pub const fn may_trap(self) -> bool {
+        match self {
+            Self::IntegerToInteger { source, target } => {
+                match (source.is_signed(), target.is_signed()) {
+                    (true, true) | (false, false) => target.bit_width() < source.bit_width(),
+                    (true, false) => true,
+                    (false, true) => target.bit_width() <= source.bit_width(),
+                }
+            }
+            Self::FloatToInteger { .. } => true,
+            Self::IntegerToFloat { .. } | Self::FloatToFloat { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NumericError {
     InvalidLiteral,
@@ -38,6 +75,9 @@ impl IntegerValue {
     /// Returns [`NumericError::InvalidLiteral`] for malformed decimal text and
     /// [`NumericError::OutOfRange`] when the value is not representable.
     pub fn parse_decimal(text: &str, kind: IntegerKind) -> Result<Self, NumericError> {
+        if !valid_digit_separators(text) {
+            return Err(NumericError::InvalidLiteral);
+        }
         let normalized = text.replace('_', "");
         let (negative, magnitude) = normalized
             .strip_prefix('-')
@@ -202,6 +242,50 @@ impl IntegerValue {
         })
     }
 
+    /// Converts to another fixed-width integer with a checked target range.
+    pub fn convert(self, target: IntegerKind) -> Result<Self, NumericError> {
+        if self.kind.is_signed() {
+            let value = self.as_i128();
+            if target.is_signed() {
+                Self::from_signed(target, value)
+            } else {
+                Self::from_unsigned(
+                    target,
+                    u128::try_from(value).map_err(|_| NumericError::OutOfRange)?,
+                )
+            }
+        } else if target.is_signed() {
+            Self::from_signed(
+                target,
+                i128::try_from(self.as_u128()).map_err(|_| NumericError::OutOfRange)?,
+            )
+        } else {
+            Self::from_unsigned(target, self.as_u128())
+        }
+    }
+
+    #[must_use]
+    pub fn to_float(self, target: FloatKind) -> FloatValue {
+        match target {
+            FloatKind::Float32 => {
+                let value = if self.kind.is_signed() {
+                    self.as_i128() as f32
+                } else {
+                    self.as_u128() as f32
+                };
+                FloatValue::Float32(value.to_bits())
+            }
+            FloatKind::Float64 => {
+                let value = if self.kind.is_signed() {
+                    self.as_i128() as f64
+                } else {
+                    self.as_u128() as f64
+                };
+                FloatValue::Float64(value.to_bits())
+            }
+        }
+    }
+
     fn checked_binary(
         self,
         right: Self,
@@ -303,6 +387,9 @@ impl FloatValue {
     ///
     /// Returns an invalid-literal or out-of-range error.
     pub fn parse_decimal(text: &str, kind: FloatKind) -> Result<Self, NumericError> {
+        if !valid_digit_separators(text) {
+            return Err(NumericError::InvalidLiteral);
+        }
         let text = text.replace('_', "");
         match kind {
             FloatKind::Float32 => {
@@ -428,6 +515,45 @@ impl FloatValue {
         }
     }
 
+    #[must_use]
+    pub fn convert(self, target: FloatKind) -> Self {
+        if self.kind() == target {
+            return self;
+        }
+        match (self, target) {
+            (Self::Float32(bits), FloatKind::Float64) => {
+                Self::Float64(f64::from(f32::from_bits(bits)).to_bits())
+            }
+            (Self::Float64(bits), FloatKind::Float32) => {
+                Self::Float32((f64::from_bits(bits) as f32).to_bits())
+            }
+            _ => self,
+        }
+    }
+
+    /// Truncates toward zero and checks the complete target integer range.
+    pub fn to_integer(self, target: IntegerKind) -> Result<IntegerValue, NumericError> {
+        let value = self.as_f64();
+        if !value.is_finite() {
+            return Err(NumericError::OutOfRange);
+        }
+        let truncated = value.trunc();
+        let width = i32::from(target.bit_width());
+        if target.is_signed() {
+            let limit = 2_f64.powi(width - 1);
+            if truncated < -limit || truncated >= limit {
+                return Err(NumericError::OutOfRange);
+            }
+            IntegerValue::from_signed(target, truncated as i128)
+        } else {
+            let limit = 2_f64.powi(width);
+            if truncated < 0.0 || truncated >= limit {
+                return Err(NumericError::OutOfRange);
+            }
+            IntegerValue::from_unsigned(target, truncated as u128)
+        }
+    }
+
     fn binary(
         self,
         right: Self,
@@ -444,4 +570,15 @@ impl FloatValue {
             _ => Err(NumericError::KindMismatch),
         }
     }
+}
+
+fn valid_digit_separators(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'_'
+            || (index > 0
+                && index + 1 < bytes.len()
+                && bytes[index - 1].is_ascii_digit()
+                && bytes[index + 1].is_ascii_digit())
+    })
 }

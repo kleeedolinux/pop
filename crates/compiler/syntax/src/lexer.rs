@@ -61,7 +61,9 @@ pub enum TokenKind {
     LeftBracket,
     RightBracket,
     LessThan,
+    LessThanEqual,
     GreaterThan,
+    GreaterThanEqual,
     At,
     Question,
     Pipe,
@@ -205,7 +207,7 @@ impl Lexer<'_> {
                 TokenKind::LineComment
             }
             b'0'..=b'9' => {
-                self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+                self.scan_number();
                 TokenKind::Number
             }
             b'\'' | b'"' => self.scan_string(start, byte),
@@ -216,6 +218,14 @@ impl Lexer<'_> {
             b'~' if remaining.starts_with("~=") => {
                 self.cursor += 2;
                 TokenKind::TildeEqual
+            }
+            b'<' if remaining.starts_with("<=") => {
+                self.cursor += 2;
+                TokenKind::LessThanEqual
+            }
+            b'>' if remaining.starts_with(">=") => {
+                self.cursor += 2;
+                TokenKind::GreaterThanEqual
             }
             _ => {
                 self.cursor += char::from(byte).len_utf8();
@@ -265,6 +275,24 @@ impl Lexer<'_> {
                 range,
             )));
         TokenKind::String
+    }
+
+    fn scan_number(&mut self) {
+        self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+        let bytes = self.source.text().as_bytes();
+        if bytes.get(self.cursor) == Some(&b'.')
+            && bytes.get(self.cursor + 1).is_some_and(u8::is_ascii_digit)
+        {
+            self.cursor += 1;
+            self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+        }
+        if matches!(bytes.get(self.cursor), Some(b'e' | b'E')) {
+            self.cursor += 1;
+            if matches!(bytes.get(self.cursor), Some(b'+' | b'-')) {
+                self.cursor += 1;
+            }
+            self.consume_while(|next| next.is_ascii_digit() || next == b'_');
+        }
     }
 
     fn consume_while(&mut self, predicate: impl Fn(u8) -> bool) {

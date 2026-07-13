@@ -443,6 +443,58 @@ fn dump_numeric_instruction(output: &mut String, instruction: &MirInstructionKin
         MirInstructionKind::FloatNegate { kind, operand } => {
             dump_numeric_unary(output, "float.negate", float_kind_text(*kind), *operand);
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.integerToInteger {} {} v{}",
+                integer_kind_text(*source),
+                integer_kind_text(*target),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.integerToFloat {} {} v{}",
+                integer_kind_text(*source),
+                float_kind_text(*target),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.floatToInteger {} {} v{}",
+                float_kind_text(*source),
+                integer_kind_text(*target),
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => {
+            let _ = write!(
+                output,
+                "numeric.floatToFloat {} {} v{}",
+                float_kind_text(*source),
+                float_kind_text(*target),
+                operand.raw()
+            );
+        }
         _ => return false,
     }
     true
@@ -492,8 +544,20 @@ fn dump_numeric_binary_instruction(output: &mut String, instruction: &MirInstruc
         MirInstructionKind::CompareIntegerLess { kind, left, right } => {
             ("integer.compareLess", integer_kind_text(*kind), left, right)
         }
+        MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right } => (
+            "integer.compareLessOrEqual",
+            integer_kind_text(*kind),
+            left,
+            right,
+        ),
         MirInstructionKind::CompareIntegerGreater { kind, left, right } => (
             "integer.compareGreater",
+            integer_kind_text(*kind),
+            left,
+            right,
+        ),
+        MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => (
+            "integer.compareGreaterOrEqual",
             integer_kind_text(*kind),
             left,
             right,
@@ -501,9 +565,21 @@ fn dump_numeric_binary_instruction(output: &mut String, instruction: &MirInstruc
         MirInstructionKind::CompareFloatLess { kind, left, right } => {
             ("float.compareLess", float_kind_text(*kind), left, right)
         }
+        MirInstructionKind::CompareFloatLessOrEqual { kind, left, right } => (
+            "float.compareLessOrEqual",
+            float_kind_text(*kind),
+            left,
+            right,
+        ),
         MirInstructionKind::CompareFloatGreater { kind, left, right } => {
             ("float.compareGreater", float_kind_text(*kind), left, right)
         }
+        MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => (
+            "float.compareGreaterOrEqual",
+            float_kind_text(*kind),
+            left,
+            right,
+        ),
         _ => return false,
     };
     dump_numeric_binary(output, name, kind, *left, *right);
@@ -956,6 +1032,7 @@ const fn trap_kind_text(kind: pop_runtime_interface::TrapKind) -> &'static str {
     match kind {
         pop_runtime_interface::TrapKind::IntegerOverflow => "IntegerOverflow",
         pop_runtime_interface::TrapKind::DivisionByZero => "DivisionByZero",
+        pop_runtime_interface::TrapKind::NumericConversion => "NumericConversion",
         pop_runtime_interface::TrapKind::BoundsViolation => "BoundsViolation",
         pop_runtime_interface::TrapKind::ImpossibleState => "ImpossibleState",
     }

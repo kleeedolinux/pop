@@ -64,6 +64,14 @@ fn evaluate_constant(
             context,
             diagnostics,
         ),
+        ExpressionSyntaxKind::Float(literal) => parse_float_constant(
+            arena,
+            literal,
+            numeric_hint,
+            expression,
+            context,
+            diagnostics,
+        ),
         ExpressionSyntaxKind::String(literal) => Some(EvaluatedDefault {
             value: FieldDefault::String(literal.clone()),
             type_id: arena.source_type("String")?,
@@ -114,6 +122,41 @@ fn evaluate_constant(
                 expression.span(),
                 context,
             ));
+            None
+        }
+    }
+}
+
+fn parse_float_constant(
+    arena: &TypeArena,
+    literal: &str,
+    numeric_hint: Option<TypeId>,
+    expression: &ExpressionSyntax,
+    context: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<EvaluatedDefault> {
+    let type_id = numeric_hint
+        .filter(|type_id| {
+            matches!(
+                arena.get(*type_id),
+                Some(SemanticType::Primitive(
+                    PrimitiveType::Float32 | PrimitiveType::Float64
+                ))
+            )
+        })
+        .or_else(|| arena.source_type("Float"))?;
+    let kind = match arena.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => FloatKind::Float32,
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => FloatKind::Float64,
+        _ => return None,
+    };
+    match FloatValue::parse_decimal(literal, kind) {
+        Ok(value) => Some(EvaluatedDefault {
+            value: FieldDefault::Float(value),
+            type_id,
+        }),
+        Err(error) => {
+            push_numeric_error(error, expression, context, diagnostics);
             None
         }
     }
@@ -217,7 +260,9 @@ fn evaluate_binary(
             | BinaryOperator::Divide
             | BinaryOperator::Remainder
             | BinaryOperator::LessThan
+            | BinaryOperator::LessThanOrEqual
             | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterThanOrEqual
     )
     .then_some(numeric_hint)
     .flatten();
@@ -302,10 +347,20 @@ fn evaluate_binary_values(
             boolean_constant(arena, left.compare(right).ok()? == Ordering::Less)
         }
         (
+            BinaryOperator::LessThanOrEqual,
+            FieldDefault::Integer(left),
+            FieldDefault::Integer(right),
+        ) => boolean_constant(arena, left.compare(right).ok()?.is_le()),
+        (
             BinaryOperator::GreaterThan,
             FieldDefault::Integer(left),
             FieldDefault::Integer(right),
         ) => boolean_constant(arena, left.compare(right).ok()? == Ordering::Greater),
+        (
+            BinaryOperator::GreaterThanOrEqual,
+            FieldDefault::Integer(left),
+            FieldDefault::Integer(right),
+        ) => boolean_constant(arena, left.compare(right).ok()?.is_ge()),
         (BinaryOperator::LessThan, FieldDefault::Float(left), FieldDefault::Float(right)) => {
             boolean_constant(
                 arena,
@@ -314,6 +369,16 @@ fn evaluate_binary_values(
                     .is_some_and(Ordering::is_lt),
             )
         }
+        (
+            BinaryOperator::LessThanOrEqual,
+            FieldDefault::Float(left),
+            FieldDefault::Float(right),
+        ) => boolean_constant(
+            arena,
+            left.partial_compare(right)
+                .ok()?
+                .is_some_and(Ordering::is_le),
+        ),
         (BinaryOperator::GreaterThan, FieldDefault::Float(left), FieldDefault::Float(right)) => {
             boolean_constant(
                 arena,
@@ -322,6 +387,16 @@ fn evaluate_binary_values(
                     .is_some_and(Ordering::is_gt),
             )
         }
+        (
+            BinaryOperator::GreaterThanOrEqual,
+            FieldDefault::Float(left),
+            FieldDefault::Float(right),
+        ) => boolean_constant(
+            arena,
+            left.partial_compare(right)
+                .ok()?
+                .is_some_and(Ordering::is_ge),
+        ),
         (BinaryOperator::And, FieldDefault::Boolean(left), FieldDefault::Boolean(right)) => {
             boolean_constant(arena, left && right)
         }
@@ -429,7 +504,9 @@ const fn binary_text(operator: BinaryOperator) -> &'static str {
         BinaryOperator::Equal => "==",
         BinaryOperator::NotEqual => "~=",
         BinaryOperator::LessThan => "<",
+        BinaryOperator::LessThanOrEqual => "<=",
         BinaryOperator::GreaterThan => ">",
+        BinaryOperator::GreaterThanOrEqual => ">=",
         BinaryOperator::Add => "+",
         BinaryOperator::Subtract => "-",
         BinaryOperator::Multiply => "*",

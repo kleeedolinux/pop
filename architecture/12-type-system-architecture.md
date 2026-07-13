@@ -197,6 +197,13 @@ upcast, and checked downcast are distinct conversion kinds in HIR. No conversion
 is labeled “dynamic.” Lossy conversions require explicit syntax unless an ADR
 proves a safe implicit rule.
 
+ADR 0040 fixes numeric conversion syntax as a call whose callee is a built-in
+numeric type, for example `UInt32(value)`. The checker resolves that type in the
+type namespace, requires one numeric operand, and records the exact source and
+target kinds. It is never an ordinary overload or runtime lookup. Decimal
+floating-point literals remain context-sensitive literal typing rather than an
+implicit conversion from an existing value.
+
 ## Effects and compile-time eligibility
 
 Function types or summaries carry effects needed to prove compile-time safety:

@@ -317,6 +317,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 false,
                 span,
             ),
+            ExpressionSyntaxKind::Float(value) => self.float_literal_expression(
+                value,
+                expected.map(|expected| expected.type_id),
+                span,
+            ),
             ExpressionSyntaxKind::String(value) => self.primitive_expression(
                 TypedExpressionKind::String(value.clone()),
                 "String",
@@ -556,6 +561,38 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     self.type_name(type_id),
                 ));
             None
+        }
+    }
+
+    pub(crate) fn float_literal_expression(
+        &mut self,
+        value: &str,
+        expected: Option<TypeId>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let type_id = expected
+            .filter(|type_id| {
+                matches!(self.numeric_target(*type_id), Some(NumericTarget::Float(_)))
+            })
+            .or_else(|| self.resolver.arena().source_type("Float"))?;
+        let NumericTarget::Float(kind) = self.numeric_target(type_id)? else {
+            return None;
+        };
+        match FloatValue::parse_decimal(value, kind) {
+            Ok(value) => Some(TypedExpression {
+                kind: TypedExpressionKind::Float(value),
+                type_id,
+                span,
+            }),
+            Err(_) => {
+                self.diagnostics
+                    .push(type_diagnostics::numeric_literal_out_of_range(
+                        span,
+                        value,
+                        self.type_name(type_id),
+                    ));
+                None
+            }
         }
     }
 
@@ -874,7 +911,9 @@ pub(crate) const fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryO
         SyntaxBinaryOperator::Equal => TypedBinaryOperator::Equal,
         SyntaxBinaryOperator::NotEqual => TypedBinaryOperator::NotEqual,
         SyntaxBinaryOperator::LessThan => TypedBinaryOperator::LessThan,
+        SyntaxBinaryOperator::LessThanOrEqual => TypedBinaryOperator::LessThanOrEqual,
         SyntaxBinaryOperator::GreaterThan => TypedBinaryOperator::GreaterThan,
+        SyntaxBinaryOperator::GreaterThanOrEqual => TypedBinaryOperator::GreaterThanOrEqual,
         SyntaxBinaryOperator::Add => TypedBinaryOperator::Add,
         SyntaxBinaryOperator::Subtract => TypedBinaryOperator::Subtract,
         SyntaxBinaryOperator::Multiply => TypedBinaryOperator::Multiply,
@@ -897,7 +936,9 @@ pub(crate) const fn binary_text(operator: SyntaxBinaryOperator) -> &'static str 
         SyntaxBinaryOperator::Equal => "==",
         SyntaxBinaryOperator::NotEqual => "~=",
         SyntaxBinaryOperator::LessThan => "<",
+        SyntaxBinaryOperator::LessThanOrEqual => "<=",
         SyntaxBinaryOperator::GreaterThan => ">",
+        SyntaxBinaryOperator::GreaterThanOrEqual => ">=",
         SyntaxBinaryOperator::Add => "+",
         SyntaxBinaryOperator::Subtract => "-",
         SyntaxBinaryOperator::Multiply => "*",

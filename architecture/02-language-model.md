@@ -39,6 +39,20 @@ must be narrowed to a concrete supported type before use.
   they do not produce a dynamically typed value.
 - Heterogeneous collections use an explicit union or interface element type.
 
+### Numeric source semantics
+
+Decimal-point and base-ten-exponent literals are floating-point values. An
+expected `Float32` or `Float64` type selects their format; without one they use
+`Float` (`Float64`). They never implicitly become integers.
+
+Numeric values convert explicitly through target-type call syntax such as
+`Float64(count)` and `Int32(total)`. These forms are compiler-known typed
+conversions, not ordinary overloads or runtime type-name lookup. Integer target
+conversions and float-to-integer conversions are checked and use the closed
+`NumericConversion` trap for invalid or out-of-range values. Ordering includes
+`<`, `<=`, `>`, and `>=`; IEEE ordering comparisons with NaN are false. See
+ADR 0040.
+
 ## Luau-first syntax rule
 
 Pop Lang starts from Luau grammar and vocabulary. Additions should reuse Luau

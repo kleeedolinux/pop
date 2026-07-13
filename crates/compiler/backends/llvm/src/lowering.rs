@@ -962,15 +962,23 @@ pub(crate) fn llvm_memory_none_instruction(instruction: &MirInstructionKind) -> 
             | MirInstructionKind::CheckedIntegerDivide { .. }
             | MirInstructionKind::CheckedIntegerRemainder { .. }
             | MirInstructionKind::IntegerNegate { .. }
+            | MirInstructionKind::ConvertInteger { .. }
+            | MirInstructionKind::ConvertIntegerToFloat { .. }
+            | MirInstructionKind::ConvertFloatToInteger { .. }
+            | MirInstructionKind::ConvertFloat { .. }
             | MirInstructionKind::FloatAdd { .. }
             | MirInstructionKind::FloatSubtract { .. }
             | MirInstructionKind::FloatMultiply { .. }
             | MirInstructionKind::FloatDivide { .. }
             | MirInstructionKind::FloatNegate { .. }
             | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerLessOrEqual { .. }
             | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
             | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatLessOrEqual { .. }
             | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::BooleanNot { .. }
             | MirInstructionKind::BooleanAnd { .. }
             | MirInstructionKind::BooleanOr { .. }

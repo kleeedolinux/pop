@@ -212,6 +212,10 @@ fn allocation_and_barrier_requests_are_backend_neutral_and_typed() {
 fn traps_panics_and_unwinds_remain_distinct_portable_failures() {
     let trap = Trap::new(TrapKind::IntegerOverflow);
     assert_eq!(RuntimeFailure::Trap(trap), RuntimeFailure::Trap(trap));
+    assert_ne!(
+        RuntimeFailure::Trap(trap),
+        RuntimeFailure::Trap(Trap::new(TrapKind::NumericConversion))
+    );
 
     let panic = PanicPayload::out_of_memory(3, 64);
     assert_eq!(

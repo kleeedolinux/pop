@@ -251,6 +251,56 @@ fn equality_uses_luau_tokens_and_comparison_precedence() {
 }
 
 #[test]
+fn parses_decimal_literals_complete_ordering_and_numeric_cast_calls() {
+    // ADR 0040 keeps casts Luau-light as target-type calls while representing
+    // decimal literals and complete ordering explicitly in syntax.
+    let body = parse_body(
+        "namespace Example\n\
+         public function convert(count: Int): Boolean\n\
+             local ratio = Float64(count)\n\
+             local small: Float32 = 1.25\n\
+             return ratio <= 6.02e23 and ratio >= 2e-3\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("numeric cast local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        ExpressionSyntaxKind::Call { callee, arguments }
+            if matches!(callee.kind(), ExpressionSyntaxKind::Name(path) if path == &["Float64"])
+                && arguments.len() == 1
+    ));
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[1].kind() else {
+        panic!("decimal local");
+    };
+    assert!(matches!(initializer.kind(), ExpressionSyntaxKind::Float(value) if value == "1.25"));
+
+    let StatementSyntaxKind::Return { values } = body.statements()[2].kind() else {
+        panic!("comparison return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        ExpressionSyntaxKind::Binary {
+            operator: BinaryOperator::And,
+            left,
+            right,
+        } if matches!(left.kind(), ExpressionSyntaxKind::Binary {
+            operator: BinaryOperator::LessThanOrEqual,
+            right,
+            ..
+        } if matches!(right.kind(), ExpressionSyntaxKind::Float(value) if value == "6.02e23"))
+            && matches!(right.kind(), ExpressionSyntaxKind::Binary {
+                operator: BinaryOperator::GreaterThanOrEqual,
+                right,
+                ..
+            } if matches!(right.kind(), ExpressionSyntaxKind::Float(value) if value == "2e-3"))
+    ));
+}
+
+#[test]
 fn parses_logical_unary_literal_and_tuple_expressions() {
     let body = parse_body(
         "namespace Example\n\

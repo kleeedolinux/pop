@@ -87,7 +87,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             SyntaxBinaryOperator::Equal | SyntaxBinaryOperator::NotEqual => {
                 self.equality_comparable(left.type_id(), right.type_id())
             }
-            SyntaxBinaryOperator::LessThan | SyntaxBinaryOperator::GreaterThan => {
+            SyntaxBinaryOperator::LessThan
+            | SyntaxBinaryOperator::LessThanOrEqual
+            | SyntaxBinaryOperator::GreaterThan
+            | SyntaxBinaryOperator::GreaterThanOrEqual => {
                 operands_match && self.is_numeric(left.type_id())
             }
             SyntaxBinaryOperator::Add
@@ -108,7 +111,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             SyntaxBinaryOperator::Equal
             | SyntaxBinaryOperator::NotEqual
             | SyntaxBinaryOperator::LessThan
+            | SyntaxBinaryOperator::LessThanOrEqual
             | SyntaxBinaryOperator::GreaterThan => self.resolver.arena().source_type("Boolean")?,
+            SyntaxBinaryOperator::GreaterThanOrEqual => {
+                self.resolver.arena().source_type("Boolean")?
+            }
             _ => left.type_id(),
         };
         Some(TypedExpression {

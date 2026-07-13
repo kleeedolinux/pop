@@ -13,7 +13,7 @@ use pop_mir::{MirBubble, lower_hir_bubble, optimize_mir};
 use pop_query::QueryBudget;
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
 use pop_source::SourceFile;
-use pop_types::{IntegerKind, IntegerValue, TypeArena};
+use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue, TypeArena};
 
 const INTEGER_KINDS: [(&str, IntegerKind, &str); 8] = [
     ("Int8", IntegerKind::Int8, "127"),
@@ -155,6 +155,75 @@ fn integer_failures_are_identical_across_constant_and_executable_layers() {
         assert_compile_time_failure(name, kind, maximum);
         assert_mir_failures(name, kind, maximum);
     }
+}
+
+#[test]
+fn decimal_ordering_and_numeric_conversions_execute_with_portable_boundaries() {
+    // ADR 0040: the interpreter is the semantic reference for exact typed
+    // conversions and ordered IEEE <=/>= behavior.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function integerToFloat(value: Int): Float64\n\
+             return Float64(value)\n\
+         end\n\
+         public function floatToInteger(value: Float64): Int\n\
+             return Int(value)\n\
+         end\n\
+         public function narrow(value: UInt16): UInt8\n\
+             return UInt8(value)\n\
+         end\n\
+         public function lessOrEqual(left: Float64, right: Float64): Boolean\n\
+             return left <= right\n\
+         end\n\
+         public function greaterOrEqual(left: Float64, right: Float64): Boolean\n\
+             return left >= right\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+    let float = |text| {
+        MirValue::Float(FloatValue::parse_decimal(text, FloatKind::Float64).expect("Float64"))
+    };
+
+    assert_eq!(
+        interpreter.call(
+            mir.functions()[0].symbol(),
+            &[MirValue::Integer(integer(
+                "9007199254740993",
+                IntegerKind::Int64
+            ))],
+        ),
+        Ok(vec![float("9007199254740992")])
+    );
+    assert_eq!(
+        interpreter.call(mir.functions()[1].symbol(), &[float("-12.75")]),
+        Ok(vec![MirValue::Integer(integer("-12", IntegerKind::Int64))])
+    );
+    assert_eq!(
+        interpreter.call(
+            mir.functions()[2].symbol(),
+            &[MirValue::Integer(integer("255", IntegerKind::UInt16))],
+        ),
+        Ok(vec![MirValue::Integer(integer("255", IntegerKind::UInt8))])
+    );
+    assert_eq!(
+        interpreter.call(
+            mir.functions()[2].symbol(),
+            &[MirValue::Integer(integer("256", IntegerKind::UInt16))],
+        ),
+        Err(trap(TrapKind::NumericConversion))
+    );
+
+    let nan = MirValue::Float(FloatValue::Float64(f64::NAN.to_bits()));
+    for function in &mir.functions()[3..=4] {
+        assert_eq!(
+            interpreter.call(function.symbol(), &[nan.clone(), float("1")]),
+            Ok(vec![MirValue::Boolean(false)])
+        );
+    }
+    assert_eq!(
+        interpreter.call(mir.functions()[1].symbol(), &[nan]),
+        Err(trap(TrapKind::NumericConversion))
+    );
 }
 
 fn assert_field_default_failure(

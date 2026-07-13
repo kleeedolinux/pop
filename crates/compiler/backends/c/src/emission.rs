@@ -7,7 +7,9 @@ use crate::api::CBackendError;
 use crate::validation::{c_type, integer_c_type};
 use pop_foundation::{BlockId, SymbolId, ValueId};
 use pop_mir::{MirBubble, MirFunction, MirInstructionKind, MirTerminator};
-use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue, TypeArena};
+use pop_types::{
+    FloatKind, FloatValue, IntegerKind, IntegerValue, NumericConversionKind, TypeArena,
+};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -82,6 +84,27 @@ pub(crate) fn contains_explicit_trap(bubble: &MirBubble) -> bool {
             )
         })
     })
+}
+
+pub(crate) fn contains_fallible_conversion(bubble: &MirBubble) -> bool {
+    bubble
+        .functions()
+        .iter()
+        .flat_map(MirFunction::blocks)
+        .flat_map(pop_mir::MirBlock::instructions)
+        .any(|instruction| {
+            matches!(
+                instruction.kind(),
+                MirInstructionKind::ConvertFloatToInteger { .. }
+            ) || matches!(
+                instruction.kind(),
+                MirInstructionKind::ConvertInteger { source, target, .. }
+                    if NumericConversionKind::IntegerToInteger {
+                        source: *source,
+                        target: *target,
+                    }.may_trap()
+            )
+        })
 }
 
 pub(crate) fn collect_standard_calls(bubble: &MirBubble) -> BTreeSet<u32> {
@@ -236,6 +259,80 @@ fn checked_helper_name(operation: CheckedOperation, kind: IntegerKind) -> String
         CheckedOperation::Negate => "negate",
     };
     format!("pop_checked_{operation}_{}", integer_suffix(kind))
+}
+
+fn emit_integer_conversion(
+    output: &mut String,
+    result: u32,
+    source: IntegerKind,
+    target: IntegerKind,
+    operand: ValueId,
+) {
+    let value = format!("v{}", operand.raw());
+    let condition = match (source.is_signed(), target.is_signed()) {
+        (true, true) if target.bit_width() < source.bit_width() => Some(format!(
+            "(intmax_t){value} < (intmax_t){} || (intmax_t){value} > (intmax_t){}",
+            integer_limit(target, false),
+            integer_limit(target, true)
+        )),
+        (true, false) if target.bit_width() < source.bit_width() => Some(format!(
+            "{value} < 0 || (uintmax_t){value} > (uintmax_t){}",
+            integer_limit(target, true)
+        )),
+        (true, false) => Some(format!("{value} < 0")),
+        (false, true) if target.bit_width() <= source.bit_width() => Some(format!(
+            "(uintmax_t){value} > (uintmax_t){}",
+            integer_limit(target, true)
+        )),
+        (false, false) if target.bit_width() < source.bit_width() => Some(format!(
+            "(uintmax_t){value} > (uintmax_t){}",
+            integer_limit(target, true)
+        )),
+        _ => None,
+    };
+    if let Some(condition) = condition {
+        let _ = writeln!(output, "    if ({condition}) pop_trap();");
+    }
+    let _ = writeln!(
+        output,
+        "    v{result} = ({}){value};",
+        integer_c_type(target)
+    );
+}
+
+fn emit_float_to_integer_conversion(
+    output: &mut String,
+    result: u32,
+    source: FloatKind,
+    target: IntegerKind,
+    operand: ValueId,
+) {
+    let bits = target.bit_width();
+    let mantissa_bits = match source {
+        FloatKind::Float32 => 24,
+        FloatKind::Float64 => 53,
+    };
+    let (lower_operator, lower) = if target.is_signed() {
+        if bits < mantissa_bits {
+            (">", format!("-{}.0L", (1_u128 << (bits - 1)) + 1))
+        } else {
+            (">=", format!("-{}.0L", 1_u128 << (bits - 1)))
+        }
+    } else {
+        (">", "-1.0L".to_owned())
+    };
+    let upper = if target.is_signed() {
+        1_u128 << (bits - 1)
+    } else {
+        1_u128 << bits
+    };
+    let value = format!("(long double)v{}", operand.raw());
+    let _ = writeln!(
+        output,
+        "    if (!({value} {lower_operator} {lower} && {value} < {upper}.0L)) pop_trap();\n    v{result} = ({})v{};",
+        integer_c_type(target),
+        operand.raw()
+    );
 }
 
 pub(crate) fn emit_function_declaration(
@@ -401,6 +498,42 @@ fn emit_instruction(
                 operand.raw()
             );
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => emit_integer_conversion(output, result, *source, *target, *operand),
+        MirInstructionKind::ConvertIntegerToFloat {
+            target, operand, ..
+        } => {
+            let _ = writeln!(
+                output,
+                "    v{result} = ({})v{};",
+                match target {
+                    FloatKind::Float32 => "float",
+                    FloatKind::Float64 => "double",
+                },
+                operand.raw()
+            );
+        }
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => emit_float_to_integer_conversion(output, result, *source, *target, *operand),
+        MirInstructionKind::ConvertFloat {
+            target, operand, ..
+        } => {
+            let _ = writeln!(
+                output,
+                "    v{result} = ({})v{};",
+                match target {
+                    FloatKind::Float32 => "float",
+                    FloatKind::Float64 => "double",
+                },
+                operand.raw()
+            );
+        }
         MirInstructionKind::FloatAdd { left, right, .. } => {
             emit_binary(output, result, *left, "+", *right);
         }
@@ -426,12 +559,48 @@ fn emit_instruction(
             emit_binary(output, result, *left, "!=", *right);
         }
         MirInstructionKind::CompareIntegerLess { left, right, .. }
+        | MirInstructionKind::CompareIntegerLessOrEqual { left, right, .. }
         | MirInstructionKind::CompareFloatLess { left, right, .. } => {
-            emit_binary(output, result, *left, "<", *right);
+            emit_binary(
+                output,
+                result,
+                *left,
+                if matches!(
+                    instruction.kind(),
+                    MirInstructionKind::CompareIntegerLessOrEqual { .. }
+                        | MirInstructionKind::CompareFloatLessOrEqual { .. }
+                ) {
+                    "<="
+                } else {
+                    "<"
+                },
+                *right,
+            );
+        }
+        MirInstructionKind::CompareFloatLessOrEqual { left, right, .. } => {
+            emit_binary(output, result, *left, "<=", *right);
         }
         MirInstructionKind::CompareIntegerGreater { left, right, .. }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { left, right, .. }
         | MirInstructionKind::CompareFloatGreater { left, right, .. } => {
-            emit_binary(output, result, *left, ">", *right);
+            emit_binary(
+                output,
+                result,
+                *left,
+                if matches!(
+                    instruction.kind(),
+                    MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
+                        | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
+                ) {
+                    ">="
+                } else {
+                    ">"
+                },
+                *right,
+            );
+        }
+        MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. } => {
+            emit_binary(output, result, *left, ">=", *right);
         }
         MirInstructionKind::BooleanNot { operand } => {
             let _ = writeln!(output, "    v{result} = !v{};", operand.raw());

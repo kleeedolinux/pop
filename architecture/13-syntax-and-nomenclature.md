@@ -110,6 +110,13 @@ literal/keyword, not a type-naming exception.
 - Keywords are lowercase.
 - Types are not distinguished with sigils or punctuation.
 
+Decimal floating-point literals use familiar spellings such as `1.5`,
+`6.02e23`, and `1_000.25`. An expected float annotation selects `Float32` or
+`Float64`; otherwise the literal is `Float64`. Numeric casts use the concise
+target-type call form `Float64(count)` or `Int32(total)`, not an `as` operator or
+runtime conversion by type name. The complete numeric ordering operators are
+`<`, `<=`, `>`, and `>=`. See ADR 0040.
+
 ## File shape
 
 Checked documentation and typed attributes for the file-scoped namespace

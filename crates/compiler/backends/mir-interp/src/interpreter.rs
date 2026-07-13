@@ -51,6 +51,7 @@ pub enum ExecutionError {
     MissingValue(ValueId),
     IntegerOverflow,
     DivisionByZero,
+    NumericConversion,
     Runtime(RuntimeFailure),
     StepLimit,
     CallDepthLimit,
@@ -364,6 +365,12 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     self.runtime.raise_trap(Trap::new(TrapKind::DivisionByZero)),
                 ));
             }
+            Err(ExecutionError::NumericConversion) => {
+                return Err(ExecutionError::Runtime(
+                    self.runtime
+                        .raise_trap(Trap::new(TrapKind::NumericConversion)),
+                ));
+            }
             Err(error) => return Err(error),
         }
         let result = match instruction.kind() {
@@ -626,10 +633,18 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::FloatDivide { .. }
             | MirInstructionKind::IntegerNegate { .. }
             | MirInstructionKind::FloatNegate { .. }
+            | MirInstructionKind::ConvertInteger { .. }
+            | MirInstructionKind::ConvertIntegerToFloat { .. }
+            | MirInstructionKind::ConvertFloatToInteger { .. }
+            | MirInstructionKind::ConvertFloat { .. }
             | MirInstructionKind::CompareIntegerLess { .. }
+            | MirInstructionKind::CompareIntegerLessOrEqual { .. }
             | MirInstructionKind::CompareIntegerGreater { .. }
+            | MirInstructionKind::CompareIntegerGreaterOrEqual { .. }
             | MirInstructionKind::CompareFloatLess { .. }
+            | MirInstructionKind::CompareFloatLessOrEqual { .. }
             | MirInstructionKind::CompareFloatGreater { .. }
+            | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::CallStandard { .. }
             | MirInstructionKind::CallDirect { .. }
             | MirInstructionKind::CallReferenced { .. }

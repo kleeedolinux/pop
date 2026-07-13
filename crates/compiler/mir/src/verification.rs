@@ -1480,8 +1480,58 @@ fn verify_numeric_instruction(
                 errors,
             );
         }
+        MirInstructionKind::ConvertInteger {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            integer_type(arena, *source),
+            integer_type(arena, *target),
+            values,
+            errors,
+        ),
+        MirInstructionKind::ConvertIntegerToFloat {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            integer_type(arena, *source),
+            float_type(arena, *target),
+            values,
+            errors,
+        ),
+        MirInstructionKind::ConvertFloatToInteger {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            float_type(arena, *source),
+            integer_type(arena, *target),
+            values,
+            errors,
+        ),
+        MirInstructionKind::ConvertFloat {
+            source,
+            target,
+            operand,
+        } => verify_numeric_conversion(
+            instruction,
+            *operand,
+            float_type(arena, *source),
+            float_type(arena, *target),
+            values,
+            errors,
+        ),
         MirInstructionKind::CompareIntegerLess { kind, left, right }
-        | MirInstructionKind::CompareIntegerGreater { kind, left, right } => {
+        | MirInstructionKind::CompareIntegerLessOrEqual { kind, left, right }
+        | MirInstructionKind::CompareIntegerGreater { kind, left, right }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { kind, left, right } => {
             verify_numeric_binary(
                 instruction,
                 (*left, *right),
@@ -1493,7 +1543,9 @@ fn verify_numeric_instruction(
             );
         }
         MirInstructionKind::CompareFloatLess { kind, left, right }
-        | MirInstructionKind::CompareFloatGreater { kind, left, right } => {
+        | MirInstructionKind::CompareFloatLessOrEqual { kind, left, right }
+        | MirInstructionKind::CompareFloatGreater { kind, left, right }
+        | MirInstructionKind::CompareFloatGreaterOrEqual { kind, left, right } => {
             verify_numeric_binary(
                 instruction,
                 (*left, *right),
@@ -1507,6 +1559,27 @@ fn verify_numeric_instruction(
         _ => return false,
     }
     true
+}
+
+fn verify_numeric_conversion(
+    instruction: &MirInstruction,
+    operand: ValueId,
+    source: Option<TypeId>,
+    target: Option<TypeId>,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let Some((source, target)) = source.zip(target) else {
+        if let Some(result_type) = instruction.optional_result_type() {
+            errors.push(MirVerificationError::InvalidInstructionType {
+                instruction: instruction.result(),
+                result_type,
+            });
+        }
+        return;
+    };
+    verify_operand_type(instruction.result(), operand, source, values, errors);
+    verify_numeric_result(instruction, Some(target), errors);
 }
 
 fn verify_numeric_binary(
@@ -2363,12 +2436,20 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareEqual { left, right }
         | MirInstructionKind::CompareNotEqual { left, right }
         | MirInstructionKind::CompareIntegerLess { left, right, .. }
+        | MirInstructionKind::CompareIntegerLessOrEqual { left, right, .. }
         | MirInstructionKind::CompareIntegerGreater { left, right, .. }
+        | MirInstructionKind::CompareIntegerGreaterOrEqual { left, right, .. }
         | MirInstructionKind::CompareFloatLess { left, right, .. }
-        | MirInstructionKind::CompareFloatGreater { left, right, .. } => vec![*left, *right],
+        | MirInstructionKind::CompareFloatLessOrEqual { left, right, .. }
+        | MirInstructionKind::CompareFloatGreater { left, right, .. }
+        | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. } => vec![*left, *right],
         MirInstructionKind::BooleanNot { operand }
         | MirInstructionKind::IntegerNegate { operand, .. }
-        | MirInstructionKind::FloatNegate { operand, .. } => vec![*operand],
+        | MirInstructionKind::FloatNegate { operand, .. }
+        | MirInstructionKind::ConvertInteger { operand, .. }
+        | MirInstructionKind::ConvertIntegerToFloat { operand, .. }
+        | MirInstructionKind::ConvertFloatToInteger { operand, .. }
+        | MirInstructionKind::ConvertFloat { operand, .. } => vec![*operand],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
         MirInstructionKind::ArrayLength { array } => vec![*array],
         MirInstructionKind::ArrayGetChecked { array, index } => vec![*array, *index],

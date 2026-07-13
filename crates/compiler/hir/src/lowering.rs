@@ -565,6 +565,12 @@ fn lower_expression(
                 interface: *interface,
             }
         }
+        TypedExpressionKind::NumericConvert { value, conversion } => {
+            HirExpressionKind::NumericConvert {
+                value: Box::new(lower_expression(value, interface_slots)),
+                conversion: *conversion,
+            }
+        }
     };
     HirExpression {
         kind,
@@ -944,6 +950,9 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::InterfaceUpcast { value, .. } => {
             first_unknown_interface_expression(value, slots)
         }
+        TypedExpressionKind::NumericConvert { value, .. } => {
+            first_unknown_interface_expression(value, slots)
+        }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::Float(_)
         | TypedExpressionKind::String(_)
@@ -1112,6 +1121,9 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
                 .find_map(first_compile_time_only_expression)
         }),
         TypedExpressionKind::InterfaceUpcast { value, .. } => {
+            first_compile_time_only_expression(value)
+        }
+        TypedExpressionKind::NumericConvert { value, .. } => {
             first_compile_time_only_expression(value)
         }
         TypedExpressionKind::Integer(_)

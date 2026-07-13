@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -84,6 +85,185 @@ fn emits_deterministic_strict_c11_with_checked_direct_calls_and_entry() {
     assert_eq!(execution.status.code(), Some(42));
     let _ = std::fs::remove_file(source_path);
     let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
+fn checked_numeric_conversions_and_complete_ordering_execute_as_strict_c11() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private function convert(value: Int): Int\n\
+             local wide: Float64 = Float64(value) + 0.75\n\
+             local converted: Int = Int(wide)\n\
+             if wide >= 41.75 and wide <= 41.75 then\n\
+                 return converted\n\
+             end\n\
+             return 0\n\
+         end\n\
+         function main(): Int\n\
+             return convert(41) + 1\n\
+         end\n",
+    );
+    let entry = mir.functions()[1].symbol();
+    let translation = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("numeric C lowering");
+    assert!(translation.as_str().contains("(long double)"));
+    assert!(translation.as_str().contains(">="));
+    assert!(translation.as_str().contains("<="));
+
+    let root = temporary_root("numeric-conversions");
+    let source_path = root.with_extension("c");
+    let executable_path = root.with_extension("out");
+    std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+    let compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+        ])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .expect("C compiler runs");
+    assert!(
+        compiler.status.success(),
+        "generated numeric C did not compile:\n{}\n{}",
+        String::from_utf8_lossy(&compiler.stderr),
+        translation.as_str()
+    );
+    let execution = Command::new(&executable_path)
+        .output()
+        .expect("generated C runs");
+    assert_eq!(execution.status.code(), Some(42));
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
+fn invalid_numeric_conversion_traps_in_strict_c11_output() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local invalid: Byte = Byte(256.0)\n\
+             return Int(invalid)\n\
+         end\n",
+    );
+    let entry = mir.functions()[0].symbol();
+    let translation = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("trapping numeric C lowering");
+    let root = temporary_root("numeric-conversion-trap");
+    let source_path = root.with_extension("c");
+    let executable_path = root.with_extension("out");
+    std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+    let compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+        ])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .expect("C compiler runs");
+    assert!(
+        compiler.status.success(),
+        "generated trapping C did not compile:\n{}\n{}",
+        String::from_utf8_lossy(&compiler.stderr),
+        translation.as_str()
+    );
+    let execution = Command::new(&executable_path)
+        .output()
+        .expect("generated C runs");
+    assert!(!execution.status.success(), "invalid conversion must trap");
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
+fn every_numeric_conversion_family_emits_warning_free_strict_c11() {
+    for source_type in [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "Float32",
+        "Float64",
+    ] {
+        let source = numeric_conversion_matrix_source(source_type);
+        let (mir, types) = lower(&source);
+        let entry = mir.functions().last().expect("main").symbol();
+        let translation = lower_mir_to_c(
+            &mir,
+            &types,
+            CLoweringOptions::default().with_entry_point(entry),
+        )
+        .expect("numeric conversion matrix C lowering");
+        let root = temporary_root(&format!("numeric-conversion-matrix-{source_type}"));
+        let source_path = root.with_extension("c");
+        let executable_path = root.with_extension("out");
+        std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+        let compiler = Command::new("cc")
+            .args([
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-pedantic",
+            ])
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&executable_path)
+            .output()
+            .expect("C compiler runs");
+        assert!(
+            compiler.status.success(),
+            "{source_type} conversion matrix did not compile:\n{}\n{}",
+            String::from_utf8_lossy(&compiler.stderr),
+            translation.as_str()
+        );
+        let execution = Command::new(&executable_path)
+            .output()
+            .expect("generated C runs");
+        assert_eq!(execution.status.code(), Some(0), "{source_type}");
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(executable_path);
+    }
+}
+
+fn numeric_conversion_matrix_source(source_type: &str) -> String {
+    const INTEGERS: [&str; 8] = [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+    ];
+    const FLOATS: [&str; 2] = ["Float32", "Float64"];
+    let mut source = String::from("namespace Main\n");
+    let mut calls = Vec::new();
+    for target_type in INTEGERS.into_iter().chain(FLOATS) {
+        let name = format!("convert{source_type}To{target_type}");
+        writeln!(
+            source,
+            "private function {name}(value: {source_type}): {target_type}\n    return {target_type}(value)\nend"
+        )
+        .expect("source text");
+        calls.push(format!("    total = total + Int({name}(0))\n"));
+    }
+    source.push_str("function main(): Int\n    local total: Int = 0\n");
+    for call in calls {
+        source.push_str(&call);
+    }
+    source.push_str("    return total\nend\n");
+    source
 }
 
 #[test]

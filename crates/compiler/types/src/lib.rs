@@ -51,7 +51,7 @@ pub use interfaces::{
     ClassInterfaceImplementation, InterfaceDefinition, InterfaceDefinitionResult,
     InterfaceMethodDefinition, InterfaceMethodImplementation,
 };
-pub use numeric::{FloatKind, FloatValue, IntegerValue, NumericError};
+pub use numeric::{FloatKind, FloatValue, IntegerValue, NumericConversionKind, NumericError};
 pub use required_constants::{
     AttributeParameterId, PendingConstantExpression, RequiredConstantError, RequiredConstantTarget,
 };
