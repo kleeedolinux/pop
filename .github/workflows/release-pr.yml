@@ -40,6 +40,13 @@ jobs:
           fetch-depth: 0
 
       - name: Install LLVM 22
+        uses: actions/cache@v4
+        id: llvm-cache
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-llvm-22-apt
+
+      - name: Install LLVM 22 packages
         shell: bash
         run: |
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
@@ -51,6 +58,22 @@ jobs:
         run: |
           echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
           echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-release-cargo-
 
       - name: Build release changelog and PR branch
         id: prep
