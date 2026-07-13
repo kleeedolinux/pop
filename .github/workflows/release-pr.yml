@@ -22,10 +22,12 @@ jobs:
     name: Build workspace
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-    runs-on: ubuntu-latest
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out source
@@ -39,10 +41,6 @@ jobs:
           toolchain: 1.96.0
           targets: ${{ matrix.target }}
 
-      - name: Install ARM linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-
       - name: Install LLVM 22
         shell: bash
         run: |
@@ -53,7 +51,6 @@ jobs:
       - name: Build workspace
         env:
           LLVM_SYS_221_PREFIX: /usr/lib/llvm-22
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           cargo build -p pop-driver --release --target "${{ matrix.target }}"
           mkdir -p dist
