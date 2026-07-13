@@ -528,6 +528,15 @@ fn visit_expression_closures(
         HirExpressionKind::Unary { operand, .. } => {
             visit_expression_closures(operand, parameters, locals);
         }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            visit_expression_closures(condition, parameters, locals);
+            visit_expression_closures(when_true, parameters, locals);
+            visit_expression_closures(when_false, parameters, locals);
+        }
         HirExpressionKind::Call { arguments, .. } => {
             for argument in arguments {
                 visit_expression_closures(argument, parameters, locals);
@@ -978,13 +987,19 @@ impl<'hir> FunctionBuilder<'hir> {
         let outer_locals = self.locals.clone();
         self.current = then_block;
         self.lower_statements(then_body);
+        let then_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
         self.branch_with_state_if_open(join_block, &state);
         self.parameters.clone_from(&outer_parameters);
         self.locals.clone_from(&outer_locals);
         self.current = else_block;
         self.lower_statements(else_body);
+        let else_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
         self.branch_with_state_if_open(join_block, &state);
         self.current = join_block;
+        if !then_reaches_join && !else_reaches_join {
+            self.terminate(MirTerminator::Unreachable);
+            return;
+        }
         self.install_state(&state, &join_arguments);
     }
 
@@ -1381,6 +1396,19 @@ impl<'hir> FunctionBuilder<'hir> {
                 left,
                 right,
             } => return self.lower_binary_expression(expression, *operator, left, right),
+            HirExpressionKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                return self.lower_conditional_expression(
+                    condition,
+                    when_true,
+                    when_false,
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
             HirExpressionKind::Call {
                 dispatch,
                 arguments,
@@ -1691,6 +1719,42 @@ impl<'hir> FunctionBuilder<'hir> {
             target: join_block,
             arguments: vec![right],
         });
+        self.current = join_block;
+        result
+    }
+
+    fn lower_conditional_expression(
+        &mut self,
+        condition: &HirExpression,
+        when_true: &HirExpression,
+        when_false: &HirExpression,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let condition = self.lower_expression(condition);
+        let true_block = self.new_block();
+        let false_block = self.new_block();
+        let (join_block, result) = self.new_block_with_argument(result_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition,
+            when_true: true_block,
+            when_false: false_block,
+        });
+
+        self.current = true_block;
+        let when_true = self.lower_expression(when_true);
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![when_true],
+        });
+
+        self.current = false_block;
+        let when_false = self.lower_expression(when_false);
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![when_false],
+        });
+
         self.current = join_block;
         result
     }

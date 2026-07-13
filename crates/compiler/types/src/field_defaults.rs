@@ -107,6 +107,25 @@ fn evaluate_constant(
             context,
             diagnostics,
         ),
+        ExpressionSyntaxKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            let condition = evaluate_constant(arena, condition, None, context, diagnostics)?;
+            match condition.value {
+                FieldDefault::Boolean(true) => {
+                    evaluate_constant(arena, when_true, numeric_hint, context, diagnostics)
+                }
+                FieldDefault::Boolean(false) => {
+                    evaluate_constant(arena, when_false, numeric_hint, context, diagnostics)
+                }
+                value => {
+                    invalid_constant_operator(expression, "if", &value, diagnostics);
+                    None
+                }
+            }
+        }
         ExpressionSyntaxKind::InterpolatedString(_)
         | ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)

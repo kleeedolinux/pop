@@ -1536,6 +1536,11 @@ pub enum HirExpressionKind {
         left: Box<HirExpression>,
         right: Box<HirExpression>,
     },
+    Conditional {
+        condition: Box<HirExpression>,
+        when_true: Box<HirExpression>,
+        when_false: Box<HirExpression>,
+    },
     Call {
         dispatch: HirCallDispatch,
         arguments: Vec<HirExpression>,

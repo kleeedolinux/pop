@@ -1087,6 +1087,37 @@ fn typed_string_composition_and_formatting_execute_natively() {
 }
 
 #[test]
+fn conditional_expressions_and_elseif_execute_lazily_natively() {
+    let module = native_module(
+        "namespace Main\n\
+         private function fail(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         private function main(): Int\n\
+             local first = if true then 40 else fail()\n\
+             local second = if false then fail() else 1\n\
+             if false then\n\
+                 return fail()\n\
+             elseif first == 40 then\n\
+                 return first + second + 1\n\
+             else\n\
+                 return fail()\n\
+             end\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("br i1"), "{text}");
+    let result = link_with_runtime_and_run(&module, "conditional-expression");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native conditional expression failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn invalid_numeric_conversion_traps_before_native_float_to_integer_lowering() {
     let module = native_module(
         "namespace Main\n\

@@ -338,6 +338,19 @@ end
 Captured state is statically typed and converted to a native environment, never
 a table.
 
+### Conditional expressions
+
+Conditional values retain Luau's keyword form and lazy evaluation:
+
+```luau
+local description = if available then "ready" else "missing"
+```
+
+Both branches have one static type and the condition is exactly `Boolean`.
+Statement chains spell the intermediate keyword `elseif` and use one final
+`end`. Pop source does not use `?:`, truthiness, or `else if` as its canonical
+chain form. See ADR 0043.
+
 ### Loops
 
 The body-first loop stays close to Luau and avoids an extra `do`/`end` pair:

@@ -157,6 +157,11 @@ pub enum ExpressionSyntaxKind {
         left: Box<ExpressionSyntax>,
         right: Box<ExpressionSyntax>,
     },
+    Conditional {
+        condition: Box<ExpressionSyntax>,
+        when_true: Box<ExpressionSyntax>,
+        when_false: Box<ExpressionSyntax>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -605,16 +610,7 @@ impl BodyParser<'_> {
 
     fn parse_if(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::If, "`if`")?.range().start();
-        let condition = self.parse_expression(0)?;
-        self.expect(TokenKind::Then, "`then`")?;
-        self.expect(TokenKind::Newline, "line break after `then`")?;
-        let then_body = self.parse_statement_list(&[TokenKind::Else, TokenKind::End])?;
-        let else_body = if self.consume(TokenKind::Else).is_some() {
-            self.expect(TokenKind::Newline, "line break after `else`")?;
-            self.parse_statement_list(&[TokenKind::End])?
-        } else {
-            Vec::new()
-        };
+        let (condition, then_body, else_body) = self.parse_if_parts()?;
         let end = self.expect(TokenKind::End, "`end`")?.range().end();
         Ok(StatementSyntax {
             kind: StatementSyntaxKind::If {
@@ -624,6 +620,41 @@ impl BodyParser<'_> {
             },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
+    }
+
+    fn parse_if_parts(
+        &mut self,
+    ) -> Result<(ExpressionSyntax, Vec<StatementSyntax>, Vec<StatementSyntax>), FunctionBodyError>
+    {
+        let condition = self.parse_expression(0)?;
+        self.expect(TokenKind::Then, "`then`")?;
+        self.expect(TokenKind::Newline, "line break after `then`")?;
+        let then_body =
+            self.parse_statement_list(&[TokenKind::ElseIf, TokenKind::Else, TokenKind::End])?;
+        let else_body = if self.consume(TokenKind::Else).is_some() {
+            self.expect(TokenKind::Newline, "line break after `else`")?;
+            self.parse_statement_list(&[TokenKind::End])?
+        } else if let Some(elseif) = self.consume(TokenKind::ElseIf) {
+            let start = elseif.range().start();
+            let (condition, then_body, else_body) = self.parse_if_parts()?;
+            let end = else_body
+                .last()
+                .or_else(|| then_body.last())
+                .map_or(condition.span().range().end(), |statement| {
+                    statement.span().range().end()
+                });
+            vec![StatementSyntax {
+                kind: StatementSyntaxKind::If {
+                    condition,
+                    then_body,
+                    else_body,
+                },
+                span: SourceSpan::new(self.file, ordered_range(start, end)),
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok((condition, then_body, else_body))
     }
 
     fn parse_while(&mut self) -> Result<StatementSyntax, FunctionBodyError> {

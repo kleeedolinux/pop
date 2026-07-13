@@ -639,6 +639,55 @@ fn rejects_non_boolean_conditions_and_missing_return_paths() {
 }
 
 #[test]
+fn conditional_expressions_require_boolean_conditions_and_one_static_type() {
+    let accepted = check_function(
+        "namespace Example\n\
+         public function choose(condition: Boolean): Int8\n\
+             return if condition then 1 else 2\n\
+         end\n",
+        "choose",
+    );
+    assert!(
+        accepted.result.diagnostics().is_empty(),
+        "{}",
+        accepted.result.diagnostic_snapshot()
+    );
+    let [statement] = accepted.result.body().expect("typed body").statements() else {
+        panic!("one return");
+    };
+    assert!(matches!(
+        statement.kind(),
+        TypedStatementKind::Return { values }
+            if matches!(values[0].kind(), TypedExpressionKind::Conditional { .. })
+                && matches!(
+                    accepted.arena.get(values[0].type_id()),
+                    Some(SemanticType::Primitive(pop_types::PrimitiveType::Integer(
+                        pop_types::IntegerKind::Int8
+                    )))
+                )
+    ));
+
+    for source in [
+        "namespace Example\n\
+         public function invalid(): Int\n\
+             return if 1 then 2 else 3\n\
+         end\n",
+        "namespace Example\n\
+         public function invalid(condition: Boolean): Int\n\
+             return if condition then 1 else \"wrong\"\n\
+         end\n",
+    ] {
+        let rejected = check_function(source, "invalid");
+        assert!(rejected.result.body().is_none());
+        assert!(
+            rejected.result.diagnostic_snapshot().contains("POP2003"),
+            "{}",
+            rejected.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
 fn branch_locals_do_not_escape_their_lexical_scope() {
     let fixture = check_function(
         "namespace Example\n\

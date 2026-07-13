@@ -269,6 +269,11 @@ pub enum TypedExpressionKind {
         left: Box<TypedExpression>,
         right: Box<TypedExpression>,
     },
+    Conditional {
+        condition: Box<TypedExpression>,
+        when_true: Box<TypedExpression>,
+        when_false: Box<TypedExpression>,
+    },
     DirectCall {
         function: SymbolId,
         arguments: Vec<TypedExpression>,

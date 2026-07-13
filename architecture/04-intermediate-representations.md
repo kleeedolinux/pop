@@ -82,7 +82,9 @@ HIR invariants:
   CFG lowering; its body-local scope includes that condition only;
 - a numeric `for` retains its immutable binding, same-kind integer bounds,
   optional step, and body, while `break`/`continue` retain their resolved
-  innermost-loop target until CFG lowering.
+  innermost-loop target until CFG lowering;
+- a conditional expression retains one `Boolean` condition and two same-typed
+  lazy branches until MIR lowers them to CFG and a typed join argument.
 
 ## Compile-time HIR and values
 

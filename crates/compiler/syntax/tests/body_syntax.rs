@@ -451,6 +451,69 @@ fn parses_nested_if_else_and_while_blocks() {
 }
 
 #[test]
+fn parses_lazy_if_expressions_and_elseif_chains() {
+    // ADR 0043 uses Luau keywords for both value and statement conditionals.
+    let body = parse_body(
+        "namespace Example\n\
+         public function choose(first: Boolean, second: Boolean): Int\n\
+             local value = if first then 1 else if second then 2 else 3\n\
+             if first then\n\
+                 return value\n\
+             elseif second then\n\
+                 return 2\n\
+             else\n\
+                 return 3\n\
+             end\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("conditional local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        ExpressionSyntaxKind::Conditional { when_false, .. }
+            if matches!(when_false.kind(), ExpressionSyntaxKind::Conditional { .. })
+    ));
+    let StatementSyntaxKind::If { else_body, .. } = body.statements()[1].kind() else {
+        panic!("if statement");
+    };
+    assert!(matches!(
+        else_body.as_slice(),
+        [statement] if matches!(statement.kind(), StatementSyntaxKind::If { .. })
+    ));
+}
+
+#[test]
+fn conditional_expressions_require_else_and_reject_ternary_punctuation() {
+    for (expression, reason) in [
+        (
+            "if condition then 1",
+            "conditional expression requires else",
+        ),
+        ("condition ? 1 : 2", "ternary punctuation is not Pop syntax"),
+    ] {
+        let text = format!(
+            "namespace Example\n\
+             public function invalid(condition: Boolean): Int\n\
+                 return {expression}\n\
+             end\n"
+        );
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/body.pop", text).expect("source fixture");
+        let syntax = parse_file(&source);
+        let function = syntax
+            .root()
+            .children()
+            .iter()
+            .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+            .expect("function declaration");
+        let signature = parse_function_signature(&source, &syntax, function).expect("signature");
+        parse_function_body(&source, &syntax, function, &signature).expect_err(reason);
+    }
+}
+
+#[test]
 fn accepts_nested_luau_shaped_repeat_until_without_extra_end_markers() {
     // ADR 0032: `until`, rather than `end`, closes a body-first loop.
     let body = parse_body(

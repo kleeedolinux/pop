@@ -287,6 +287,7 @@ impl BodyParser<'_> {
                 let end = function.span().range().end();
                 Ok(self.expression(ExpressionSyntaxKind::Function(function), start, end))
             }
+            TokenKind::If => self.parse_conditional_expression(start),
             TokenKind::Identifier | TokenKind::Attribute => self.parse_name(token),
             TokenKind::LeftParenthesis => self.parse_parenthesized(start),
             TokenKind::LeftBrace => self.parse_brace_literal(start),
@@ -295,6 +296,27 @@ impl BodyParser<'_> {
                 expectation: "expression",
             }),
         }
+    }
+
+    fn parse_conditional_expression(
+        &mut self,
+        start: TextSize,
+    ) -> Result<ExpressionSyntax, FunctionBodyError> {
+        let condition = self.parse_expression(0)?;
+        self.expect(TokenKind::Then, "`then` in conditional expression")?;
+        let when_true = self.parse_expression(0)?;
+        self.expect(TokenKind::Else, "`else` in conditional expression")?;
+        let when_false = self.parse_expression(0)?;
+        let end = when_false.span().range().end();
+        Ok(self.expression(
+            ExpressionSyntaxKind::Conditional {
+                condition: Box::new(condition),
+                when_true: Box::new(when_true),
+                when_false: Box::new(when_false),
+            },
+            start,
+            end,
+        ))
     }
 
     fn parse_interpolated_string(

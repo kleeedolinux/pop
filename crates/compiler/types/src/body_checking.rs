@@ -392,6 +392,33 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 left,
                 right,
             } => self.check_binary(*operator, left, right, expected, span),
+            ExpressionSyntaxKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                let condition = self.check_condition(condition)?;
+                let when_true = self.check_expression_expected(when_true, expected)?;
+                let branch_expected =
+                    expected.unwrap_or_else(|| ExpectedExpressionType::plain(when_true.type_id()));
+                let when_false =
+                    self.check_expression_expected(when_false, Some(branch_expected))?;
+                self.require_same_type(
+                    when_true.type_id(),
+                    when_false.type_id(),
+                    when_false.span(),
+                    span,
+                );
+                Some(TypedExpression {
+                    type_id: when_true.type_id(),
+                    kind: TypedExpressionKind::Conditional {
+                        condition: Box::new(condition),
+                        when_true: Box::new(when_true),
+                        when_false: Box::new(when_false),
+                    },
+                    span,
+                })
+            }
             ExpressionSyntaxKind::Call { callee, arguments } => {
                 self.check_call(callee, arguments, span)
             }

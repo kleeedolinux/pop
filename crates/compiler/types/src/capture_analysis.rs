@@ -200,6 +200,15 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
         }
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            finalize_expression_captures(condition, written);
+            finalize_expression_captures(when_true, written);
+            finalize_expression_captures(when_false, written);
+        }
         TypedExpressionKind::StringFormat { value, .. } => {
             finalize_expression_captures(value, written);
         }

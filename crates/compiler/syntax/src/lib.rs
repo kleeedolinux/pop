@@ -298,8 +298,8 @@ impl Parser<'_, '_> {
                 {
                     depth += 1;
                 }
-                TokenKind::If
-                | TokenKind::While
+                TokenKind::If if self.if_opens_block(index) => depth += 1,
+                TokenKind::While
                 | TokenKind::For
                 | TokenKind::Record
                 | TokenKind::Class
@@ -354,6 +354,19 @@ impl Parser<'_, '_> {
             .rev()
             .find(|token| !token.kind().is_trivia())
             .is_none_or(|token| token.kind() != TokenKind::Colon)
+    }
+
+    fn if_opens_block(&self, index: usize) -> bool {
+        for token in self.tokens[..index].iter().rev() {
+            match token.kind() {
+                TokenKind::Newline => return true,
+                TokenKind::Whitespace
+                | TokenKind::LineComment
+                | TokenKind::DocumentationComment => {}
+                _ => return false,
+            }
+        }
+        true
     }
 
     fn line_end(&self, start: usize) -> usize {

@@ -226,6 +226,17 @@ impl TypedCompileTimeLowerer<'_> {
                     span,
                 ))
             }
+            TypedExpressionKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => Ok(CompileTimeExpression::conditional(
+                self.lower_expression(condition)?,
+                self.lower_expression(when_true)?,
+                self.lower_expression(when_false)?,
+                type_id,
+                span,
+            )),
             TypedExpressionKind::NumericConvert { value, conversion } => {
                 Ok(CompileTimeExpression::numeric_convert(
                     *conversion,
@@ -479,6 +490,7 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::Tuple(_)
         | TypedExpressionKind::Unary { .. }
         | TypedExpressionKind::Binary { .. }
+        | TypedExpressionKind::Conditional { .. }
         | TypedExpressionKind::NumericConvert { .. }
         | TypedExpressionKind::DirectCall { .. } => {
             unreachable!("supported expression is not routed to the unsupported lowerer")

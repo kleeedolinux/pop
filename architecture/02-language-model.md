@@ -207,6 +207,11 @@ reads remain optional. See ADR 0034.
 
 ## Control flow and loops
 
+Conditions are exactly `Boolean`. Statement `if` supports Luau-shaped `elseif`
+chains with one final `end`. Conditional values use `if condition then value
+else alternative` without a trailing `end`; exactly one branch executes and
+both branches resolve to one static result type. See ADR 0043.
+
 `while` remains the pre-condition loop. Pop Lang also has the Luau-shaped
 body-first form:
 

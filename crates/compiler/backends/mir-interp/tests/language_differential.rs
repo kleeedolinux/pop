@@ -170,6 +170,32 @@ fn string_composition_and_primitive_formatting_are_optimization_stable() {
 }
 
 #[test]
+fn conditional_expressions_are_lazy_and_elseif_is_optimization_stable() {
+    // ADR 0043: an unselected expression branch is never evaluated, and
+    // statement elseif chains preserve their source ordering.
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private function fail(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public function run(): Int\n\
+             local first = if true then 40 else fail()\n\
+             local second = if false then fail() else 1\n\
+             if false then\n\
+                 return fail()\n\
+             elseif first == 40 then\n\
+                 return first + second + 1\n\
+             else\n\
+                 return fail()\n\
+             end\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("42")]);
+}
+
+#[test]
 fn numeric_ranges_break_and_continue_are_cfg_stable() {
     // ADR 0042: every loop-control form lowers to verified CFG edges, including
     // continue-to-condition for repeat-until.

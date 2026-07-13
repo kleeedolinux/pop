@@ -161,6 +161,29 @@ fn numeric_for_and_loop_control_lower_to_verified_portable_cfg() {
 }
 
 #[test]
+fn conditional_expressions_lower_to_typed_cfg_joins_and_round_trip() {
+    // ADR 0043 represents conditional expressions with ordinary control flow;
+    // MIR has no select-like operation that could evaluate both branches.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function choose(flag: Boolean): Int8\n\
+             return if flag then 41 else 42\n\
+         end\n",
+    );
+
+    let dump = mir.dump();
+    assert_eq!(dump.matches("condBranch").count(), 1, "{dump}");
+    assert!(dump.contains("branch b"), "{dump}");
+    assert!(
+        dump.contains("(v"),
+        "typed join block argument missing: {dump}"
+    );
+    assert!(!dump.to_ascii_lowercase().contains("select"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("conditional"), "{dump}");
+    assert_verified_round_trip(&mir, &types);
+}
+
+#[test]
 fn typed_string_composition_is_backend_neutral_effectful_and_round_trips() {
     // ADR 0041: concatenation and primitive formatting carry exact static
     // kinds, allocation effects, and no runtime format-string lookup.

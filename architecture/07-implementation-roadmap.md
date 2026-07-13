@@ -33,6 +33,7 @@ diagnostics.
   checked numeric conversions from ADR 0040;
 - typed string concatenation, interpolation, escape decoding, and closed
   primitive formatting from ADR 0041;
+- conditional expressions and `elseif` statement chains from ADR 0043;
 - constraint-based local inference with no dynamic fallback;
 - typed UDA declarations, attachment, constant arguments, and query API;
 - deterministic compile-time constant/function evaluation with budgets;

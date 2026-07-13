@@ -1366,6 +1366,18 @@ impl Verifier<'_> {
                 self.verify_expression(right, visible);
                 self.verify_binary_operator(expression, *operator, left, right);
             }
+            HirExpressionKind::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                self.verify_expression(condition, visible);
+                self.verify_condition(condition);
+                self.verify_expression(when_true, visible);
+                self.verify_expression(when_false, visible);
+                self.verify_expression_type(expression.type_id(), when_true);
+                self.verify_expression_type(expression.type_id(), when_false);
+            }
             HirExpressionKind::Call {
                 dispatch,
                 arguments,
@@ -2949,6 +2961,15 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::Binary { left, right, .. } => {
             collect_cell_captures(left, written);
             collect_cell_captures(right, written);
+        }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_cell_captures(condition, written);
+            collect_cell_captures(when_true, written);
+            collect_cell_captures(when_false, written);
         }
         HirExpressionKind::StringConcat { left, right } => {
             collect_cell_captures(left, written);

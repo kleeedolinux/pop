@@ -568,6 +568,19 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, right, arena);
             output.push(')');
         }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            output.push_str("conditional(");
+            dump_expression(output, condition, arena);
+            output.push_str(", ");
+            dump_expression(output, when_true, arena);
+            output.push_str(", ");
+            dump_expression(output, when_false, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
             arguments,

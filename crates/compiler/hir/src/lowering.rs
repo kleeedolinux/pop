@@ -583,6 +583,15 @@ fn lower_expression(
             left: Box::new(lower_expression(left, interface_slots)),
             right: Box::new(lower_expression(right, interface_slots)),
         },
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => HirExpressionKind::Conditional {
+            condition: Box::new(lower_expression(condition, interface_slots)),
+            when_true: Box::new(lower_expression(when_true, interface_slots)),
+            when_false: Box::new(lower_expression(when_false, interface_slots)),
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -971,6 +980,13 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(left, slots)
                 .or_else(|| first_unknown_interface_expression(right, slots))
         }
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => first_unknown_interface_expression(condition, slots)
+            .or_else(|| first_unknown_interface_expression(when_true, slots))
+            .or_else(|| first_unknown_interface_expression(when_false, slots)),
         TypedExpressionKind::StringConcat { left, right } => {
             first_unknown_interface_expression(left, slots)
                 .or_else(|| first_unknown_interface_expression(right, slots))
@@ -1153,6 +1169,13 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
         TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
             .or_else(|| first_compile_time_only_expression(right)),
+        TypedExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => first_compile_time_only_expression(condition)
+            .or_else(|| first_compile_time_only_expression(when_true))
+            .or_else(|| first_compile_time_only_expression(when_false)),
         TypedExpressionKind::StringConcat { left, right } => {
             first_compile_time_only_expression(left)
                 .or_else(|| first_compile_time_only_expression(right))

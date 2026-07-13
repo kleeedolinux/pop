@@ -137,6 +137,38 @@ fn compile_time_boolean_operators_preserve_source_short_circuiting() {
 }
 
 #[test]
+fn compile_time_conditional_expressions_preserve_source_laziness() {
+    let result = analyze(
+        "namespace Example\n\
+         @CompileTime\n\
+         private function failing(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         @CompileTime\n\
+         private function choose(flag: Boolean): Int\n\
+             return if flag then 42 else failing()\n\
+         end\n\
+         @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+         public attribute Answer(value: Int)\n\
+         @Answer(choose(true))\n\
+         public function value(): Int\n\
+             return 0\n\
+         end\n",
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let function = &result.hir().expect("verified HIR").functions()[0];
+    assert!(matches!(
+        function.attributes()[0].arguments()[0].value(),
+        AttributeConstant::Integer(value)
+            if value.kind() == IntegerKind::Int64 && value.to_string() == "42"
+    ));
+}
+
+#[test]
 fn source_compile_time_cycles_report_the_cycle_with_call_and_request_provenance() {
     let result = analyze(CYCLE);
     assert!(result.hir().is_none());
