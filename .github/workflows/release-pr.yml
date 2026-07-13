@@ -48,7 +48,9 @@ jobs:
 
       - name: Export LLVM prefix
         shell: bash
-        run: echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
+        run: |
+          echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
+          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
 
       - name: Build release changelog and PR branch
         id: prep
@@ -155,13 +157,16 @@ jobs:
         shell: bash
         run: |
           title="release: ${{ steps.prep.outputs.tag }}"
-          body="Automated release PR for \`${{ steps.prep.outputs.tag }}\`.
+          body=$(cat <<EOF
+          Automated release PR for \`${{ steps.prep.outputs.tag }}\`.
 
-- Kind: \`${{ steps.prep.outputs.kind }}\`
-- Previous published version: \`${{ steps.prep.outputs.previous || 'none' }}\`
-- Source archive checksum: \`${{ steps.prep.outputs.checksum }}\`
+          - Kind: \`${{ steps.prep.outputs.kind }}\`
+          - Previous published version: \`${{ steps.prep.outputs.previous || 'none' }}\`
+          - Source archive checksum: \`${{ steps.prep.outputs.checksum }}\`
 
-Review the generated \`CHANGELOG.md\`, approve it, and merge to publish."
+          Review the generated \`CHANGELOG.md\`, approve it, and merge to publish.
+          EOF
+          )
 
           pr_number="$(gh pr list --head "${{ steps.prep.outputs.branch }}" --state open --json number --jq '.[0].number // empty')"
           if [[ -n "$pr_number" ]]; then
