@@ -18,8 +18,36 @@ env:
   GH_TOKEN: ${{ github.token }}
 
 jobs:
+  build:
+    name: Build workspace
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+
+      - name: Install LLVM 22
+        shell: bash
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 22
+
+      - name: Build workspace
+        env:
+          LLVM_SYS_221_PREFIX: /usr/lib/llvm-22
+        run: cargo build --workspace --release
+
   publish:
     if: github.actor == 'kleeedolinux'
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
