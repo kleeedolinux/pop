@@ -64,16 +64,25 @@ jobs:
         env:
           LLVM_SYS_221_PREFIX: /usr/lib/llvm-22
         run: |
-          cargo build -p pop-driver --release --target "${{ matrix.target }}"
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/pop" "dist/pop-${{ matrix.target }}"
-          sha256sum "dist/pop-${{ matrix.target }}" > "dist/pop-${{ matrix.target }}.sha256"
+          cargo build -p pop-driver -p pop-standard -p pop-runtime-native --release --target "${{ matrix.target }}"
+          bundle="pop-${{ matrix.target }}"
+          mkdir -p "dist/$bundle"
+          cp "target/${{ matrix.target }}/release/pop" "dist/$bundle/$bundle"
+          cp "target/${{ matrix.target }}/release/libpop_standard.a" "dist/$bundle/"
+          cp "target/${{ matrix.target }}/release/libpop_runtime_native.a" "dist/$bundle/"
+          cd "dist/$bundle"
+          zip -9 "../$bundle.zip" "$bundle" libpop_standard.a libpop_runtime_native.a
+          cd ..
+          sha256sum "$bundle.zip" > "$bundle.zip.sha256"
+          rm -rf "$bundle"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: pop-${{ matrix.target }}
-          path: dist/
+          path: |
+            dist/pop-${{ matrix.target }}.zip
+            dist/pop-${{ matrix.target }}.zip.sha256
 
   publish:
     if: github.actor == 'kleeedolinux'
