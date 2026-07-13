@@ -65,11 +65,12 @@ jobs:
           from pathlib import Path
 
           tag = os.environ.get("INPUT_TAG") or os.environ["GITHUB_REF_NAME"]
-          match = re.fullmatch(r"v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?", tag)
-          if not match:
+          version_pattern = re.compile(r"v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?")
+          tag_match = version_pattern.fullmatch(tag)
+          if not tag_match:
               raise SystemExit(f"tag {tag!r} is not semantic versioned")
 
-          prerelease = match.group("prerelease") or ""
+          prerelease = tag_match.group("prerelease") or ""
           release_kind = "prerelease" if prerelease else "release"
 
           def git(*args, check=True):
@@ -88,7 +89,7 @@ jobs:
               pre_rank = tuple((0, int(part)) if part.isdigit() else (1, part) for part in pre_parts)
               return major, minor, patch, stable_rank, pre_rank
 
-          all_tags = [line for line in git("tag", "--list", "v*").splitlines() if match.fullmatch(line)]
+          all_tags = [line for line in git("tag", "--list", "v*").splitlines() if version_pattern.fullmatch(line)]
           current = tag
           previous = ""
           for candidate in sorted(all_tags, key=version_key):
