@@ -19,6 +19,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'poplanguages/pop'
     name: Build workspace
     strategy:
       matrix:
@@ -85,7 +86,7 @@ jobs:
             dist/pop-${{ matrix.target }}.zip.sha256
 
   publish:
-    if: github.actor == 'kleeedolinux'
+    if: github.repository == 'poplanguages/pop' && github.actor == 'kleeedolinux'
     needs: build
     runs-on: ubuntu-latest
 
