@@ -29,13 +29,14 @@ pub(crate) struct Binding {
 #[derive(Clone, Copy)]
 pub(crate) enum BindingKind {
     Local(LocalId),
+    LoopLocal(LocalId),
     Parameter(ValueParameterId),
 }
 
 impl BindingKind {
     pub(crate) const fn capture_source(self) -> CaptureSource {
         match self {
-            Self::Local(local) => CaptureSource::Local(local),
+            Self::Local(local) | Self::LoopLocal(local) => CaptureSource::Local(local),
             Self::Parameter(parameter) => CaptureSource::Parameter(parameter),
         }
     }
@@ -129,6 +130,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) active_functions: Vec<ActiveFunction>,
     pub(crate) written_bindings: BTreeSet<BindingId>,
     pub(crate) signature_stack: Vec<ResolvedFunctionSignature>,
+    pub(crate) loop_depth: u32,
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
@@ -151,6 +153,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             active_functions: Vec::new(),
             written_bindings: BTreeSet::new(),
             signature_stack: Vec::new(),
+            loop_depth: 0,
         }
     }
 
@@ -848,7 +851,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .map(TypedExpressionKind::Capture);
         }
         Some(match binding.kind {
-            BindingKind::Local(local) => TypedExpressionKind::Local(local),
+            BindingKind::Local(local) | BindingKind::LoopLocal(local) => {
+                TypedExpressionKind::Local(local)
+            }
             BindingKind::Parameter(parameter) => TypedExpressionKind::Parameter(parameter),
         })
     }
@@ -939,6 +944,9 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::While { .. }
+        | TypedStatementKind::NumericFor { .. }
+        | TypedStatementKind::Break
+        | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
         | TypedStatementKind::Call(_)

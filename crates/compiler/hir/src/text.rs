@@ -292,6 +292,36 @@ fn dump_statements(
                 dump_expression(output, condition, arena);
                 output.push('\n');
             }
+            HirStatementKind::NumericFor {
+                binding,
+                local,
+                name,
+                integer_type,
+                first,
+                last,
+                step,
+                body,
+            } => {
+                let _ = write!(
+                    output,
+                    "numericFor bind#{} l{} {}:{} = ",
+                    binding.raw(),
+                    local.raw(),
+                    name,
+                    type_text(*integer_type, arena)
+                );
+                dump_expression(output, first, arena);
+                output.push_str(", ");
+                dump_expression(output, last, arena);
+                output.push_str(", ");
+                dump_expression(output, step, arena);
+                output.push('\n');
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
+            HirStatementKind::Break => output.push_str("break\n"),
+            HirStatementKind::Continue => output.push_str("continue\n"),
             HirStatementKind::Match {
                 scrutinee,
                 union,

@@ -352,8 +352,22 @@ until value == 3
 
 The `until` expression must be `Boolean`. Its `true` result exits; `false`
 repeats after the body has executed. A local declared in the body remains
-visible to that condition but not after the statement. Version one deliberately
-does not add `break` or `continue` with this form. See ADR 0032.
+visible to that condition but not after the statement.
+
+Numeric ranges use Luau's compact comma clause rather than a new punctuation
+operator:
+
+```luau
+for index = 1, count do
+    process(index)
+end
+```
+
+An explicit third expression supplies the step. All range expressions have one
+fixed integer type and the loop binding is immutable. `break` and `continue`
+are standalone statements targeting the innermost loop; they do not take
+labels. `continue` reaches the natural condition or advancement point of the
+loop form. See ADR 0032 and ADR 0042.
 
 ### Tagged-union matching
 

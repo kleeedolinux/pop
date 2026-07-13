@@ -81,6 +81,18 @@ pub enum TypedStatementKind {
         body: Vec<TypedStatement>,
         condition: TypedExpression,
     },
+    NumericFor {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        integer_type: TypeId,
+        first: TypedExpression,
+        last: TypedExpression,
+        step: TypedExpression,
+        body: Vec<TypedStatement>,
+    },
+    Break,
+    Continue,
     Match {
         scrutinee: TypedExpression,
         union: SymbolId,

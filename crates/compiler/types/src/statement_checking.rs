@@ -82,11 +82,34 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             StatementSyntaxKind::While { condition, body } => {
                 let condition = self.check_condition(condition)?;
+                self.loop_depth = self.loop_depth.saturating_add(1);
                 let body = self.check_nested_statements(signature, body);
+                self.loop_depth = self.loop_depth.saturating_sub(1);
                 TypedStatementKind::While { condition, body }
             }
             StatementSyntaxKind::RepeatUntil { body, condition } => {
                 self.check_repeat_until(signature, body, condition)?
+            }
+            StatementSyntaxKind::NumericFor {
+                name,
+                first,
+                last,
+                step,
+                body,
+            } => self.check_numeric_for(
+                signature,
+                name,
+                first,
+                last,
+                step.as_ref(),
+                body,
+                statement.span(),
+            )?,
+            StatementSyntaxKind::Break => {
+                self.check_loop_control("break", true, statement.span())?
+            }
+            StatementSyntaxKind::Continue => {
+                self.check_loop_control("continue", false, statement.span())?
             }
             StatementSyntaxKind::Match { scrutinee, arms } => {
                 self.check_match(signature, scrutinee, arms, statement.span())?
@@ -101,6 +124,118 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(TypedStatement {
             kind,
             span: statement.span(),
+        })
+    }
+
+    fn check_loop_control(
+        &mut self,
+        name: &str,
+        is_break: bool,
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        if self.loop_depth == 0 {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                span,
+                name,
+                "outside loop",
+            ));
+            return None;
+        }
+        Some(if is_break {
+            TypedStatementKind::Break
+        } else {
+            TypedStatementKind::Continue
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_numeric_for(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        first: &ExpressionSyntax,
+        last: &ExpressionSyntax,
+        step: Option<&ExpressionSyntax>,
+        body: &[StatementSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let first = self.check_expression(first)?;
+        let integer_type = first.type_id();
+        let Some(SemanticType::Primitive(crate::PrimitiveType::Integer(kind))) =
+            self.resolver.arena().get(integer_type).cloned()
+        else {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                first.span(),
+                "numeric for",
+                self.type_name(integer_type),
+            ));
+            return None;
+        };
+        let last = self
+            .check_expression_expected(last, Some(ExpectedExpressionType::plain(integer_type)))?;
+        self.require_same_type(integer_type, last.type_id(), last.span(), span);
+        let step = if let Some(step) = step {
+            let step = self.check_expression_expected(
+                step,
+                Some(ExpectedExpressionType::plain(integer_type)),
+            )?;
+            self.require_same_type(integer_type, step.type_id(), step.span(), span);
+            step
+        } else {
+            TypedExpression {
+                kind: TypedExpressionKind::Integer(
+                    crate::IntegerValue::parse_decimal("1", kind).expect("one fits every integer"),
+                ),
+                type_id: integer_type,
+                span,
+            }
+        };
+        if matches!(step.kind(), TypedExpressionKind::Integer(value)
+            if value.signed() == Some(0) || value.unsigned() == Some(0))
+        {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                step.span(),
+                "numeric for step",
+                "zero",
+            ));
+            return None;
+        }
+
+        let local = LocalId::from_raw(self.next_local);
+        self.next_local = self.next_local.saturating_add(1);
+        let binding = BindingId::from_raw(self.next_binding);
+        self.next_binding = self.next_binding.saturating_add(1);
+        self.scopes.push(BTreeMap::new());
+        self.scopes
+            .last_mut()
+            .expect("numeric for scope was just pushed")
+            .insert(
+                name.to_owned(),
+                Binding {
+                    id: binding,
+                    kind: BindingKind::LoopLocal(local),
+                    type_id: integer_type,
+                    function_depth: self.function_depth,
+                },
+            );
+        self.loop_depth = self.loop_depth.saturating_add(1);
+        let body = body
+            .iter()
+            .filter_map(|statement| self.check_statement(signature, statement))
+            .collect();
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.scopes
+            .pop()
+            .expect("numeric for scope was just pushed");
+        Some(TypedStatementKind::NumericFor {
+            binding,
+            local,
+            name: name.to_owned(),
+            integer_type,
+            first,
+            last,
+            step,
+            body,
         })
     }
 
@@ -335,6 +470,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             shape.results.clone(),
         );
         self.signature_stack.push(nested_signature.clone());
+        let enclosing_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let mut statements = Vec::new();
         for statement in function.body() {
             if let Some(typed) = self.check_statement(&nested_signature, statement) {
@@ -348,6 +484,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         self.signature_stack
             .pop()
             .expect("closure signature was just pushed");
+        self.loop_depth = enclosing_loop_depth;
 
         self.scopes.pop().expect("closure scope was just pushed");
         let active = self
@@ -404,6 +541,14 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
+            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "assignment",
+                    "immutable numeric for binding",
+                ));
+                return None;
+            }
             let target_kind = self.binding_reference_kind(binding)?;
             if matches!(target_kind, TypedExpressionKind::Parameter(_)) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
@@ -504,11 +649,26 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         condition: &ExpressionSyntax,
     ) -> Option<TypedStatementKind> {
         self.scopes.push(BTreeMap::new());
+        self.loop_depth = self.loop_depth.saturating_add(1);
         let body = statements
             .iter()
             .filter_map(|statement| self.check_statement(signature, statement))
             .collect();
+        if statements.iter().any(|statement| {
+            matches!(
+                statement.kind(),
+                StatementSyntaxKind::Local { .. } | StatementSyntaxKind::LocalFunction { .. }
+            )
+        }) && contains_continue_for_current_loop(statements)
+        {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                condition.span(),
+                "repeat continue",
+                "body-local condition scope",
+            ));
+        }
         let condition = self.check_condition(condition);
+        self.loop_depth = self.loop_depth.saturating_sub(1);
         self.scopes
             .pop()
             .expect("repeat-until lexical scope was just pushed");
@@ -664,4 +824,30 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             arms: typed_arms,
         })
     }
+}
+
+fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
+    statements.iter().any(|statement| match statement.kind() {
+        StatementSyntaxKind::Continue => true,
+        StatementSyntaxKind::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            contains_continue_for_current_loop(then_body)
+                || contains_continue_for_current_loop(else_body)
+        }
+        StatementSyntaxKind::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| contains_continue_for_current_loop(arm.body())),
+        StatementSyntaxKind::While { .. }
+        | StatementSyntaxKind::RepeatUntil { .. }
+        | StatementSyntaxKind::NumericFor { .. }
+        | StatementSyntaxKind::Local { .. }
+        | StatementSyntaxKind::LocalFunction { .. }
+        | StatementSyntaxKind::Return { .. }
+        | StatementSyntaxKind::Break
+        | StatementSyntaxKind::Assignment { .. }
+        | StatementSyntaxKind::Expression(_) => false,
+    })
 }

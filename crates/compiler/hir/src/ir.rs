@@ -1306,6 +1306,18 @@ pub enum HirStatementKind {
         body: Vec<HirStatement>,
         condition: HirExpression,
     },
+    NumericFor {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        integer_type: TypeId,
+        first: HirExpression,
+        last: HirExpression,
+        step: HirExpression,
+        body: Vec<HirStatement>,
+    },
+    Break,
+    Continue,
     Match {
         scrutinee: HirExpression,
         union: SymbolId,

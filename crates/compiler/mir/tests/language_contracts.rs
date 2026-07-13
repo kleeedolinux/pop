@@ -127,6 +127,40 @@ fn numeric_conversions_and_complete_ordering_are_explicit_and_round_trip() {
 }
 
 #[test]
+fn numeric_for_and_loop_control_lower_to_verified_portable_cfg() {
+    // ADR 0042 forbids backend-specific range and loop-control instructions.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function sum(limit: Int): Int\n\
+             local total = 0\n\
+             for index = 1, limit do\n\
+                 if index == 2 then\n\
+                     continue\n\
+                 end\n\
+                 total = total + index\n\
+                 if total > 10 then\n\
+                     break\n\
+                 end\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+
+    let dump = mir.dump();
+    assert!(dump.contains("integer.compareLessOrEqual Int64"), "{dump}");
+    assert!(
+        dump.contains("integer.compareGreaterOrEqual Int64"),
+        "{dump}"
+    );
+    assert!(dump.contains("integer.checkedAdd Int64"), "{dump}");
+    assert!(dump.contains("gcSafePoint"), "{dump}");
+    assert!(!dump.contains("numericFor"), "{dump}");
+    assert!(!dump.contains("break"), "{dump}");
+    assert!(!dump.contains("continue"), "{dump}");
+    assert_verified_round_trip(&mir, &types);
+}
+
+#[test]
 fn typed_string_composition_is_backend_neutral_effectful_and_round_trips() {
     // ADR 0041: concatenation and primitive formatting carry exact static
     // kinds, allocation effects, and no runtime format-string lookup.

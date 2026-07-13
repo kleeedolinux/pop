@@ -1039,6 +1039,7 @@ const fn trap_kind_text(kind: pop_runtime_interface::TrapKind) -> &'static str {
         pop_runtime_interface::TrapKind::IntegerOverflow => "IntegerOverflow",
         pop_runtime_interface::TrapKind::DivisionByZero => "DivisionByZero",
         pop_runtime_interface::TrapKind::NumericConversion => "NumericConversion",
+        pop_runtime_interface::TrapKind::InvalidRangeStep => "InvalidRangeStep",
         pop_runtime_interface::TrapKind::BoundsViolation => "BoundsViolation",
         pop_runtime_interface::TrapKind::ImpossibleState => "ImpossibleState",
     }

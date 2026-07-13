@@ -26,7 +26,8 @@ diagnostics.
 - namespaces, using directives, explicit declaration visibility, Bubble
   reference metadata, and symbol
   resolution;
-- primitive types, functions, locals, branches, `while`/`repeat` loops, tuples, immutable records,
+- primitive types, functions, locals, branches, `while`/`repeat` loops, numeric
+  `for` ranges and loop control, tuples, immutable records,
   tagged unions, and typed `with` updates;
 - decimal floating-point literals, complete numeric ordering, and explicit
   checked numeric conversions from ADR 0040;

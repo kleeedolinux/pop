@@ -497,6 +497,113 @@ fn repeat_until_requires_boolean_conditions_and_keeps_body_locals_scoped_to_the_
 }
 
 #[test]
+fn numeric_for_ranges_and_loop_control_are_closed_static_statements() {
+    // ADR 0042: range values share one integer type and loop control resolves
+    // lexically without a runtime iterator lookup.
+    let accepted = check_function(
+        "namespace Example\n\
+         public function count(limit: Int): Int\n\
+             local total = 0\n\
+             for index = 1, limit do\n\
+                 if index == 2 then\n\
+                     continue\n\
+                 end\n\
+                 total = total + index\n\
+                 if total > 20 then\n\
+                     break\n\
+                 end\n\
+             end\n\
+             return total\n\
+         end\n",
+        "count",
+    );
+    assert!(
+        accepted.result.diagnostics().is_empty(),
+        "{}",
+        accepted.result.diagnostic_snapshot()
+    );
+    let statements = accepted.result.body().expect("typed body").statements();
+    assert!(matches!(
+        statements[1].kind(),
+        TypedStatementKind::NumericFor { body, .. }
+            if matches!(body[0].kind(), TypedStatementKind::If { then_body, .. }
+                if matches!(then_body[0].kind(), TypedStatementKind::Continue))
+                && matches!(body[2].kind(), TypedStatementKind::If { then_body, .. }
+                    if matches!(then_body[0].kind(), TypedStatementKind::Break))
+    ));
+}
+
+#[test]
+fn numeric_for_rejects_dynamic_boundaries_and_invalid_loop_control() {
+    for (source, expected) in [
+        (
+            "namespace Example\n\
+         public function invalid(limit: Float64)\n\
+             for index = 1, limit do\n\
+                 index\n\
+             end\n\
+         end\n",
+            "POP2003",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid()\n\
+             for index = 1, 3 do\n\
+                 index = 2\n\
+             end\n\
+         end\n",
+            "POP2005",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid()\n\
+             for index = 1, 3, 0 do\n\
+                 index\n\
+             end\n\
+         end\n",
+            "POP2005",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid()\n\
+             break\n\
+         end\n",
+            "POP2005",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid()\n\
+             repeat\n\
+                 continue\n\
+                 local value = 1\n\
+             until value == 1\n\
+         end\n",
+            "POP2005",
+        ),
+        (
+            "namespace Example\n\
+         public function invalid()\n\
+             while true do\n\
+                 local escape = function()\n\
+                     continue\n\
+                 end\n\
+                 escape()\n\
+             end\n\
+         end\n",
+            "POP2005",
+        ),
+    ] {
+        let rejected = check_function(source, "invalid");
+        assert!(rejected.result.body().is_none());
+        assert!(
+            rejected.result.diagnostic_snapshot().contains(expected),
+            "{}",
+            rejected.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
 fn rejects_non_boolean_conditions_and_missing_return_paths() {
     for (source, expected_code) in [
         (

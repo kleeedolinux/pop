@@ -474,6 +474,30 @@ fn runtime_free_c_rejects_repeat_until_safe_points_without_a_fallback() {
 }
 
 #[test]
+fn runtime_free_c_rejects_numeric_range_safe_points_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local total = 0\n\
+             for index = 1, 42 do\n\
+                 total = total + index\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect_err("runtime-free C cannot erase a numeric-range safe point");
+    assert!(matches!(
+        error,
+        CBackendError::UnsupportedInstruction { .. }
+    ));
+}
+
+#[test]
 fn checked_addition_traps_for_every_fixed_integer_width() {
     for (name, maximum) in [
         ("Int8", "127"),

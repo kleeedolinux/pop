@@ -328,6 +328,30 @@ fn lower_statement(
                 .collect(),
             condition: lower_expression(condition, interface_slots),
         },
+        TypedStatementKind::NumericFor {
+            binding,
+            local,
+            name,
+            integer_type,
+            first,
+            last,
+            step,
+            body,
+        } => HirStatementKind::NumericFor {
+            binding: *binding,
+            local: *local,
+            name: name.clone(),
+            integer_type: *integer_type,
+            first: lower_expression(first, interface_slots),
+            last: lower_expression(last, interface_slots),
+            step: lower_expression(step, interface_slots),
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
+        TypedStatementKind::Break => HirStatementKind::Break,
+        TypedStatementKind::Continue => HirStatementKind::Continue,
         TypedStatementKind::Match {
             scrutinee,
             union,
@@ -807,6 +831,17 @@ fn first_unknown_interface_call(
                 first_unknown_interface_call(body, slots)
                     .or_else(|| first_unknown_interface_expression(condition, slots))
             }
+            TypedStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => first_unknown_interface_expression(first, slots)
+                .or_else(|| first_unknown_interface_expression(last, slots))
+                .or_else(|| first_unknown_interface_expression(step, slots))
+                .or_else(|| first_unknown_interface_call(body, slots)),
+            TypedStatementKind::Break | TypedStatementKind::Continue => None,
             TypedStatementKind::Match {
                 scrutinee, arms, ..
             } => first_unknown_interface_expression(scrutinee, slots).or_else(|| {
@@ -1010,6 +1045,17 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 first_compile_time_only_statement(body)
                     .or_else(|| first_compile_time_only_expression(condition))
             }
+            TypedStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => first_compile_time_only_expression(first)
+                .or_else(|| first_compile_time_only_expression(last))
+                .or_else(|| first_compile_time_only_expression(step))
+                .or_else(|| first_compile_time_only_statement(body)),
+            TypedStatementKind::Break | TypedStatementKind::Continue => None,
             TypedStatementKind::Match {
                 scrutinee, arms, ..
             } => first_compile_time_only_expression(scrutinee).or_else(|| {

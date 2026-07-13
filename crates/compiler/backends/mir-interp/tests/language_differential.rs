@@ -2,6 +2,7 @@ use pop_backend_mir_interp::{MirInterpreter, MirValue, ReferenceRuntimeEvent};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{MirBubble, lower_hir_bubble, optimize_mir};
+use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
 use pop_source::SourceFile;
 use pop_types::{IntegerKind, IntegerValue, TypeArena};
 
@@ -166,6 +167,127 @@ fn string_composition_and_primitive_formatting_are_optimization_stable() {
         .expect("optimized execution");
     assert_eq!(construction, expected);
     assert_eq!(optimized, expected);
+}
+
+#[test]
+fn numeric_ranges_break_and_continue_are_cfg_stable() {
+    // ADR 0042: every loop-control form lowers to verified CFG edges, including
+    // continue-to-condition for repeat-until.
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public function run(): Int\n\
+             local total = 0\n\
+             for index = 1, 6 do\n\
+                 if index == 2 then\n\
+                     continue\n\
+                 end\n\
+                 if index == 5 then\n\
+                     break\n\
+                 end\n\
+                 total = total + index\n\
+             end\n\
+             for reverse = 3, 1, -1 do\n\
+                 total = total + reverse\n\
+             end\n\
+             local current = 0\n\
+             while current < 4 do\n\
+                 current = current + 1\n\
+                 if current == 2 then\n\
+                     continue\n\
+                 end\n\
+                 total = total + current\n\
+             end\n\
+             repeat\n\
+                 current = current - 1\n\
+                 if current == 2 then\n\
+                     continue\n\
+                 end\n\
+                 total = total + current\n\
+             until current == 0\n\
+             return total\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("26")]);
+    let dump = mir.dump();
+    assert!(dump.contains("integer.checkedAdd Int64"), "{dump}");
+    assert!(dump.contains("integer.compareLessOrEqual Int64"), "{dump}");
+    assert!(
+        dump.contains("integer.compareGreaterOrEqual Int64"),
+        "{dump}"
+    );
+    assert!(!dump.to_ascii_lowercase().contains("iterator lookup"));
+}
+
+#[test]
+fn dynamic_zero_numeric_range_step_raises_the_typed_trap() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public function run(step: Int): Int\n\
+             local total = 0\n\
+             for index = 1, 3, step do\n\
+                 total = total + index\n\
+             end\n\
+             return total\n\
+         end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &arena).expect("interpreter");
+    assert_eq!(
+        interpreter.call(entry, &[integer("0")]),
+        Err(pop_backend_mir_interp::ExecutionError::Runtime(
+            RuntimeFailure::Trap(Trap::new(TrapKind::InvalidRangeStep))
+        ))
+    );
+}
+
+#[test]
+fn numeric_range_inputs_evaluate_once_and_nested_control_targets_innermost_loop() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public class Marker\n\
+             public value: Int = 0\n\
+         end\n\
+         public function run(): Int\n\
+             local marker = Marker {}\n\
+             local first = function(): Int\n\
+                 marker.value = marker.value * 10 + 1\n\
+                 return 1\n\
+             end\n\
+             local last = function(): Int\n\
+                 marker.value = marker.value * 10 + 2\n\
+                 return 2\n\
+             end\n\
+             local step = function(): Int\n\
+                 marker.value = marker.value * 10 + 3\n\
+                 return 1\n\
+             end\n\
+             for ignored = first(), last(), step() do\n\
+                 ignored\n\
+             end\n\
+             local visits = 0\n\
+             for outer = 1, 2 do\n\
+                 for inner = 1, 3 do\n\
+                     if inner == 2 then\n\
+                         break\n\
+                     end\n\
+                     visits = visits + 1\n\
+                 end\n\
+                 outer\n\
+             end\n\
+             for empty = 5, 1 do\n\
+                 visits = visits + empty\n\
+             end\n\
+             for empty = 1, 5, -1 do\n\
+                 visits = visits + empty\n\
+             end\n\
+             return marker.value * 10 + visits\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("1232")]);
 }
 
 #[test]

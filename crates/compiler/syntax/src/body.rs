@@ -69,6 +69,15 @@ pub enum StatementSyntaxKind {
         body: Vec<StatementSyntax>,
         condition: ExpressionSyntax,
     },
+    NumericFor {
+        name: String,
+        first: ExpressionSyntax,
+        last: ExpressionSyntax,
+        step: Option<ExpressionSyntax>,
+        body: Vec<StatementSyntax>,
+    },
+    Break,
+    Continue,
     Match {
         scrutinee: ExpressionSyntax,
         arms: Vec<MatchArmSyntax>,
@@ -463,6 +472,9 @@ impl BodyParser<'_> {
             Some(TokenKind::If) => self.parse_if(),
             Some(TokenKind::While) => self.parse_while(),
             Some(TokenKind::Repeat) => self.parse_repeat_until(),
+            Some(TokenKind::For) => self.parse_numeric_for(),
+            Some(TokenKind::Break) => self.parse_loop_control(StatementSyntaxKind::Break),
+            Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
             _ => {
                 let expression = self.parse_expression(0)?;
@@ -637,6 +649,51 @@ impl BodyParser<'_> {
         Ok(StatementSyntax {
             kind: StatementSyntaxKind::RepeatUntil { body, condition },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
+    }
+
+    fn parse_numeric_for(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+        let start = self.expect(TokenKind::For, "`for`")?.range().start();
+        let name = self.expect(TokenKind::Identifier, "numeric `for` binding")?;
+        let name = name.text(self.source).to_owned();
+        self.expect(TokenKind::Equal, "`=` in numeric `for`")?;
+        let first = self.parse_expression(0)?;
+        self.expect(TokenKind::Comma, "`,` after numeric `for` first value")?;
+        let last = self.parse_expression(0)?;
+        let step = if self.consume(TokenKind::Comma).is_some() {
+            Some(self.parse_expression(0)?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::Do, "`do` after numeric `for` range")?;
+        self.expect(TokenKind::Newline, "line break after `do`")?;
+        let body = self.parse_statement_list(&[TokenKind::End])?;
+        let end = self
+            .expect(TokenKind::End, "numeric `for` `end`")?
+            .range()
+            .end();
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::NumericFor {
+                name,
+                first,
+                last,
+                step,
+                body,
+            },
+            span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
+    }
+
+    fn parse_loop_control(
+        &mut self,
+        kind: StatementSyntaxKind,
+    ) -> Result<StatementSyntax, FunctionBodyError> {
+        let token = self
+            .advance()
+            .ok_or_else(|| self.error("loop-control statement"))?;
+        Ok(StatementSyntax {
+            kind,
+            span: SourceSpan::new(self.file, token.range()),
         })
     }
 

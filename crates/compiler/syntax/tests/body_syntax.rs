@@ -473,6 +473,56 @@ fn accepts_nested_luau_shaped_repeat_until_without_extra_end_markers() {
 }
 
 #[test]
+fn parses_numeric_for_ranges_and_loop_control_without_dynamic_iteration() {
+    // ADR 0042 keeps the first `for` form closed over one fixed integer kind.
+    let body = parse_body(
+        "namespace Example\n\
+         public function visitRange(limit: Int)\n\
+             for index = 1, limit do\n\
+                 if index == 2 then\n\
+                     continue\n\
+                 end\n\
+                 break\n\
+             end\n\
+             for reverse = limit, 1, -1 do\n\
+                 visit(reverse)\n\
+             end\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::NumericFor {
+        name,
+        first,
+        last,
+        step,
+        body: range_body,
+    } = body.statements()[0].kind()
+    else {
+        panic!("numeric for");
+    };
+    assert_eq!(name, "index");
+    assert!(matches!(first.kind(), ExpressionSyntaxKind::Integer(value) if value == "1"));
+    assert!(matches!(last.kind(), ExpressionSyntaxKind::Name(path) if path == &["limit"]));
+    assert!(step.is_none());
+    let StatementSyntaxKind::If { then_body, .. } = range_body[0].kind() else {
+        panic!("conditional continue");
+    };
+    assert!(matches!(then_body[0].kind(), StatementSyntaxKind::Continue));
+    assert!(matches!(range_body[1].kind(), StatementSyntaxKind::Break));
+
+    let StatementSyntaxKind::NumericFor { step, .. } = body.statements()[1].kind() else {
+        panic!("stepped numeric for");
+    };
+    assert!(matches!(
+        step.as_ref().map(|expression| expression.kind()),
+        Some(ExpressionSyntaxKind::Unary {
+            operator: UnaryOperator::Negate,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn repeat_until_requires_its_until_closer() {
     let source = SourceFile::new(
         FileId::from_raw(0),

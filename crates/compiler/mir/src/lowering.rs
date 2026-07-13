@@ -16,11 +16,11 @@ use pop_hir::{
     HirStatement, HirStatementKind, HirTableEntry,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap,
+    ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
 };
 use pop_types::{
-    FloatKind, IntegerKind, NumericConversionKind, PrimitiveType, SemanticType, TypeArena,
-    TypedBinaryOperator, TypedUnaryOperator,
+    FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType, SemanticType,
+    TypeArena, TypedBinaryOperator, TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -275,10 +275,19 @@ struct BuildingBlock {
     terminator: MirTerminator,
 }
 
+#[derive(Clone)]
 struct LiveState {
     parameters: Vec<ValueParameterId>,
     locals: Vec<LocalId>,
     specs: Vec<(TypeId, SourceSpan)>,
+}
+
+#[derive(Clone)]
+struct LoopContext {
+    break_target: BlockId,
+    break_state: LiveState,
+    continue_target: BlockId,
+    continue_state: LiveState,
 }
 
 struct FunctionBuilder<'hir> {
@@ -300,6 +309,7 @@ struct FunctionBuilder<'hir> {
     cell_parameters: BTreeSet<ValueParameterId>,
     cell_locals: BTreeSet<LocalId>,
     nested_functions: Vec<MirNestedFunction>,
+    loop_stack: Vec<LoopContext>,
 }
 
 fn collect_cell_sources(
@@ -355,6 +365,21 @@ fn visit_statement_closures(
             }
             visit_expression_closures(condition, parameters, locals);
         }
+        HirStatementKind::NumericFor {
+            first,
+            last,
+            step,
+            body,
+            ..
+        } => {
+            visit_expression_closures(first, parameters, locals);
+            visit_expression_closures(last, parameters, locals);
+            visit_expression_closures(step, parameters, locals);
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
+        HirStatementKind::Break | HirStatementKind::Continue => {}
         HirStatementKind::Match {
             scrutinee, arms, ..
         } => {
@@ -384,6 +409,36 @@ fn visit_statement_closures(
             }
         }
     }
+}
+
+fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
+    statements.iter().any(|statement| match statement.kind() {
+        HirStatementKind::Continue => true,
+        HirStatementKind::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            contains_continue_for_current_loop(then_body)
+                || contains_continue_for_current_loop(else_body)
+        }
+        HirStatementKind::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| contains_continue_for_current_loop(arm.body())),
+        HirStatementKind::While { .. }
+        | HirStatementKind::RepeatUntil { .. }
+        | HirStatementKind::NumericFor { .. }
+        | HirStatementKind::Local { .. }
+        | HirStatementKind::LocalSet { .. }
+        | HirStatementKind::ParameterSet { .. }
+        | HirStatementKind::CaptureSet { .. }
+        | HirStatementKind::Return { .. }
+        | HirStatementKind::Break
+        | HirStatementKind::FieldSet { .. }
+        | HirStatementKind::ArraySet { .. }
+        | HirStatementKind::Call(_)
+        | HirStatementKind::Expression(_) => false,
+    })
 }
 
 fn visit_expression_closures(
@@ -607,6 +662,7 @@ impl<'hir> FunctionBuilder<'hir> {
             cell_parameters,
             cell_locals,
             nested_functions: Vec::new(),
+            loop_stack: Vec::new(),
         }
     }
 
@@ -745,6 +801,44 @@ impl<'hir> FunctionBuilder<'hir> {
                 }
                 HirStatementKind::RepeatUntil { body, condition } => {
                     self.lower_repeat_until(body, condition);
+                }
+                HirStatementKind::NumericFor {
+                    local,
+                    integer_type,
+                    first,
+                    last,
+                    step,
+                    body,
+                    ..
+                } => {
+                    self.lower_numeric_for(
+                        *local,
+                        *integer_type,
+                        first,
+                        last,
+                        step,
+                        body,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::Break => {
+                    let context = self
+                        .loop_stack
+                        .last()
+                        .cloned()
+                        .expect("verified HIR resolves break inside a loop");
+                    self.branch_with_state_if_open(context.break_target, &context.break_state);
+                }
+                HirStatementKind::Continue => {
+                    let context = self
+                        .loop_stack
+                        .last()
+                        .cloned()
+                        .expect("verified HIR resolves continue inside a loop");
+                    self.branch_with_state_if_open(
+                        context.continue_target,
+                        &context.continue_state,
+                    );
                 }
                 HirStatementKind::Match {
                     scrutinee,
@@ -911,7 +1005,16 @@ impl<'hir> FunctionBuilder<'hir> {
             when_false: exit_edge,
         });
         self.current = body_block;
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: state.clone(),
+            continue_target: condition_block,
+            continue_state: state.clone(),
+        });
         self.lower_statements(body);
+        self.loop_stack
+            .pop()
+            .expect("while loop context was pushed");
         self.branch_with_state_if_open(condition_block, &state);
         self.current = exit_edge;
         self.install_state(&state, &condition_arguments);
@@ -924,8 +1027,13 @@ impl<'hir> FunctionBuilder<'hir> {
         let state = self.live_state(condition.span());
         let initial_values = self.state_values(&state);
         let outer_locals = self.locals.clone();
+        let has_continue = contains_continue_for_current_loop(body);
         let (body_block, body_arguments) = self.new_block_with_arguments(&state.specs);
-        let condition_block = self.new_block();
+        let (condition_block, condition_arguments) = if has_continue {
+            self.new_block_with_arguments(&state.specs)
+        } else {
+            (self.new_block(), Vec::new())
+        };
         let repeat_edge = self.new_block();
         let exit_edge = self.new_block();
         let (exit_block, exit_arguments) = self.new_block_with_arguments(&state.specs);
@@ -933,10 +1041,26 @@ impl<'hir> FunctionBuilder<'hir> {
         self.branch_with_arguments_if_open(body_block, initial_values);
         self.current = body_block;
         self.install_state(&state, &body_arguments);
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: state.clone(),
+            continue_target: condition_block,
+            continue_state: state.clone(),
+        });
         self.lower_statements(body);
-        self.branch_if_open(condition_block);
+        self.loop_stack
+            .pop()
+            .expect("repeat loop context was pushed");
+        if has_continue {
+            self.branch_with_state_if_open(condition_block, &state);
+        } else {
+            self.branch_if_open(condition_block);
+        }
 
         self.current = condition_block;
+        if has_continue {
+            self.install_state(&state, &condition_arguments);
+        }
         let condition = self.lower_expression(condition);
         self.terminate(MirTerminator::ConditionalBranch {
             condition,
@@ -953,6 +1077,203 @@ impl<'hir> FunctionBuilder<'hir> {
         self.current = exit_block;
         self.locals = outer_locals;
         self.install_state(&state, &exit_arguments);
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn lower_numeric_for(
+        &mut self,
+        local: LocalId,
+        integer_type: TypeId,
+        first: &HirExpression,
+        last: &HirExpression,
+        step: &HirExpression,
+        body: &[HirStatement],
+        span: SourceSpan,
+    ) {
+        let first = self.lower_expression(first);
+        let last = self.lower_expression(last);
+        let step = self.lower_expression(step);
+        let kind = integer_kind(self.arena, integer_type)
+            .expect("verified numeric for range has one fixed integer type");
+        let zero = self.emit(
+            MirInstructionKind::IntegerConstant(
+                IntegerValue::parse_decimal("0", kind).expect("zero fits every integer"),
+            ),
+            integer_type,
+            span,
+        );
+        let step_is_zero = self.emit(
+            MirInstructionKind::CompareEqual {
+                left: step,
+                right: zero,
+            },
+            self.arena
+                .source_type("Boolean")
+                .expect("validated type arena contains Boolean"),
+            span,
+        );
+
+        let outer_state = self.live_state(span);
+        let initial_outer_values = self.state_values(&outer_state);
+        let outer_locals = self.locals.clone();
+        let mut loop_specs = outer_state.specs.clone();
+        loop_specs.push((integer_type, span));
+        let (condition_block, condition_arguments) = self.new_block_with_arguments(&loop_specs);
+        let initial_edge = self.new_block();
+        let positive_condition = self.new_block();
+        let negative_condition = self.new_block();
+        let body_block = self.new_block();
+        let condition_exit_edge = self.new_block();
+        let mut continue_specs = outer_state.specs.clone();
+        continue_specs.push((integer_type, span));
+        let (increment_block, increment_arguments) = self.new_block_with_arguments(&continue_specs);
+        let increment_exit_edge = self.new_block();
+        let advance_block = self.new_block();
+        let invalid_step = self.new_block();
+        let (exit_block, exit_arguments) = self.new_block_with_arguments(&outer_state.specs);
+
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: step_is_zero,
+            when_true: invalid_step,
+            when_false: initial_edge,
+        });
+        self.current = invalid_step;
+        self.terminate(MirTerminator::Trap(Trap::new(TrapKind::InvalidRangeStep)));
+
+        self.current = initial_edge;
+        let mut initial_values = initial_outer_values;
+        initial_values.push(first);
+        self.branch_with_arguments_if_open(condition_block, initial_values);
+
+        self.current = condition_block;
+        self.install_state(
+            &outer_state,
+            &condition_arguments[..outer_state.specs.len()],
+        );
+        let induction = condition_arguments[outer_state.specs.len()];
+        let condition = if kind.is_signed() {
+            self.emit(
+                MirInstructionKind::CompareIntegerGreater {
+                    kind,
+                    left: step,
+                    right: zero,
+                },
+                self.arena.source_type("Boolean").expect("Boolean"),
+                span,
+            )
+        } else {
+            self.emit(
+                MirInstructionKind::BooleanConstant(true),
+                self.arena.source_type("Boolean").expect("Boolean"),
+                span,
+            )
+        };
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition,
+            when_true: positive_condition,
+            when_false: negative_condition,
+        });
+
+        self.current = positive_condition;
+        let in_positive_range = self.emit(
+            MirInstructionKind::CompareIntegerLessOrEqual {
+                kind,
+                left: induction,
+                right: last,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: in_positive_range,
+            when_true: body_block,
+            when_false: condition_exit_edge,
+        });
+
+        self.current = negative_condition;
+        let in_negative_range = self.emit(
+            MirInstructionKind::CompareIntegerGreaterOrEqual {
+                kind,
+                left: induction,
+                right: last,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: in_negative_range,
+            when_true: body_block,
+            when_false: condition_exit_edge,
+        });
+
+        self.current = body_block;
+        self.locals.insert(local, induction);
+        let mut continue_state = outer_state.clone();
+        continue_state.locals.push(local);
+        continue_state.specs.push((integer_type, span));
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: outer_state.clone(),
+            continue_target: increment_block,
+            continue_state: continue_state.clone(),
+        });
+        self.lower_statements(body);
+        self.loop_stack
+            .pop()
+            .expect("numeric for context was pushed");
+        self.branch_with_state_if_open(increment_block, &continue_state);
+
+        self.current = increment_block;
+        self.install_state(
+            &outer_state,
+            &increment_arguments[..outer_state.specs.len()],
+        );
+        let current = increment_arguments[outer_state.specs.len()];
+        self.locals.insert(local, current);
+        let reached_last = self.emit(
+            MirInstructionKind::CompareEqual {
+                left: current,
+                right: last,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: reached_last,
+            when_true: increment_exit_edge,
+            when_false: advance_block,
+        });
+
+        self.current = advance_block;
+        let next = self.emit(
+            MirInstructionKind::CheckedIntegerAdd {
+                kind,
+                left: current,
+                right: step,
+            },
+            integer_type,
+            span,
+        );
+        let mut next_values = self.state_values(&outer_state);
+        next_values.push(next);
+        self.branch_with_arguments_if_open(condition_block, next_values);
+
+        self.current = condition_exit_edge;
+        self.install_state(
+            &outer_state,
+            &condition_arguments[..outer_state.specs.len()],
+        );
+        self.branch_with_state_if_open(exit_block, &outer_state);
+        self.current = increment_exit_edge;
+        self.install_state(
+            &outer_state,
+            &increment_arguments[..outer_state.specs.len()],
+        );
+        self.branch_with_state_if_open(exit_block, &outer_state);
+
+        self.current = exit_block;
+        self.locals = outer_locals;
+        self.install_state(&outer_state, &exit_arguments);
     }
 
     #[allow(clippy::too_many_lines)]

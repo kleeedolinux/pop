@@ -52,6 +52,21 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
             }
             finalize_expression_captures(condition, written);
         }
+        TypedStatementKind::NumericFor {
+            first,
+            last,
+            step,
+            body,
+            ..
+        } => {
+            finalize_expression_captures(first, written);
+            finalize_expression_captures(last, written);
+            finalize_expression_captures(step, written);
+            for statement in body {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedStatementKind::Break | TypedStatementKind::Continue => {}
         TypedStatementKind::Match {
             scrutinee, arms, ..
         } => {

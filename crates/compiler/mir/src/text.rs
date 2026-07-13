@@ -1321,6 +1321,7 @@ fn parse_trap_kind(text: &str, line: usize) -> Result<TrapKind, MirParseError> {
         "IntegerOverflow" => Ok(TrapKind::IntegerOverflow),
         "DivisionByZero" => Ok(TrapKind::DivisionByZero),
         "NumericConversion" => Ok(TrapKind::NumericConversion),
+        "InvalidRangeStep" => Ok(TrapKind::InvalidRangeStep),
         "BoundsViolation" => Ok(TrapKind::BoundsViolation),
         "ImpossibleState" => Ok(TrapKind::ImpossibleState),
         _ => Err(error(line, "trap kind")),

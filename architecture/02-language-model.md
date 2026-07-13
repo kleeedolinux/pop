@@ -218,9 +218,23 @@ until value == 3
 
 The body executes once before each `Boolean` `until` condition. `true` exits
 and `false` repeats. The body and condition share one lexical scope, so a body
-local can contribute to the condition without escaping after the loop. The
-first loop slice has no `break` or `continue`; generalized iteration remains a
-separate typed-protocol feature. See ADR 0032.
+local can contribute to the condition without escaping after the loop.
+
+The first `for` form is an inclusive fixed-integer range:
+
+```luau
+for index = 1, limit, 2 do
+    visit(index)
+end
+```
+
+Bounds and the optional step are evaluated once from left to right and have one
+identical integer type. The loop binding is immutable and body-local. Positive
+steps use `<=`, negative steps use `>=`, zero raises `InvalidRangeStep`, and
+progression is checked.
+`break` exits the innermost loop; `continue` reaches the `while` condition, the
+`repeat` condition, or numeric-range advancement as appropriate. Generalized
+iteration remains a separate typed-protocol feature. See ADR 0032 and ADR 0042.
 
 ## Namespaces, using directives, Modules, and Bubbles
 

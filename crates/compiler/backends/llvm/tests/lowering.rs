@@ -329,6 +329,37 @@ end\n",
 }
 
 #[test]
+fn emitted_llvm_executes_numeric_ranges_break_and_continue() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(arguments: Array<String>): Int\n\
+    local total = 0\n\
+    for index = 1, 6 do\n\
+        if index == 2 then\n\
+            continue\n\
+        end\n\
+        if index == 5 then\n\
+            break\n\
+        end\n\
+        total = total + index\n\
+    end\n\
+    for reverse = 3, 1, -1 do\n\
+        total = total + reverse\n\
+    end\n\
+    return total\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "numeric-for-range");
+    assert_eq!(
+        result.status.code(),
+        Some(14),
+        "native executable misexecuted numeric ranges: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn loop_safe_points_lower_to_an_llvm_promotable_function_local_poll() {
     let module = native_module(
         "namespace Main\n\

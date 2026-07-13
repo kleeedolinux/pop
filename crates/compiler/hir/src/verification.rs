@@ -114,6 +114,13 @@ pub enum HirVerificationError {
         found: TypeId,
         span: SourceSpan,
     },
+    LoopControlOutsideLoop {
+        span: SourceSpan,
+    },
+    InvalidNumericForType {
+        type_id: TypeId,
+        span: SourceSpan,
+    },
     DuplicateSymbol(SymbolId),
     DuplicateClass(ClassId),
     DuplicateInterface(InterfaceId),
@@ -975,6 +982,7 @@ fn verify_hir_callable_with_schema(
         bindings: BTreeSet::new(),
         nested_functions: BTreeSet::new(),
         cell_bindings,
+        loop_depth: 0,
         errors: Vec::new(),
     };
     for parameter in &function.parameters {
@@ -1025,6 +1033,7 @@ struct Verifier<'arena> {
     bindings: BTreeSet<BindingId>,
     nested_functions: BTreeSet<NestedFunctionId>,
     cell_bindings: BTreeSet<BindingId>,
+    loop_depth: u32,
     errors: Vec<HirVerificationError>,
 }
 
@@ -1122,10 +1131,14 @@ impl Verifier<'_> {
                 HirStatementKind::While { condition, body } => {
                     self.verify_expression(condition, &visible);
                     self.verify_condition(condition);
+                    self.loop_depth = self.loop_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
                 }
                 HirStatementKind::RepeatUntil { body, condition } => {
+                    self.loop_depth = self.loop_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
                     let mut condition_visible = visible.clone();
                     for nested in body {
                         if let HirStatementKind::Local { local, .. } = nested.kind() {
@@ -1134,6 +1147,54 @@ impl Verifier<'_> {
                     }
                     self.verify_expression(condition, &condition_visible);
                     self.verify_condition(condition);
+                }
+                HirStatementKind::NumericFor {
+                    binding,
+                    local,
+                    integer_type,
+                    first,
+                    last,
+                    step,
+                    body,
+                    ..
+                } => {
+                    self.verify_type(*integer_type, statement.span());
+                    if !matches!(
+                        self.arena.get(*integer_type),
+                        Some(SemanticType::Primitive(PrimitiveType::Integer(_)))
+                    ) {
+                        self.errors
+                            .push(HirVerificationError::InvalidNumericForType {
+                                type_id: *integer_type,
+                                span: statement.span(),
+                            });
+                    }
+                    for expression in [first, last, step] {
+                        self.verify_expression(expression, &visible);
+                        self.verify_expression_type(*integer_type, expression);
+                    }
+                    if self.local_types.insert(*local, *integer_type).is_some() {
+                        self.errors
+                            .push(HirVerificationError::DuplicateLocal(*local));
+                    }
+                    self.local_bindings.insert(*local, *binding);
+                    if !self.bindings.insert(*binding) {
+                        self.errors
+                            .push(HirVerificationError::DuplicateBinding(*binding));
+                    }
+                    let mut body_visible = visible.clone();
+                    body_visible.insert(*local);
+                    self.loop_depth = self.loop_depth.saturating_add(1);
+                    self.verify_statements(body, &body_visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
+                }
+                HirStatementKind::Break | HirStatementKind::Continue => {
+                    if self.loop_depth == 0 {
+                        self.errors
+                            .push(HirVerificationError::LoopControlOutsideLoop {
+                                span: statement.span(),
+                            });
+                    }
                 }
                 HirStatementKind::Match {
                     scrutinee,
@@ -1552,6 +1613,7 @@ impl Verifier<'_> {
             &self.capture_modes,
         );
         let saved_cell_bindings = std::mem::replace(&mut self.cell_bindings, nested_cell_bindings);
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         for parameter in &closure.parameters {
             self.verify_type(parameter.type_id, parameter.span);
             if !self.bindings.insert(parameter.binding) {
@@ -1567,6 +1629,7 @@ impl Verifier<'_> {
         self.capture_bindings = saved_capture_bindings;
         self.capture_modes = saved_capture_modes;
         self.cell_bindings = saved_cell_bindings;
+        self.loop_depth = saved_loop_depth;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2646,6 +2709,15 @@ fn collect_local_binding_map(
             HirStatementKind::While { body, .. } | HirStatementKind::RepeatUntil { body, .. } => {
                 collect_local_binding_map(body, local_bindings);
             }
+            HirStatementKind::NumericFor {
+                local,
+                binding,
+                body,
+                ..
+            } => {
+                local_bindings.insert(*local, *binding);
+                collect_local_binding_map(body, local_bindings);
+            }
             HirStatementKind::Match { arms, .. } => {
                 for arm in arms {
                     for binding in &arm.bindings {
@@ -2660,6 +2732,8 @@ fn collect_local_binding_map(
             | HirStatementKind::ParameterSet { .. }
             | HirStatementKind::CaptureSet { .. }
             | HirStatementKind::Return { .. }
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::FieldSet { .. }
             | HirStatementKind::ArraySet { .. }
             | HirStatementKind::Call(_)
@@ -2747,6 +2821,25 @@ fn collect_written_bindings(
                 );
                 collect_cell_captures(condition, written);
             }
+            HirStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => {
+                collect_cell_captures(first, written);
+                collect_cell_captures(last, written);
+                collect_cell_captures(step, written);
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
+            HirStatementKind::Break | HirStatementKind::Continue => {}
             HirStatementKind::Match {
                 scrutinee, arms, ..
             } => {

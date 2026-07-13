@@ -79,7 +79,10 @@ HIR invariants:
   derived from declarations and is not a source-level export list;
 - every item and source origin identifies its owning `ModuleId` and `BubbleId`.
 - a `repeat` statement retains its typed body and `Boolean` exit condition until
-  CFG lowering; its body-local scope includes that condition only.
+  CFG lowering; its body-local scope includes that condition only;
+- a numeric `for` retains its immutable binding, same-kind integer bounds,
+  optional step, and body, while `break`/`continue` retain their resolved
+  innermost-loop target until CFG lowering.
 
 ## Compile-time HIR and values
 
@@ -177,7 +180,8 @@ The initial portable failure/GC encoding is fixed by ADR 0022. Runtime traps
 are closed `TrapKind` values and are not ordinary exceptions. Panic uses a
 runtime-private typed payload. Expected failures continue to use typed result
 values. ADR 0040 adds `NumericConversion` for checked numeric casts that receive
-NaN, infinity, or an out-of-range value.
+NaN, infinity, or an out-of-range value. ADR 0042 adds `InvalidRangeStep` for a
+dynamic zero step in a numeric `for` range.
 
 ## Attribute representation
 

@@ -26,7 +26,7 @@ This is an architectural inventory, not yet a complete compatibility table.
 | Type packs and variadic results | Use fully typed tuples/type packs and preserve ergonomic destructuring. | Adapt |
 | First-class functions and closures | Core feature with explicit closure conversion in MIR. | Adopt |
 | Coroutines | Preserve structured suspension capability behind backend-neutral MIR/runtime operations. | Adapt |
-| `repeat`/`until`, `continue`, compound assignment, if-expressions, generalized iteration, and string interpolation | Preserve them in the source language with canonical formatting; ADR 0032 fixes the body-first loop contract. | Adopt |
+| `repeat`/`until`, `continue`, compound assignment, if-expressions, generalized iteration, and string interpolation | Preserve them in the source language with canonical formatting; ADR 0032 fixes the body-first loop contract, ADR 0042 fixes numeric `for` ranges and loop control, and generalized iteration remains protocol-gated. | Adopt |
 | Immutable/`const` bindings and attributes | Preserve them; attributes extend to typed PascalCase UDAs. | Adapt |
 | Tables | Keep Luau-like literal/indexing ergonomics, but require static key/value types. | Adapt |
 | Table types used as records or objects | Replace with structural records, nominal classes, interfaces, typed tables, and arrays. | Replace |

@@ -127,7 +127,9 @@ The closed portable trap vocabulary includes `NumericConversion` for a checked
 integer target that cannot represent its input. Backends perform the conversion
 directly where possible, but must raise that same trap for out-of-range integer
 casts and for NaN, infinity, or out-of-range float-to-integer casts. See ADR
-0040.
+0040. Numeric `for` raises the closed `InvalidRangeStep` trap before iteration
+when a dynamic step is zero; a backend cannot treat it as an empty range or
+choose a direction. See ADR 0042.
 
 ## Object model
 
