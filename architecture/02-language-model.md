@@ -199,6 +199,12 @@ Indexed array assignment uses the same one-based indexing model as reads. The
 assigned value must have the array's element type, and an out-of-bounds write
 traps rather than growing the array or falling back to table semantics.
 
+Compound assignment supports `+=`, `-=`, `*=`, `/=`, and `%=` for the exact
+numeric types accepted by the corresponding operation, plus `..=` for `String`.
+Mutable locals/captures, declared class fields, and array elements are valid
+targets. Receivers and indexes evaluate once; an indexed compound read is
+checked and non-optional. See ADR 0044.
+
 Arrays have fixed length. `Array.create<<T>>(length, initialValue)` constructs a
 fully initialized array, `Array.length(array)` queries its length,
 `Array.get(array, index)` performs a trapping non-optional read, and

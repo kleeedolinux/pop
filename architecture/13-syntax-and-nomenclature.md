@@ -338,6 +338,23 @@ end
 Captured state is statically typed and converted to a native environment, never
 a table.
 
+### Compound assignment
+
+Compound mutation keeps Luau's compact operator spellings:
+
+```luau
+total += amount
+message ..= suffix
+values[index] *= scale
+```
+
+Only mutable locals/captures, declared class fields, and array elements are
+targets. The target receiver/index and right-hand side each evaluate once, and
+the corresponding ordinary typed operator defines the result, trap, allocation,
+and effect semantics. Pop Lang initially accepts `+=`, `-=`, `*=`, `/=`, `%=`,
+and `..=`; it does not infer absent underlying operators from other Luau
+spellings. See ADR 0044.
+
 ### Conditional expressions
 
 Conditional values retain Luau's keyword form and lazy evaluation:

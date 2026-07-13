@@ -196,6 +196,94 @@ fn conditional_expressions_are_lazy_and_elseif_is_optimization_stable() {
 }
 
 #[test]
+fn compound_assignment_evaluates_targets_and_rhs_once_in_source_order() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public class State\n\
+             public log: Int = 0\n\
+         end\n\
+         public class Box\n\
+             public value: Int = 10\n\
+         end\n\
+         private function fieldRight(state: State, box: Box): Int\n\
+             state.log = state.log * 10 + 2\n\
+             box.value = 20\n\
+             return 5\n\
+         end\n\
+         private function selectArray(state: State, values: {Int}): {Int}\n\
+             state.log = state.log * 10 + 3\n\
+             return values\n\
+         end\n\
+         private function selectIndex(state: State): Int\n\
+             state.log = state.log * 10 + 4\n\
+             return 1\n\
+         end\n\
+         private function arrayRight(state: State): Int\n\
+             state.log = state.log * 10 + 5\n\
+             return 4\n\
+         end\n\
+         public function run(): Int\n\
+             local state = State {}\n\
+             local box = Box {}\n\
+             local values: {Int} = { 2 }\n\
+             box.value += fieldRight(state, box)\n\
+             selectArray(state, values)[selectIndex(state)] *= arrayRight(state)\n\
+             return state.log + box.value + Array.get(values, 1)\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("2368")]);
+}
+
+#[test]
+fn compound_assignment_updates_shared_capture_cells() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public function run(): Int\n\
+             local value = 1\n\
+             local bump = function(): Int\n\
+                 value += 2\n\
+                 return value\n\
+             end\n\
+             return bump()\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("3")]);
+    assert!(mir.dump().contains("capture.store"));
+}
+
+#[test]
+fn compound_array_bounds_trap_precedes_rhs_evaluation() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private function fail(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public function run(): Int\n\
+             local values: {Int} = { 1 }\n\
+             values[2] += fail()\n\
+             return 0\n\
+         end\n",
+        "run",
+    );
+    for candidate in [
+        mir.clone(),
+        optimize_mir(mir, &arena).expect("optimized MIR"),
+    ] {
+        let interpreter = MirInterpreter::new(&candidate, &arena).expect("interpreter");
+        assert_eq!(
+            interpreter.call(entry, &[]),
+            Err(pop_backend_mir_interp::ExecutionError::Runtime(
+                RuntimeFailure::Trap(Trap::new(TrapKind::BoundsViolation))
+            ))
+        );
+    }
+}
+
+#[test]
 fn numeric_ranges_break_and_continue_are_cfg_stable() {
     // ADR 0042: every loop-control form lowers to verified CFG edges, including
     // continue-to-condition for repeat-until.

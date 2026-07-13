@@ -104,7 +104,7 @@ fn parses_local_and_anonymous_functions_without_table_desugaring() {
 
     assert!(matches!(
         body.statements()[2].kind(),
-        StatementSyntaxKind::Assignment { target, value }
+        StatementSyntaxKind::Assignment { target, value, .. }
             if matches!(target.kind(), ExpressionSyntaxKind::Name(path) if path == &["add"])
                 && matches!(value.kind(), ExpressionSyntaxKind::Name(path) if path == &["subtract"])
     ));
@@ -514,6 +514,57 @@ fn conditional_expressions_require_else_and_reject_ternary_punctuation() {
 }
 
 #[test]
+fn parses_only_compound_assignments_with_owned_underlying_operators() {
+    // ADR 0044 derives compound spellings only from existing Pop operators.
+    let body = parse_body(
+        "namespace Example\n\
+         public function update(value: Int, text: String): Int\n\
+             local result = value\n\
+             result += 1\n\
+             result -= 2\n\
+             result *= 3\n\
+             result /= 4\n\
+             result %= 5\n\
+             text ..= \"!\"\n\
+             return result\n\
+         end\n",
+    );
+
+    let expected = [
+        BinaryOperator::Add,
+        BinaryOperator::Subtract,
+        BinaryOperator::Multiply,
+        BinaryOperator::Divide,
+        BinaryOperator::Remainder,
+        BinaryOperator::Concat,
+    ];
+    for (statement, expected) in body.statements()[1..7].iter().zip(expected) {
+        assert!(matches!(
+            statement.kind(),
+            StatementSyntaxKind::Assignment {
+                operator: Some(operator),
+                ..
+            } if *operator == expected
+        ));
+    }
+
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/body.pop",
+        "namespace Example\n\
+         public function invalid(value: Int): Int\n\
+             value ^= 1\n\
+             return value\n\
+         end\n",
+    )
+    .expect("source");
+    assert!(
+        !parse_file(&source).diagnostics().is_empty(),
+        "unsupported underlying operator must remain rejected"
+    );
+}
+
+#[test]
 fn accepts_nested_luau_shaped_repeat_until_without_extra_end_markers() {
     // ADR 0032: `until`, rather than `end`, closes a body-first loop.
     let body = parse_body(
@@ -842,7 +893,7 @@ fn parses_field_assignment_as_a_statement_not_an_equality_expression() {
 
     assert!(matches!(
         body.statements()[0].kind(),
-        StatementSyntaxKind::Assignment { target, value }
+        StatementSyntaxKind::Assignment { target, value, .. }
             if matches!(target.kind(), ExpressionSyntaxKind::Name(path) if path == &["counter", "value"])
                 && matches!(value.kind(), ExpressionSyntaxKind::Name(path) if path == &["value"])
     ));

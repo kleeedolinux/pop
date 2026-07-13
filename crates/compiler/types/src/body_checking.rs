@@ -975,7 +975,9 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }
+        | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::CompoundArraySet { .. }
         | TypedStatementKind::Call(_)
         | TypedStatementKind::Expression(_) => false,
         TypedStatementKind::RepeatUntil { body, .. } => statements_definitely_return(body),

@@ -54,6 +54,7 @@ pub enum TokenKind {
     Not,
     Dot,
     DotDot,
+    DotDotEqual,
     Comma,
     Colon,
     Equal,
@@ -73,10 +74,15 @@ pub enum TokenKind {
     Question,
     Pipe,
     Plus,
+    PlusEqual,
     Minus,
+    MinusEqual,
     Star,
+    StarEqual,
     Slash,
+    SlashEqual,
     Percent,
+    PercentEqual,
     Unknown,
 }
 
@@ -230,9 +236,33 @@ impl Lexer<'_> {
             }
             b'\'' | b'"' => self.scan_string(start, byte, false),
             b'`' => self.scan_string(start, byte, true),
+            b'.' if remaining.starts_with("..=") => {
+                self.cursor += 3;
+                TokenKind::DotDotEqual
+            }
             b'.' if remaining.starts_with("..") => {
                 self.cursor += 2;
                 TokenKind::DotDot
+            }
+            b'+' if remaining.starts_with("+=") => {
+                self.cursor += 2;
+                TokenKind::PlusEqual
+            }
+            b'-' if remaining.starts_with("-=") => {
+                self.cursor += 2;
+                TokenKind::MinusEqual
+            }
+            b'*' if remaining.starts_with("*=") => {
+                self.cursor += 2;
+                TokenKind::StarEqual
+            }
+            b'/' if remaining.starts_with("/=") => {
+                self.cursor += 2;
+                TokenKind::SlashEqual
+            }
+            b'%' if remaining.starts_with("%=") => {
+                self.cursor += 2;
+                TokenKind::PercentEqual
             }
             b'=' if remaining.starts_with("==") => {
                 self.cursor += 2;

@@ -184,6 +184,38 @@ fn conditional_expressions_lower_to_typed_cfg_joins_and_round_trip() {
 }
 
 #[test]
+fn compound_assignment_lowers_to_existing_typed_load_operation_store_mir() {
+    // ADR 0044 preserves exact target evaluation in HIR but adds no MIR opcode.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public class Counter\n\
+             public value: Int = 0\n\
+             public label: String = \"\"\n\
+         end\n\
+         public function update(counter: Counter, values: {Int}, suffix: String): String\n\
+             local message = suffix\n\
+             counter.value += 2\n\
+             counter.label ..= suffix\n\
+             values[1] *= 3\n\
+             message ..= \"!\"\n\
+             return message\n\
+         end\n",
+    );
+
+    let dump = mir.dump();
+    assert!(dump.contains("fieldGet"), "{dump}");
+    assert!(dump.contains("fieldSet"), "{dump}");
+    assert!(dump.contains("arrayGetChecked"), "{dump}");
+    assert!(dump.contains("arraySet"), "{dump}");
+    assert!(dump.contains("integer.checkedAdd Int64"), "{dump}");
+    assert!(dump.contains("integer.checkedMultiply Int64"), "{dump}");
+    assert!(dump.contains("string.concat"), "{dump}");
+    assert!(dump.contains("writeBarrier"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("compound"), "{dump}");
+    assert_verified_round_trip(&mir, &types);
+}
+
+#[test]
 fn typed_string_composition_is_backend_neutral_effectful_and_round_trips() {
     // ADR 0041: concatenation and primitive formatting carry exact static
     // kinds, allocation effects, and no runtime format-string lookup.

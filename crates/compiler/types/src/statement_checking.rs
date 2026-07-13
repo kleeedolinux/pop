@@ -10,8 +10,8 @@ use pop_foundation::{
     BindingId, LocalId, NestedFunctionId, SourceSpan, TextRange, TextSize, ValueParameterId,
 };
 use pop_syntax::{
-    CaptureFunctionSyntax, ExpressionSyntax, ExpressionSyntaxKind, MatchArmSyntax, StatementSyntax,
-    StatementSyntaxKind,
+    BinaryOperator as SyntaxBinaryOperator, CaptureFunctionSyntax, ExpressionSyntax,
+    ExpressionSyntaxKind, MatchArmSyntax, StatementSyntax, StatementSyntaxKind,
 };
 
 use crate::body_checking::{
@@ -114,9 +114,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             StatementSyntaxKind::Match { scrutinee, arms } => {
                 self.check_match(signature, scrutinee, arms, statement.span())?
             }
-            StatementSyntaxKind::Assignment { target, value } => {
-                self.check_assignment(target, value, statement.span())?
-            }
+            StatementSyntaxKind::Assignment {
+                target,
+                operator,
+                value,
+            } => self.check_assignment(target, *operator, value, statement.span())?,
             StatementSyntaxKind::Expression(expression) => {
                 self.check_expression_statement(expression)?
             }
@@ -534,6 +536,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_assignment(
         &mut self,
         target: &ExpressionSyntax,
+        operator: Option<SyntaxBinaryOperator>,
+        value: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        if let Some(operator) = operator {
+            return self.check_compound_assignment(target, operator, value, span);
+        }
+        self.check_plain_assignment(target, value, span)
+    }
+
+    fn check_plain_assignment(
+        &mut self,
+        target: &ExpressionSyntax,
         value: &ExpressionSyntax,
         span: SourceSpan,
     ) -> Option<TypedStatementKind> {
@@ -623,6 +638,148 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             base: *base,
             field,
             value,
+        })
+    }
+
+    fn check_compound_assignment(
+        &mut self,
+        target: &ExpressionSyntax,
+        operator: SyntaxBinaryOperator,
+        value: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        if let ExpressionSyntaxKind::Name(path) = target.kind()
+            && path.len() == 1
+            && let Some(binding) = self.binding_by_name(&path[0])
+        {
+            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "compound assignment",
+                    "immutable numeric for binding",
+                ));
+                return None;
+            }
+            let target_kind = self.binding_reference_kind(binding)?;
+            if matches!(target_kind, TypedExpressionKind::Parameter(_)) {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "compound assignment",
+                    "immutable parameter",
+                ));
+                return None;
+            }
+            let current = TypedExpression {
+                kind: target_kind.clone(),
+                type_id: binding.type_id,
+                span: target.span(),
+            };
+            let right = self.check_expression_expected(
+                value,
+                Some(ExpectedExpressionType::plain(binding.type_id)),
+            )?;
+            let operator =
+                self.check_compound_operator(operator, binding.type_id, right.type_id(), span)?;
+            let value = compound_expression(current, right, operator, span);
+            self.written_bindings.insert(binding.id);
+            return match target_kind {
+                TypedExpressionKind::Local(local) => {
+                    Some(TypedStatementKind::LocalSet { local, value })
+                }
+                TypedExpressionKind::Capture(capture) => {
+                    Some(TypedStatementKind::CaptureSet { capture, value })
+                }
+                _ => None,
+            };
+        }
+
+        let target = self.check_expression(target)?;
+        if let TypedExpressionKind::ArrayGet { array, index } = target.kind {
+            let Some(SemanticType::Array(element_type)) =
+                self.resolver.arena().get(array.type_id()).cloned()
+            else {
+                return None;
+            };
+            let value = self.check_expression_expected(
+                value,
+                Some(ExpectedExpressionType::plain(element_type)),
+            )?;
+            let operator =
+                self.check_compound_operator(operator, element_type, value.type_id(), span)?;
+            return Some(TypedStatementKind::CompoundArraySet {
+                array: *array,
+                index: *index,
+                element_type,
+                operator,
+                value,
+            });
+        }
+
+        let target_type = target.type_id();
+        let TypedExpressionKind::Field { base, field } = target.kind else {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                span,
+                "compound assignment",
+                self.type_name(target_type),
+            ));
+            return None;
+        };
+        if self
+            .resolver
+            .class_definition_for_type(base.type_id())
+            .is_none()
+        {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                span,
+                "compound assignment",
+                "immutable field",
+            ));
+            return None;
+        }
+        let value = self
+            .check_expression_expected(value, Some(ExpectedExpressionType::plain(target_type)))?;
+        let operator =
+            self.check_compound_operator(operator, target_type, value.type_id(), span)?;
+        Some(TypedStatementKind::CompoundFieldSet {
+            base: *base,
+            field,
+            value_type: target_type,
+            operator,
+            value,
+        })
+    }
+
+    fn check_compound_operator(
+        &mut self,
+        operator: SyntaxBinaryOperator,
+        target: pop_foundation::TypeId,
+        value: pop_foundation::TypeId,
+        span: SourceSpan,
+    ) -> Option<TypedCompoundOperator> {
+        let operands_match = target == value;
+        let valid = match operator {
+            SyntaxBinaryOperator::Add
+            | SyntaxBinaryOperator::Subtract
+            | SyntaxBinaryOperator::Multiply
+            | SyntaxBinaryOperator::Divide => operands_match && self.is_numeric(target),
+            SyntaxBinaryOperator::Remainder => operands_match && self.is_integer(target),
+            SyntaxBinaryOperator::Concat => {
+                operands_match && self.is_primitive(target, crate::PrimitiveType::String)
+            }
+            _ => false,
+        };
+        if !valid {
+            self.invalid_operator(span, compound_operator_text(operator), &[target, value]);
+            return None;
+        }
+        Some(match operator {
+            SyntaxBinaryOperator::Add => TypedCompoundOperator::Add,
+            SyntaxBinaryOperator::Subtract => TypedCompoundOperator::Subtract,
+            SyntaxBinaryOperator::Multiply => TypedCompoundOperator::Multiply,
+            SyntaxBinaryOperator::Divide => TypedCompoundOperator::Divide,
+            SyntaxBinaryOperator::Remainder => TypedCompoundOperator::Remainder,
+            SyntaxBinaryOperator::Concat => TypedCompoundOperator::Concat,
+            _ => unreachable!("parser exposes only supported compound operators"),
         })
     }
 
@@ -823,6 +980,50 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             union: definition.symbol(),
             arms: typed_arms,
         })
+    }
+}
+
+fn compound_expression(
+    left: TypedExpression,
+    right: TypedExpression,
+    operator: TypedCompoundOperator,
+    span: SourceSpan,
+) -> TypedExpression {
+    let type_id = left.type_id();
+    let kind = match operator {
+        TypedCompoundOperator::Concat => TypedExpressionKind::StringConcat {
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        operator => TypedExpressionKind::Binary {
+            operator: match operator {
+                TypedCompoundOperator::Add => TypedBinaryOperator::Add,
+                TypedCompoundOperator::Subtract => TypedBinaryOperator::Subtract,
+                TypedCompoundOperator::Multiply => TypedBinaryOperator::Multiply,
+                TypedCompoundOperator::Divide => TypedBinaryOperator::Divide,
+                TypedCompoundOperator::Remainder => TypedBinaryOperator::Remainder,
+                TypedCompoundOperator::Concat => unreachable!(),
+            },
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    };
+    TypedExpression {
+        kind,
+        type_id,
+        span,
+    }
+}
+
+const fn compound_operator_text(operator: SyntaxBinaryOperator) -> &'static str {
+    match operator {
+        SyntaxBinaryOperator::Add => "+=",
+        SyntaxBinaryOperator::Subtract => "-=",
+        SyntaxBinaryOperator::Multiply => "*=",
+        SyntaxBinaryOperator::Divide => "/=",
+        SyntaxBinaryOperator::Remainder => "%=",
+        SyntaxBinaryOperator::Concat => "..=",
+        _ => "compound assignment",
     }
 }
 

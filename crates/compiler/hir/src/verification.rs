@@ -1206,6 +1206,19 @@ impl Verifier<'_> {
                     self.verify_expression(value, &visible);
                     self.verify_field_set(*field, base, value, statement.span());
                 }
+                HirStatementKind::CompoundFieldSet {
+                    base,
+                    field,
+                    value_type,
+                    operator,
+                    value,
+                } => {
+                    self.verify_expression(base, &visible);
+                    self.verify_expression(value, &visible);
+                    self.verify_expression_type(*value_type, value);
+                    self.verify_field_set(*field, base, value, statement.span());
+                    self.verify_compound_operator(*operator, *value_type, statement.span());
+                }
                 HirStatementKind::ArraySet {
                     array,
                     index,
@@ -1216,6 +1229,27 @@ impl Verifier<'_> {
                     if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id()) {
                         self.verify_expression_type(*element, value);
                     }
+                }
+                HirStatementKind::CompoundArraySet {
+                    array,
+                    index,
+                    element_type,
+                    operator,
+                    value,
+                } => {
+                    self.verify_array_get(array, index, &visible);
+                    self.verify_expression(value, &visible);
+                    self.verify_expression_type(*element_type, value);
+                    if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id())
+                        && *element != *element_type
+                    {
+                        self.errors
+                            .push(HirVerificationError::InvalidCollectionType {
+                                type_id: array.type_id(),
+                                span: statement.span(),
+                            });
+                    }
+                    self.verify_compound_operator(*operator, *element_type, statement.span());
                 }
                 HirStatementKind::Call(call) => {
                     self.verify_call(
@@ -1954,6 +1988,36 @@ impl Verifier<'_> {
                     result: expression.type_id(),
                     span: expression.span(),
                 });
+        }
+    }
+
+    fn verify_compound_operator(
+        &mut self,
+        operator: pop_types::TypedCompoundOperator,
+        type_id: TypeId,
+        span: SourceSpan,
+    ) {
+        let valid = match operator {
+            pop_types::TypedCompoundOperator::Add
+            | pop_types::TypedCompoundOperator::Subtract
+            | pop_types::TypedCompoundOperator::Multiply
+            | pop_types::TypedCompoundOperator::Divide => matches!(
+                self.arena.get(type_id),
+                Some(SemanticType::Primitive(
+                    PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64
+                ))
+            ),
+            pop_types::TypedCompoundOperator::Remainder => matches!(
+                self.arena.get(type_id),
+                Some(SemanticType::Primitive(PrimitiveType::Integer(_)))
+            ),
+            pop_types::TypedCompoundOperator::Concat => {
+                self.arena.source_type("String") == Some(type_id)
+            }
+        };
+        if !valid {
+            self.errors
+                .push(HirVerificationError::InvalidType { type_id, span });
         }
     }
 
@@ -2747,7 +2811,9 @@ fn collect_local_binding_map(
             | HirStatementKind::Break
             | HirStatementKind::Continue
             | HirStatementKind::FieldSet { .. }
+            | HirStatementKind::CompoundFieldSet { .. }
             | HirStatementKind::ArraySet { .. }
+            | HirStatementKind::CompoundArraySet { .. }
             | HirStatementKind::Call(_)
             | HirStatementKind::Expression(_) => {}
         }
@@ -2870,10 +2936,24 @@ fn collect_written_bindings(
                 collect_cell_captures(base, written);
                 collect_cell_captures(value, written);
             }
+            HirStatementKind::CompoundFieldSet { base, value, .. } => {
+                collect_cell_captures(base, written);
+                collect_cell_captures(value, written);
+            }
             HirStatementKind::ArraySet {
                 array,
                 index,
                 value,
+            } => {
+                collect_cell_captures(array, written);
+                collect_cell_captures(index, written);
+                collect_cell_captures(value, written);
+            }
+            HirStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
             } => {
                 collect_cell_captures(array, written);
                 collect_cell_captures(index, written);

@@ -365,12 +365,40 @@ fn dump_statements(
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
+            HirStatementKind::CompoundFieldSet {
+                base,
+                field,
+                operator,
+                value,
+                ..
+            } => {
+                let _ = write!(output, "compound.fieldSet {operator:?} ");
+                dump_expression(output, base, arena);
+                let _ = write!(output, ".field#{} = ", field.raw());
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::ArraySet {
                 array,
                 index,
                 value,
             } => {
                 output.push_str("array.set ");
+                dump_expression(output, array, arena);
+                output.push('[');
+                dump_expression(output, index, arena);
+                output.push_str("] = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
+            HirStatementKind::CompoundArraySet {
+                array,
+                index,
+                operator,
+                value,
+                ..
+            } => {
+                let _ = write!(output, "compound.arraySet {operator:?} ");
                 dump_expression(output, array, arena);
                 output.push('[');
                 dump_expression(output, index, arena);

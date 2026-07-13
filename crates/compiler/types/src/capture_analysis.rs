@@ -81,10 +81,24 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
             finalize_expression_captures(base, written);
             finalize_expression_captures(value, written);
         }
+        TypedStatementKind::CompoundFieldSet { base, value, .. } => {
+            finalize_expression_captures(base, written);
+            finalize_expression_captures(value, written);
+        }
         TypedStatementKind::ArraySet {
             array,
             index,
             value,
+        } => {
+            finalize_expression_captures(array, written);
+            finalize_expression_captures(index, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedStatementKind::CompoundArraySet {
+            array,
+            index,
+            value,
+            ..
         } => {
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);

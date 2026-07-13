@@ -103,9 +103,23 @@ pub enum TypedStatementKind {
         field: FieldId,
         value: TypedExpression,
     },
+    CompoundFieldSet {
+        base: TypedExpression,
+        field: FieldId,
+        value_type: TypeId,
+        operator: TypedCompoundOperator,
+        value: TypedExpression,
+    },
     ArraySet {
         array: TypedExpression,
         index: TypedExpression,
+        value: TypedExpression,
+    },
+    CompoundArraySet {
+        array: TypedExpression,
+        index: TypedExpression,
+        element_type: TypeId,
+        operator: TypedCompoundOperator,
         value: TypedExpression,
     },
     Call(TypedCall),
@@ -579,6 +593,16 @@ pub enum TypedBinaryOperator {
     Multiply,
     Divide,
     Remainder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypedCompoundOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+    Concat,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -17,7 +17,7 @@ use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
     ClassMethodDispatch, FieldDefault, FloatValue, IntegerValue, InterfaceDefinition,
     NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena, TypedBinaryOperator,
-    TypedUnaryOperator, UnionDefinition,
+    TypedCompoundOperator, TypedUnaryOperator, UnionDefinition,
 };
 
 use crate::lowering::lower_interface_implementation;
@@ -1328,9 +1328,23 @@ pub enum HirStatementKind {
         field: FieldId,
         value: HirExpression,
     },
+    CompoundFieldSet {
+        base: HirExpression,
+        field: FieldId,
+        value_type: TypeId,
+        operator: TypedCompoundOperator,
+        value: HirExpression,
+    },
     ArraySet {
         array: HirExpression,
         index: HirExpression,
+        value: HirExpression,
+    },
+    CompoundArraySet {
+        array: HirExpression,
+        index: HirExpression,
+        element_type: TypeId,
+        operator: TypedCompoundOperator,
         value: HirExpression,
     },
     Call(HirCall),

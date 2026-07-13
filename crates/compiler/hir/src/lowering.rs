@@ -369,6 +369,19 @@ fn lower_statement(
             field: *field,
             value: lower_expression(value, interface_slots),
         },
+        TypedStatementKind::CompoundFieldSet {
+            base,
+            field,
+            value_type,
+            operator,
+            value,
+        } => HirStatementKind::CompoundFieldSet {
+            base: lower_expression(base, interface_slots),
+            field: *field,
+            value_type: *value_type,
+            operator: *operator,
+            value: lower_expression(value, interface_slots),
+        },
         TypedStatementKind::ArraySet {
             array,
             index,
@@ -376,6 +389,19 @@ fn lower_statement(
         } => HirStatementKind::ArraySet {
             array: lower_expression(array, interface_slots),
             index: lower_expression(index, interface_slots),
+            value: lower_expression(value, interface_slots),
+        },
+        TypedStatementKind::CompoundArraySet {
+            array,
+            index,
+            element_type,
+            operator,
+            value,
+        } => HirStatementKind::CompoundArraySet {
+            array: lower_expression(array, interface_slots),
+            index: lower_expression(index, interface_slots),
+            element_type: *element_type,
+            operator: *operator,
             value: lower_expression(value, interface_slots),
         },
         TypedStatementKind::Call(call) => HirStatementKind::Call(lower_call(call, interface_slots)),
@@ -861,10 +887,22 @@ fn first_unknown_interface_call(
                 first_unknown_interface_expression(base, slots)
                     .or_else(|| first_unknown_interface_expression(value, slots))
             }
+            TypedStatementKind::CompoundFieldSet { base, value, .. } => {
+                first_unknown_interface_expression(base, slots)
+                    .or_else(|| first_unknown_interface_expression(value, slots))
+            }
             TypedStatementKind::ArraySet {
                 array,
                 index,
                 value,
+            } => first_unknown_interface_expression(array, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+                .or_else(|| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
             } => first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
                 .or_else(|| first_unknown_interface_expression(value, slots)),
@@ -1082,10 +1120,22 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 first_compile_time_only_expression(base)
                     .or_else(|| first_compile_time_only_expression(value))
             }
+            TypedStatementKind::CompoundFieldSet { base, value, .. } => {
+                first_compile_time_only_expression(base)
+                    .or_else(|| first_compile_time_only_expression(value))
+            }
             TypedStatementKind::ArraySet {
                 array,
                 index,
                 value,
+            } => first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+                .or_else(|| first_compile_time_only_expression(value)),
+            TypedStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
             } => first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
                 .or_else(|| first_compile_time_only_expression(value)),

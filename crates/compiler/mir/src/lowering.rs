@@ -20,7 +20,7 @@ use pop_runtime_interface::{
 };
 use pop_types::{
     FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType, SemanticType,
-    TypeArena, TypedBinaryOperator, TypedUnaryOperator,
+    TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
 };
 
 use crate::ir::*;
@@ -394,10 +394,24 @@ fn visit_statement_closures(
             visit_expression_closures(base, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
+        HirStatementKind::CompoundFieldSet { base, value, .. } => {
+            visit_expression_closures(base, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
         HirStatementKind::ArraySet {
             array,
             index,
             value,
+        } => {
+            visit_expression_closures(array, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirStatementKind::CompoundArraySet {
+            array,
+            index,
+            value,
+            ..
         } => {
             visit_expression_closures(array, parameters, locals);
             visit_expression_closures(index, parameters, locals);
@@ -435,7 +449,9 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         | HirStatementKind::Return { .. }
         | HirStatementKind::Break
         | HirStatementKind::FieldSet { .. }
+        | HirStatementKind::CompoundFieldSet { .. }
         | HirStatementKind::ArraySet { .. }
+        | HirStatementKind::CompoundArraySet { .. }
         | HirStatementKind::Call(_)
         | HirStatementKind::Expression(_) => false,
     })
@@ -894,6 +910,65 @@ impl<'hir> FunctionBuilder<'hir> {
                         statement.span(),
                     );
                 }
+                HirStatementKind::CompoundFieldSet {
+                    base,
+                    field,
+                    value_type,
+                    operator,
+                    value,
+                } => {
+                    let base = self.lower_expression(base);
+                    let current = self.emit(
+                        MirInstructionKind::FieldGet {
+                            base,
+                            field: *field,
+                        },
+                        *value_type,
+                        statement.span(),
+                    );
+                    let right = self.lower_expression(value);
+                    let value = self.lower_compound_value(
+                        *operator,
+                        *value_type,
+                        current,
+                        right,
+                        statement.span(),
+                    );
+                    if let Some((slot, field_type)) = self.gc_schema.fields.get(field).copied()
+                        && is_managed_reference_type_id(field_type, Some(self.arena))
+                    {
+                        let previous = self.emit(
+                            MirInstructionKind::FieldGet {
+                                base,
+                                field: *field,
+                            },
+                            field_type,
+                            statement.span(),
+                        );
+                        self.emit_effect(
+                            MirInstructionKind::WriteBarrier {
+                                owner: base,
+                                slot,
+                                previous: Some(previous),
+                                value: Some(value),
+                            },
+                            statement.span(),
+                        );
+                    }
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::FieldSet {
+                            base,
+                            field: *field,
+                            value,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
                 HirStatementKind::ArraySet {
                     array,
                     index,
@@ -903,6 +978,44 @@ impl<'hir> FunctionBuilder<'hir> {
                     let array = self.lower_expression(array);
                     let index = self.lower_expression(index);
                     let value = self.lower_expression(value);
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::ArraySet {
+                            array,
+                            index,
+                            value,
+                            element_map,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
+                HirStatementKind::CompoundArraySet {
+                    array,
+                    index,
+                    element_type,
+                    operator,
+                    value,
+                } => {
+                    let element_map = array_element_map(self.arena, array.type_id());
+                    let array = self.lower_expression(array);
+                    let index = self.lower_expression(index);
+                    let current = self.emit(
+                        MirInstructionKind::ArrayGetChecked { array, index },
+                        *element_type,
+                        statement.span(),
+                    );
+                    let right = self.lower_expression(value);
+                    let value = self.lower_compound_value(
+                        *operator,
+                        *element_type,
+                        current,
+                        right,
+                        statement.span(),
+                    );
                     let nil = self
                         .arena
                         .source_type("nil")
@@ -1677,6 +1790,34 @@ impl<'hir> FunctionBuilder<'hir> {
             expression.type_id(),
             expression.span(),
         )
+    }
+
+    fn lower_compound_value(
+        &mut self,
+        operator: TypedCompoundOperator,
+        value_type: TypeId,
+        left: ValueId,
+        right: ValueId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let kind = match operator {
+            TypedCompoundOperator::Concat => MirInstructionKind::StringConcat { left, right },
+            operator => lower_binary(
+                self.arena,
+                match operator {
+                    TypedCompoundOperator::Add => TypedBinaryOperator::Add,
+                    TypedCompoundOperator::Subtract => TypedBinaryOperator::Subtract,
+                    TypedCompoundOperator::Multiply => TypedBinaryOperator::Multiply,
+                    TypedCompoundOperator::Divide => TypedBinaryOperator::Divide,
+                    TypedCompoundOperator::Remainder => TypedBinaryOperator::Remainder,
+                    TypedCompoundOperator::Concat => unreachable!(),
+                },
+                value_type,
+                left,
+                right,
+            ),
+        };
+        self.emit(kind, value_type, span)
     }
 
     fn lower_short_circuit(

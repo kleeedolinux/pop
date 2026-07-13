@@ -64,8 +64,9 @@ pub use signature_resolution::{
 pub use typed_body::{
     CaptureMode, CaptureSource, StringFormatKind, TypedBinaryOperator, TypedBody, TypedBodyResult,
     TypedCall, TypedCallDispatch, TypedCapture, TypedClosure, TypedClosureParameter,
-    TypedExpression, TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm,
-    TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
+    TypedCompoundOperator, TypedExpression, TypedExpressionKind, TypedExpressionResult,
+    TypedFieldValue, TypedMatchArm, TypedMatchBinding, TypedStatement, TypedStatementKind,
+    TypedTableEntry, TypedUnaryOperator,
 };
 
 pub type ClassFieldDefault = FieldDefault;

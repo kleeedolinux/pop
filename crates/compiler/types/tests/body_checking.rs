@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use pop_foundation::{BubbleId, FileId, ModuleId, SymbolId};
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
@@ -6,8 +7,8 @@ use pop_source::SourceFile;
 use pop_syntax::{NodeKind, parse_file, parse_function_body, parse_function_signature};
 use pop_types::{
     BodyChecker, CaptureMode, FloatKind, NumericConversionKind, SemanticType, SignatureResolver,
-    StringFormatKind, TypedBinaryOperator, TypedExpressionKind, TypedStatementKind,
-    embedded_bootstrap_schema,
+    StringFormatKind, TypedBinaryOperator, TypedCompoundOperator, TypedExpressionKind,
+    TypedStatementKind, embedded_bootstrap_schema,
 };
 
 struct CheckedFixture {
@@ -683,6 +684,104 @@ fn conditional_expressions_require_boolean_conditions_and_one_static_type() {
             rejected.result.diagnostic_snapshot().contains("POP2003"),
             "{}",
             rejected.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
+fn compound_assignment_preserves_exact_types_targets_and_operators() {
+    let accepted = check_function(
+        "namespace Example\n\
+         public function update(values: {Int}): Int8\n\
+             local total: Int8 = 1\n\
+             local message = \"\"\n\
+             total += 2\n\
+             values[1] += 4\n\
+             message ..= \"!\"\n\
+             return total\n\
+         end\n",
+        "update",
+    );
+    assert!(
+        accepted.result.diagnostics().is_empty(),
+        "{}",
+        accepted.result.diagnostic_snapshot()
+    );
+    let statements = accepted.result.body().expect("typed body").statements();
+    assert!(matches!(
+        statements[2].kind(),
+        TypedStatementKind::LocalSet { value, .. }
+            if matches!(value.kind(), TypedExpressionKind::Binary {
+                operator: TypedBinaryOperator::Add,
+                ..
+            })
+    ));
+    assert!(matches!(
+        statements[3].kind(),
+        TypedStatementKind::CompoundArraySet {
+            operator: TypedCompoundOperator::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        statements[4].kind(),
+        TypedStatementKind::LocalSet { value, .. }
+            if matches!(value.kind(), TypedExpressionKind::StringConcat { .. })
+    ));
+
+    for source in [
+        "namespace Example\n\
+         public function invalid(value: Float64): Float64\n\
+             local result = value\n\
+             result %= 2.0\n\
+             return result\n\
+         end\n",
+        "namespace Example\n\
+         public function invalid(value: Int): Int\n\
+             local result = value\n\
+             result += 1.5\n\
+             return result\n\
+         end\n",
+        "namespace Example\n\
+         public function invalid(value: Int): Int\n\
+             value += 1\n\
+             return value\n\
+         end\n",
+    ] {
+        let rejected = check_function(source, "invalid");
+        assert!(rejected.result.body().is_none());
+        assert!(
+            rejected.result.diagnostic_snapshot().contains("POP2005")
+                || rejected.result.diagnostic_snapshot().contains("POP2003"),
+            "{}",
+            rejected.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
+fn compound_arithmetic_accepts_every_exact_numeric_kind() {
+    for type_name in [
+        "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64", "Float32",
+        "Float64",
+    ] {
+        let mut operations = String::from(
+            "    local result = value\n    result += 1\n    result -= 1\n    result *= 2\n    result /= 2\n",
+        );
+        if !type_name.starts_with("Float") {
+            operations.push_str("    result %= 3\n");
+        }
+        let mut source = String::new();
+        write!(
+            source,
+            "namespace Example\npublic function update(value: {type_name}): {type_name}\n{operations}    return result\nend\n"
+        )
+        .expect("source text");
+        let accepted = check_function(&source, "update");
+        assert!(
+            accepted.result.diagnostics().is_empty(),
+            "{type_name}: {}",
+            accepted.result.diagnostic_snapshot()
         );
     }
 }

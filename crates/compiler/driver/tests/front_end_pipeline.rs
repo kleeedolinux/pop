@@ -496,6 +496,37 @@ fn assignment_rejects_immutable_targets_and_wrong_value_types() {
 }
 
 #[test]
+fn compound_field_and_array_targets_remain_explicit_in_verified_hir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/compound.pop",
+        "namespace Main\n\
+         public class Counter\n\
+             public value: Int = 0\n\
+         end\n\
+         public function update(counter: Counter, values: {Int})\n\
+             counter.value += 2\n\
+             values[1] *= 3\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let dump = result.hir().expect("verified HIR").dump(result.types());
+    assert!(dump.contains("compound.fieldSet Add"), "{dump}");
+    assert!(dump.contains("compound.arraySet Multiply"), "{dump}");
+}
+
+#[test]
 fn indirect_calls_keep_the_declared_function_arity() {
     let source = SourceFile::new(
         FileId::from_raw(0),

@@ -84,6 +84,7 @@ pub enum StatementSyntaxKind {
     },
     Assignment {
         target: ExpressionSyntax,
+        operator: Option<BinaryOperator>,
         value: ExpressionSyntax,
     },
     Expression(ExpressionSyntax),
@@ -483,7 +484,7 @@ impl BodyParser<'_> {
             Some(TokenKind::Match) => self.parse_match(),
             _ => {
                 let expression = self.parse_expression(0)?;
-                if self.consume(TokenKind::Equal).is_some() {
+                if let Some(operator) = self.consume_assignment_operator() {
                     let value = self.parse_expression(0)?;
                     let span = SourceSpan::new(
                         self.file,
@@ -495,6 +496,7 @@ impl BodyParser<'_> {
                     return Ok(StatementSyntax {
                         kind: StatementSyntaxKind::Assignment {
                             target: expression,
+                            operator,
                             value,
                         },
                         span,
@@ -507,6 +509,21 @@ impl BodyParser<'_> {
                 })
             }
         }
+    }
+
+    fn consume_assignment_operator(&mut self) -> Option<Option<BinaryOperator>> {
+        let operator = match self.current_kind()? {
+            TokenKind::Equal => None,
+            TokenKind::PlusEqual => Some(BinaryOperator::Add),
+            TokenKind::MinusEqual => Some(BinaryOperator::Subtract),
+            TokenKind::StarEqual => Some(BinaryOperator::Multiply),
+            TokenKind::SlashEqual => Some(BinaryOperator::Divide),
+            TokenKind::PercentEqual => Some(BinaryOperator::Remainder),
+            TokenKind::DotDotEqual => Some(BinaryOperator::Concat),
+            _ => return None,
+        };
+        self.position = self.position.saturating_add(1);
+        Some(operator)
     }
 
     pub(crate) fn parse_statement_list(

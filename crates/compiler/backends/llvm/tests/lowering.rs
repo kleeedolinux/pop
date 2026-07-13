@@ -1118,6 +1118,55 @@ fn conditional_expressions_and_elseif_execute_lazily_natively() {
 }
 
 #[test]
+fn compound_assignment_preserves_single_evaluation_natively() {
+    let module = native_module(
+        "namespace Main\n\
+         public class State\n\
+             public log: Int = 0\n\
+         end\n\
+         public class Box\n\
+             public value: Int = 10\n\
+         end\n\
+         private function fieldRight(state: State, box: Box): Int\n\
+             state.log = state.log * 10 + 2\n\
+             box.value = 20\n\
+             return 5\n\
+         end\n\
+         private function selectArray(state: State, values: {Int}): {Int}\n\
+             state.log = state.log * 10 + 3\n\
+             return values\n\
+         end\n\
+         private function selectIndex(state: State): Int\n\
+             state.log = state.log * 10 + 4\n\
+             return 1\n\
+         end\n\
+         private function arrayRight(state: State): Int\n\
+             state.log = state.log * 10 + 5\n\
+             return 4\n\
+         end\n\
+         private function main(): Int\n\
+             local state = State {}\n\
+             local box = Box {}\n\
+             local values: {Int} = { 2 }\n\
+             box.value += fieldRight(state, box)\n\
+             selectArray(state, values)[selectIndex(state)] *= arrayRight(state)\n\
+             if state.log == 2345 and box.value == 15 and Array.get(values, 1) == 8 then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "compound-assignment");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native compound assignment failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn invalid_numeric_conversion_traps_before_native_float_to_integer_lowering() {
     let module = native_module(
         "namespace Main\n\

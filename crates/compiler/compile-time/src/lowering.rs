@@ -405,7 +405,9 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::FieldSet { .. }
-        | TypedStatementKind::ArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
+        | TypedStatementKind::CompoundFieldSet { .. }
+        | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {

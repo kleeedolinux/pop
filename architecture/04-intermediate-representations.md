@@ -84,7 +84,10 @@ HIR invariants:
   optional step, and body, while `break`/`continue` retain their resolved
   innermost-loop target until CFG lowering;
 - a conditional expression retains one `Boolean` condition and two same-typed
-  lazy branches until MIR lowers them to CFG and a typed join argument.
+  lazy branches until MIR lowers them to CFG and a typed join argument;
+- compound assignment retains its resolved mutable target, typed operator, and
+  right-hand side until lowering can evaluate a receiver/index once and emit
+  ordinary MIR load-operation-store instructions.
 
 ## Compile-time HIR and values
 
