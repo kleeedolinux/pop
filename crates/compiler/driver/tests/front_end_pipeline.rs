@@ -56,6 +56,65 @@ fn type_alias_cycles_and_type_arguments_are_rejected() {
 }
 
 #[test]
+fn nominal_enum_cases_reach_verified_runtime_ir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Main\n\
+         public enum Color\n\
+             Red\n\
+             Blue\n\
+         end\n\
+         public function isRed(color: Color): Boolean\n\
+             return color == Color.Red\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("verified HIR"), result.types())
+        .expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("enum.case"));
+    assert_eq!(
+        pop_mir::parse_mir_dump(&dump)
+            .expect("enum MIR text")
+            .dump(),
+        dump
+    );
+}
+
+#[test]
+fn enums_reject_unknown_cases_cross_type_equality_and_arithmetic() {
+    for source_text in [
+        "namespace Main\nprivate enum Color\n    Red\nend\npublic function invalid(): Color\n    return Color.Blue\nend\n",
+        "namespace Main\nprivate enum Color\n    Red\nend\nprivate enum State\n    Ready\nend\npublic function invalid(): Boolean\n    return Color.Red == State.Ready\nend\n",
+        "namespace Main\nprivate enum Color\n    Red\nend\npublic function invalid(): Color\n    return Color.Red + Color.Red\nend\n",
+    ] {
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+        assert!(result.hir().is_none(), "{source_text}");
+        assert!(!result.diagnostics().is_empty(), "{source_text}");
+    }
+}
+
+#[test]
 fn multi_module_bubble_reaches_verified_typed_hir() {
     let models = SourceFile::new(
         FileId::from_raw(0),

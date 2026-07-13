@@ -44,6 +44,23 @@ pub(crate) fn dump_declaration(
                 type_text(union.type_id, arena)
             );
         }
+        HirDeclarationKind::Enum(enumeration) => {
+            let _ = write!(
+                output,
+                "enum {}:{}",
+                declaration.name,
+                type_text(enumeration.type_id, arena)
+            );
+            for case in &enumeration.cases {
+                let _ = write!(
+                    output,
+                    " [ec{} {}={}]",
+                    case.case.raw(),
+                    case.name,
+                    case.discriminant
+                );
+            }
+        }
         HirDeclarationKind::Class(class) => {
             let _ = write!(
                 output,
@@ -629,6 +646,19 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             arguments,
         } => {
             dump_union_case(output, *union, *case, arguments, arena);
+        }
+        HirExpressionKind::EnumCase {
+            definition,
+            case,
+            discriminant,
+        } => {
+            let _ = write!(
+                output,
+                "enum.case s{} ec{} {}",
+                definition.raw(),
+                case.raw(),
+                discriminant
+            );
         }
         HirExpressionKind::Tuple(elements) => {
             output.push('(');

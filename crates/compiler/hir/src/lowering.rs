@@ -670,6 +670,15 @@ fn lower_expression(
                 .map(|argument| lower_expression(argument, interface_slots))
                 .collect(),
         },
+        TypedExpressionKind::EnumCase {
+            definition,
+            case,
+            discriminant,
+        } => HirExpressionKind::EnumCase {
+            definition: *definition,
+            case: *case,
+            discriminant: *discriminant,
+        },
         TypedExpressionKind::Tuple(elements) => HirExpressionKind::Tuple(
             elements
                 .iter()
@@ -1194,7 +1203,8 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
-        | TypedExpressionKind::Function(_) => None,
+        | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
 
@@ -1432,7 +1442,8 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
-        | TypedExpressionKind::Function(_) => None,
+        | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
 

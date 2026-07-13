@@ -152,6 +152,7 @@ fn referenced_types(semantic: &SemanticType) -> Vec<TypeId> {
     match semantic {
         SemanticType::Primitive(_)
         | SemanticType::TaggedUnion { .. }
+        | SemanticType::Enum { .. }
         | SemanticType::TypeParameter(_)
         | SemanticType::Opaque(_)
         | SemanticType::Error => Vec::new(),

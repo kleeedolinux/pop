@@ -428,6 +428,15 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
+            MirInstructionKind::EnumConstant {
+                definition,
+                case,
+                discriminant,
+            } => MirValue::Enum {
+                definition: *definition,
+                case: *case,
+                discriminant: *discriminant,
+            },
             MirInstructionKind::FunctionReference(function) => MirValue::Function(*function),
             MirInstructionKind::TupleMake(elements) => {
                 let tuple = MirValue::Tuple(

@@ -75,6 +75,54 @@ pub struct UnionDeclarationSyntax {
     span: SourceSpan,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumDeclarationSyntax {
+    name: String,
+    cases: Vec<EnumCaseSyntax>,
+    span: SourceSpan,
+}
+
+impl EnumDeclarationSyntax {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[EnumCaseSyntax] {
+        &self.cases
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumCaseSyntax {
+    attributes: Vec<AttributeUseSyntax>,
+    name: String,
+    span: SourceSpan,
+}
+
+impl EnumCaseSyntax {
+    #[must_use]
+    pub fn attributes(&self) -> &[AttributeUseSyntax] {
+        &self.attributes
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
 impl UnionDeclarationSyntax {
     #[must_use]
     pub fn name(&self) -> &str {
@@ -280,6 +328,49 @@ pub fn parse_union_declaration(
         parser.expect_line_end()?;
     }
     Ok(UnionDeclarationSyntax {
+        name,
+        cases,
+        span: SourceSpan::new(source.id(), node.range()),
+    })
+}
+
+/// Parses one nominal payload-free enum declaration.
+///
+/// # Errors
+///
+/// Returns an error when the declaration or a case is malformed.
+pub fn parse_enum_declaration(
+    source: &SourceFile,
+    syntax: &SyntaxTree,
+    node: &SyntaxNode,
+) -> Result<EnumDeclarationSyntax, DataDeclarationError> {
+    let mut parser = DataParser::new(source, syntax, node);
+    if node.kind() != NodeKind::EnumDeclaration {
+        return Err(parser.error("enum declaration"));
+    }
+    parser.seek(TokenKind::Enum)?;
+    let name_token = parser.expect(TokenKind::Identifier, "enum name")?;
+    let name = name_token.text(source).to_owned();
+    parser.expect(TokenKind::Newline, "line break after enum name")?;
+    let mut cases = Vec::new();
+    loop {
+        parser.skip_newlines();
+        let attributes = parser.parse_member_attributes()?;
+        if parser.consume(TokenKind::End).is_some() {
+            if !attributes.is_empty() {
+                return Err(parser.error("case after attribute"));
+            }
+            break;
+        }
+        let case = parser.expect(TokenKind::Identifier, "enum case name")?;
+        cases.push(EnumCaseSyntax {
+            attributes,
+            name: case.text(source).to_owned(),
+            span: SourceSpan::new(source.id(), case.range()),
+        });
+        parser.expect_line_end()?;
+    }
+    Ok(EnumDeclarationSyntax {
         name,
         cases,
         span: SourceSpan::new(source.id(), node.range()),

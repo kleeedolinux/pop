@@ -56,7 +56,8 @@ pub use required_constants::{
     AttributeParameterId, PendingConstantExpression, RequiredConstantError, RequiredConstantTarget,
 };
 pub use signature_resolution::{
-    RecordDefinition, RecordDefinitionResult, RecordFieldDefinition, ResolvedFunctionParameter,
+    EnumCaseDefinition, EnumDefinition, EnumDefinitionResult, RecordDefinition,
+    RecordDefinitionResult, RecordFieldDefinition, ResolvedFunctionParameter,
     ResolvedFunctionSignature, ResolvedSignatureResult, ResolvedType, ResolvedTypeKind,
     ResolvedTypeParameter, SignatureResolver, UnionCaseDefinition, UnionDefinition,
     UnionDefinitionResult,
@@ -223,6 +224,9 @@ pub enum SemanticType {
     },
     Record(Vec<(String, TypeId)>),
     TaggedUnion {
+        definition: pop_foundation::SymbolId,
+    },
+    Enum {
         definition: pop_foundation::SymbolId,
     },
     Array(TypeId),

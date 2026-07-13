@@ -224,6 +224,7 @@ Minimum traceability matrix:
 | Typed table access and mutation | type checker, HIR/MIR, runtime, backends | exact key/value, optional missing lookup, insertion order, growth/barrier, and differential tests |
 | Evaluated runtime constants | front end, HIR/MIR, backends | exact type/value substitution, visibility, deterministic evaluation, and no runtime lookup/global tests |
 | Erased type aliases | syntax, resolver, type checker | target equivalence, visibility, chain/cycle, arity, and no-runtime-operation tests |
+| Nominal scalar enums | syntax, type checker, HIR/MIR, backends | identity/order, exact equality, invalid operators, text, differential, and fail-closed C tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |

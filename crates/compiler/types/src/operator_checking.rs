@@ -278,7 +278,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     | PrimitiveType::Integer(_)
                     | PrimitiveType::String,
                 )
-                | SemanticType::Class { .. },
+                | SemanticType::Class { .. }
+                | SemanticType::Enum { .. },
             ) => true,
             Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
                 .iter()

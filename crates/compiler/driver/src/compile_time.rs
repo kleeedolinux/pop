@@ -212,7 +212,9 @@ pub(crate) fn evaluate_declaration_defaults(
                 compile_time_evaluations,
                 diagnostics,
             ),
-            HirDeclarationKind::Union(_) | HirDeclarationKind::Interface(_) => {}
+            HirDeclarationKind::Union(_)
+            | HirDeclarationKind::Enum(_)
+            | HirDeclarationKind::Interface(_) => {}
         }
     }
 }

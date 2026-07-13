@@ -31,6 +31,24 @@ pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration
             );
             dump_union_cases(output, &union.cases);
         }
+        MirDeclarationKind::Enum(enumeration) => {
+            let _ = write!(
+                output,
+                "type.enum s{} t{} cases ",
+                declaration.symbol.raw(),
+                enumeration.type_id.raw()
+            );
+            if enumeration.cases.is_empty() {
+                output.push('-');
+            } else {
+                for (index, case) in enumeration.cases.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    let _ = write!(output, "case#{}={}", case.case.raw(), case.discriminant);
+                }
+            }
+        }
         MirDeclarationKind::Class(class) => {
             let _ = write!(
                 output,
@@ -304,6 +322,19 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "const.boolean {value}");
         }
         MirInstructionKind::NilConstant => output.push_str("const.nil"),
+        MirInstructionKind::EnumConstant {
+            definition,
+            case,
+            discriminant,
+        } => {
+            let _ = write!(
+                output,
+                "enum.case s{} ec{} {}",
+                definition.raw(),
+                case.raw(),
+                discriminant
+            );
+        }
         MirInstructionKind::FunctionReference(function) => {
             let _ = write!(output, "functionReference s{}", function.raw());
         }

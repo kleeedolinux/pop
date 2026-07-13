@@ -169,7 +169,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::Local(_)
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
-        | TypedExpressionKind::Function(_) => {}
+        | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::EnumCase { .. } => {}
         TypedExpressionKind::Closure(closure) => {
             for capture in &mut closure.captures {
                 capture.mode = if written.contains(&capture.binding) {

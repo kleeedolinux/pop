@@ -119,6 +119,7 @@ struct DeclaredField {
 struct MirSchema<'mir> {
     records: BTreeMap<SymbolId, &'mir MirRecordDeclaration>,
     unions: BTreeMap<SymbolId, &'mir MirUnionDeclaration>,
+    enums: BTreeMap<SymbolId, &'mir MirEnumDeclaration>,
     classes: BTreeMap<ClassId, &'mir MirClassDeclaration>,
     interfaces: BTreeMap<InterfaceId, &'mir MirInterfaceDeclaration>,
     fields: BTreeMap<FieldId, DeclaredField>,
@@ -133,6 +134,7 @@ impl<'mir> MirSchema<'mir> {
         let mut schema = Self {
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
+            enums: BTreeMap::new(),
             classes: BTreeMap::new(),
             interfaces: BTreeMap::new(),
             fields: BTreeMap::new(),
@@ -176,6 +178,19 @@ impl<'mir> MirSchema<'mir> {
                         }
                     }
                     schema.unions.insert(declaration.symbol, union);
+                }
+                MirDeclarationKind::Enum(enumeration) => {
+                    if arena.get(enumeration.type_id)
+                        != Some(&SemanticType::Enum {
+                            definition: declaration.symbol,
+                        })
+                    {
+                        errors.push(MirVerificationError::InvalidDeclarationType {
+                            symbol: declaration.symbol,
+                            type_id: enumeration.type_id,
+                        });
+                    }
+                    schema.enums.insert(declaration.symbol, enumeration);
                 }
                 MirDeclarationKind::Class(class) => {
                     if arena.get(class.type_id)
@@ -1830,7 +1845,8 @@ fn mir_supports_default_equality(arena: &TypeArena, type_id: TypeId) -> bool {
                 | pop_types::PrimitiveType::Integer(_)
                 | pop_types::PrimitiveType::String,
             )
-            | SemanticType::Class { .. },
+            | SemanticType::Class { .. }
+            | SemanticType::Enum { .. },
         ) => true,
         Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
             .iter()
@@ -1850,6 +1866,24 @@ fn verify_schema_instruction(
     errors: &mut Vec<MirVerificationError>,
 ) -> bool {
     match instruction.kind() {
+        MirInstructionKind::EnumConstant {
+            definition,
+            case,
+            discriminant,
+        } => {
+            let valid = schema.enums.get(definition).is_some_and(|enumeration| {
+                enumeration.type_id == instruction.result_type()
+                    && enumeration.cases.iter().any(|candidate| {
+                        candidate.case == *case && candidate.discriminant == *discriminant
+                    })
+            });
+            if !valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::RecordMake { record, fields } => {
             let Some(declaration) = schema.records.get(record) else {
                 errors.push(MirVerificationError::UnknownRecord {
@@ -2513,6 +2547,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::GcSafePoint { .. } => Vec::new(),
         MirInstructionKind::TupleMake(values)

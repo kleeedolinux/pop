@@ -7,8 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, CaptureId, ClassId, FieldId, InterfaceId, InterfaceMethodId, LocalId, MethodId,
-    NestedFunctionId, SourceSpan, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    BindingId, CaptureId, ClassId, EnumCaseId, FieldId, InterfaceId, InterfaceMethodId, LocalId,
+    MethodId, NestedFunctionId, SourceSpan, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -133,6 +134,15 @@ pub enum HirVerificationError {
     DuplicateUnionCase {
         union: SymbolId,
         case: UnionCaseId,
+    },
+    DuplicateEnumCase {
+        enumeration: SymbolId,
+        case: EnumCaseId,
+    },
+    UnknownEnumCase {
+        enumeration: SymbolId,
+        case: EnumCaseId,
+        span: SourceSpan,
     },
     InvalidDeclarationType {
         symbol: SymbolId,
@@ -382,6 +392,7 @@ struct HirSchema {
     declared_methods: BTreeMap<MethodId, HirDeclaredMethod>,
     records: BTreeMap<SymbolId, HirAggregateSchema>,
     unions: BTreeMap<SymbolId, HirUnionSchema>,
+    enums: BTreeMap<SymbolId, (TypeId, BTreeMap<EnumCaseId, u32>)>,
     classes: BTreeMap<ClassId, HirClassSchema>,
     interfaces: BTreeMap<InterfaceId, HirInterfaceSchema>,
     interface_methods: BTreeMap<InterfaceMethodId, InterfaceId>,
@@ -401,6 +412,7 @@ impl HirSchema {
             declared_methods: BTreeMap::new(),
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
+            enums: BTreeMap::new(),
             classes: BTreeMap::new(),
             interfaces: BTreeMap::new(),
             interface_methods: BTreeMap::new(),
@@ -504,6 +516,30 @@ impl HirSchema {
                         cases,
                     },
                 );
+            }
+            HirDeclarationKind::Enum(enumeration) => {
+                if arena.get(enumeration.type_id)
+                    != Some(&SemanticType::Enum {
+                        definition: declaration.symbol(),
+                    })
+                {
+                    errors.push(HirVerificationError::InvalidDeclarationType {
+                        symbol: declaration.symbol(),
+                        type_id: enumeration.type_id,
+                        span: declaration.span(),
+                    });
+                }
+                let mut cases = BTreeMap::new();
+                for case in &enumeration.cases {
+                    if cases.insert(case.case, case.discriminant).is_some() {
+                        errors.push(HirVerificationError::DuplicateEnumCase {
+                            enumeration: declaration.symbol(),
+                            case: case.case,
+                        });
+                    }
+                }
+                self.enums
+                    .insert(declaration.symbol(), (enumeration.type_id, cases));
             }
             HirDeclarationKind::Class(class) => {
                 for field in &class.fields {
@@ -1508,6 +1544,42 @@ impl Verifier<'_> {
             | HirExpressionKind::RecordUpdate { .. }
             | HirExpressionKind::UnionCase { .. } => {
                 self.verify_schema_expression(expression, visible);
+            }
+            HirExpressionKind::EnumCase {
+                definition,
+                case,
+                discriminant,
+            } => {
+                if self.schema.is_none() {
+                    if self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Enum {
+                            definition: *definition,
+                        })
+                    {
+                        self.errors.push(HirVerificationError::InvalidType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                    }
+                    return;
+                }
+                let Some((expected_type, cases)) =
+                    self.schema.and_then(|schema| schema.enums.get(definition))
+                else {
+                    self.errors.push(HirVerificationError::UnknownEnumCase {
+                        enumeration: *definition,
+                        case: *case,
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                if cases.get(case) != Some(discriminant) || *expected_type != expression.type_id() {
+                    self.errors.push(HirVerificationError::UnknownEnumCase {
+                        enumeration: *definition,
+                        case: *case,
+                        span: expression.span(),
+                    });
+                }
             }
             HirExpressionKind::ArrayGet { array, index } => {
                 self.verify_array_get(array, index, visible);
@@ -2969,7 +3041,8 @@ fn hir_supports_default_equality(arena: &TypeArena, type_id: TypeId) -> bool {
                 | PrimitiveType::Integer(_)
                 | PrimitiveType::String,
             )
-            | SemanticType::Class { .. },
+            | SemanticType::Class { .. }
+            | SemanticType::Enum { .. },
         ) => true,
         Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
             .iter()
@@ -3356,7 +3429,8 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Local(_)
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
-        | HirExpressionKind::Function(_) => {}
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::EnumCase { .. } => {}
     }
 }
 

@@ -28,6 +28,11 @@ Namespace type aliases erase to their recursively resolved target before HIR;
 they add no nominal identity or runtime operation. Alias cycles and type
 arguments on the initial non-generic alias form are rejected. See ADR 0048.
 
+Enums are closed nominal payload-free case sets. Cases such as `Color.Red`
+carry their enum type and a stable case identity; their compact discriminants
+do not implicitly convert to integers. Exact same-enum equality is supported.
+See ADR 0049.
+
 There is no user-visible `dynamic`, `any`, or unknown value on which operations
 can be performed. A top type may exist for type-theory purposes only if values
 must be narrowed to a concrete supported type before use.

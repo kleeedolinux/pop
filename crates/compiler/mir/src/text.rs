@@ -2,9 +2,10 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
-    InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
-    SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FileId, FunctionId,
+    InterfaceId, InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan,
+    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
+    ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -14,11 +15,12 @@ use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
     MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
-    MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary, MirField,
-    MirFunction, MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
-    MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod,
-    MirNestedFunction, MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration,
-    MirUnionSwitchArm, MirUnwindAction, local_instruction_effects,
+    MirClosureCapture, MirDeclaration, MirDeclarationKind, MirEffect, MirEffectSummary,
+    MirEnumCase, MirEnumDeclaration, MirField, MirFunction, MirFunctionReference, MirInstruction,
+    MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation, MirInterfaceMethod,
+    MirInterfaceMethodImplementation, MirMethod, MirNestedFunction, MirRecordDeclaration,
+    MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
+    local_instruction_effects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +160,13 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             kind: MirDeclarationKind::Union(MirUnionDeclaration {
                 type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
                 cases: parse_union_cases(cases, number)?,
+            }),
+        }),
+        ["type.enum", symbol, type_id, "cases", cases] => Ok(MirDeclaration {
+            symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
+            kind: MirDeclarationKind::Enum(MirEnumDeclaration {
+                type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                cases: parse_enum_cases(cases, number)?,
             }),
         }),
         [
@@ -331,6 +340,23 @@ fn parse_union_cases(text: &str, line: usize) -> Result<Vec<MirUnionCase>, MirPa
             Ok(MirUnionCase {
                 case: UnionCaseId::from_raw(parse_hash(case, "case#", line)?),
                 parameters,
+            })
+        })
+        .collect()
+}
+
+fn parse_enum_cases(text: &str, line: usize) -> Result<Vec<MirEnumCase>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|case| {
+            let (case, discriminant) = case
+                .split_once('=')
+                .ok_or_else(|| error(line, "malformed declared enum case"))?;
+            Ok(MirEnumCase {
+                case: EnumCaseId::from_raw(parse_hash(case, "case#", line)?),
+                discriminant: parse_u32(discriminant, line)?,
             })
         })
         .collect()
@@ -1029,6 +1055,21 @@ fn parse_constant_operation(
     }
     if text == "const.nil" {
         return Ok(Some(MirInstructionKind::NilConstant));
+    }
+    if let Some(value) = text.strip_prefix("enum.case s") {
+        let components: Vec<_> = value.split_whitespace().collect();
+        if let [definition, case, discriminant] = components.as_slice() {
+            return Ok(Some(MirInstructionKind::EnumConstant {
+                definition: SymbolId::from_raw(parse_u32(definition, line)?),
+                case: EnumCaseId::from_raw(
+                    case.strip_prefix("ec")
+                        .ok_or_else(|| error(line, "enum case"))
+                        .and_then(|case| parse_u32(case, line))?,
+                ),
+                discriminant: parse_u32(discriminant, line)?,
+            }));
+        }
+        return Err(error(line, "malformed enum constant"));
     }
     Ok(None)
 }

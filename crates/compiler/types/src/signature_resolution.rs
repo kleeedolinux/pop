@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
-    BuiltinTypeId, Diagnostic, FieldId, ModuleId, ParameterId, SourceSpan, SymbolId, TypeId,
-    UnionCaseId,
+    BuiltinTypeId, Diagnostic, EnumCaseId, FieldId, ModuleId, ParameterId, SourceSpan, SymbolId,
+    TypeId, UnionCaseId,
 };
 use pop_resolve::{ResolutionDatabase, SymbolSpace};
 use pop_syntax::{
-    FunctionSignatureSyntax, RecordDeclarationSyntax, TypeAliasDeclarationSyntax, TypeSyntax,
-    TypeSyntaxKind, UnionDeclarationSyntax,
+    EnumDeclarationSyntax, FunctionSignatureSyntax, RecordDeclarationSyntax,
+    TypeAliasDeclarationSyntax, TypeSyntax, TypeSyntaxKind, UnionDeclarationSyntax,
 };
 
 use crate::field_defaults::resolve_field_default;
@@ -405,6 +405,84 @@ impl UnionDefinitionResult {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumDefinition {
+    symbol: SymbolId,
+    type_id: TypeId,
+    cases: Vec<EnumCaseDefinition>,
+    span: SourceSpan,
+}
+
+impl EnumDefinition {
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[EnumCaseDefinition] {
+        &self.cases
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumCaseDefinition {
+    case: EnumCaseId,
+    name: String,
+    discriminant: u32,
+    span: SourceSpan,
+}
+
+impl EnumCaseDefinition {
+    #[must_use]
+    pub const fn case(&self) -> EnumCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn discriminant(&self) -> u32 {
+        self.discriminant
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EnumDefinitionResult {
+    definition: Option<EnumDefinition>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl EnumDefinitionResult {
+    #[must_use]
+    pub const fn definition(&self) -> Option<&EnumDefinition> {
+        self.definition.as_ref()
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+}
+
 impl ResolvedSignatureResult {
     #[must_use]
     pub const fn signature(&self) -> Option<&ResolvedFunctionSignature> {
@@ -439,6 +517,7 @@ pub struct SignatureResolver<'index> {
     next_parameter: u32,
     pub(crate) next_field: u32,
     next_union_case: u32,
+    next_enum_case: u32,
     pub(crate) next_class: u32,
     pub(crate) next_method: u32,
     pub(crate) next_interface: u32,
@@ -448,6 +527,7 @@ pub struct SignatureResolver<'index> {
     records_by_type: BTreeMap<TypeId, SymbolId>,
     structural_record_fields: BTreeMap<(String, TypeId), FieldId>,
     union_definitions: BTreeMap<SymbolId, UnionDefinition>,
+    enum_definitions: BTreeMap<SymbolId, EnumDefinition>,
     pub(crate) class_types: BTreeMap<SymbolId, TypeId>,
     pub(crate) class_definitions: BTreeMap<SymbolId, crate::ClassDefinition>,
     pub(crate) classes_by_type: BTreeMap<TypeId, SymbolId>,
@@ -469,6 +549,7 @@ impl<'index> SignatureResolver<'index> {
             next_parameter: 0,
             next_field: 0,
             next_union_case: 0,
+            next_enum_case: 0,
             next_class: 0,
             next_method: 0,
             next_interface: 0,
@@ -478,6 +559,7 @@ impl<'index> SignatureResolver<'index> {
             records_by_type: BTreeMap::new(),
             structural_record_fields: BTreeMap::new(),
             union_definitions: BTreeMap::new(),
+            enum_definitions: BTreeMap::new(),
             class_types: BTreeMap::new(),
             class_definitions: BTreeMap::new(),
             classes_by_type: BTreeMap::new(),
@@ -535,6 +617,11 @@ impl<'index> SignatureResolver<'index> {
                     .map(UnionDefinition::type_id)
             })
             .or_else(|| {
+                self.enum_definitions
+                    .get(&symbol)
+                    .map(EnumDefinition::type_id)
+            })
+            .or_else(|| {
                 self.class_definitions
                     .get(&symbol)
                     .map(crate::ClassDefinition::type_id)
@@ -558,6 +645,61 @@ impl<'index> SignatureResolver<'index> {
     #[must_use]
     pub fn union_definition(&self, symbol: SymbolId) -> Option<&UnionDefinition> {
         self.union_definitions.get(&symbol)
+    }
+
+    #[must_use]
+    pub fn enum_definition(&self, symbol: SymbolId) -> Option<&EnumDefinition> {
+        self.enum_definitions.get(&symbol)
+    }
+
+    #[must_use]
+    pub fn define_enum(
+        &mut self,
+        symbol: SymbolId,
+        syntax: &EnumDeclarationSyntax,
+    ) -> EnumDefinitionResult {
+        let mut diagnostics = Vec::new();
+        let mut names = BTreeMap::new();
+        let mut cases = Vec::new();
+        for (discriminant, case) in syntax.cases().iter().enumerate() {
+            if let Some(original) = names.insert(case.name().to_owned(), case.span()) {
+                diagnostics.push(type_diagnostics::duplicate_record_field(
+                    case.span(),
+                    case.name(),
+                    original,
+                ));
+                continue;
+            }
+            let case_id = EnumCaseId::from_raw(self.next_enum_case);
+            self.next_enum_case = self.next_enum_case.saturating_add(1);
+            cases.push(EnumCaseDefinition {
+                case: case_id,
+                name: case.name().to_owned(),
+                discriminant: u32::try_from(discriminant).unwrap_or(u32::MAX),
+                span: case.span(),
+            });
+        }
+        let type_id = self
+            .arena
+            .intern(SemanticType::Enum { definition: symbol })
+            .ok();
+        let definition = if diagnostics.is_empty() {
+            type_id.map(|type_id| EnumDefinition {
+                symbol,
+                type_id,
+                cases,
+                span: syntax.span(),
+            })
+        } else {
+            None
+        };
+        if let Some(definition) = &definition {
+            self.enum_definitions.insert(symbol, definition.clone());
+        }
+        EnumDefinitionResult {
+            definition,
+            diagnostics,
+        }
     }
 
     pub fn register_type_alias(
@@ -1100,6 +1242,11 @@ impl<'index> SignatureResolver<'index> {
                 self.union_definitions
                     .get(&symbol)
                     .map(UnionDefinition::type_id)
+            })
+            .or_else(|| {
+                self.enum_definitions
+                    .get(&symbol)
+                    .map(EnumDefinition::type_id)
             })
             .or_else(|| self.class_types.get(&symbol).copied())
             .or_else(|| self.interface_types.get(&symbol).copied());

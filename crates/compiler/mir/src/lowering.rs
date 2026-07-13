@@ -165,6 +165,17 @@ fn lower_declaration(declaration: &HirDeclaration) -> Option<MirDeclaration> {
                 })
                 .collect(),
         }),
+        HirDeclarationKind::Enum(enumeration) => MirDeclarationKind::Enum(MirEnumDeclaration {
+            type_id: enumeration.type_id(),
+            cases: enumeration
+                .cases()
+                .iter()
+                .map(|case| MirEnumCase {
+                    case: case.case(),
+                    discriminant: case.discriminant(),
+                })
+                .collect(),
+        }),
         HirDeclarationKind::Class(class) => MirDeclarationKind::Class(MirClassDeclaration {
             class: class.class(),
             type_id: class.type_id(),
@@ -630,6 +641,7 @@ fn visit_expression_closures(
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_) => {}
+        HirExpressionKind::EnumCase { .. } => {}
     }
 }
 
@@ -1723,6 +1735,15 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::String(value) => MirInstructionKind::StringConstant(value.clone()),
             HirExpressionKind::Boolean(value) => MirInstructionKind::BooleanConstant(*value),
             HirExpressionKind::Nil => MirInstructionKind::NilConstant,
+            HirExpressionKind::EnumCase {
+                definition,
+                case,
+                discriminant,
+            } => MirInstructionKind::EnumConstant {
+                definition: *definition,
+                case: *case,
+                discriminant: *discriminant,
+            },
             HirExpressionKind::Closure(closure) => {
                 return self.lower_closure(closure, expression.type_id());
             }
@@ -2796,6 +2817,7 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleGet { .. }
         | MirInstructionKind::ArrayGet { .. }

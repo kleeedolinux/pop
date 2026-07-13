@@ -5,7 +5,7 @@
 //! modules so downstream phases can depend on a stable typed contract.
 
 use pop_foundation::{
-    AttributeId, BindingId, CaptureId, ClassId, Diagnostic, FieldId, InterfaceId,
+    AttributeId, BindingId, CaptureId, ClassId, Diagnostic, EnumCaseId, FieldId, InterfaceId,
     InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan,
     StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
@@ -363,6 +363,11 @@ pub enum TypedExpressionKind {
         union: SymbolId,
         case: UnionCaseId,
         arguments: Vec<TypedExpression>,
+    },
+    EnumCase {
+        definition: SymbolId,
+        case: EnumCaseId,
+        discriminant: u32,
     },
     Tuple(Vec<TypedExpression>),
     StringConcat {

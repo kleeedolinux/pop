@@ -43,6 +43,9 @@ pub(crate) fn lower_instruction(
             format!("{result} = xor i1 0, {}", u8::from(*value))
         }
         MirInstructionKind::NilConstant => format!("{result} = add i64 0, 0"),
+        MirInstructionKind::EnumConstant { discriminant, .. } => {
+            format!("{result} = add i32 0, {discriminant}")
+        }
         MirInstructionKind::StringConstant(value) => {
             let symbol = string_literals
                 .get(value)
@@ -2433,6 +2436,7 @@ pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, Ll
         SemanticType::Primitive(PrimitiveType::Float32) => Ok("float".to_owned()),
         SemanticType::Primitive(PrimitiveType::Float64) => Ok("double".to_owned()),
         SemanticType::Primitive(PrimitiveType::Never) => Ok("void".to_owned()),
+        SemanticType::Enum { .. } => Ok("i32".to_owned()),
         _ => Ok("i64".to_owned()),
     }
 }

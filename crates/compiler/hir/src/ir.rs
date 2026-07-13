@@ -8,16 +8,17 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    AttributeId, BindingId, BubbleId, CaptureId, ClassId, FieldId, FunctionId, InterfaceId,
-    InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId, SourceSpan,
-    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FunctionId,
+    InterfaceId, InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId,
+    SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
-    ClassMethodDispatch, FieldDefault, FloatValue, IntegerValue, InterfaceDefinition,
-    NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena, TypedBinaryOperator,
-    TypedCompoundOperator, TypedUnaryOperator, UnionDefinition,
+    ClassMethodDispatch, EnumDefinition, FieldDefault, FloatValue, IntegerValue,
+    InterfaceDefinition, NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena,
+    TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator, UnionDefinition,
 };
 
 use crate::lowering::lower_interface_implementation;
@@ -411,6 +412,37 @@ impl HirDeclaration {
     }
 
     #[must_use]
+    pub fn enumeration(
+        module: ModuleId,
+        bubble: BubbleId,
+        visibility: Visibility,
+        name: impl Into<String>,
+        definition: &EnumDefinition,
+    ) -> Self {
+        Self {
+            symbol: definition.symbol(),
+            module,
+            bubble,
+            visibility,
+            name: name.into(),
+            kind: HirDeclarationKind::Enum(HirEnumDeclaration {
+                type_id: definition.type_id(),
+                cases: definition
+                    .cases()
+                    .iter()
+                    .map(|case| HirEnumCase {
+                        case: case.case(),
+                        name: case.name().to_owned(),
+                        discriminant: case.discriminant(),
+                        span: case.span(),
+                    })
+                    .collect(),
+            }),
+            span: definition.span(),
+        }
+    }
+
+    #[must_use]
     pub fn class(
         module: ModuleId,
         bubble: BubbleId,
@@ -603,9 +635,58 @@ impl HirDeclaration {
 pub enum HirDeclarationKind {
     Record(HirRecordDeclaration),
     Union(HirUnionDeclaration),
+    Enum(HirEnumDeclaration),
     Class(HirClassDeclaration),
     Interface(HirInterfaceDeclaration),
     Attribute(HirAttributeDeclaration),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirEnumDeclaration {
+    pub(crate) type_id: TypeId,
+    pub(crate) cases: Vec<HirEnumCase>,
+}
+
+impl HirEnumDeclaration {
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[HirEnumCase] {
+        &self.cases
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirEnumCase {
+    pub(crate) case: EnumCaseId,
+    pub(crate) name: String,
+    pub(crate) discriminant: u32,
+    pub(crate) span: SourceSpan,
+}
+
+impl HirEnumCase {
+    #[must_use]
+    pub const fn case(&self) -> EnumCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn discriminant(&self) -> u32 {
+        self.discriminant
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1612,6 +1693,11 @@ pub enum HirExpressionKind {
         union: SymbolId,
         case: UnionCaseId,
         arguments: Vec<HirExpression>,
+    },
+    EnumCase {
+        definition: SymbolId,
+        case: EnumCaseId,
+        discriminant: u32,
     },
     Tuple(Vec<HirExpression>),
     StringConcat {

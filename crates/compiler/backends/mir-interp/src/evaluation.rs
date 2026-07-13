@@ -309,6 +309,22 @@ pub(crate) fn pop_value_equal(left: &MirValue, right: &MirValue) -> bool {
         (MirValue::Nil, MirValue::Nil) => true,
         (MirValue::Boolean(left), MirValue::Boolean(right)) => left == right,
         (MirValue::Integer(left), MirValue::Integer(right)) => left == right,
+        (
+            MirValue::Enum {
+                definition: left_definition,
+                case: left_case,
+                discriminant: left_discriminant,
+            },
+            MirValue::Enum {
+                definition: right_definition,
+                case: right_case,
+                discriminant: right_discriminant,
+            },
+        ) => {
+            left_definition == right_definition
+                && left_case == right_case
+                && left_discriminant == right_discriminant
+        }
         (MirValue::String(left), MirValue::String(right)) => left == right,
         (MirValue::Tuple(left), MirValue::Tuple(right)) => values_equal(left, right),
         (

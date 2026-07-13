@@ -39,8 +39,9 @@ pub use class::{
 };
 pub use constant::{ConstDeclarationError, ConstDeclarationSyntax, parse_const_declaration};
 pub use data::{
-    DataDeclarationError, RecordDeclarationSyntax, RecordFieldSyntax, UnionCaseParameterSyntax,
-    UnionCaseSyntax, UnionDeclarationSyntax, parse_record_declaration, parse_union_declaration,
+    DataDeclarationError, EnumCaseSyntax, EnumDeclarationSyntax, RecordDeclarationSyntax,
+    RecordFieldSyntax, UnionCaseParameterSyntax, UnionCaseSyntax, UnionDeclarationSyntax,
+    parse_enum_declaration, parse_record_declaration, parse_union_declaration,
 };
 pub use interface::{
     InterfaceDeclarationError, InterfaceDeclarationSyntax, InterfaceMethodParameterSyntax,

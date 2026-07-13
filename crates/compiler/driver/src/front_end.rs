@@ -14,9 +14,10 @@ use pop_hir::{
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
 use pop_syntax::{
     AttributeUseSyntax, NodeKind, parse_attribute_declaration, parse_attribute_use,
-    parse_class_declaration, parse_class_method_body, parse_const_declaration, parse_file,
-    parse_function_body, parse_function_signature, parse_interface_declaration,
-    parse_record_declaration, parse_type_alias_declaration, parse_union_declaration,
+    parse_class_declaration, parse_class_method_body, parse_const_declaration,
+    parse_enum_declaration, parse_file, parse_function_body, parse_function_signature,
+    parse_interface_declaration, parse_record_declaration, parse_type_alias_declaration,
+    parse_union_declaration,
 };
 use pop_types::{
     AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SignatureResolver,
@@ -598,6 +599,15 @@ fn define_records_and_unions(
                     diagnostics,
                     std::mem::take(&mut pending_attributes),
                 ),
+                NodeKind::EnumDeclaration => define_enum(
+                    module,
+                    node,
+                    bubble,
+                    database,
+                    resolver,
+                    diagnostics,
+                    std::mem::take(&mut pending_attributes),
+                ),
                 _ => {
                     pending_attributes.clear();
                     continue;
@@ -773,6 +783,57 @@ fn define_union(
             module: module.module,
             symbol,
             target: AttributeTarget::Union,
+            attribute_uses,
+            attributes: Vec::new(),
+        }),
+    )
+}
+
+fn define_enum(
+    module: &ParsedModule,
+    node: &pop_syntax::SyntaxNode,
+    bubble: BubbleId,
+    database: &ResolutionDatabase,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    attribute_uses: Vec<AttributeUseSyntax>,
+) -> (Option<HirDeclaration>, Option<DeclarationAttributeWork>) {
+    let syntax = match parse_enum_declaration(&module.source, &module.syntax, node) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            diagnostics.push(syntax_error(error.span(), error.expectation()));
+            return (None, None);
+        }
+    };
+    let Some(symbol) = resolve_symbol(
+        database,
+        module.module,
+        syntax.name(),
+        SymbolSpace::Type,
+        syntax.span(),
+        diagnostics,
+    ) else {
+        return (None, None);
+    };
+    let result = resolver.define_enum(symbol, &syntax);
+    diagnostics.extend(result.diagnostics().iter().cloned());
+    let (Some(definition), Some(declaration)) =
+        (result.definition(), database.index().declaration(symbol))
+    else {
+        return (None, None);
+    };
+    (
+        Some(HirDeclaration::enumeration(
+            module.module,
+            bubble,
+            declaration.visibility(),
+            syntax.name(),
+            definition,
+        )),
+        Some(DeclarationAttributeWork {
+            module: module.module,
+            symbol,
+            target: AttributeTarget::Enum,
             attribute_uses,
             attributes: Vec::new(),
         }),

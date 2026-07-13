@@ -726,6 +726,10 @@ impl<'program> CompileTimeInterpreter<'program> {
                 self.dependencies
                     .insert(CompileTimeDependency::Symbol(definition));
             }
+            SemanticType::Enum { definition } => {
+                self.dependencies
+                    .insert(CompileTimeDependency::Symbol(definition));
+            }
             SemanticType::Attribute {
                 attribute,
                 parameters,

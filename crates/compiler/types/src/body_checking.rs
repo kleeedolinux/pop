@@ -758,6 +758,36 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             BoundPathLookup::Error => return None,
             BoundPathLookup::NotBound => {}
         }
+        if path.len() >= 2 {
+            let type_name = path[..path.len() - 1].join(".");
+            let resolution =
+                self.resolver
+                    .database()
+                    .resolve(self.module, &type_name, SymbolSpace::Type, span);
+            if let Some(symbol) = resolution.symbol()
+                && let Some(definition) = self.resolver.enum_definition(symbol).cloned()
+            {
+                let case_name = &path[path.len() - 1];
+                let Some(case) = definition
+                    .cases()
+                    .iter()
+                    .find(|case| case.name() == case_name)
+                else {
+                    self.diagnostics
+                        .push(resolution_diagnostics::unknown_name(span, path.join(".")));
+                    return None;
+                };
+                return Some(TypedExpression {
+                    kind: TypedExpressionKind::EnumCase {
+                        definition: definition.symbol(),
+                        case: case.case(),
+                        discriminant: case.discriminant(),
+                    },
+                    type_id: definition.type_id(),
+                    span,
+                });
+            }
+        }
         match self.lookup_union_case(path, span) {
             UnionCaseLookup::Found(definition, case) => {
                 if !case.parameters().is_empty() {

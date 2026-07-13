@@ -489,6 +489,7 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::Table
         }
         TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
+        TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. } => {
             UnsupportedCompileTimeConstruct::InterfaceDispatch

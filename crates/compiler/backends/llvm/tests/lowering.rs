@@ -64,6 +64,50 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
 }
 
 #[test]
+fn nominal_enum_constants_and_equality_lower_to_i32() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/enum.pop",
+        "namespace Main\n\
+         private enum Color\n\
+             Red\n\
+             Blue\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             if Color.Red == Color.Red then\n\
+                 return 7\n\
+             end\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("add i32 0, 0"), "{text}");
+    assert!(text.contains("icmp eq i32"), "{text}");
+    let result = link_with_runtime_and_run(&module, "enum");
+    assert_eq!(result.status.code(), Some(7), "{text}");
+}
+
+#[test]
 fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
     let source = SourceFile::new(
         FileId::from_raw(0),

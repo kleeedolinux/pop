@@ -1,6 +1,8 @@
 use pop_backend_mir_interp::{ExecutionError, MirInterpreter, MirValue};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
-use pop_foundation::{BubbleId, FieldId, FileId, ModuleId, NamespaceId, SymbolId, UnionCaseId};
+use pop_foundation::{
+    BubbleId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, SymbolId, UnionCaseId,
+};
 use pop_mir::{lower_hir_bubble, optimize_mir};
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
 use pop_source::SourceFile;
@@ -61,6 +63,59 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .call(choose, &[int(5), int(3)])
             .expect("else branch"),
         vec![int(3)]
+    );
+}
+
+#[test]
+fn nominal_enum_cases_preserve_identity_and_equality() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public enum Color\n\
+             Red\n\
+             Blue\n\
+         end\n\
+         public function choose(flag: Boolean): Color\n\
+             return if flag then Color.Red else Color.Blue\n\
+         end\n\
+         public function isRed(color: Color): Boolean\n\
+             return color == Color.Red\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+    let red = MirValue::Enum {
+        definition: SymbolId::from_raw(0),
+        case: EnumCaseId::from_raw(0),
+        discriminant: 0,
+    };
+    let blue = MirValue::Enum {
+        definition: SymbolId::from_raw(0),
+        case: EnumCaseId::from_raw(1),
+        discriminant: 1,
+    };
+
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[MirValue::Boolean(true)])
+            .expect("red"),
+        vec![red.clone()]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[MirValue::Boolean(false)])
+            .expect("blue"),
+        vec![blue.clone()]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[red])
+            .expect("red equality"),
+        vec![MirValue::Boolean(true)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[blue])
+            .expect("blue inequality"),
+        vec![MirValue::Boolean(false)]
     );
 }
 

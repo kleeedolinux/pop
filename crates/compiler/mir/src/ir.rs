@@ -8,7 +8,7 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, CaptureId, ClassId, FieldId, FunctionId, InterfaceId,
+    BindingId, BlockId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FunctionId, InterfaceId,
     InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
     SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
@@ -268,8 +268,45 @@ impl MirDeclaration {
 pub enum MirDeclarationKind {
     Record(MirRecordDeclaration),
     Union(MirUnionDeclaration),
+    Enum(MirEnumDeclaration),
     Class(MirClassDeclaration),
     Interface(MirInterfaceDeclaration),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirEnumDeclaration {
+    pub(crate) type_id: TypeId,
+    pub(crate) cases: Vec<MirEnumCase>,
+}
+
+impl MirEnumDeclaration {
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[MirEnumCase] {
+        &self.cases
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirEnumCase {
+    pub(crate) case: EnumCaseId,
+    pub(crate) discriminant: u32,
+}
+
+impl MirEnumCase {
+    #[must_use]
+    pub const fn case(self) -> EnumCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub const fn discriminant(self) -> u32 {
+        self.discriminant
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -756,6 +793,11 @@ pub enum MirInstructionKind {
     },
     BooleanConstant(bool),
     NilConstant,
+    EnumConstant {
+        definition: SymbolId,
+        case: EnumCaseId,
+        discriminant: u32,
+    },
     FunctionReference(SymbolId),
     TupleMake(Vec<ValueId>),
     TupleGet {
