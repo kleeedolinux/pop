@@ -334,7 +334,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let mut entries = Vec::with_capacity(fields.len());
         for field in fields {
             let key = TypedExpression {
-                kind: TypedExpressionKind::String(format!("\"{}\"", field.name())),
+                kind: TypedExpressionKind::String(field.name().to_owned()),
                 type_id: string_type,
                 span: field.span(),
             };

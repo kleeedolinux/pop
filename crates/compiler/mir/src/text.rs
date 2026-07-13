@@ -665,6 +665,19 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             parse_prefixed(function, 's', line)?,
         )));
     }
+    if let Some(operands) = text.strip_prefix("string.concat ") {
+        let (left, right) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::StringConcat { left, right });
+    }
+    if let Some(rest) = text.strip_prefix("string.format ") {
+        let (kind, value) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "string format operation"))?;
+        return Ok(MirInstructionKind::StringFormat {
+            kind: parse_string_format_kind(kind, line)?,
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
     if let Some(values) = text.strip_prefix("tupleMake ") {
         return Ok(MirInstructionKind::TupleMake(parse_values(values, line)?));
     }
@@ -1530,6 +1543,28 @@ fn parse_integer_kind(text: &str, line: usize) -> Result<IntegerKind, MirParseEr
         "UInt64" => Ok(IntegerKind::UInt64),
         _ => Err(error(line, "integer kind")),
     }
+}
+
+fn parse_string_format_kind(
+    text: &str,
+    line: usize,
+) -> Result<pop_types::StringFormatKind, MirParseError> {
+    if text == "Boolean" {
+        return Ok(pop_types::StringFormatKind::Boolean);
+    }
+    if let Some(kind) = text
+        .strip_prefix("Integer(")
+        .and_then(|kind| kind.strip_suffix(')'))
+    {
+        return parse_integer_kind(kind, line).map(pop_types::StringFormatKind::Integer);
+    }
+    if let Some(kind) = text
+        .strip_prefix("Float(")
+        .and_then(|kind| kind.strip_suffix(')'))
+    {
+        return parse_float_kind(kind, line).map(pop_types::StringFormatKind::Float);
+    }
+    Err(error(line, "string format kind"))
 }
 
 fn parse_float_kind(text: &str, line: usize) -> Result<FloatKind, MirParseError> {

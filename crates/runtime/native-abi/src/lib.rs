@@ -4,4 +4,4 @@ mod symbol;
 mod version;
 
 pub use symbol::symbol;
-pub use version::{INVALID_HANDLE, NATIVE_ABI_VERSION, NativeAbiVersion};
+pub use version::{INVALID_HANDLE, NATIVE_ABI_VERSION, NativeAbiVersion, StringFormatTag};

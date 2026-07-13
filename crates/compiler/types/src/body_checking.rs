@@ -8,7 +8,7 @@ use pop_foundation::{
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
     BinaryOperator as SyntaxBinaryOperator, ExpressionSyntax, ExpressionSyntaxKind,
-    FunctionBodySyntax, UnaryOperator as SyntaxUnaryOperator,
+    FunctionBodySyntax, StringSegmentSyntaxKind, UnaryOperator as SyntaxUnaryOperator,
 };
 
 use crate::capture_analysis::finalize_capture_modes;
@@ -327,6 +327,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 "String",
                 span,
             ),
+            ExpressionSyntaxKind::InterpolatedString(segments) => {
+                self.check_interpolated_string(segments, span)
+            }
             ExpressionSyntaxKind::Boolean(value) => {
                 self.primitive_expression(TypedExpressionKind::Boolean(*value), "Boolean", span)
             }
@@ -607,6 +610,78 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id: self.resolver.arena().source_type(name)?,
             span,
         })
+    }
+
+    fn check_interpolated_string(
+        &mut self,
+        segments: &[pop_syntax::StringSegmentSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let string = self.resolver.arena().source_type("String")?;
+        let mut composed: Option<TypedExpression> = None;
+        for segment in segments {
+            let value = match segment.kind() {
+                StringSegmentSyntaxKind::Text(value) => TypedExpression {
+                    kind: TypedExpressionKind::String(value.clone()),
+                    type_id: string,
+                    span: segment.span(),
+                },
+                StringSegmentSyntaxKind::Expression(expression) => {
+                    let value = self.check_expression(expression)?;
+                    if value.type_id() == string {
+                        value
+                    } else {
+                        let kind = match self.resolver.arena().get(value.type_id()) {
+                            Some(SemanticType::Primitive(PrimitiveType::Boolean)) => {
+                                StringFormatKind::Boolean
+                            }
+                            Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => {
+                                StringFormatKind::Integer(*kind)
+                            }
+                            Some(SemanticType::Primitive(PrimitiveType::Float32)) => {
+                                StringFormatKind::Float(FloatKind::Float32)
+                            }
+                            Some(SemanticType::Primitive(PrimitiveType::Float64)) => {
+                                StringFormatKind::Float(FloatKind::Float64)
+                            }
+                            _ => {
+                                self.diagnostics.push(type_diagnostics::invalid_operator(
+                                    expression.span(),
+                                    "string interpolation",
+                                    self.type_name(value.type_id()),
+                                ));
+                                return None;
+                            }
+                        };
+                        TypedExpression {
+                            kind: TypedExpressionKind::StringFormat {
+                                kind,
+                                value: Box::new(value),
+                            },
+                            type_id: string,
+                            span: expression.span(),
+                        }
+                    }
+                }
+            };
+            composed = Some(if let Some(left) = composed {
+                TypedExpression {
+                    kind: TypedExpressionKind::StringConcat {
+                        left: Box::new(left),
+                        right: Box::new(value),
+                    },
+                    type_id: string,
+                    span,
+                }
+            } else {
+                value
+            });
+        }
+        Some(composed.unwrap_or(TypedExpression {
+            kind: TypedExpressionKind::String(String::new()),
+            type_id: string,
+            span,
+        }))
     }
 
     pub(crate) fn check_name(
@@ -914,6 +989,7 @@ pub(crate) const fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryO
         SyntaxBinaryOperator::LessThanOrEqual => TypedBinaryOperator::LessThanOrEqual,
         SyntaxBinaryOperator::GreaterThan => TypedBinaryOperator::GreaterThan,
         SyntaxBinaryOperator::GreaterThanOrEqual => TypedBinaryOperator::GreaterThanOrEqual,
+        SyntaxBinaryOperator::Concat => unreachable!(),
         SyntaxBinaryOperator::Add => TypedBinaryOperator::Add,
         SyntaxBinaryOperator::Subtract => TypedBinaryOperator::Subtract,
         SyntaxBinaryOperator::Multiply => TypedBinaryOperator::Multiply,
@@ -939,6 +1015,7 @@ pub(crate) const fn binary_text(operator: SyntaxBinaryOperator) -> &'static str 
         SyntaxBinaryOperator::LessThanOrEqual => "<=",
         SyntaxBinaryOperator::GreaterThan => ">",
         SyntaxBinaryOperator::GreaterThanOrEqual => ">=",
+        SyntaxBinaryOperator::Concat => "..",
         SyntaxBinaryOperator::Add => "+",
         SyntaxBinaryOperator::Subtract => "-",
         SyntaxBinaryOperator::Multiply => "*",

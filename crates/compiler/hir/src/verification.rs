@@ -1338,6 +1338,48 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::StringConcat { left, right } => {
+                self.verify_expression(left, visible);
+                self.verify_expression(right, visible);
+                let string = self.arena.source_type("String");
+                if string != Some(left.type_id())
+                    || string != Some(right.type_id())
+                    || string != Some(expression.type_id())
+                {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::StringFormat { kind, value } => {
+                self.verify_expression(value, visible);
+                let source_valid = match (kind, self.arena.get(value.type_id())) {
+                    (
+                        pop_types::StringFormatKind::Boolean,
+                        Some(SemanticType::Primitive(PrimitiveType::Boolean)),
+                    ) => true,
+                    (
+                        pop_types::StringFormatKind::Integer(expected),
+                        Some(SemanticType::Primitive(PrimitiveType::Integer(found))),
+                    ) => expected == found,
+                    (
+                        pop_types::StringFormatKind::Float(FloatKind::Float32),
+                        Some(SemanticType::Primitive(PrimitiveType::Float32)),
+                    )
+                    | (
+                        pop_types::StringFormatKind::Float(FloatKind::Float64),
+                        Some(SemanticType::Primitive(PrimitiveType::Float64)),
+                    ) => true,
+                    _ => false,
+                };
+                if !source_valid || self.arena.source_type("String") != Some(expression.type_id()) {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
             HirExpressionKind::Integer(_) | HirExpressionKind::Float(_) => {
                 self.verify_numeric_literal(expression);
             }
@@ -2814,6 +2856,13 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::Binary { left, right, .. } => {
             collect_cell_captures(left, written);
             collect_cell_captures(right, written);
+        }
+        HirExpressionKind::StringConcat { left, right } => {
+            collect_cell_captures(left, written);
+            collect_cell_captures(right, written);
+        }
+        HirExpressionKind::StringFormat { value, .. } => {
+            collect_cell_captures(value, written);
         }
         HirExpressionKind::InterfaceUpcast { value, .. } => {
             collect_cell_captures(value, written);

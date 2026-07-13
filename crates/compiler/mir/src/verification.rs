@@ -1230,6 +1230,35 @@ fn verify_instruction_types(
         return;
     }
     match instruction.kind() {
+        MirInstructionKind::StringConcat { left, right } => {
+            let Some(string) = arena.source_type("String") else {
+                return;
+            };
+            verify_operand_type(instruction.result(), *left, string, values, errors);
+            verify_operand_type(instruction.result(), *right, string, values, errors);
+            if instruction.result_type() != string {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::StringFormat { kind, value } => {
+            let expected = match kind {
+                pop_types::StringFormatKind::Boolean => arena.source_type("Boolean"),
+                pop_types::StringFormatKind::Integer(kind) => integer_type(arena, *kind),
+                pop_types::StringFormatKind::Float(kind) => float_type(arena, *kind),
+            };
+            if let Some(expected) = expected {
+                verify_operand_type(instruction.result(), *value, expected, values, errors);
+            }
+            if arena.source_type("String") != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::CompareEqual { left, right }
         | MirInstructionKind::CompareNotEqual { left, right } => {
             verify_equality_instruction(instruction, *left, *right, arena, values, errors);
@@ -2442,14 +2471,16 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareFloatLess { left, right, .. }
         | MirInstructionKind::CompareFloatLessOrEqual { left, right, .. }
         | MirInstructionKind::CompareFloatGreater { left, right, .. }
-        | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. } => vec![*left, *right],
+        | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. }
+        | MirInstructionKind::StringConcat { left, right } => vec![*left, *right],
         MirInstructionKind::BooleanNot { operand }
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. }
         | MirInstructionKind::ConvertInteger { operand, .. }
         | MirInstructionKind::ConvertIntegerToFloat { operand, .. }
         | MirInstructionKind::ConvertFloatToInteger { operand, .. }
-        | MirInstructionKind::ConvertFloat { operand, .. } => vec![*operand],
+        | MirInstructionKind::ConvertFloat { operand, .. }
+        | MirInstructionKind::StringFormat { value: operand, .. } => vec![*operand],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
         MirInstructionKind::ArrayLength { array } => vec![*array],
         MirInstructionKind::ArrayGetChecked { array, index } => vec![*array, *index],

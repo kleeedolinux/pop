@@ -10,7 +10,9 @@ use pop_foundation::{
     StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 
-use crate::{AttributeQuerySubject, FloatValue, IntegerValue, NumericConversionKind};
+use crate::{
+    AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, NumericConversionKind,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedBody {
@@ -238,6 +240,14 @@ pub enum TypedExpressionKind {
         arguments: Vec<TypedExpression>,
     },
     Tuple(Vec<TypedExpression>),
+    StringConcat {
+        left: Box<TypedExpression>,
+        right: Box<TypedExpression>,
+    },
+    StringFormat {
+        kind: StringFormatKind,
+        value: Box<TypedExpression>,
+    },
     Unary {
         operator: TypedUnaryOperator,
         operand: Box<TypedExpression>,
@@ -552,6 +562,13 @@ pub enum TypedBinaryOperator {
     Multiply,
     Divide,
     Remainder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StringFormatKind {
+    Boolean,
+    Integer(IntegerKind),
+    Float(FloatKind),
 }
 
 #[derive(Clone, Debug)]

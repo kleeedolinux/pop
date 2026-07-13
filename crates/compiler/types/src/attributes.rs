@@ -1156,7 +1156,7 @@ impl SignatureResolver<'_> {
             ExpressionSyntaxKind::String(value)
                 if self.is_primitive(expected, PrimitiveType::String) =>
             {
-                Some(AttributeConstant::String(unquote(value)))
+                Some(AttributeConstant::String(value.clone()))
             }
             ExpressionSyntaxKind::Boolean(value)
                 if self.is_primitive(expected, PrimitiveType::Boolean) =>
@@ -1246,13 +1246,6 @@ impl SignatureResolver<'_> {
     fn is_primitive(&self, type_id: TypeId, primitive: PrimitiveType) -> bool {
         self.arena().get(type_id) == Some(&SemanticType::Primitive(primitive))
     }
-}
-
-fn unquote(value: &str) -> String {
-    value
-        .get(1..value.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn type_name(type_id: TypeId) -> String {

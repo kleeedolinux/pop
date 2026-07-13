@@ -437,6 +437,16 @@ impl FloatValue {
         }
     }
 
+    /// Formats one IEEE value using Pop Lang's locale-independent string
+    /// contract from ADR 0041.
+    #[must_use]
+    pub fn format_string(self) -> String {
+        match self {
+            Self::Float32(bits) => format_float32(f32::from_bits(bits)),
+            Self::Float64(bits) => format_float64(f64::from_bits(bits)),
+        }
+    }
+
     /// Adds equal-format IEEE values.
     ///
     /// # Errors
@@ -569,6 +579,30 @@ impl FloatValue {
             )),
             _ => Err(NumericError::KindMismatch),
         }
+    }
+}
+
+fn format_float32(value: f32) -> String {
+    if value.is_nan() {
+        "nan".to_owned()
+    } else if value == f32::INFINITY {
+        "inf".to_owned()
+    } else if value == f32::NEG_INFINITY {
+        "-inf".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_float64(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_owned()
+    } else if value == f64::INFINITY {
+        "inf".to_owned()
+    } else if value == f64::NEG_INFINITY {
+        "-inf".to_owned()
+    } else {
+        value.to_string()
     }
 }
 

@@ -181,6 +181,13 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
         }
+        TypedExpressionKind::StringConcat { left, right } => {
+            finalize_expression_captures(left, written);
+            finalize_expression_captures(right, written);
+        }
+        TypedExpressionKind::StringFormat { value, .. } => {
+            finalize_expression_captures(value, written);
+        }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             finalize_expression_captures(callee, written);
             for argument in arguments {

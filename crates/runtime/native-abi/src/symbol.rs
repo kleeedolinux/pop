@@ -1,6 +1,6 @@
 use pop_runtime_interface::RuntimeOperation;
 
-/// Returns the native C symbol for an operation implemented by ABI 1.4.
+/// Returns the native C symbol for an operation implemented by ABI 1.5.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.
@@ -19,6 +19,8 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::ArrayFill => Some("pop_rt_array_fill"),
         RuntimeOperation::FieldGet => Some("pop_rt_field_get"),
         RuntimeOperation::FieldSet => Some("pop_rt_field_set"),
+        RuntimeOperation::StringConcat => Some("pop_rt_string_concat"),
+        RuntimeOperation::StringFormat => Some("pop_rt_string_format"),
         RuntimeOperation::RetainRoot => Some("pop_rt_retain_root"),
         RuntimeOperation::ReleaseRoot => Some("pop_rt_release_root"),
         RuntimeOperation::Pin => Some("pop_rt_pin"),

@@ -477,6 +477,7 @@ pub enum UnsupportedCompileTimeConstruct {
     Array,
     Table,
     UnionCase,
+    StringComposition,
 }
 
 /// A deterministic failure to translate accepted typed syntax into restricted

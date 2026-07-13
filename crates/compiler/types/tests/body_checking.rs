@@ -6,7 +6,8 @@ use pop_source::SourceFile;
 use pop_syntax::{NodeKind, parse_file, parse_function_body, parse_function_signature};
 use pop_types::{
     BodyChecker, CaptureMode, FloatKind, NumericConversionKind, SemanticType, SignatureResolver,
-    TypedBinaryOperator, TypedExpressionKind, TypedStatementKind, embedded_bootstrap_schema,
+    StringFormatKind, TypedBinaryOperator, TypedExpressionKind, TypedStatementKind,
+    embedded_bootstrap_schema,
 };
 
 struct CheckedFixture {
@@ -290,6 +291,70 @@ fn types_decimal_literals_ordering_and_explicit_numeric_conversions() {
             ..
         })
     ));
+}
+
+#[test]
+fn types_string_composition_and_closed_primitive_formatting() {
+    // ADR 0041: interpolation and String(value) are closed static operations,
+    // never universal formatting or dynamic dispatch.
+    let fixture = check_function(
+        "namespace Example\n\
+         public function describe(count: Int, enabled: Boolean): String\n\
+             local explicit = String(count)\n\
+             local text = `count={count}, enabled={enabled}`\n\
+             return explicit .. \"; \" .. text\n\
+         end\n",
+        "describe",
+    );
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let body = fixture.result.body().expect("typed body");
+    let TypedStatementKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("explicit format local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        TypedExpressionKind::StringFormat {
+            kind: StringFormatKind::Integer(_),
+            ..
+        }
+    ));
+    let TypedStatementKind::Return { values } = body.statements()[2].kind() else {
+        panic!("return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        TypedExpressionKind::StringConcat { .. }
+    ));
+}
+
+#[test]
+fn rejects_non_string_concat_and_non_primitive_formatting() {
+    for source in [
+        "namespace Example\n\
+         public function invalid(): String\n\
+             return \"count=\" .. 1\n\
+         end\n",
+        "namespace Example\n\
+         public function invalid(values: {Int}): String\n\
+             return String(values)\n\
+         end\n",
+        "namespace Example\n\
+         public function invalid(values: {[String]: Int}): String\n\
+             return `values={values}`\n\
+         end\n",
+    ] {
+        let fixture = check_function(source, "invalid");
+        assert!(fixture.result.body().is_none());
+        assert!(
+            fixture.result.diagnostic_snapshot().starts_with("POP2005"),
+            "{}\n{source}",
+            fixture.result.diagnostic_snapshot()
+        );
+    }
 }
 
 #[test]

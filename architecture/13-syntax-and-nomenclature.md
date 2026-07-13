@@ -117,6 +117,22 @@ target-type call form `Float64(count)` or `Int32(total)`, not an `as` operator o
 runtime conversion by type name. The complete numeric ordering operators are
 `<`, `<=`, `>`, and `>=`. See ADR 0040.
 
+String concatenation uses the Luau operator `..`. Backtick interpolation keeps
+Luau's `{expression}` shape, while `String(value)` is the explicit formatting
+form for the closed primitive set:
+
+```luau
+local path = "src" .. "/main.pop"
+local summary = `checked {count} files for {path}`
+local exact = String(total)
+```
+
+Quoted strings use the portable escapes `\\`, `\"`, `\'`, `\n`, `\r`, `\t`,
+`\0`, `\xHH`, and `\u{H...}`. Backticks additionally use `\`` and
+`\{`/`\}` for literal interpolation punctuation. There is no JavaScript `${}`
+form, universal `toString`, implicit formatting conversion, or runtime type
+inspection. See ADR 0041.
+
 ## File shape
 
 Checked documentation and typed attributes for the file-scoped namespace

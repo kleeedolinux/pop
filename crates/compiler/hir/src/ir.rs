@@ -16,8 +16,8 @@ use pop_resolve::Visibility;
 use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
     ClassMethodDispatch, FieldDefault, FloatValue, IntegerValue, InterfaceDefinition,
-    NumericConversionKind, RecordDefinition, TypeArena, TypedBinaryOperator, TypedUnaryOperator,
-    UnionDefinition,
+    NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena, TypedBinaryOperator,
+    TypedUnaryOperator, UnionDefinition,
 };
 
 use crate::lowering::lower_interface_implementation;
@@ -1507,6 +1507,14 @@ pub enum HirExpressionKind {
         arguments: Vec<HirExpression>,
     },
     Tuple(Vec<HirExpression>),
+    StringConcat {
+        left: Box<HirExpression>,
+        right: Box<HirExpression>,
+    },
+    StringFormat {
+        kind: StringFormatKind,
+        value: Box<HirExpression>,
+    },
     Unary {
         operator: TypedUnaryOperator,
         operand: Box<HirExpression>,

@@ -746,6 +746,14 @@ pub enum MirInstructionKind {
     IntegerConstant(IntegerValue),
     FloatConstant(FloatValue),
     StringConstant(String),
+    StringConcat {
+        left: ValueId,
+        right: ValueId,
+    },
+    StringFormat {
+        kind: pop_types::StringFormatKind,
+        value: ValueId,
+    },
     BooleanConstant(bool),
     NilConstant,
     FunctionReference(SymbolId),

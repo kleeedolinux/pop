@@ -538,6 +538,14 @@ fn lower_expression(
                 .map(|element| lower_expression(element, interface_slots))
                 .collect(),
         ),
+        TypedExpressionKind::StringConcat { left, right } => HirExpressionKind::StringConcat {
+            left: Box::new(lower_expression(left, interface_slots)),
+            right: Box::new(lower_expression(right, interface_slots)),
+        },
+        TypedExpressionKind::StringFormat { kind, value } => HirExpressionKind::StringFormat {
+            kind: *kind,
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
         TypedExpressionKind::Unary { operator, operand } => HirExpressionKind::Unary {
             operator: *operator,
             operand: Box::new(lower_expression(operand, interface_slots)),
@@ -928,6 +936,13 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(left, slots)
                 .or_else(|| first_unknown_interface_expression(right, slots))
         }
+        TypedExpressionKind::StringConcat { left, right } => {
+            first_unknown_interface_expression(left, slots)
+                .or_else(|| first_unknown_interface_expression(right, slots))
+        }
+        TypedExpressionKind::StringFormat { value, .. } => {
+            first_unknown_interface_expression(value, slots)
+        }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             first_unknown_interface_expression(callee, slots).or_else(|| {
                 arguments
@@ -1092,6 +1107,13 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
         TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
             .or_else(|| first_compile_time_only_expression(right)),
+        TypedExpressionKind::StringConcat { left, right } => {
+            first_compile_time_only_expression(left)
+                .or_else(|| first_compile_time_only_expression(right))
+        }
+        TypedExpressionKind::StringFormat { value, .. } => {
+            first_compile_time_only_expression(value)
+        }
         TypedExpressionKind::IndirectCall { callee, arguments } => {
             first_compile_time_only_expression(callee).or_else(|| {
                 arguments

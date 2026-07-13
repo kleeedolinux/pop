@@ -67,6 +67,12 @@ This addition advances the bootstrap native ABI from version 1.0 to 1.1.
 spelling. This bootstrap service does not expose general object memory,
 reflection, or string mutation.
 
+String concatenation and closed primitive formatting use typed PLRI semantics.
+The native runtime may expose versioned private helpers to materialize their
+owned UTF-8 results, but HIR/MIR name only backend-neutral `StringConcat` and
+`StringFormat` operations. Helpers never inspect a runtime type or ambient
+locale. Their output bytes follow ADR 0041 identically across backends.
+
 Scoped pin handles advance the bootstrap native ABI to version 1.2. Distinct
 typed table allocation advances it to version 1.3: the allocation request and
 native entry carry the entry count plus homogeneous key/value managed-reference
@@ -81,6 +87,11 @@ behavior and distinguish scalar from managed elements. Native backends may
 scalar-replace non-escaping arrays, batch transitions, or use scoped pinned
 contiguous access, but raw managed pointers never become source, HIR, MIR, or
 public PLRI values.
+
+ADR 0041 advances the bootstrap native ABI to version 1.5 with closed string
+concatenation and primitive-format helpers. The format tag is selected from the
+verified MIR operand kind and cannot request a runtime type lookup or universal
+formatting fallback.
 
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and

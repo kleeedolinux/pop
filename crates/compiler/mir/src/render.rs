@@ -294,6 +294,12 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::StringConstant(value) => {
             let _ = write!(output, "const.string {value:?}");
         }
+        MirInstructionKind::StringConcat { left, right } => {
+            dump_binary(output, "string.concat", *left, *right);
+        }
+        MirInstructionKind::StringFormat { kind, value } => {
+            let _ = write!(output, "string.format {kind:?} v{}", value.raw());
+        }
         MirInstructionKind::BooleanConstant(value) => {
             let _ = write!(output, "const.boolean {value}");
         }
@@ -1055,11 +1061,4 @@ fn dump_unwind_reason(output: &mut String, reason: &UnwindReason) {
         UnwindReason::Panic(payload) => dump_panic_payload(output, payload),
         UnwindReason::Cancellation => output.push_str("Cancellation"),
     }
-}
-
-pub(crate) fn unquote(value: &str) -> String {
-    value
-        .get(1..value.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_owned()
 }

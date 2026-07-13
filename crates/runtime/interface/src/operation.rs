@@ -12,6 +12,8 @@ pub enum RuntimeOperation {
     ArrayFill,
     FieldGet,
     FieldSet,
+    StringConcat,
+    StringFormat,
     RecordUpdate,
     UnionMake,
     CaptureLoad,

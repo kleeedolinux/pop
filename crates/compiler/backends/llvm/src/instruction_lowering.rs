@@ -52,6 +52,15 @@ pub(crate) fn lower_instruction(
                 value.len()
             )
         }
+        MirInstructionKind::StringConcat { left, right } => format!(
+            "{result} = call i64 @{}(i64 %v{}, i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::StringConcat),
+            left.raw(),
+            right.raw()
+        ),
+        MirInstructionKind::StringFormat { kind, value } => {
+            lower_string_format(&result, instruction.result(), *kind, *value)
+        }
         MirInstructionKind::CheckedIntegerAdd { kind, left, right } => {
             if proven_non_overflow_adds.contains(&instruction.result()) {
                 format!(
@@ -576,6 +585,75 @@ pub(crate) fn lower_instruction(
         )?,
     };
     Ok(line)
+}
+
+fn lower_string_format(
+    result: &str,
+    result_id: ValueId,
+    kind: pop_types::StringFormatKind,
+    value: ValueId,
+) -> String {
+    use pop_runtime_native_abi::StringFormatTag;
+
+    let temporary = format!("%string_format_bits_{}", result_id.raw());
+    let (tag, conversion, bits) = match kind {
+        pop_types::StringFormatKind::Boolean => (
+            StringFormatTag::Boolean,
+            Some(format!("{temporary} = zext i1 %v{} to i64", value.raw())),
+            temporary.clone(),
+        ),
+        pop_types::StringFormatKind::Integer(kind) => {
+            let tag = match kind {
+                IntegerKind::Int8 => StringFormatTag::Int8,
+                IntegerKind::Int16 => StringFormatTag::Int16,
+                IntegerKind::Int32 => StringFormatTag::Int32,
+                IntegerKind::Int64 => StringFormatTag::Int64,
+                IntegerKind::UInt8 => StringFormatTag::UInt8,
+                IntegerKind::UInt16 => StringFormatTag::UInt16,
+                IntegerKind::UInt32 => StringFormatTag::UInt32,
+                IntegerKind::UInt64 => StringFormatTag::UInt64,
+            };
+            if kind.bit_width() == 64 {
+                (tag, None, format!("%v{}", value.raw()))
+            } else {
+                let operation = if kind.is_signed() { "sext" } else { "zext" };
+                (
+                    tag,
+                    Some(format!(
+                        "{temporary} = {operation} i{} %v{} to i64",
+                        kind.bit_width(),
+                        value.raw()
+                    )),
+                    temporary.clone(),
+                )
+            }
+        }
+        pop_types::StringFormatKind::Float(FloatKind::Float32) => {
+            let raw = format!("%string_format_raw_{}", result_id.raw());
+            (
+                StringFormatTag::Float32,
+                Some(format!(
+                    "{raw} = bitcast float %v{} to i32\n{temporary} = zext i32 {raw} to i64",
+                    value.raw()
+                )),
+                temporary.clone(),
+            )
+        }
+        pop_types::StringFormatKind::Float(FloatKind::Float64) => (
+            StringFormatTag::Float64,
+            Some(format!(
+                "{temporary} = bitcast double %v{} to i64",
+                value.raw()
+            )),
+            temporary.clone(),
+        ),
+    };
+    let call = format!(
+        "{result} = call i64 @{}(i32 {}, i64 {bits})",
+        native_runtime_symbol(RuntimeOperation::StringFormat),
+        tag as u32
+    );
+    conversion.map_or(call.clone(), |conversion| format!("{conversion}\n{call}"))
 }
 
 pub(crate) fn lower_terminator(

@@ -166,6 +166,14 @@ pub fn lower_mir_to_llvm_ir(
             "declare void @{}()",
             native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
+        format!(
+            "declare i64 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::StringConcat)
+        ),
+        format!(
+            "declare i64 @{}(i32, i64)",
+            native_runtime_symbol(RuntimeOperation::StringFormat)
+        ),
         "declare i64 @pop_rt_string_literal(ptr, i64)".to_owned(),
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),

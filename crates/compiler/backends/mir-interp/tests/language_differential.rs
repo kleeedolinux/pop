@@ -140,6 +140,35 @@ fn exhaustive_union_match_switches_by_case_identity_in_both_mir_forms() {
 }
 
 #[test]
+fn string_composition_and_primitive_formatting_are_optimization_stable() {
+    // ADR 0041: the interpreter executes the same deterministic bytes before
+    // and after MIR optimization, including UTF-8 and negative zero.
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public function run(): String\n\
+             local count: Int8 = -12\n\
+             local ratio: Float32 = 1.5\n\
+             local negativeZero: Float64 = -0.0\n\
+             return `Pop 🫧 {count} {ratio} {negativeZero} {true}` .. \"!\"\n\
+         end\n",
+        "run",
+    );
+
+    let expected = vec![MirValue::String("Pop 🫧 -12 1.5 -0 true!".to_owned())];
+    let construction = MirInterpreter::new(&mir, &arena)
+        .expect("construction interpreter")
+        .call(entry, &[])
+        .expect("construction execution");
+    let optimized = optimize_mir(mir.clone(), &arena).expect("optimized MIR");
+    let optimized = MirInterpreter::new(&optimized, &arena)
+        .expect("optimized interpreter")
+        .call(entry, &[])
+        .expect("optimized execution");
+    assert_eq!(construction, expected);
+    assert_eq!(optimized, expected);
+}
+
+#[test]
 fn nominal_interface_upcast_and_call_use_verified_slots_in_both_mir_forms() {
     let (mir, arena, entry) = lower(
         "namespace Main\n\

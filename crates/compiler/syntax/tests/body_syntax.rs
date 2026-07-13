@@ -2,7 +2,8 @@ use pop_foundation::FileId;
 use pop_source::SourceFile;
 use pop_syntax::{
     BinaryOperator, CaptureFunctionSyntax, ExpressionSyntaxKind, NodeKind, StatementSyntaxKind,
-    UnaryOperator, parse_file, parse_function_body, parse_function_signature,
+    StringSegmentSyntaxKind, UnaryOperator, parse_file, parse_function_body,
+    parse_function_signature,
 };
 
 fn parse_body(text: &str) -> pop_syntax::FunctionBodySyntax {
@@ -174,6 +175,46 @@ fn calls_respect_arithmetic_precedence() {
             ..
         }
     ));
+}
+
+#[test]
+fn parses_decoded_strings_concatenation_and_interpolation_segments() {
+    // ADR 0041: interpolation retains typed expression segments and `..` has
+    // lower precedence than arithmetic inside those segments.
+    let body = parse_body(
+        "namespace Example\n\
+         public function describe(count: Int, name: String): String\n\
+             return \"line\\n\" .. `checked {count + 1}: {name}`\n\
+         end\n",
+    );
+    let StatementSyntaxKind::Return { values } = body.statements()[0].kind() else {
+        panic!("return");
+    };
+    let ExpressionSyntaxKind::Binary {
+        operator: BinaryOperator::Concat,
+        left,
+        right,
+    } = values[0].kind()
+    else {
+        panic!("string concatenation");
+    };
+    assert!(matches!(left.kind(), ExpressionSyntaxKind::String(value) if value == "line\n"));
+    let ExpressionSyntaxKind::InterpolatedString(segments) = right.kind() else {
+        panic!("interpolated string");
+    };
+    assert_eq!(segments.len(), 4);
+    assert!(
+        matches!(segments[0].kind(), StringSegmentSyntaxKind::Text(value) if value == "checked ")
+    );
+    assert!(
+        matches!(segments[1].kind(), StringSegmentSyntaxKind::Expression(expression)
+        if matches!(expression.kind(), ExpressionSyntaxKind::Binary { operator: BinaryOperator::Add, .. }))
+    );
+    assert!(matches!(segments[2].kind(), StringSegmentSyntaxKind::Text(value) if value == ": "));
+    assert!(
+        matches!(segments[3].kind(), StringSegmentSyntaxKind::Expression(expression)
+        if matches!(expression.kind(), ExpressionSyntaxKind::Name(path) if path == &["name"]))
+    );
 }
 
 #[test]

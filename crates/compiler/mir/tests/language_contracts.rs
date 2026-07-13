@@ -127,6 +127,33 @@ fn numeric_conversions_and_complete_ordering_are_explicit_and_round_trip() {
 }
 
 #[test]
+fn typed_string_composition_is_backend_neutral_effectful_and_round_trips() {
+    // ADR 0041: concatenation and primitive formatting carry exact static
+    // kinds, allocation effects, and no runtime format-string lookup.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function describe(count: Int, ratio: Float32, enabled: Boolean): String\n\
+             return `count={count}, ratio={ratio}, enabled={enabled}` .. \"!\"\n\
+         end\n",
+    );
+
+    let dump = mir.dump();
+    assert!(dump.contains("string.format Integer(Int64)"), "{dump}");
+    assert!(dump.contains("string.format Float(Float32)"), "{dump}");
+    assert!(dump.contains("string.format Boolean"), "{dump}");
+    assert!(dump.contains("string.concat"), "{dump}");
+    assert!(!dump.contains("pop_rt_"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("lookup"), "{dump}");
+    assert!(mir.functions()[0].effects().contains(MirEffect::Allocates));
+    assert!(
+        mir.functions()[0]
+            .effects()
+            .contains(MirEffect::GcSafePoint)
+    );
+    assert_verified_round_trip(&mir, &types);
+}
+
+#[test]
 fn nominal_interface_schema_upcast_and_slot_call_are_portable_and_round_trip() {
     let (mir, types) = lower(
         "namespace Main\n\

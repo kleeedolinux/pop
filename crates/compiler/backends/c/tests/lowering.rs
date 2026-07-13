@@ -342,6 +342,59 @@ fn typed_integer_and_literal_string_output_use_safe_c_adapters() {
 }
 
 #[test]
+fn constant_interpolation_and_concatenation_execute_as_strict_c11() {
+    // ADR 0041: the runtime-free C slice accepts composition after portable
+    // MIR proves and folds every segment to one UTF-8 literal.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main()\n\
+             print(`Pop 🫧 {12} {1.5} {true}` .. \"!\")\n\
+         end\n",
+    );
+    let entry = mir.functions()[0].symbol();
+    let translation = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("constant string C lowering");
+    assert!(!translation.as_str().contains("string.format"));
+    assert!(!translation.as_str().contains("string.concat"));
+
+    let root = temporary_root("constant-string-composition");
+    let source_path = root.with_extension("c");
+    let executable_path = root.with_extension("out");
+    std::fs::write(&source_path, translation.as_str()).expect("write generated C");
+    let compiler = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+        ])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .expect("C compiler runs");
+    assert!(
+        compiler.status.success(),
+        "generated string C did not compile:\n{}\n{}",
+        String::from_utf8_lossy(&compiler.stderr),
+        translation.as_str()
+    );
+    let execution = Command::new(&executable_path)
+        .output()
+        .expect("generated C runs");
+    assert!(execution.status.success());
+    assert_eq!(execution.stdout, "Pop 🫧 12 1.5 true!\n".as_bytes());
+    let _ = std::fs::remove_file(source_path);
+    let _ = std::fs::remove_file(executable_path);
+}
+
+#[test]
 fn strict_c11_preserves_block_arguments_and_conditional_control_flow() {
     let (mir, types) = lower(
         "namespace Main\n\

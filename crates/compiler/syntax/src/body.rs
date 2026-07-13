@@ -103,6 +103,7 @@ pub enum ExpressionSyntaxKind {
     Integer(String),
     Float(String),
     String(String),
+    InterpolatedString(Vec<StringSegmentSyntax>),
     Boolean(bool),
     Nil,
     Function(CaptureFunctionSyntax),
@@ -147,6 +148,30 @@ pub enum ExpressionSyntaxKind {
         left: Box<ExpressionSyntax>,
         right: Box<ExpressionSyntax>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StringSegmentSyntax {
+    pub(crate) kind: StringSegmentSyntaxKind,
+    pub(crate) span: SourceSpan,
+}
+
+impl StringSegmentSyntax {
+    #[must_use]
+    pub const fn kind(&self) -> &StringSegmentSyntaxKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StringSegmentSyntaxKind {
+    Text(String),
+    Expression(ExpressionSyntax),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -273,6 +298,7 @@ pub enum BinaryOperator {
     LessThanOrEqual,
     GreaterThan,
     GreaterThanOrEqual,
+    Concat,
     Add,
     Subtract,
     Multiply,

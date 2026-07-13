@@ -7,6 +7,7 @@ use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, ManagedReference, ObjectSlot,
     RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
 };
+use pop_runtime_native_abi::StringFormatTag;
 
 use crate::state::abi_runtime;
 
@@ -209,4 +210,80 @@ pub extern "C" fn pop_rt_string_equal(left: u64, right: u64) -> u8 {
         return 0;
     };
     u8::from(runtime.strings_equal(ManagedReference::new(left), ManagedReference::new(right)))
+}
+
+/// Concatenates two managed UTF-8 strings into one owned managed string.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_string_concat(left: u64, right: u64) -> u64 {
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    let Some(left) =
+        runtime.scalar_array_values(ManagedReference::new(left), RuntimeTypeId::new(1))
+    else {
+        return 0;
+    };
+    let Some(right) =
+        runtime.scalar_array_values(ManagedReference::new(right), RuntimeTypeId::new(1))
+    else {
+        return 0;
+    };
+    let bytes = left
+        .into_iter()
+        .chain(right)
+        .map(u8::try_from)
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(bytes) = bytes else {
+        return 0;
+    };
+    allocate_utf8_string(&mut runtime, &bytes).map_or(0, ManagedReference::raw)
+}
+
+/// Formats one statically selected primitive value as an owned managed string.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_string_format(tag: u32, bits: u64) -> u64 {
+    let Some(tag) = StringFormatTag::from_raw(tag) else {
+        return 0;
+    };
+    let formatted = match tag {
+        StringFormatTag::Boolean if bits <= 1 => (bits != 0).to_string(),
+        StringFormatTag::Boolean => return 0,
+        StringFormatTag::Int8 => i8::from_ne_bytes([bits as u8]).to_string(),
+        StringFormatTag::Int16 => i16::from_ne_bytes((bits as u16).to_ne_bytes()).to_string(),
+        StringFormatTag::Int32 => i32::from_ne_bytes((bits as u32).to_ne_bytes()).to_string(),
+        StringFormatTag::Int64 => i64::from_ne_bytes(bits.to_ne_bytes()).to_string(),
+        StringFormatTag::UInt8 => (bits as u8).to_string(),
+        StringFormatTag::UInt16 => (bits as u16).to_string(),
+        StringFormatTag::UInt32 => (bits as u32).to_string(),
+        StringFormatTag::UInt64 => bits.to_string(),
+        StringFormatTag::Float32 => format_float32(f32::from_bits(bits as u32)),
+        StringFormatTag::Float64 => format_float64(f64::from_bits(bits)),
+    };
+    allocate_utf8_string_literal(formatted.as_bytes())
+}
+
+fn format_float32(value: f32) -> String {
+    if value.is_nan() {
+        "nan".to_owned()
+    } else if value == f32::INFINITY {
+        "inf".to_owned()
+    } else if value == f32::NEG_INFINITY {
+        "-inf".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_float64(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_owned()
+    } else if value == f64::INFINITY {
+        "inf".to_owned()
+    } else if value == f64::NEG_INFINITY {
+        "-inf".to_owned()
+    } else {
+        value.to_string()
+    }
 }

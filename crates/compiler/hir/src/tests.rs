@@ -78,7 +78,7 @@ fn verifier_rejects_array_access_on_a_non_array_base() {
             kind: HirStatementKind::Expression(HirExpression {
                 kind: HirExpressionKind::ArrayGet {
                     array: Box::new(HirExpression {
-                        kind: HirExpressionKind::String("\"value\"".to_owned()),
+                        kind: HirExpressionKind::String("value".to_owned()),
                         type_id: string,
                         span,
                     }),
@@ -1298,7 +1298,7 @@ fn test_span() -> SourceSpan {
 
 fn string_expression(type_id: TypeId, span: SourceSpan) -> HirExpression {
     HirExpression {
-        kind: HirExpressionKind::String("\"value\"".to_owned()),
+        kind: HirExpressionKind::String("value".to_owned()),
         type_id,
         span,
     }

@@ -68,6 +68,35 @@ fn portable_optimization_folds_typed_primitive_equality() {
 }
 
 #[test]
+fn portable_optimization_folds_constant_string_composition() {
+    // ADR 0041 permits compile-time folding only when every formatted value
+    // and concatenated segment is already constant.
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/stringFolding.pop",
+        "namespace Main\n\
+         public function describe(): String\n\
+             return `value={12}, ratio={1.5}, enabled={true}` .. \"!\"\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let construction =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(construction, front_end.types()).expect("optimized MIR");
+    let dump = optimized.dump();
+
+    assert!(dump.contains("const.string \"value=12, ratio=1.5, enabled=true!\""));
+    assert!(!dump.contains("string.format"));
+    assert!(!dump.contains("string.concat"));
+}
+
+#[test]
 fn portable_optimization_summarizes_constant_bounded_integer_reductions() {
     let source = SourceFile::new(
         FileId::from_raw(0),

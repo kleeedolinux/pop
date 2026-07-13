@@ -69,7 +69,7 @@ fn attribute_uses_preserve_source_order_and_named_or_positional_arguments() {
     assert_eq!(uses[1].arguments()[0].name(), None);
     assert!(matches!(
         uses[1].arguments()[0].value().kind(),
-        ExpressionSyntaxKind::String(value) if value == "\"userName\""
+        ExpressionSyntaxKind::String(value) if value == "userName"
     ));
 }
 

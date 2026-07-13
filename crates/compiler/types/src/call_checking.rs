@@ -12,7 +12,7 @@ use crate::body_checking::{
     BodyChecker, CheckedCall, CheckedInvocation, ExpectedExpressionType, UnionCaseLookup,
 };
 use crate::typed_body::*;
-use crate::{NumericConversionKind, SemanticType};
+use crate::{NumericConversionKind, PrimitiveType, SemanticType, StringFormatKind};
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_call(
@@ -34,6 +34,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<CheckedInvocation> {
         if let ExpressionSyntaxKind::Name(path) = callee.kind() {
+            if path.as_slice() == ["String"] {
+                return self
+                    .check_string_conversion(arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if matches!(path.as_slice(), [target]
                 if self.resolver.arena().source_type(target)
                     .and_then(|type_id| self.numeric_target(type_id))
@@ -128,6 +133,59 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn check_string_conversion(
+        &mut self,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "string formatting",
+                1,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let value = self.check_expression(&arguments[0])?;
+        let string = self.resolver.arena().source_type("String")?;
+        if value.type_id() == string {
+            return Some(TypedExpression {
+                type_id: string,
+                span,
+                ..value
+            });
+        }
+        let kind = match self.resolver.arena().get(value.type_id()) {
+            Some(SemanticType::Primitive(PrimitiveType::Boolean)) => StringFormatKind::Boolean,
+            Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => {
+                StringFormatKind::Integer(*kind)
+            }
+            Some(SemanticType::Primitive(PrimitiveType::Float32)) => {
+                StringFormatKind::Float(crate::FloatKind::Float32)
+            }
+            Some(SemanticType::Primitive(PrimitiveType::Float64)) => {
+                StringFormatKind::Float(crate::FloatKind::Float64)
+            }
+            _ => {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "string formatting",
+                    self.type_name(value.type_id()),
+                ));
+                return None;
+            }
+        };
+        Some(TypedExpression {
+            kind: TypedExpressionKind::StringFormat {
+                kind,
+                value: Box::new(value),
+            },
+            type_id: string,
+            span,
+        })
     }
 
     fn check_numeric_conversion(

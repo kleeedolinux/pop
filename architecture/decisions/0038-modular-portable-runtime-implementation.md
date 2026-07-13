@@ -140,7 +140,7 @@ before another Cargo boundary is considered.
   backend's symbol vocabulary.
 - The workspace gains two crates and more manifests, but each new crate enforces
   a dependency boundary rejected by architecture tests.
-- Moving code must preserve existing ABI 1.4 behavior and bootstrap collector
+- Moving code must preserve existing ABI 1.x behavior and bootstrap collector
   tests; this ADR does not claim the production concurrent collector is done.
 
 ## Alternatives considered
@@ -189,7 +189,7 @@ calls weaken determinism, static integration, dead stripping, and performance.
 - `Pop.Internal` native adapters use native ABI while source/HIR/MIR remain free
   of `pop_rt_*` spellings;
 - existing allocation, precise reachability, cycles, roots, pins, safe points,
-  barriers, deterministic out-of-memory, string, process-argument, and ABI 1.4
+  barriers, deterministic out-of-memory, string, process-argument, and ABI 1.x
   tests continue to pass;
 - runtime crate roots remain thin explicit module inventories and each ownership
   boundary is documented;

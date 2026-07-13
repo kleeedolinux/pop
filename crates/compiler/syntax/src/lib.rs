@@ -19,6 +19,7 @@ mod expression;
 mod interface;
 mod lexer;
 mod signature;
+mod string_literal;
 
 pub use attribute::{
     AttributeArgumentSyntax, AttributeDeclarationSyntax, AttributeParameterSyntax,
@@ -27,7 +28,8 @@ pub use attribute::{
 pub use body::{
     BinaryOperator, CaptureFunctionParameterSyntax, CaptureFunctionSyntax, ExpressionSyntax,
     ExpressionSyntaxKind, FieldInitializerSyntax, FunctionBodyError, FunctionBodySyntax,
-    MatchArmSyntax, StatementSyntax, StatementSyntaxKind, UnaryOperator, parse_function_body,
+    MatchArmSyntax, StatementSyntax, StatementSyntaxKind, StringSegmentSyntax,
+    StringSegmentSyntaxKind, UnaryOperator, parse_function_body,
 };
 pub use class::{
     ClassDeclarationError, ClassDeclarationSyntax, ClassFieldSyntax, ClassMethodDispatchSyntax,
@@ -48,6 +50,7 @@ pub use signature::{
     FunctionParameterSyntax, FunctionSignatureError, FunctionSignatureSyntax,
     GenericParameterSyntax, TypeSyntax, TypeSyntaxKind, parse_function_signature,
 };
+pub use string_literal::{StringLiteralError, decode_string_literal};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeKind {

@@ -24,7 +24,6 @@ use pop_types::{
 };
 
 use crate::ir::*;
-use crate::render::unquote;
 use crate::verification::{
     instruction_operands, instruction_unwind_target, terminator_operands, terminator_targets,
     verify_mir_bubble,
@@ -411,7 +410,8 @@ fn visit_expression_closures(
         }
         HirExpressionKind::Field { base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
-        | HirExpressionKind::NumericConvert { value: base, .. } => {
+        | HirExpressionKind::NumericConvert { value: base, .. }
+        | HirExpressionKind::StringFormat { value: base, .. } => {
             visit_expression_closures(base, parameters, locals);
         }
         HirExpressionKind::ArrayGet { array, index }
@@ -420,6 +420,10 @@ fn visit_expression_closures(
             left: array,
             right: index,
             ..
+        }
+        | HirExpressionKind::StringConcat {
+            left: array,
+            right: index,
         } => {
             visit_expression_closures(array, parameters, locals);
             visit_expression_closures(index, parameters, locals);
@@ -956,7 +960,7 @@ impl<'hir> FunctionBuilder<'hir> {
         let kind = match expression.kind() {
             HirExpressionKind::Integer(value) => MirInstructionKind::IntegerConstant(*value),
             HirExpressionKind::Float(value) => MirInstructionKind::FloatConstant(*value),
-            HirExpressionKind::String(value) => MirInstructionKind::StringConstant(unquote(value)),
+            HirExpressionKind::String(value) => MirInstructionKind::StringConstant(value.clone()),
             HirExpressionKind::Boolean(value) => MirInstructionKind::BooleanConstant(*value),
             HirExpressionKind::Nil => MirInstructionKind::NilConstant,
             HirExpressionKind::Closure(closure) => {
@@ -1003,6 +1007,14 @@ impl<'hir> FunctionBuilder<'hir> {
                     .map(|element| self.lower_expression(element))
                     .collect(),
             ),
+            HirExpressionKind::StringConcat { left, right } => MirInstructionKind::StringConcat {
+                left: self.lower_expression(left),
+                right: self.lower_expression(right),
+            },
+            HirExpressionKind::StringFormat { kind, value } => MirInstructionKind::StringFormat {
+                kind: *kind,
+                value: self.lower_expression(value),
+            },
             HirExpressionKind::Array(elements) => MirInstructionKind::ArrayMake {
                 elements: elements
                     .iter()
@@ -1866,6 +1878,13 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::ClassMake { .. }
         | MirInstructionKind::CaptureCellAllocate { .. }
         | MirInstructionKind::ClosureEnvironmentAllocate { .. } => {
+            MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ])
+        }
+        MirInstructionKind::StringConcat { .. } | MirInstructionKind::StringFormat { .. } => {
             MirEffectSummary::from_effects([
                 MirEffect::Allocates,
                 MirEffect::MayUnwind,

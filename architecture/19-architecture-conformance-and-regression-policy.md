@@ -216,6 +216,7 @@ Minimum traceability matrix:
 | Decision | Owning components | Required proof |
 | --- | --- | --- |
 | Strong static typing | resolver, type checker, HIR/MIR | no dynamic fallback/opcode tests |
+| Typed string composition | lexer, type checker, HIR/MIR, runtime, backends | escape, closed formatting, effect, and cross-backend byte tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |

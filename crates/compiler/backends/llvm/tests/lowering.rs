@@ -1027,6 +1027,35 @@ fn checked_numeric_conversions_and_ordered_comparisons_execute_natively() {
 }
 
 #[test]
+fn typed_string_composition_and_formatting_execute_natively() {
+    // ADR 0041: retain runtime operations by formatting parameters in a
+    // separate function, then compare the exact UTF-8 bytes natively.
+    let module = native_module(
+        "namespace Main\n\
+         private function describe(count: Int8, ratio: Float32, enabled: Boolean): String\n\
+             return `Pop 🫧 {count} {ratio} {enabled}` .. \"!\"\n\
+         end\n\
+         private function main(): Int\n\
+             if describe(-12, 1.5, true) == \"Pop 🫧 -12 1.5 true!\" then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("@pop_rt_string_concat"));
+    assert!(text.contains("@pop_rt_string_format"));
+    let result = link_with_runtime_and_run(&module, "string-composition");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native string composition failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn invalid_numeric_conversion_traps_before_native_float_to_integer_lowering() {
     let module = native_module(
         "namespace Main\n\

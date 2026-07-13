@@ -53,6 +53,20 @@ conversions and float-to-integer conversions are checked and use the closed
 `<`, `<=`, `>`, and `>=`; IEEE ordering comparisons with NaN are false. See
 ADR 0040.
 
+### String source semantics
+
+`String` is immutable UTF-8 text. The Luau `..` operator concatenates two
+strings, and backtick strings interpolate statically typed `String`, `Boolean`,
+integer, or floating-point expressions. `String(value)` explicitly formats the
+same closed primitive set; it is not an ordinary overload, universal inherited
+method, runtime type-name lookup, or implicit conversion in another call.
+
+Quoted and backtick literals decode a fixed portable escape set. Primitive
+formatting is deterministic and locale-independent, while locale-sensitive or
+user-defined formatting remains an explicit typed library concern. String
+composition and non-identity formatting may allocate and are represented by
+backend-neutral typed HIR/MIR operations. See ADR 0041.
+
 ## Luau-first syntax rule
 
 Pop Lang starts from Luau grammar and vocabulary. Additions should reuse Luau

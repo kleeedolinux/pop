@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use pop_foundation::{BlockId, ValueId};
+use pop_foundation::{BlockId, MethodId, SymbolId, ValueId};
 use pop_types::{FloatValue, IntegerKind, IntegerValue, TypeArena};
 
 use super::{
@@ -32,15 +32,148 @@ pub fn optimize_mir(
         fold_constants(function);
         remove_unreachable_blocks(function);
         remove_dead_constants(function);
+        refresh_transformed_instruction_effects(function);
+        remove_redundant_gc_safe_points(function);
+        recompute_optimized_effects(function);
     }
     for method in &mut bubble.methods {
         summarize_constant_reduction(&mut method.function);
         fold_constants(&mut method.function);
         remove_unreachable_blocks(&mut method.function);
         remove_dead_constants(&mut method.function);
+        refresh_transformed_instruction_effects(&mut method.function);
+        remove_redundant_gc_safe_points(&mut method.function);
+        recompute_optimized_effects(&mut method.function);
     }
+    refresh_transitive_call_effects(&mut bubble);
     verify_mir_bubble(&bubble, arena)?;
     Ok(bubble)
+}
+
+fn refresh_transitive_call_effects(bubble: &mut MirBubble) {
+    let mut function_effects = bubble
+        .functions
+        .iter()
+        .map(|function| (function.symbol, super::MirEffectSummary::empty()))
+        .collect::<BTreeMap<SymbolId, _>>();
+    let mut method_effects = bubble
+        .methods
+        .iter()
+        .map(|method| (method.method, super::MirEffectSummary::empty()))
+        .collect::<BTreeMap<MethodId, _>>();
+
+    loop {
+        let previous_functions = function_effects.clone();
+        let previous_methods = method_effects.clone();
+        let mut changed = false;
+        for function in &mut bubble.functions {
+            let effects =
+                refresh_function_call_effects(function, &previous_functions, &previous_methods);
+            changed |= function_effects.insert(function.symbol, effects) != Some(effects);
+        }
+        for method in &mut bubble.methods {
+            let effects = refresh_function_call_effects(
+                &mut method.function,
+                &previous_functions,
+                &previous_methods,
+            );
+            changed |= method_effects.insert(method.method, effects) != Some(effects);
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn refresh_function_call_effects(
+    function: &mut super::MirFunction,
+    function_effects: &BTreeMap<SymbolId, super::MirEffectSummary>,
+    method_effects: &BTreeMap<MethodId, super::MirEffectSummary>,
+) -> super::MirEffectSummary {
+    let mut summary = super::MirEffectSummary::empty();
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            let effects = match &mut instruction.kind {
+                MirInstructionKind::CallDirect {
+                    function,
+                    declared_effects,
+                    ..
+                } => {
+                    let effects = function_effects.get(function).copied().unwrap_or_default();
+                    *declared_effects = effects;
+                    effects
+                }
+                MirInstructionKind::CallDirectMethod {
+                    method,
+                    declared_effects,
+                    ..
+                } => {
+                    let effects = method_effects.get(method).copied().unwrap_or_default();
+                    *declared_effects = effects;
+                    effects
+                }
+                kind => local_instruction_effects(kind),
+            };
+            instruction.effects = effects;
+            summary = summary.union(effects);
+        }
+        summary = summary.union(crate::lowering::terminator_effects(&block.terminator));
+    }
+    function.effects = summary;
+    summary
+}
+
+fn refresh_transformed_instruction_effects(function: &mut super::MirFunction) {
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            if !matches!(
+                instruction.kind,
+                MirInstructionKind::CallDirect { .. }
+                    | MirInstructionKind::CallReferenced { .. }
+                    | MirInstructionKind::CallDirectMethod { .. }
+            ) {
+                instruction.effects = local_instruction_effects(&instruction.kind);
+            }
+        }
+    }
+}
+
+fn remove_redundant_gc_safe_points(function: &mut super::MirFunction) {
+    let allocates = function.blocks.iter().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. })
+                && instruction.effects.contains(super::MirEffect::Allocates)
+        })
+    });
+    let has_backedge = function.blocks.iter().any(|block| {
+        block_targets(block)
+            .into_iter()
+            .any(|target| target.raw() <= block.block.raw())
+    });
+    if allocates || has_backedge {
+        return;
+    }
+    for block in &mut function.blocks {
+        block.instructions.retain(|instruction| {
+            !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. })
+        });
+    }
+}
+
+fn recompute_optimized_effects(function: &mut super::MirFunction) {
+    function.effects =
+        function
+            .blocks
+            .iter()
+            .fold(super::MirEffectSummary::empty(), |summary, block| {
+                block
+                    .instructions
+                    .iter()
+                    .fold(summary, |summary, instruction| {
+                        summary.union(instruction.effects)
+                    })
+                    .union(crate::lowering::terminator_effects(&block.terminator))
+            });
 }
 
 struct CountedReductionSummary {
@@ -351,6 +484,10 @@ fn fold_instruction(
         Some(Constant::Float(value)) => Some(*value),
         _ => None,
     };
+    let string = |value| match constants.get(&value) {
+        Some(Constant::String(value)) => Some(value.clone()),
+        _ => None,
+    };
     Some(match kind {
         MirInstructionKind::CheckedIntegerAdd { left, right, .. } => {
             MirInstructionKind::IntegerConstant(integer(*left)?.checked_add(integer(*right)?).ok()?)
@@ -405,6 +542,31 @@ fn fold_instruction(
         MirInstructionKind::ConvertFloat {
             target, operand, ..
         } => MirInstructionKind::FloatConstant(float(*operand)?.convert(*target)),
+        MirInstructionKind::StringConcat { left, right } => {
+            let mut value = string(*left)?;
+            value.push_str(&string(*right)?);
+            MirInstructionKind::StringConstant(value)
+        }
+        MirInstructionKind::StringFormat { kind, value } => {
+            let formatted = match kind {
+                pop_types::StringFormatKind::Boolean => boolean(*value)?.to_string(),
+                pop_types::StringFormatKind::Integer(expected) => {
+                    let value = integer(*value)?;
+                    if value.kind() != *expected {
+                        return None;
+                    }
+                    value.to_string()
+                }
+                pop_types::StringFormatKind::Float(expected) => {
+                    let value = float(*value)?;
+                    if value.kind() != *expected {
+                        return None;
+                    }
+                    value.format_string()
+                }
+            };
+            MirInstructionKind::StringConstant(formatted)
+        }
         MirInstructionKind::BooleanNot { operand } => {
             MirInstructionKind::BooleanConstant(!boolean(*operand)?)
         }

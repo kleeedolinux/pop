@@ -375,9 +375,7 @@ fn lower_compile_time_literal(expression: &TypedExpression) -> CompileTimeExpres
     let value = match expression.kind() {
         TypedExpressionKind::Integer(value) => CompileTimeValue::Integer(*value),
         TypedExpressionKind::Float(value) => CompileTimeValue::Float(*value),
-        TypedExpressionKind::String(value) => {
-            CompileTimeValue::String(unquote_source_string(value))
-        }
+        TypedExpressionKind::String(value) => CompileTimeValue::String(value.clone()),
         TypedExpressionKind::Boolean(value) => CompileTimeValue::Boolean(*value),
         TypedExpressionKind::Nil => CompileTimeValue::Nil,
         _ => unreachable!("literal lowering receives only a typed literal"),
@@ -464,6 +462,9 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::ReferencedCall
         }
         TypedExpressionKind::StandardCall { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
+        TypedExpressionKind::StringConcat { .. } | TypedExpressionKind::StringFormat { .. } => {
+            UnsupportedCompileTimeConstruct::StringComposition
+        }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::AttributeQuery { .. }
         | TypedExpressionKind::HasAttributeQuery { .. }
@@ -481,11 +482,4 @@ fn unsupported_compile_time_construct(
             unreachable!("supported expression is not routed to the unsupported lowerer")
         }
     }
-}
-
-fn unquote_source_string(value: &str) -> String {
-    value
-        .get(1..value.len().saturating_sub(1))
-        .unwrap_or_default()
-        .to_owned()
 }

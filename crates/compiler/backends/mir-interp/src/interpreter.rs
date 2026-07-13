@@ -375,6 +375,41 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         }
         let result = match instruction.kind() {
             MirInstructionKind::StringConstant(value) => MirValue::String(value.clone()),
+            MirInstructionKind::StringConcat { left, right } => {
+                let MirValue::String(left) = &value(values, *left)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let MirValue::String(right) = &value(values, *right)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let mut result = String::with_capacity(left.len().saturating_add(right.len()));
+                result.push_str(left);
+                result.push_str(right);
+                MirValue::String(result)
+            }
+            MirInstructionKind::StringFormat {
+                kind,
+                value: operand,
+            } => {
+                let operand = &value(values, *operand)?.visible;
+                let formatted = match (kind, operand) {
+                    (pop_types::StringFormatKind::Boolean, MirValue::Boolean(value)) => {
+                        value.to_string()
+                    }
+                    (pop_types::StringFormatKind::Integer(expected), MirValue::Integer(value))
+                        if expected == &value.kind() =>
+                    {
+                        value.to_string()
+                    }
+                    (pop_types::StringFormatKind::Float(expected), MirValue::Float(value))
+                        if expected == &value.kind() =>
+                    {
+                        value.format_string()
+                    }
+                    _ => return Err(ExecutionError::TypeMismatch),
+                };
+                MirValue::String(formatted)
+            }
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
             MirInstructionKind::FunctionReference(function) => MirValue::Function(*function),

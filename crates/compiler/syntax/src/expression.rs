@@ -9,7 +9,7 @@ use pop_foundation::{SourceSpan, TextSize};
 use crate::body::{
     BinaryOperator, BodyParser, CaptureFunctionParameterSyntax, CaptureFunctionSyntax,
     ExpressionSyntax, ExpressionSyntaxKind, FieldInitializerSyntax, FunctionBodyError,
-    UnaryOperator, ordered_range,
+    StringSegmentSyntax, StringSegmentSyntaxKind, UnaryOperator, ordered_range,
 };
 use crate::signature::parse_type_prefix;
 use crate::{Token, TokenKind, TypeSyntax};
@@ -70,7 +70,12 @@ impl BodyParser<'_> {
                 break;
             }
             self.position += 1;
-            let right = self.parse_expression(precedence + 1)?;
+            let right_precedence = if operator == BinaryOperator::Concat {
+                precedence
+            } else {
+                precedence + 1
+            };
+            let right = self.parse_expression(right_precedence)?;
             let start = left.span().range().start();
             let end = right.span().range().end();
             left = self.expression(
@@ -260,11 +265,17 @@ impl BodyParser<'_> {
                 };
                 Ok(self.expression(kind, start, end))
             }
-            TokenKind::String => Ok(self.expression(
-                ExpressionSyntaxKind::String(token.text(self.source).to_owned()),
-                start,
-                end,
-            )),
+            TokenKind::String => {
+                let value =
+                    crate::decode_string_literal(token.text(self.source)).map_err(|_| {
+                        FunctionBodyError::new(
+                            SourceSpan::new(self.file, token.range()),
+                            "valid string literal",
+                        )
+                    })?;
+                Ok(self.expression(ExpressionSyntaxKind::String(value), start, end))
+            }
+            TokenKind::InterpolatedString => self.parse_interpolated_string(token),
             TokenKind::True | TokenKind::False => Ok(self.expression(
                 ExpressionSyntaxKind::Boolean(token.kind() == TokenKind::True),
                 start,
@@ -284,6 +295,189 @@ impl BodyParser<'_> {
                 expectation: "expression",
             }),
         }
+    }
+
+    fn parse_interpolated_string(
+        &self,
+        token: Token,
+    ) -> Result<ExpressionSyntax, FunctionBodyError> {
+        let start = token.range().start().to_usize();
+        let end = token.range().end().to_usize();
+        let content_start = start + 1;
+        let content_end = end.saturating_sub(1);
+        let bytes = self.source.text().as_bytes();
+        let mut cursor = content_start;
+        let mut text_start = content_start;
+        let mut segments = Vec::new();
+        while cursor < content_end {
+            match bytes[cursor] {
+                b'\\' => {
+                    cursor =
+                        crate::string_literal::scan_escape(bytes, cursor, true).map_err(|_| {
+                            self.interpolation_error(cursor, cursor + 1, "valid string escape")
+                        })?;
+                }
+                b'{' => {
+                    self.push_string_text_segment(&mut segments, text_start, cursor)?;
+                    let expression_start = cursor + 1;
+                    let expression_end =
+                        self.find_interpolation_end(expression_start, content_end)?;
+                    let lexed =
+                        crate::lexer::lex_range(self.source, expression_start, expression_end);
+                    if !lexed.diagnostics().is_empty() {
+                        return Err(self.interpolation_error(
+                            expression_start,
+                            expression_end,
+                            "valid interpolation expression",
+                        ));
+                    }
+                    let tokens = lexed
+                        .tokens()
+                        .iter()
+                        .copied()
+                        .filter(|token| !token.kind().is_trivia())
+                        .collect::<Vec<_>>();
+                    let mut parser = BodyParser {
+                        source: self.source,
+                        file: self.file,
+                        node: self.node,
+                        boundary_end: TextSize::try_from_usize(expression_end)
+                            .unwrap_or(token.range().end()),
+                        tokens,
+                        position: 0,
+                    };
+                    let expression = parser.parse_expression(0)?;
+                    if parser.current_kind().is_some() {
+                        return Err(parser.error("end of interpolation expression"));
+                    }
+                    segments.push(StringSegmentSyntax {
+                        span: expression.span(),
+                        kind: StringSegmentSyntaxKind::Expression(expression),
+                    });
+                    cursor = expression_end + 1;
+                    text_start = cursor;
+                }
+                b'}' => {
+                    return Err(self.interpolation_error(cursor, cursor + 1, "escaped `}`"));
+                }
+                _ => {
+                    cursor += self.source.text()[cursor..content_end]
+                        .chars()
+                        .next()
+                        .map_or(1, char::len_utf8);
+                }
+            }
+        }
+        self.push_string_text_segment(&mut segments, text_start, content_end)?;
+        Ok(self.expression(
+            ExpressionSyntaxKind::InterpolatedString(segments),
+            token.range().start(),
+            token.range().end(),
+        ))
+    }
+
+    fn push_string_text_segment(
+        &self,
+        segments: &mut Vec<StringSegmentSyntax>,
+        start: usize,
+        end: usize,
+    ) -> Result<(), FunctionBodyError> {
+        if start == end {
+            return Ok(());
+        }
+        let text =
+            crate::string_literal::decode_string_contents(&self.source.text()[start..end], true)
+                .map_err(|_| self.interpolation_error(start, end, "valid string text"))?;
+        segments.push(StringSegmentSyntax {
+            kind: StringSegmentSyntaxKind::Text(text),
+            span: SourceSpan::new(
+                self.file,
+                ordered_range(
+                    TextSize::try_from_usize(start).unwrap_or(TextSize::from_u32(0)),
+                    TextSize::try_from_usize(end).unwrap_or(TextSize::from_u32(0)),
+                ),
+            ),
+        });
+        Ok(())
+    }
+
+    fn find_interpolation_end(
+        &self,
+        mut cursor: usize,
+        content_end: usize,
+    ) -> Result<usize, FunctionBodyError> {
+        let bytes = self.source.text().as_bytes();
+        let mut depth = 1_u32;
+        while cursor < content_end {
+            match bytes[cursor] {
+                b'\'' | b'"' | b'`' => {
+                    let quote = bytes[cursor];
+                    cursor += 1;
+                    while cursor < content_end && bytes[cursor] != quote {
+                        if bytes[cursor] == b'\\' {
+                            cursor =
+                                crate::string_literal::scan_escape(bytes, cursor, quote == b'`')
+                                    .map_err(|_| {
+                                        self.interpolation_error(
+                                            cursor,
+                                            cursor + 1,
+                                            "valid string escape",
+                                        )
+                                    })?;
+                        } else {
+                            cursor += self.source.text()[cursor..content_end]
+                                .chars()
+                                .next()
+                                .map_or(1, char::len_utf8);
+                        }
+                    }
+                    if cursor >= content_end {
+                        return Err(self.interpolation_error(
+                            cursor,
+                            cursor,
+                            "closing string delimiter",
+                        ));
+                    }
+                    cursor += 1;
+                }
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(cursor);
+                    }
+                    cursor += 1;
+                }
+                _ => {
+                    cursor += self.source.text()[cursor..content_end]
+                        .chars()
+                        .next()
+                        .map_or(1, char::len_utf8);
+                }
+            }
+        }
+        Err(self.interpolation_error(content_end, content_end, "closing interpolation `}`"))
+    }
+
+    fn interpolation_error(
+        &self,
+        start: usize,
+        end: usize,
+        expectation: &'static str,
+    ) -> FunctionBodyError {
+        FunctionBodyError::new(
+            SourceSpan::new(
+                self.file,
+                ordered_range(
+                    TextSize::try_from_usize(start).unwrap_or(TextSize::from_u32(0)),
+                    TextSize::try_from_usize(end).unwrap_or(TextSize::from_u32(0)),
+                ),
+            ),
+            expectation,
+        )
     }
 
     fn parse_field_initializers(
@@ -400,11 +594,12 @@ impl BodyParser<'_> {
             TokenKind::LessThanEqual => (BinaryOperator::LessThanOrEqual, 3),
             TokenKind::GreaterThan => (BinaryOperator::GreaterThan, 3),
             TokenKind::GreaterThanEqual => (BinaryOperator::GreaterThanOrEqual, 3),
-            TokenKind::Plus => (BinaryOperator::Add, 4),
-            TokenKind::Minus => (BinaryOperator::Subtract, 4),
-            TokenKind::Star => (BinaryOperator::Multiply, 5),
-            TokenKind::Slash => (BinaryOperator::Divide, 5),
-            TokenKind::Percent => (BinaryOperator::Remainder, 5),
+            TokenKind::DotDot => (BinaryOperator::Concat, 4),
+            TokenKind::Plus => (BinaryOperator::Add, 5),
+            TokenKind::Minus => (BinaryOperator::Subtract, 5),
+            TokenKind::Star => (BinaryOperator::Multiply, 6),
+            TokenKind::Slash => (BinaryOperator::Divide, 6),
+            TokenKind::Percent => (BinaryOperator::Remainder, 6),
             _ => return None,
         })
     }

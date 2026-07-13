@@ -107,7 +107,8 @@ fn evaluate_constant(
             context,
             diagnostics,
         ),
-        ExpressionSyntaxKind::Name(_)
+        ExpressionSyntaxKind::InterpolatedString(_)
+        | ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }
         | ExpressionSyntaxKind::GenericCall { .. }
@@ -343,6 +344,12 @@ fn evaluate_binary_values(
         };
     }
     match (operator, left, right) {
+        (BinaryOperator::Concat, FieldDefault::String(left), FieldDefault::String(right)) => {
+            Some(EvaluatedDefault {
+                value: FieldDefault::String(left + &right),
+                type_id: operand_type,
+            })
+        }
         (BinaryOperator::LessThan, FieldDefault::Integer(left), FieldDefault::Integer(right)) => {
             boolean_constant(arena, left.compare(right).ok()? == Ordering::Less)
         }
@@ -507,6 +514,7 @@ const fn binary_text(operator: BinaryOperator) -> &'static str {
         BinaryOperator::LessThanOrEqual => "<=",
         BinaryOperator::GreaterThan => ">",
         BinaryOperator::GreaterThanOrEqual => ">=",
+        BinaryOperator::Concat => "..",
         BinaryOperator::Add => "+",
         BinaryOperator::Subtract => "-",
         BinaryOperator::Multiply => "*",

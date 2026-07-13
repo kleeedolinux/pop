@@ -368,7 +368,9 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             let _ = write!(output, "{value}");
         }
         HirExpressionKind::Float(value) => dump_float_value(output, *value),
-        HirExpressionKind::String(value) => output.push_str(value),
+        HirExpressionKind::String(value) => {
+            let _ = write!(output, "{value:?}");
+        }
         HirExpressionKind::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
         HirExpressionKind::Nil => output.push_str("nil"),
         HirExpressionKind::Closure(closure) => {
@@ -504,6 +506,18 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
                 }
                 dump_expression(output, element, arena);
             }
+            output.push(')');
+        }
+        HirExpressionKind::StringConcat { left, right } => {
+            output.push_str("string.concat(");
+            dump_expression(output, left, arena);
+            output.push_str(", ");
+            dump_expression(output, right, arena);
+            output.push(')');
+        }
+        HirExpressionKind::StringFormat { kind, value } => {
+            let _ = write!(output, "string.format {kind:?}(");
+            dump_expression(output, value, arena);
             output.push(')');
         }
         HirExpressionKind::Unary { operator, operand } => {

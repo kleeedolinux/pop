@@ -62,10 +62,10 @@ pub use signature_resolution::{
     UnionDefinitionResult,
 };
 pub use typed_body::{
-    CaptureMode, CaptureSource, TypedBinaryOperator, TypedBody, TypedBodyResult, TypedCall,
-    TypedCallDispatch, TypedCapture, TypedClosure, TypedClosureParameter, TypedExpression,
-    TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm, TypedMatchBinding,
-    TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
+    CaptureMode, CaptureSource, StringFormatKind, TypedBinaryOperator, TypedBody, TypedBodyResult,
+    TypedCall, TypedCallDispatch, TypedCapture, TypedClosure, TypedClosureParameter,
+    TypedExpression, TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm,
+    TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
 };
 
 pub type ClassFieldDefault = FieldDefault;

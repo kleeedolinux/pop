@@ -30,6 +30,8 @@ diagnostics.
   tagged unions, and typed `with` updates;
 - decimal floating-point literals, complete numeric ordering, and explicit
   checked numeric conversions from ADR 0040;
+- typed string concatenation, interpolation, escape decoding, and closed
+  primitive formatting from ADR 0041;
 - constraint-based local inference with no dynamic fallback;
 - typed UDA declarations, attachment, constant arguments, and query API;
 - deterministic compile-time constant/function evaluation with budgets;
