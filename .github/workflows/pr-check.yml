@@ -36,8 +36,9 @@ jobs:
       - name: Install LLVM 22
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm-22-dev clang-22
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 22
 
       - name: Export LLVM prefix
         shell: bash
