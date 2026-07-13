@@ -735,21 +735,36 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
         "release"
     };
 
-    let standard = root.join(format!("target/{profile}/libpop_standard.a"));
-    let runtime = root.join(format!("target/{profile}/libpop_runtime_native.a"));
+    let executable_directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let distributed_archives = executable_directory.map(|directory| {
+        (
+            directory.join("libpop_standard.a"),
+            directory.join("libpop_runtime_native.a"),
+        )
+    });
+    let (standard, runtime) = distributed_archives
+        .filter(|(standard, runtime)| standard.is_file() && runtime.is_file())
+        .unwrap_or_else(|| {
+            (
+                root.join(format!("target/{profile}/libpop_standard.a")),
+                root.join(format!("target/{profile}/libpop_runtime_native.a")),
+            )
+        });
 
-    let mut command = Command::new("cargo");
-    command
-        .current_dir(root)
-        .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"]);
-    if profile == "release" {
-        command.arg("--release");
-    }
-    let build = command.status();
-
-    if !matches!(build, Ok(status) if status.success()) {
-        eprintln!("pop: could not build bootstrap foundation archives");
-        return ExitCode::FAILURE;
+    if !standard.is_file() || !runtime.is_file() {
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(root)
+            .args(["build", "-p", "pop-standard", "-p", "pop-runtime-native"]);
+        if profile == "release" {
+            command.arg("--release");
+        }
+        if !matches!(command.status(), Ok(status) if status.success()) {
+            eprintln!("pop: could not build bootstrap foundation archives");
+            return ExitCode::FAILURE;
+        }
     }
 
     if !standard.is_file() || !runtime.is_file() {
