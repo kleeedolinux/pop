@@ -19,7 +19,7 @@ env:
 
 jobs:
   publish:
-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'release: v')
+    if: ${{ github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'release: v') }}
     name: Publish tagged release
     runs-on: ubuntu-latest
 
