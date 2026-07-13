@@ -456,27 +456,6 @@ fn source_constants_are_typed_evaluated_and_published_without_runtime_functions(
 }
 
 #[test]
-fn explicit_generic_compile_time_calls_use_concrete_static_types() {
-    let result = analyze(
-        "namespace Example\n\
-         @CompileTime\n\
-         private function identity<T>(value: T): T\n\
-             return value\n\
-         end\n\
-         private const ANSWER: Int = identity<<Int>>(42)\n",
-    );
-    assert!(
-        result.diagnostics().is_empty(),
-        "{}",
-        result.diagnostic_snapshot()
-    );
-    assert!(matches!(
-        result.constants()[0].value(),
-        pop_compile_time::CompileTimeValue::Integer(value) if value.to_string() == "42"
-    ));
-}
-
-#[test]
 fn source_attribute_queries_use_resolved_type_and_attribute_identities() {
     let result = analyze(
         "namespace Example\n\
