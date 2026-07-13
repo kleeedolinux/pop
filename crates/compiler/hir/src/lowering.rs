@@ -199,6 +199,11 @@ pub fn build_hir_function_with_known_callables_and_attributes(
         bubble: context.bubble,
         visibility: context.visibility,
         name: signature.name().to_owned(),
+        type_parameters: signature
+            .type_parameters()
+            .iter()
+            .map(pop_types::ResolvedTypeParameter::type_id)
+            .collect(),
         parameters,
         results,
         body: body
@@ -509,6 +514,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
         TypedCallDispatch::DirectMethod { method, receiver } => {
             return HirCall {
                 dispatch: HirCallDispatch::DirectMethod { method: *method },
+                type_arguments: call.type_arguments().to_vec(),
                 arguments: receiver
                     .iter()
                     .map(|receiver| lower_expression(receiver, interface_slots))
@@ -532,6 +538,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                     method: *method,
                     slot: interface_slots[&(*interface, *method)],
                 },
+                type_arguments: call.type_arguments().to_vec(),
                 arguments: std::iter::once(lower_expression(receiver, interface_slots))
                     .chain(
                         call.arguments()
@@ -548,6 +555,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
     };
     HirCall {
         dispatch,
+        type_arguments: call.type_arguments().to_vec(),
         arguments: call
             .arguments()
             .iter()
@@ -755,6 +763,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Standard {
                 function: *function,
             },
+            type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -762,11 +771,13 @@ fn lower_call_expression(
         },
         TypedExpressionKind::DirectCall {
             function,
+            type_arguments,
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Direct {
                 function: *function,
             },
+            type_arguments: type_arguments.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -779,6 +790,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Referenced {
                 function: *function,
             },
+            type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -788,6 +800,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Indirect {
                 callee: Box::new(lower_expression(callee, interface_slots)),
             },
+            type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -799,6 +812,7 @@ fn lower_call_expression(
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::DirectMethod { method: *method },
+            type_arguments: Vec::new(),
             arguments: receiver
                 .iter()
                 .map(|receiver| lower_expression(receiver, interface_slots))
@@ -820,6 +834,7 @@ fn lower_call_expression(
                 method: *method,
                 slot: interface_slots[&(*interface, *method)],
             },
+            type_arguments: Vec::new(),
             arguments: std::iter::once(lower_expression(receiver, interface_slots))
                 .chain(
                     arguments

@@ -1165,7 +1165,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     ) -> Option<TypedStatementKind> {
         let scrutinee = self.check_expression(scrutinee)?;
         let definition_symbol = match self.resolver.arena().get(scrutinee.type_id()) {
-            Some(SemanticType::TaggedUnion { definition }) => *definition,
+            Some(SemanticType::TaggedUnion { .. }) => self
+                .resolver
+                .union_definition_for_type(scrutinee.type_id())?
+                .symbol(),
             _ => {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
@@ -1179,16 +1182,30 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let mut seen = BTreeMap::new();
         let mut typed_arms = Vec::new();
         for arm in arms {
-            let (arm_definition, case) = match self.lookup_union_case(arm.case_path(), arm.span()) {
-                UnionCaseLookup::Found(definition, case) => (definition, case),
-                UnionCaseLookup::Missing | UnionCaseLookup::NotUnion => continue,
-            };
+            let (arm_definition, mut case) =
+                match self.lookup_union_case(arm.case_path(), arm.span()) {
+                    UnionCaseLookup::Found(definition, case) => (definition, case),
+                    UnionCaseLookup::Missing | UnionCaseLookup::NotUnion => continue,
+                };
             if arm_definition.symbol() != definition.symbol() {
-                self.diagnostics.push(type_diagnostics::foreign_match_case(
-                    arm.span(),
-                    arm.case_path().join("."),
-                ));
-                continue;
+                if arm_definition.symbol() == self.resolver.union_source_symbol(definition.symbol())
+                {
+                    let Some(concrete_case) = definition
+                        .cases()
+                        .iter()
+                        .find(|candidate| candidate.name() == case.name())
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    case = concrete_case;
+                } else {
+                    self.diagnostics.push(type_diagnostics::foreign_match_case(
+                        arm.span(),
+                        arm.case_path().join("."),
+                    ));
+                    continue;
+                }
             }
             if let Some(original) = seen.insert(case.case(), arm.span()) {
                 self.diagnostics

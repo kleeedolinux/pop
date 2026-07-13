@@ -225,6 +225,8 @@ pub enum SemanticType {
     Record(Vec<(String, TypeId)>),
     TaggedUnion {
         definition: pop_foundation::SymbolId,
+        source: pop_foundation::SymbolId,
+        arguments: Vec<TypeId>,
     },
     Enum {
         definition: pop_foundation::SymbolId,

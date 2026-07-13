@@ -12,8 +12,9 @@ use pop_foundation::{
 };
 use pop_hir::{
     HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
-    HirDeclaration, HirDeclarationKind, HirExpression, HirExpressionKind, HirFieldValue,
-    HirFunction, HirMatchArm, HirStatement, HirStatementKind, HirTableEntry,
+    HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirExpression, HirExpressionKind,
+    HirFieldValue, HirFunction, HirMatchArm, HirStatement, HirStatementKind, HirTableEntry,
+    hir_generic_call_instances, specialize_hir_function,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
@@ -55,12 +56,17 @@ pub fn lower_hir_bubble(
     let declarations: Vec<_> = hir
         .declarations()
         .iter()
+        .filter(|declaration| match declaration.kind() {
+            HirDeclarationKind::Record(record) => !arena.contains_type_parameter(record.type_id()),
+            HirDeclarationKind::Union(union) => !arena.contains_type_parameter(union.type_id()),
+            _ => true,
+        })
         .filter_map(lower_declaration)
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
+    let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let mut nested_functions = Vec::new();
-    let mut functions: Vec<_> = hir
-        .functions()
+    let mut functions: Vec<_> = specialized_hir_functions
         .iter()
         .map(|function| {
             let (function, mut nested) =
@@ -105,6 +111,152 @@ pub fn lower_hir_bubble(
     seal_effects(&mut mir);
     verify_mir_bubble(&mir, arena)?;
     Ok(mir)
+}
+
+fn specialize_reachable_functions(
+    hir: &HirBubble,
+    arena: &TypeArena,
+) -> Result<Vec<HirFunction>, Vec<MirVerificationError>> {
+    let templates: BTreeMap<_, _> = hir
+        .functions()
+        .iter()
+        .map(|function| (function.symbol(), function))
+        .collect();
+    let mut instances = BTreeMap::new();
+    let data_symbols: BTreeMap<_, _> = hir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            HirDeclarationKind::Record(record)
+                if !arena.contains_type_parameter(record.type_id()) =>
+            {
+                Some((record.type_id(), declaration.symbol()))
+            }
+            HirDeclarationKind::Union(union) if !arena.contains_type_parameter(union.type_id()) => {
+                Some((union.type_id(), declaration.symbol()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut data_fields = BTreeMap::new();
+    for template in hir.declarations().iter().filter(|declaration| {
+        matches!(declaration.kind(), HirDeclarationKind::Record(record)
+            if arena.contains_type_parameter(record.type_id()))
+    }) {
+        let HirDeclarationKind::Record(template_record) = template.kind() else {
+            continue;
+        };
+        for instance in hir.declarations().iter().filter(|declaration| {
+            declaration.module() == template.module()
+                && declaration.name() == template.name()
+                && matches!(declaration.kind(), HirDeclarationKind::Record(record)
+                    if !arena.contains_type_parameter(record.type_id()))
+        }) {
+            let HirDeclarationKind::Record(instance_record) = instance.kind() else {
+                continue;
+            };
+            for template_field in template_record.fields() {
+                if let Some(instance_field) = instance_record
+                    .fields()
+                    .iter()
+                    .find(|field| field.name() == template_field.name())
+                {
+                    data_fields.insert(
+                        (instance_record.type_id(), template_field.field()),
+                        instance_field.field(),
+                    );
+                }
+            }
+        }
+    }
+    let data_instances = HirDataSpecialization::new(data_symbols, data_fields);
+    let mut pending = BTreeSet::new();
+    for function in hir
+        .functions()
+        .iter()
+        .filter(|function| function.type_parameters().is_empty())
+    {
+        pending.extend(hir_generic_call_instances(function));
+    }
+    let mut next_symbol = hir
+        .functions()
+        .iter()
+        .map(HirFunction::symbol)
+        .chain(hir.declarations().iter().map(HirDeclaration::symbol))
+        .chain(
+            hir.methods()
+                .iter()
+                .map(|method| method.function().symbol()),
+        )
+        .map(SymbolId::raw)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    while let Some(key) = pending.pop_first() {
+        if instances.contains_key(&key) {
+            continue;
+        }
+        let symbol = SymbolId::from_raw(next_symbol);
+        next_symbol = next_symbol.saturating_add(1);
+        instances.insert(key.clone(), symbol);
+        let Some(template) = templates.get(&key.0) else {
+            return Err(vec![MirVerificationError::UnknownGenericTemplate(key.0)]);
+        };
+        if let Some(specialized) =
+            specialize_hir_function(template, symbol, &key.1, &instances, &data_instances, arena)
+        {
+            pending.extend(hir_generic_call_instances(&specialized));
+        } else {
+            return Err(vec![MirVerificationError::InvalidGenericSpecialization(
+                key.0,
+            )]);
+        }
+        if instances.len() >= 4096 {
+            return Err(vec![
+                MirVerificationError::GenericSpecializationBudgetExceeded { limit: 4096 },
+            ]);
+        }
+    }
+    let mut specialized = Vec::new();
+    for function in hir
+        .functions()
+        .iter()
+        .filter(|function| function.type_parameters().is_empty())
+    {
+        specialized.push(
+            specialize_hir_function(
+                function,
+                function.symbol(),
+                &[],
+                &instances,
+                &data_instances,
+                arena,
+            )
+            .ok_or_else(|| {
+                vec![MirVerificationError::InvalidGenericSpecialization(
+                    function.symbol(),
+                )]
+            })?,
+        );
+    }
+    for ((source, arguments), symbol) in &instances {
+        let template = templates
+            .get(source)
+            .ok_or_else(|| vec![MirVerificationError::UnknownGenericTemplate(*source)])?;
+        specialized.push(
+            specialize_hir_function(
+                template,
+                *symbol,
+                arguments,
+                &instances,
+                &data_instances,
+                arena,
+            )
+            .ok_or_else(|| vec![MirVerificationError::InvalidGenericSpecialization(*source)])?,
+        );
+    }
+    specialized.sort_by_key(HirFunction::symbol);
+    Ok(specialized)
 }
 
 fn seal_effects(bubble: &mut MirBubble) {
@@ -1861,6 +2013,7 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::Call {
                 dispatch,
                 arguments,
+                ..
             } => self.lower_call(dispatch, arguments),
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);

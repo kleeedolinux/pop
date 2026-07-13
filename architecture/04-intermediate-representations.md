@@ -144,6 +144,12 @@ Debug:         debugValue, sourceScope
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
 
+HIR generic calls retain their ordered semantic type arguments. The bootstrap
+MIR lowering fully specializes reachable concrete functions and generic data
+representations, deduplicates equivalent instances, and emits only concrete
+call signatures and layouts. Type parameters and runtime type-argument lookup
+do not reach canonical MIR. See ADR 0050.
+
 Numeric conversion operations carry exact source and target integer/float
 kinds. Checked integer-target conversions name `NumericConversion`; float
 ordering uses ordered comparisons so NaN does not make `<=`/`>=` true. These

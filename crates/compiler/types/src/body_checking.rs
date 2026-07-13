@@ -482,6 +482,145 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
             return self.check_array_create(type_arguments, arguments, span);
         }
+        if path.len() >= 2 {
+            let type_name = path[..path.len() - 1].join(".");
+            let resolution = self.resolver.database().resolve(
+                self.module,
+                &type_name,
+                SymbolSpace::Type,
+                callee.span(),
+            );
+            if let Some(definition_symbol) = resolution.symbol()
+                && let Some(expected_arity) =
+                    self.resolver.union_type_parameter_count(definition_symbol)
+            {
+                if expected_arity != type_arguments.len() {
+                    self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                        span,
+                        &type_name,
+                        u16::try_from(expected_arity).unwrap_or(u16::MAX),
+                        type_arguments.len(),
+                    ));
+                    return None;
+                }
+                let enclosing = self.signature_stack.last().cloned()?;
+                let mut resolved_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments {
+                    let (resolved, diagnostics) =
+                        self.resolver
+                            .resolve_annotation(self.module, argument, &enclosing);
+                    self.diagnostics.extend(diagnostics);
+                    resolved_arguments.push(resolved?.type_id()?);
+                }
+                let definition = self
+                    .resolver
+                    .instantiate_union(definition_symbol, &resolved_arguments)?;
+                let case_name = path.last()?;
+                let Some(case) = definition
+                    .cases()
+                    .iter()
+                    .find(|case| case.name() == case_name)
+                    .cloned()
+                else {
+                    self.diagnostics
+                        .push(resolution_diagnostics::unknown_name(span, path.join(".")));
+                    return None;
+                };
+                return self.check_union_case_call(&definition, &case, arguments, span);
+            }
+        }
+        let name = path.join(".");
+        let resolution =
+            self.resolver
+                .database()
+                .resolve(self.module, &name, SymbolSpace::Value, callee.span());
+        if let Some(symbol) = resolution.symbol()
+            && let Some(signature) = self.signatures.get(&symbol).cloned()
+        {
+            if signature.type_parameters().len() != type_arguments.len() {
+                self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                    span,
+                    &name,
+                    u16::try_from(signature.type_parameters().len()).unwrap_or(u16::MAX),
+                    type_arguments.len(),
+                ));
+                return None;
+            }
+            if signature.parameters().len() != arguments.len() {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    span,
+                    &name,
+                    signature.parameters().len(),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let enclosing = self.signature_stack.last().cloned()?;
+            let mut resolved_arguments = Vec::with_capacity(type_arguments.len());
+            for argument in type_arguments {
+                let (resolved, diagnostics) =
+                    self.resolver
+                        .resolve_annotation(self.module, argument, &enclosing);
+                self.diagnostics.extend(diagnostics);
+                resolved_arguments.push(resolved?.type_id()?);
+            }
+            let substitutions: BTreeMap<_, _> = signature
+                .type_parameters()
+                .iter()
+                .zip(&resolved_arguments)
+                .map(|(parameter, argument)| (parameter.parameter(), *argument))
+                .collect();
+            let parameter_types = signature
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    self.resolver.substitute_type_parameters(
+                        parameter.parameter_type().type_id()?,
+                        &substitutions,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let result_types = signature
+                .results()
+                .iter()
+                .map(|result| {
+                    self.resolver
+                        .substitute_type_parameters(result.type_id()?, &substitutions)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut typed_arguments = Vec::with_capacity(arguments.len());
+            for (argument, parameter_type) in arguments.iter().zip(parameter_types) {
+                let typed = self.check_expression_expected(
+                    argument,
+                    Some(ExpectedExpressionType::plain(parameter_type)),
+                )?;
+                self.require_same_type(
+                    parameter_type,
+                    typed.type_id(),
+                    typed.span(),
+                    argument.span(),
+                );
+                typed_arguments.push(typed);
+            }
+            let dispatch = self
+                .resolver
+                .database()
+                .index()
+                .declaration(symbol)
+                .and_then(pop_resolve::Declaration::reference_identity)
+                .map_or(TypedCallDispatch::Direct { function: symbol }, |function| {
+                    TypedCallDispatch::Referenced { function }
+                });
+            return self.checked_call_expression(CheckedCall {
+                call: TypedCall {
+                    dispatch,
+                    type_arguments: resolved_arguments,
+                    arguments: typed_arguments,
+                    span,
+                },
+                results: result_types,
+            });
+        }
         let [query] = path.as_slice() else {
             self.diagnostics.push(resolution_diagnostics::unknown_name(
                 callee.span(),

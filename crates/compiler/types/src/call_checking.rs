@@ -128,6 +128,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(CheckedInvocation::Call(CheckedCall {
             call: TypedCall {
                 dispatch,
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -495,6 +496,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 dispatch: TypedCallDispatch::Standard {
                     function: *function,
                 },
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -657,6 +659,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     method: method.method(),
                     receiver: Box::new(receiver),
                 },
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -702,6 +705,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     method: method.method(),
                     receiver: receiver.map(Box::new),
                 },
+                type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
             },
@@ -725,6 +729,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let result_type = checked.results[0];
         let TypedCall {
             dispatch,
+            type_arguments,
             arguments,
             span,
         } = checked.call;
@@ -735,6 +740,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             TypedCallDispatch::Direct { function } => TypedExpressionKind::DirectCall {
                 function,
+                type_arguments,
                 arguments,
             },
             TypedCallDispatch::Referenced { function } => TypedExpressionKind::ReferencedCall {

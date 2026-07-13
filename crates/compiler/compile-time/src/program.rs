@@ -502,7 +502,7 @@ pub(crate) fn value_matches_type(
                 case,
                 arguments,
             },
-            Some(SemanticType::TaggedUnion { definition }),
+            Some(SemanticType::TaggedUnion { definition, .. }),
         ) => {
             let Some(argument_types) = metadata.union_case(*union, *case) else {
                 return false;

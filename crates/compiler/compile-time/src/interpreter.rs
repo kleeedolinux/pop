@@ -722,7 +722,7 @@ impl<'program> CompileTimeInterpreter<'program> {
                     self.record_type_dependency(field_type);
                 }
             }
-            SemanticType::TaggedUnion { definition } => {
+            SemanticType::TaggedUnion { definition, .. } => {
                 self.dependencies
                     .insert(CompileTimeDependency::Symbol(definition));
             }

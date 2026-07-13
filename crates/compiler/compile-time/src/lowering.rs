@@ -267,6 +267,7 @@ impl TypedCompileTimeLowerer<'_> {
             TypedExpressionKind::DirectCall {
                 function,
                 arguments,
+                ..
             } => Ok(CompileTimeExpression::call(
                 FunctionId::from_raw(function.raw()),
                 arguments

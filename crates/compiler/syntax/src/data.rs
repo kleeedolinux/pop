@@ -5,13 +5,14 @@ use crate::attribute::parse_attribute_use_prefix;
 use crate::body::parse_expression_prefix;
 use crate::signature::parse_type_prefix;
 use crate::{
-    AttributeUseSyntax, ExpressionSyntax, NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind,
-    TypeSyntax,
+    AttributeUseSyntax, ExpressionSyntax, GenericParameterSyntax, NodeKind, SyntaxNode, SyntaxTree,
+    Token, TokenKind, TypeSyntax,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordDeclarationSyntax {
     name: String,
+    type_parameters: Vec<GenericParameterSyntax>,
     fields: Vec<RecordFieldSyntax>,
     span: SourceSpan,
 }
@@ -20,6 +21,11 @@ impl RecordDeclarationSyntax {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[GenericParameterSyntax] {
+        &self.type_parameters
     }
 
     #[must_use]
@@ -71,6 +77,7 @@ impl RecordFieldSyntax {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnionDeclarationSyntax {
     name: String,
+    type_parameters: Vec<GenericParameterSyntax>,
     cases: Vec<UnionCaseSyntax>,
     span: SourceSpan,
 }
@@ -127,6 +134,11 @@ impl UnionDeclarationSyntax {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[GenericParameterSyntax] {
+        &self.type_parameters
     }
 
     #[must_use]
@@ -228,6 +240,7 @@ pub fn parse_record_declaration(
     parser.seek(TokenKind::Record)?;
     let name_token = parser.expect(TokenKind::Identifier, "record name")?;
     let name = name_token.text(source).to_owned();
+    let type_parameters = parser.parse_type_parameters()?;
     parser.expect(TokenKind::Newline, "line break after record name")?;
     let mut fields = Vec::new();
     loop {
@@ -263,6 +276,7 @@ pub fn parse_record_declaration(
     }
     Ok(RecordDeclarationSyntax {
         name,
+        type_parameters,
         fields,
         span: SourceSpan::new(source.id(), node.range()),
     })
@@ -285,6 +299,7 @@ pub fn parse_union_declaration(
     parser.seek(TokenKind::Union)?;
     let name_token = parser.expect(TokenKind::Identifier, "union name")?;
     let name = name_token.text(source).to_owned();
+    let type_parameters = parser.parse_type_parameters()?;
     parser.expect(TokenKind::Newline, "line break after union name")?;
     let mut cases = Vec::new();
     loop {
@@ -329,6 +344,7 @@ pub fn parse_union_declaration(
     }
     Ok(UnionDeclarationSyntax {
         name,
+        type_parameters,
         cases,
         span: SourceSpan::new(source.id(), node.range()),
     })
@@ -408,6 +424,27 @@ impl<'source> DataParser<'source> {
             tokens,
             position: 0,
         }
+    }
+
+    fn parse_type_parameters(
+        &mut self,
+    ) -> Result<Vec<GenericParameterSyntax>, DataDeclarationError> {
+        if self.consume(TokenKind::LessThan).is_none() {
+            return Ok(Vec::new());
+        }
+        let mut parameters = Vec::new();
+        loop {
+            let token = self.expect(TokenKind::Identifier, "type parameter")?;
+            parameters.push(GenericParameterSyntax::new(
+                token.text(self.source).to_owned(),
+                SourceSpan::new(self.file, token.range()),
+            ));
+            if self.consume(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::GreaterThan, "`>`")?;
+        Ok(parameters)
     }
 
     fn parse_type(&mut self) -> Result<TypeSyntax, DataDeclarationError> {

@@ -168,7 +168,6 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             })
         })
         .collect();
-    declarations = refresh_declarations(declarations, &resolver);
     let (hir_functions, hir_methods, hir_build_failed) = build_runtime_hir(
         input.bubble,
         &mut functions,
@@ -178,6 +177,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
+    declarations = refresh_declarations(declarations, &resolver);
     sort_diagnostics(&mut diagnostics);
     let hir = if diagnostics.is_empty() && !hir_build_failed {
         HirBubble::new_with_declarations_and_methods(
@@ -1004,41 +1004,91 @@ fn refresh_declarations(
 ) -> Vec<HirDeclaration> {
     declarations
         .into_iter()
-        .map(|declaration| {
+        .flat_map(|declaration| {
             if matches!(declaration.kind(), HirDeclarationKind::Attribute(_)) {
                 if let Some(definition) = resolver.attribute_definition(declaration.symbol()) {
-                    return HirDeclaration::attribute(
+                    return vec![HirDeclaration::attribute(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),
                         declaration.name(),
                         definition,
-                    );
+                    )];
                 }
             }
             if matches!(declaration.kind(), HirDeclarationKind::Record(_)) {
+                if resolver.record_is_generic(declaration.symbol()) {
+                    let mut refreshed = resolver
+                        .record_instances(declaration.symbol())
+                        .map(|definition| {
+                            HirDeclaration::record(
+                                declaration.module(),
+                                declaration.bubble(),
+                                declaration.visibility(),
+                                declaration.name(),
+                                definition,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(template) = resolver.record_definition(declaration.symbol()) {
+                        refreshed.push(HirDeclaration::record(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            template,
+                        ));
+                    }
+                    return refreshed;
+                }
                 if let Some(definition) = resolver.record_definition(declaration.symbol()) {
-                    return HirDeclaration::record(
+                    return vec![HirDeclaration::record(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),
                         declaration.name(),
                         definition,
-                    );
+                    )];
                 }
+            }
+            if matches!(declaration.kind(), HirDeclarationKind::Union(_))
+                && resolver.union_is_generic(declaration.symbol())
+            {
+                let mut refreshed = resolver
+                    .union_instances(declaration.symbol())
+                    .map(|definition| {
+                        HirDeclaration::tagged_union(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            definition,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(template) = resolver.union_definition(declaration.symbol()) {
+                    refreshed.push(HirDeclaration::tagged_union(
+                        declaration.module(),
+                        declaration.bubble(),
+                        declaration.visibility(),
+                        declaration.name(),
+                        template,
+                    ));
+                }
+                return refreshed;
             }
             if matches!(declaration.kind(), HirDeclarationKind::Class(_)) {
                 if let Some(definition) = resolver.class_definition(declaration.symbol()) {
-                    return HirDeclaration::class(
+                    return vec![HirDeclaration::class(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),
                         declaration.name(),
                         definition,
-                    );
+                    )];
                 }
             }
-            declaration
+            vec![declaration]
         })
         .collect()
 }

@@ -117,7 +117,9 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 
 ## Milestone 5 — Language depth
 
-- generics and specialization strategy;
+- typed generic code sharing, portable generic reference metadata, and
+  specialization policy beyond the accepted bootstrap full-specialization
+  subset;
 - error handling;
 - coroutines/async model;
 - FFI;

@@ -1172,6 +1172,7 @@ pub struct HirFunction {
     pub(crate) bubble: BubbleId,
     pub(crate) visibility: Visibility,
     pub(crate) name: String,
+    pub(crate) type_parameters: Vec<TypeId>,
     pub(crate) parameters: Vec<HirParameter>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) body: Vec<HirStatement>,
@@ -1211,6 +1212,11 @@ impl HirFunction {
     }
 
     #[must_use]
+    pub fn type_parameters(&self) -> &[TypeId] {
+        &self.type_parameters
+    }
+
+    #[must_use]
     pub fn parameters(&self) -> &[HirParameter] {
         &self.parameters
     }
@@ -1234,6 +1240,884 @@ impl HirFunction {
     pub fn attributes(&self) -> &[HirAttribute] {
         &self.attributes
     }
+}
+
+/// Produces one concrete HIR callable instance while retaining only static
+/// type information. MIR lowering uses this as its initial full-specialization
+/// strategy; no runtime type argument is introduced.
+#[must_use]
+pub struct HirDataSpecialization {
+    symbols: std::collections::BTreeMap<TypeId, SymbolId>,
+    fields: std::collections::BTreeMap<(TypeId, FieldId), FieldId>,
+}
+
+impl HirDataSpecialization {
+    #[must_use]
+    pub fn new(
+        symbols: std::collections::BTreeMap<TypeId, SymbolId>,
+        fields: std::collections::BTreeMap<(TypeId, FieldId), FieldId>,
+    ) -> Self {
+        Self { symbols, fields }
+    }
+
+    fn symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        self.symbols.get(&type_id).copied()
+    }
+
+    fn field(&self, type_id: TypeId, field: FieldId) -> FieldId {
+        self.fields.get(&(type_id, field)).copied().unwrap_or(field)
+    }
+}
+
+#[must_use]
+pub fn specialize_hir_function(
+    function: &HirFunction,
+    symbol: SymbolId,
+    type_arguments: &[TypeId],
+    instances: &std::collections::BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    data_instances: &HirDataSpecialization,
+    arena: &pop_types::TypeArena,
+) -> Option<HirFunction> {
+    if function.type_parameters.len() != type_arguments.len() {
+        return None;
+    }
+    let substitutions: std::collections::BTreeMap<_, _> = function
+        .type_parameters
+        .iter()
+        .zip(type_arguments)
+        .map(|(parameter, argument)| match arena.get(*parameter) {
+            Some(pop_types::SemanticType::TypeParameter(parameter)) => {
+                Some((*parameter, *argument))
+            }
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let mut specialized = function.clone();
+    specialized.symbol = symbol;
+    specialized.function = FunctionId::from_raw(symbol.raw());
+    specialized.type_parameters.clear();
+    for parameter in &mut specialized.parameters {
+        parameter.type_id = arena.substitute_existing(parameter.type_id, &substitutions)?;
+    }
+    for result in &mut specialized.results {
+        *result = arena.substitute_existing(*result, &substitutions)?;
+    }
+    for statement in &mut specialized.body {
+        specialize_statement(statement, &substitutions, instances, arena)?;
+    }
+    remap_aggregate_statements(&mut specialized.body, data_instances);
+    Some(specialized)
+}
+
+fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDataSpecialization) {
+    for statement in statements {
+        match &mut statement.kind {
+            HirStatementKind::Local { initializer, .. } => {
+                remap_aggregate_expression(initializer, instances)
+            }
+            HirStatementKind::MultipleLocal { value, .. }
+            | HirStatementKind::LocalSet { value, .. }
+            | HirStatementKind::ParameterSet { value, .. }
+            | HirStatementKind::CaptureSet { value, .. }
+            | HirStatementKind::Expression(value) => remap_aggregate_expression(value, instances),
+            HirStatementKind::Return { values } => {
+                for value in values {
+                    remap_aggregate_expression(value, instances);
+                }
+            }
+            HirStatementKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                remap_aggregate_expression(condition, instances);
+                remap_aggregate_statements(then_body, instances);
+                remap_aggregate_statements(else_body, instances);
+            }
+            HirStatementKind::While { condition, body } => {
+                remap_aggregate_expression(condition, instances);
+                remap_aggregate_statements(body, instances);
+            }
+            HirStatementKind::RepeatUntil { body, condition } => {
+                remap_aggregate_statements(body, instances);
+                remap_aggregate_expression(condition, instances);
+            }
+            HirStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => {
+                remap_aggregate_expression(first, instances);
+                remap_aggregate_expression(last, instances);
+                remap_aggregate_expression(step, instances);
+                remap_aggregate_statements(body, instances);
+            }
+            HirStatementKind::Break | HirStatementKind::Continue => {}
+            HirStatementKind::Match {
+                scrutinee,
+                union,
+                arms,
+            } => {
+                remap_aggregate_expression(scrutinee, instances);
+                if let Some(instance) = instances.symbol(scrutinee.type_id()) {
+                    *union = instance;
+                }
+                for arm in arms {
+                    if let Some(instance) = instances.symbol(scrutinee.type_id()) {
+                        arm.union = instance;
+                    }
+                    remap_aggregate_statements(&mut arm.body, instances);
+                }
+            }
+            HirStatementKind::FieldSet { base, field, value } => {
+                remap_aggregate_expression(base, instances);
+                *field = instances.field(base.type_id(), *field);
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::CompoundFieldSet {
+                base, field, value, ..
+            } => {
+                remap_aggregate_expression(base, instances);
+                *field = instances.field(base.type_id(), *field);
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::ArraySet {
+                array,
+                index,
+                value,
+            }
+            | HirStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                remap_aggregate_expression(array, instances);
+                remap_aggregate_expression(index, instances);
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::TableSet { table, key, value } => {
+                remap_aggregate_expression(table, instances);
+                remap_aggregate_expression(key, instances);
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::MultipleAssignment { targets, value } => {
+                for target in targets {
+                    match target {
+                        HirAssignmentTarget::Local { .. } | HirAssignmentTarget::Capture { .. } => {
+                        }
+                        HirAssignmentTarget::Field { base, field, .. } => {
+                            remap_aggregate_expression(base, instances);
+                            *field = instances.field(base.type_id(), *field);
+                        }
+                        HirAssignmentTarget::Array { array, index, .. } => {
+                            remap_aggregate_expression(array, instances);
+                            remap_aggregate_expression(index, instances);
+                        }
+                        HirAssignmentTarget::Table { table, key, .. } => {
+                            remap_aggregate_expression(table, instances);
+                            remap_aggregate_expression(key, instances);
+                        }
+                    }
+                }
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::Call(call) => {
+                for argument in &mut call.arguments {
+                    remap_aggregate_expression(argument, instances);
+                }
+            }
+        }
+    }
+}
+
+fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDataSpecialization) {
+    match &mut expression.kind {
+        HirExpressionKind::Closure(closure) => {
+            remap_aggregate_statements(&mut closure.body, instances)
+        }
+        HirExpressionKind::Field { base, field } => {
+            remap_aggregate_expression(base, instances);
+            *field = instances.field(base.type_id(), *field);
+        }
+        HirExpressionKind::TupleGet { tuple: base, .. }
+        | HirExpressionKind::InterfaceUpcast { value: base, .. }
+        | HirExpressionKind::NumericConvert { value: base, .. }
+        | HirExpressionKind::StringFormat { value: base, .. }
+        | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::ArrayLength { array: base } => {
+            remap_aggregate_expression(base, instances)
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            remap_aggregate_expression(table, instances);
+            remap_aggregate_expression(key, instances);
+        }
+        HirExpressionKind::ArrayGet { array, index }
+        | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::Binary {
+            left: array,
+            right: index,
+            ..
+        }
+        | HirExpressionKind::StringConcat {
+            left: array,
+            right: index,
+        } => {
+            remap_aggregate_expression(array, instances);
+            remap_aggregate_expression(index, instances);
+        }
+        HirExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            remap_aggregate_expression(length, instances);
+            remap_aggregate_expression(initial_value, instances);
+        }
+        HirExpressionKind::ArrayFill { array, value } => {
+            remap_aggregate_expression(array, instances);
+            remap_aggregate_expression(value, instances);
+        }
+        HirExpressionKind::Record { record, fields } => {
+            if let Some(instance) = instances.symbol(expression.type_id) {
+                *record = instance;
+            }
+            for field in fields {
+                field.field = instances.field(expression.type_id, field.field);
+                remap_aggregate_expression(&mut field.value, instances);
+            }
+        }
+        HirExpressionKind::ClassConstruct { fields, .. } => {
+            for field in fields {
+                remap_aggregate_expression(&mut field.value, instances);
+            }
+        }
+        HirExpressionKind::RecordUpdate {
+            record,
+            base,
+            fields,
+        } => {
+            if let Some(instance) = instances.symbol(expression.type_id) {
+                *record = instance;
+            }
+            remap_aggregate_expression(base, instances);
+            for field in fields {
+                field.field = instances.field(expression.type_id, field.field);
+                remap_aggregate_expression(&mut field.value, instances);
+            }
+        }
+        HirExpressionKind::UnionCase {
+            union, arguments, ..
+        } => {
+            if let Some(instance) = instances.symbol(expression.type_id) {
+                *union = instance;
+            }
+            for argument in arguments {
+                remap_aggregate_expression(argument, instances);
+            }
+        }
+        HirExpressionKind::Array(values) | HirExpressionKind::Tuple(values) => {
+            for value in values {
+                remap_aggregate_expression(value, instances);
+            }
+        }
+        HirExpressionKind::Table(entries) => {
+            for entry in entries {
+                remap_aggregate_expression(&mut entry.key, instances);
+                remap_aggregate_expression(&mut entry.value, instances);
+            }
+        }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            remap_aggregate_expression(condition, instances);
+            remap_aggregate_expression(when_true, instances);
+            remap_aggregate_expression(when_false, instances);
+        }
+        HirExpressionKind::Call { arguments, .. } => {
+            for argument in arguments {
+                remap_aggregate_expression(argument, instances);
+            }
+        }
+        HirExpressionKind::Integer(_)
+        | HirExpressionKind::Float(_)
+        | HirExpressionKind::String(_)
+        | HirExpressionKind::Boolean(_)
+        | HirExpressionKind::Nil
+        | HirExpressionKind::Local(_)
+        | HirExpressionKind::Parameter(_)
+        | HirExpressionKind::Capture(_)
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::EnumCase { .. } => {}
+    }
+}
+
+#[must_use]
+pub fn hir_generic_call_instances(function: &HirFunction) -> Vec<(SymbolId, Vec<TypeId>)> {
+    let mut calls = Vec::new();
+    collect_statement_calls(&function.body, &mut calls);
+    calls.sort();
+    calls.dedup();
+    calls
+}
+
+fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolId, Vec<TypeId>)>) {
+    for statement in statements {
+        match statement.kind() {
+            HirStatementKind::Local { initializer, .. } => {
+                collect_expression_calls(initializer, calls)
+            }
+            HirStatementKind::MultipleLocal { value, .. }
+            | HirStatementKind::LocalSet { value, .. }
+            | HirStatementKind::ParameterSet { value, .. }
+            | HirStatementKind::CaptureSet { value, .. }
+            | HirStatementKind::Expression(value) => collect_expression_calls(value, calls),
+            HirStatementKind::Return { values } => {
+                for value in values {
+                    collect_expression_calls(value, calls);
+                }
+            }
+            HirStatementKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                collect_expression_calls(condition, calls);
+                collect_statement_calls(then_body, calls);
+                collect_statement_calls(else_body, calls);
+            }
+            HirStatementKind::While { condition, body } => {
+                collect_expression_calls(condition, calls);
+                collect_statement_calls(body, calls);
+            }
+            HirStatementKind::RepeatUntil { body, condition } => {
+                collect_statement_calls(body, calls);
+                collect_expression_calls(condition, calls);
+            }
+            HirStatementKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => {
+                collect_expression_calls(first, calls);
+                collect_expression_calls(last, calls);
+                collect_expression_calls(step, calls);
+                collect_statement_calls(body, calls);
+            }
+            HirStatementKind::Break | HirStatementKind::Continue => {}
+            HirStatementKind::Match {
+                scrutinee, arms, ..
+            } => {
+                collect_expression_calls(scrutinee, calls);
+                for arm in arms {
+                    collect_statement_calls(arm.body(), calls);
+                }
+            }
+            HirStatementKind::FieldSet { base, value, .. }
+            | HirStatementKind::CompoundFieldSet { base, value, .. } => {
+                collect_expression_calls(base, calls);
+                collect_expression_calls(value, calls);
+            }
+            HirStatementKind::ArraySet {
+                array,
+                index,
+                value,
+            }
+            | HirStatementKind::CompoundArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                collect_expression_calls(array, calls);
+                collect_expression_calls(index, calls);
+                collect_expression_calls(value, calls);
+            }
+            HirStatementKind::TableSet { table, key, value } => {
+                collect_expression_calls(table, calls);
+                collect_expression_calls(key, calls);
+                collect_expression_calls(value, calls);
+            }
+            HirStatementKind::MultipleAssignment { targets, value } => {
+                for target in targets {
+                    match target {
+                        HirAssignmentTarget::Local { .. } | HirAssignmentTarget::Capture { .. } => {
+                        }
+                        HirAssignmentTarget::Field { base, .. } => {
+                            collect_expression_calls(base, calls)
+                        }
+                        HirAssignmentTarget::Array { array, index, .. } => {
+                            collect_expression_calls(array, calls);
+                            collect_expression_calls(index, calls);
+                        }
+                        HirAssignmentTarget::Table { table, key, .. } => {
+                            collect_expression_calls(table, calls);
+                            collect_expression_calls(key, calls);
+                        }
+                    }
+                }
+                collect_expression_calls(value, calls);
+            }
+            HirStatementKind::Call(call) => {
+                if let HirCallDispatch::Direct { function } = call.dispatch()
+                    && !call.type_arguments().is_empty()
+                {
+                    calls.push((*function, call.type_arguments().to_vec()));
+                }
+                for argument in call.arguments() {
+                    collect_expression_calls(argument, calls);
+                }
+            }
+        }
+    }
+}
+
+fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolId, Vec<TypeId>)>) {
+    match expression.kind() {
+        HirExpressionKind::Closure(closure) => collect_statement_calls(closure.body(), calls),
+        HirExpressionKind::Field { base, .. }
+        | HirExpressionKind::TupleGet { tuple: base, .. }
+        | HirExpressionKind::InterfaceUpcast { value: base, .. }
+        | HirExpressionKind::NumericConvert { value: base, .. }
+        | HirExpressionKind::StringFormat { value: base, .. }
+        | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::ArrayLength { array: base } => collect_expression_calls(base, calls),
+        HirExpressionKind::TableGet { table, key } => {
+            collect_expression_calls(table, calls);
+            collect_expression_calls(key, calls);
+        }
+        HirExpressionKind::ArrayGet { array, index }
+        | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::Binary {
+            left: array,
+            right: index,
+            ..
+        }
+        | HirExpressionKind::StringConcat {
+            left: array,
+            right: index,
+        } => {
+            collect_expression_calls(array, calls);
+            collect_expression_calls(index, calls);
+        }
+        HirExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            collect_expression_calls(length, calls);
+            collect_expression_calls(initial_value, calls);
+        }
+        HirExpressionKind::ArrayFill { array, value } => {
+            collect_expression_calls(array, calls);
+            collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::Record { fields, .. }
+        | HirExpressionKind::ClassConstruct { fields, .. } => {
+            for field in fields {
+                collect_expression_calls(field.value(), calls);
+            }
+        }
+        HirExpressionKind::RecordUpdate { base, fields, .. } => {
+            collect_expression_calls(base, calls);
+            for field in fields {
+                collect_expression_calls(field.value(), calls);
+            }
+        }
+        HirExpressionKind::Array(values)
+        | HirExpressionKind::Tuple(values)
+        | HirExpressionKind::UnionCase {
+            arguments: values, ..
+        } => {
+            for value in values {
+                collect_expression_calls(value, calls);
+            }
+        }
+        HirExpressionKind::Table(entries) => {
+            for entry in entries {
+                collect_expression_calls(entry.key(), calls);
+                collect_expression_calls(entry.value(), calls);
+            }
+        }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_expression_calls(condition, calls);
+            collect_expression_calls(when_true, calls);
+            collect_expression_calls(when_false, calls);
+        }
+        HirExpressionKind::Call {
+            dispatch,
+            type_arguments,
+            arguments,
+        } => {
+            if let HirCallDispatch::Direct { function } = dispatch
+                && !type_arguments.is_empty()
+            {
+                calls.push((*function, type_arguments.clone()));
+            }
+            for argument in arguments {
+                collect_expression_calls(argument, calls);
+            }
+        }
+        HirExpressionKind::Integer(_)
+        | HirExpressionKind::Float(_)
+        | HirExpressionKind::String(_)
+        | HirExpressionKind::Boolean(_)
+        | HirExpressionKind::Nil
+        | HirExpressionKind::Local(_)
+        | HirExpressionKind::Parameter(_)
+        | HirExpressionKind::Capture(_)
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::EnumCase { .. } => {}
+    }
+}
+
+fn specialize_type(
+    type_id: &mut TypeId,
+    substitutions: &std::collections::BTreeMap<pop_foundation::ParameterId, TypeId>,
+    arena: &pop_types::TypeArena,
+) -> Option<()> {
+    *type_id = arena.substitute_existing(*type_id, substitutions)?;
+    Some(())
+}
+
+fn specialize_statements(
+    statements: &mut [HirStatement],
+    substitutions: &std::collections::BTreeMap<pop_foundation::ParameterId, TypeId>,
+    instances: &std::collections::BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    arena: &pop_types::TypeArena,
+) -> Option<()> {
+    for statement in statements {
+        specialize_statement(statement, substitutions, instances, arena)?;
+    }
+    Some(())
+}
+
+fn specialize_statement(
+    statement: &mut HirStatement,
+    substitutions: &std::collections::BTreeMap<pop_foundation::ParameterId, TypeId>,
+    instances: &std::collections::BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    arena: &pop_types::TypeArena,
+) -> Option<()> {
+    match &mut statement.kind {
+        HirStatementKind::Local {
+            local_type,
+            initializer,
+            ..
+        } => {
+            specialize_type(local_type, substitutions, arena)?;
+            specialize_expression(initializer, substitutions, instances, arena)?;
+        }
+        HirStatementKind::MultipleLocal { bindings, value } => {
+            for binding in bindings {
+                specialize_type(&mut binding.local_type, substitutions, arena)?;
+            }
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::LocalSet { value, .. }
+        | HirStatementKind::ParameterSet { value, .. }
+        | HirStatementKind::CaptureSet { value, .. }
+        | HirStatementKind::Expression(value) => {
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::Return { values } => {
+            for value in values {
+                specialize_expression(value, substitutions, instances, arena)?;
+            }
+        }
+        HirStatementKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            specialize_expression(condition, substitutions, instances, arena)?;
+            specialize_statements(then_body, substitutions, instances, arena)?;
+            specialize_statements(else_body, substitutions, instances, arena)?;
+        }
+        HirStatementKind::While { condition, body } => {
+            specialize_expression(condition, substitutions, instances, arena)?;
+            specialize_statements(body, substitutions, instances, arena)?;
+        }
+        HirStatementKind::RepeatUntil { body, condition } => {
+            specialize_statements(body, substitutions, instances, arena)?;
+            specialize_expression(condition, substitutions, instances, arena)?;
+        }
+        HirStatementKind::NumericFor {
+            integer_type,
+            first,
+            last,
+            step,
+            body,
+            ..
+        } => {
+            specialize_type(integer_type, substitutions, arena)?;
+            specialize_expression(first, substitutions, instances, arena)?;
+            specialize_expression(last, substitutions, instances, arena)?;
+            specialize_expression(step, substitutions, instances, arena)?;
+            specialize_statements(body, substitutions, instances, arena)?;
+        }
+        HirStatementKind::Break | HirStatementKind::Continue => {}
+        HirStatementKind::Match {
+            scrutinee, arms, ..
+        } => {
+            specialize_expression(scrutinee, substitutions, instances, arena)?;
+            for arm in arms {
+                for binding in &mut arm.bindings {
+                    specialize_type(&mut binding.type_id, substitutions, arena)?;
+                }
+                specialize_statements(&mut arm.body, substitutions, instances, arena)?;
+            }
+        }
+        HirStatementKind::FieldSet { base, value, .. } => {
+            specialize_expression(base, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::CompoundFieldSet {
+            base,
+            value_type,
+            value,
+            ..
+        } => {
+            specialize_type(value_type, substitutions, arena)?;
+            specialize_expression(base, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::ArraySet {
+            array,
+            index,
+            value,
+        } => {
+            specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::CompoundArraySet {
+            array,
+            index,
+            element_type,
+            value,
+            ..
+        } => {
+            specialize_type(element_type, substitutions, arena)?;
+            specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::TableSet { table, key, value } => {
+            specialize_expression(table, substitutions, instances, arena)?;
+            specialize_expression(key, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::MultipleAssignment { targets, value } => {
+            for target in targets {
+                specialize_assignment_target(target, substitutions, instances, arena)?;
+            }
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirStatementKind::Call(call) => specialize_call(call, substitutions, instances, arena)?,
+    }
+    Some(())
+}
+
+fn specialize_assignment_target(
+    target: &mut HirAssignmentTarget,
+    substitutions: &std::collections::BTreeMap<pop_foundation::ParameterId, TypeId>,
+    instances: &std::collections::BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    arena: &pop_types::TypeArena,
+) -> Option<()> {
+    match target {
+        HirAssignmentTarget::Local { value_type, .. }
+        | HirAssignmentTarget::Capture { value_type, .. } => {
+            specialize_type(value_type, substitutions, arena)?;
+        }
+        HirAssignmentTarget::Field {
+            base, value_type, ..
+        } => {
+            specialize_type(value_type, substitutions, arena)?;
+            specialize_expression(base, substitutions, instances, arena)?;
+        }
+        HirAssignmentTarget::Array {
+            array,
+            index,
+            element_type,
+        } => {
+            specialize_type(element_type, substitutions, arena)?;
+            specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+        }
+        HirAssignmentTarget::Table {
+            table,
+            key,
+            value_type,
+        } => {
+            specialize_type(value_type, substitutions, arena)?;
+            specialize_expression(table, substitutions, instances, arena)?;
+            specialize_expression(key, substitutions, instances, arena)?;
+        }
+    }
+    Some(())
+}
+
+fn specialize_call(
+    call: &mut HirCall,
+    substitutions: &std::collections::BTreeMap<pop_foundation::ParameterId, TypeId>,
+    instances: &std::collections::BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    arena: &pop_types::TypeArena,
+) -> Option<()> {
+    for argument in &mut call.type_arguments {
+        specialize_type(argument, substitutions, arena)?;
+    }
+    if let HirCallDispatch::Direct { function } = &mut call.dispatch
+        && !call.type_arguments.is_empty()
+        && let Some(instance) = instances.get(&(*function, call.type_arguments.clone()))
+    {
+        *function = *instance;
+        call.type_arguments.clear();
+    }
+    if let HirCallDispatch::Indirect { callee } = &mut call.dispatch {
+        specialize_expression(callee, substitutions, instances, arena)?;
+    }
+    for argument in &mut call.arguments {
+        specialize_expression(argument, substitutions, instances, arena)?;
+    }
+    Some(())
+}
+
+fn specialize_expression(
+    expression: &mut HirExpression,
+    substitutions: &std::collections::BTreeMap<pop_foundation::ParameterId, TypeId>,
+    instances: &std::collections::BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    arena: &pop_types::TypeArena,
+) -> Option<()> {
+    specialize_type(&mut expression.type_id, substitutions, arena)?;
+    match &mut expression.kind {
+        HirExpressionKind::Closure(closure) => {
+            for parameter in &mut closure.parameters {
+                specialize_type(&mut parameter.type_id, substitutions, arena)?;
+            }
+            for result in &mut closure.results {
+                specialize_type(result, substitutions, arena)?;
+            }
+            for capture in &mut closure.captures {
+                specialize_type(&mut capture.type_id, substitutions, arena)?;
+            }
+            specialize_statements(&mut closure.body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::Field { base, .. }
+        | HirExpressionKind::TupleGet { tuple: base, .. }
+        | HirExpressionKind::InterfaceUpcast { value: base, .. }
+        | HirExpressionKind::NumericConvert { value: base, .. }
+        | HirExpressionKind::StringFormat { value: base, .. }
+        | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::ArrayLength { array: base } => {
+            specialize_expression(base, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            specialize_expression(table, substitutions, instances, arena)?;
+            specialize_expression(key, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::ArrayGet { array, index }
+        | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::Binary {
+            left: array,
+            right: index,
+            ..
+        }
+        | HirExpressionKind::StringConcat {
+            left: array,
+            right: index,
+        } => {
+            specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::ArrayCreate {
+            length,
+            initial_value,
+        } => {
+            specialize_expression(length, substitutions, instances, arena)?;
+            specialize_expression(initial_value, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::ArrayFill { array, value } => {
+            specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::Record { fields, .. }
+        | HirExpressionKind::ClassConstruct { fields, .. } => {
+            for field in fields {
+                specialize_expression(&mut field.value, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::RecordUpdate { base, fields, .. } => {
+            specialize_expression(base, substitutions, instances, arena)?;
+            for field in fields {
+                specialize_expression(&mut field.value, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::Array(values)
+        | HirExpressionKind::Tuple(values)
+        | HirExpressionKind::UnionCase {
+            arguments: values, ..
+        } => {
+            for value in values {
+                specialize_expression(value, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::Table(entries) => {
+            for entry in entries {
+                specialize_expression(&mut entry.key, substitutions, instances, arena)?;
+                specialize_expression(&mut entry.value, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            specialize_expression(condition, substitutions, instances, arena)?;
+            specialize_expression(when_true, substitutions, instances, arena)?;
+            specialize_expression(when_false, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::Call {
+            dispatch,
+            type_arguments,
+            arguments,
+        } => {
+            for argument in type_arguments.iter_mut() {
+                specialize_type(argument, substitutions, arena)?;
+            }
+            if let HirCallDispatch::Direct { function } = dispatch
+                && !type_arguments.is_empty()
+                && let Some(instance) = instances.get(&(*function, type_arguments.clone()))
+            {
+                *function = *instance;
+                type_arguments.clear();
+            }
+            if let HirCallDispatch::Indirect { callee } = dispatch {
+                specialize_expression(callee, substitutions, instances, arena)?;
+            }
+            for argument in arguments {
+                specialize_expression(argument, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::Integer(_)
+        | HirExpressionKind::Float(_)
+        | HirExpressionKind::String(_)
+        | HirExpressionKind::Boolean(_)
+        | HirExpressionKind::Nil
+        | HirExpressionKind::Local(_)
+        | HirExpressionKind::Parameter(_)
+        | HirExpressionKind::Capture(_)
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::EnumCase { .. } => {}
+    }
+    Some(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1585,6 +2469,7 @@ impl HirMatchBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirCall {
     pub(crate) dispatch: HirCallDispatch,
+    pub(crate) type_arguments: Vec<TypeId>,
     pub(crate) arguments: Vec<HirExpression>,
     pub(crate) span: SourceSpan,
 }
@@ -1593,6 +2478,11 @@ impl HirCall {
     #[must_use]
     pub const fn dispatch(&self) -> &HirCallDispatch {
         &self.dispatch
+    }
+
+    #[must_use]
+    pub fn type_arguments(&self) -> &[TypeId] {
+        &self.type_arguments
     }
 
     #[must_use]
@@ -1724,6 +2614,7 @@ pub enum HirExpressionKind {
     },
     Call {
         dispatch: HirCallDispatch,
+        type_arguments: Vec<TypeId>,
         arguments: Vec<HirExpression>,
     },
     InterfaceUpcast {

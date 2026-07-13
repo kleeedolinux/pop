@@ -128,6 +128,8 @@ fn canonical_value_fixture() -> CanonicalValueFixture {
     let union = arena
         .intern(SemanticType::TaggedUnion {
             definition: union_symbol,
+            source: union_symbol,
+            arguments: Vec::new(),
         })
         .expect("union type");
     let type_handle = arena

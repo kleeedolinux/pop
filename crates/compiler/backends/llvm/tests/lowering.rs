@@ -108,6 +108,146 @@ fn nominal_enum_constants_and_equality_lower_to_i32() {
 }
 
 #[test]
+fn specialized_generic_data_and_calls_execute_natively() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function identity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = identity<<T>>(value) }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("specialized MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+
+    let result = link_with_runtime_and_run(&module, "generics");
+    assert_eq!(result.status.code(), Some(7), "{}", module);
+}
+
+#[test]
+fn specialized_generic_data_lowers_to_concrete_native_ir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = value }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         private function main(arguments: Array<String>): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("concrete MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+    assert!(text.contains("pop_rt_allocate_mapped_object"));
+    assert!(text.contains("pop_rt_field_set"));
+    assert!(text.contains("switch i64"));
+    let input = std::env::temp_dir().join("pop-backend-llvm-generics.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-generics.bc");
+    fs::write(&input, text).expect("write generic LLVM input");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected specialized generic IR: {}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+#[test]
 fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
     let source = SourceFile::new(
         FileId::from_raw(0),

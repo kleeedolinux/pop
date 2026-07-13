@@ -325,6 +325,24 @@ end
 local name = first<<String>>(names)
 ```
 
+Records and tagged unions use the same declaration direction. Generic record
+literals receive their concrete type from expected context; generic union cases
+use explicit call arguments:
+
+```luau
+private record Box<T>
+    value: T
+end
+
+private union Choice<T>
+    Value(value: T)
+    Empty
+end
+
+local box: Box<Int> = { value = 7 }
+local choice: Choice<Int> = Choice.Value<<Int>>(box.value)
+```
+
 Local functions and anonymous expressions retain Luau's `function ... end`
 shape and may capture lexical values:
 

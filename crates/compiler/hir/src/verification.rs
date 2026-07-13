@@ -319,6 +319,7 @@ pub type HirBuildError = HirVerificationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HirCallableSignature {
+    type_parameters: Vec<TypeId>,
     parameters: Vec<TypeId>,
     results: Vec<TypeId>,
 }
@@ -326,6 +327,7 @@ struct HirCallableSignature {
 impl HirCallableSignature {
     fn from_function(function: &HirFunction) -> Self {
         Self {
+            type_parameters: function.type_parameters().to_vec(),
             parameters: function
                 .parameters()
                 .iter()
@@ -441,6 +443,7 @@ impl HirSchema {
             schema.function_references.insert(
                 reference.identity(),
                 HirCallableSignature {
+                    type_parameters: Vec::new(),
                     parameters: reference.parameters().to_vec(),
                     results: reference.results().to_vec(),
                 },
@@ -485,11 +488,10 @@ impl HirSchema {
                 );
             }
             HirDeclarationKind::Union(union) => {
-                if arena.get(union.type_id)
-                    != Some(&SemanticType::TaggedUnion {
-                        definition: declaration.symbol(),
-                    })
-                {
+                if !matches!(
+                    arena.get(union.type_id),
+                    Some(SemanticType::TaggedUnion { .. })
+                ) {
                     errors.push(HirVerificationError::InvalidDeclarationType {
                         symbol: declaration.symbol(),
                         type_id: union.type_id,
@@ -634,6 +636,7 @@ impl HirSchema {
                                 HirInterfaceMethodSchema {
                                     slot: method.slot,
                                     signature: HirCallableSignature {
+                                        type_parameters: Vec::new(),
                                         parameters: method
                                             .parameters
                                             .iter()
@@ -754,6 +757,7 @@ impl HirSchema {
                 class: class.class,
                 definition,
                 signature: HirCallableSignature {
+                    type_parameters: Vec::new(),
                     parameters,
                     results: method.results.clone(),
                 },
@@ -1374,6 +1378,7 @@ impl Verifier<'_> {
                 HirStatementKind::Call(call) => {
                     self.verify_call(
                         call.dispatch(),
+                        call.type_arguments(),
                         call.arguments(),
                         None,
                         call.span(),
@@ -1728,10 +1733,12 @@ impl Verifier<'_> {
             }
             HirExpressionKind::Call {
                 dispatch,
+                type_arguments,
                 arguments,
             } => {
                 self.verify_call(
                     dispatch,
+                    type_arguments,
                     arguments,
                     Some(expression.type_id()),
                     expression.span(),
@@ -2365,6 +2372,7 @@ impl Verifier<'_> {
     fn verify_call(
         &mut self,
         dispatch: &HirCallDispatch,
+        type_arguments: &[TypeId],
         arguments: &[HirExpression],
         result: Option<TypeId>,
         span: SourceSpan,
@@ -2376,6 +2384,7 @@ impl Verifier<'_> {
                     self.arena
                         .source_type("Int")
                         .map(|int| HirCallableSignature {
+                            type_parameters: Vec::new(),
                             parameters: vec![int],
                             results: Vec::new(),
                         })
@@ -2441,6 +2450,7 @@ impl Verifier<'_> {
                     let mut parameters = vec![receiver_type];
                     parameters.extend(method_schema.signature.parameters);
                     Some(HirCallableSignature {
+                        type_parameters: Vec::new(),
                         parameters,
                         results: method_schema.signature.results,
                     })
@@ -2465,6 +2475,7 @@ impl Verifier<'_> {
                 }) = self.arena.get(callee.type_id()).cloned()
                 {
                     Some(HirCallableSignature {
+                        type_parameters: Vec::new(),
                         parameters,
                         results,
                     })
@@ -2481,8 +2492,32 @@ impl Verifier<'_> {
             self.verify_expression(argument, visible);
         }
         if self.schema.is_some()
-            && let Some(signature) = signature
+            && let Some(mut signature) = signature
         {
+            if signature.type_parameters.len() == type_arguments.len() && !type_arguments.is_empty()
+            {
+                let substitutions = signature
+                    .type_parameters
+                    .iter()
+                    .zip(type_arguments)
+                    .filter_map(|(parameter, argument)| match self.arena.get(*parameter) {
+                        Some(SemanticType::TypeParameter(parameter)) => {
+                            Some((*parameter, *argument))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                signature.parameters = signature
+                    .parameters
+                    .iter()
+                    .filter_map(|type_id| self.arena.substitute_existing(*type_id, &substitutions))
+                    .collect();
+                signature.results = signature
+                    .results
+                    .iter()
+                    .filter_map(|type_id| self.arena.substitute_existing(*type_id, &substitutions))
+                    .collect();
+            }
             self.verify_call_signature(&signature, arguments, result, span);
         }
     }

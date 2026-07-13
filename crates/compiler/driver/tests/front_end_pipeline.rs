@@ -5,6 +5,111 @@ use pop_mir::lower_hir_bubble;
 use pop_source::SourceFile;
 
 #[test]
+fn explicit_generic_functions_records_and_unions_reach_concrete_mir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function identity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = identity<<T>>(value) }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         public function run(): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("verified HIR");
+    assert!(
+        hir.functions().iter().any(|function| {
+            function.name() == "boxed" && !function.type_parameters().is_empty()
+        })
+    );
+    let run = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run HIR");
+    let HirStatementKind::Local { initializer, .. } = run.body()[0].kind() else {
+        panic!("generic call initializer");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::Call { type_arguments, .. } if !type_arguments.is_empty()
+    ));
+    let mir = lower_hir_bubble(hir, result.types()).expect("concrete specialized MIR");
+    assert!(!mir.dump().contains("type-parameter"));
+    assert_eq!(
+        mir.functions().len(),
+        4,
+        "each concrete instance is emitted once"
+    );
+    assert!(mir.functions().iter().all(|function| {
+        function
+            .parameters()
+            .iter()
+            .chain(function.results())
+            .all(|type_id| !result.types().contains_type_parameter(*type_id))
+    }));
+}
+
+#[test]
+fn generic_calls_and_data_require_exact_static_type_arguments() {
+    for source_text in [
+        "namespace Main\nprivate function identity<T>(value: T): T\n    return value\nend\npublic function run(): Int\n    return identity(1)\nend\n",
+        "namespace Main\nprivate function identity<T>(value: T): T\n    return value\nend\npublic function run(): Int\n    return identity<<Int, String>>(1)\nend\n",
+        "namespace Main\nprivate record Box<T>\n    value: T\nend\npublic function run(value: Box<Int, String>): Int\n    return 0\nend\n",
+        "namespace Main\nprivate union Choice<T>\n    Value(value: T)\nend\npublic function run(): Choice<Int>\n    return Choice.Value<<Int>>(\"wrong\")\nend\n",
+    ] {
+        let source = SourceFile::new(FileId::from_raw(0), "src/invalidGeneric.pop", source_text)
+            .expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+
+        assert!(
+            result.hir().is_none(),
+            "invalid generic program reached HIR"
+        );
+        assert!(!result.diagnostics().is_empty());
+    }
+}
+
+#[test]
 fn erased_type_aliases_work_in_runtime_signatures_and_bodies() {
     let source = SourceFile::new(
         FileId::from_raw(0),
@@ -24,7 +129,6 @@ fn erased_type_aliases_work_in_runtime_signatures_and_bodies() {
         Vec::new(),
         vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
     ));
-
     assert!(
         result.diagnostics().is_empty(),
         "{}",

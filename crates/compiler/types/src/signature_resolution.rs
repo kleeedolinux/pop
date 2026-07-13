@@ -7,8 +7,9 @@ use pop_foundation::{
 };
 use pop_resolve::{ResolutionDatabase, SymbolSpace};
 use pop_syntax::{
-    EnumDeclarationSyntax, FunctionSignatureSyntax, RecordDeclarationSyntax,
-    TypeAliasDeclarationSyntax, TypeSyntax, TypeSyntaxKind, UnionDeclarationSyntax,
+    EnumDeclarationSyntax, FunctionSignatureSyntax, GenericParameterSyntax,
+    RecordDeclarationSyntax, TypeAliasDeclarationSyntax, TypeSyntax, TypeSyntaxKind,
+    UnionDeclarationSyntax,
 };
 
 use crate::field_defaults::resolve_field_default;
@@ -523,10 +524,17 @@ pub struct SignatureResolver<'index> {
     pub(crate) next_interface: u32,
     pub(crate) next_interface_method: u32,
     pub(crate) next_attribute: u32,
+    next_instance_symbol: u32,
     record_definitions: BTreeMap<SymbolId, RecordDefinition>,
+    record_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
+    record_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
     records_by_type: BTreeMap<TypeId, SymbolId>,
     structural_record_fields: BTreeMap<(String, TypeId), FieldId>,
     union_definitions: BTreeMap<SymbolId, UnionDefinition>,
+    unions_by_type: BTreeMap<TypeId, SymbolId>,
+    union_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
+    union_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    union_instance_sources: BTreeMap<SymbolId, SymbolId>,
     enum_definitions: BTreeMap<SymbolId, EnumDefinition>,
     pub(crate) class_types: BTreeMap<SymbolId, TypeId>,
     pub(crate) class_definitions: BTreeMap<SymbolId, crate::ClassDefinition>,
@@ -542,6 +550,14 @@ pub struct SignatureResolver<'index> {
 impl<'index> SignatureResolver<'index> {
     #[must_use]
     pub fn new(database: &'index ResolutionDatabase, schema: BootstrapSchema) -> Self {
+        let next_instance_symbol = database
+            .index()
+            .declarations()
+            .map(pop_resolve::Declaration::symbol)
+            .map(SymbolId::raw)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         Self {
             database,
             schema,
@@ -555,10 +571,17 @@ impl<'index> SignatureResolver<'index> {
             next_interface: 0,
             next_interface_method: 0,
             next_attribute: 0,
+            next_instance_symbol,
             record_definitions: BTreeMap::new(),
+            record_type_parameters: BTreeMap::new(),
+            record_instances: BTreeMap::new(),
             records_by_type: BTreeMap::new(),
             structural_record_fields: BTreeMap::new(),
             union_definitions: BTreeMap::new(),
+            unions_by_type: BTreeMap::new(),
+            union_type_parameters: BTreeMap::new(),
+            union_instances: BTreeMap::new(),
+            union_instance_sources: BTreeMap::new(),
             enum_definitions: BTreeMap::new(),
             class_types: BTreeMap::new(),
             class_definitions: BTreeMap::new(),
@@ -594,6 +617,130 @@ impl<'index> SignatureResolver<'index> {
         &mut self.arena
     }
 
+    pub fn substitute_type_parameters(
+        &mut self,
+        type_id: TypeId,
+        substitutions: &BTreeMap<ParameterId, TypeId>,
+    ) -> Option<TypeId> {
+        let semantic = self.arena.get(type_id)?.clone();
+        if let SemanticType::TypeParameter(parameter) = semantic {
+            return substitutions.get(&parameter).copied();
+        }
+        let substituted = match semantic {
+            SemanticType::Primitive(_)
+            | SemanticType::Enum { .. }
+            | SemanticType::Opaque(_)
+            | SemanticType::Error => return Some(type_id),
+            SemanticType::TypeParameter(_) => unreachable!("handled above"),
+            SemanticType::TaggedUnion {
+                definition,
+                source,
+                arguments,
+            } => {
+                let arguments = arguments
+                    .into_iter()
+                    .map(|argument| self.substitute_type_parameters(argument, substitutions))
+                    .collect::<Option<Vec<_>>>()?;
+                if self.union_type_parameters.contains_key(&source) {
+                    return self
+                        .instantiate_union(source, &arguments)
+                        .map(|instance| instance.type_id());
+                }
+                SemanticType::TaggedUnion {
+                    definition,
+                    source,
+                    arguments,
+                }
+            }
+            SemanticType::Tuple(elements) => SemanticType::Tuple(
+                elements
+                    .into_iter()
+                    .map(|element| self.substitute_type_parameters(element, substitutions))
+                    .collect::<Option<_>>()?,
+            ),
+            SemanticType::Union(elements) => SemanticType::Union(
+                elements
+                    .into_iter()
+                    .map(|element| self.substitute_type_parameters(element, substitutions))
+                    .collect::<Option<_>>()?,
+            ),
+            SemanticType::Record(fields) => SemanticType::Record(
+                fields
+                    .into_iter()
+                    .map(|(name, field_type)| {
+                        Some((
+                            name,
+                            self.substitute_type_parameters(field_type, substitutions)?,
+                        ))
+                    })
+                    .collect::<Option<_>>()?,
+            ),
+            SemanticType::Array(element) => {
+                SemanticType::Array(self.substitute_type_parameters(element, substitutions)?)
+            }
+            SemanticType::Table { key, value } => SemanticType::Table {
+                key: self.substitute_type_parameters(key, substitutions)?,
+                value: self.substitute_type_parameters(value, substitutions)?,
+            },
+            SemanticType::Optional(element) => {
+                SemanticType::Optional(self.substitute_type_parameters(element, substitutions)?)
+            }
+            SemanticType::Function {
+                parameters,
+                results,
+                effects,
+            } => SemanticType::Function {
+                parameters: parameters
+                    .into_iter()
+                    .map(|parameter| self.substitute_type_parameters(parameter, substitutions))
+                    .collect::<Option<_>>()?,
+                results: results
+                    .into_iter()
+                    .map(|result| self.substitute_type_parameters(result, substitutions))
+                    .collect::<Option<_>>()?,
+                effects,
+            },
+            SemanticType::Class { class, arguments } => SemanticType::Class {
+                class,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.substitute_type_parameters(argument, substitutions))
+                    .collect::<Option<_>>()?,
+            },
+            SemanticType::Interface {
+                interface,
+                arguments,
+            } => SemanticType::Interface {
+                interface,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.substitute_type_parameters(argument, substitutions))
+                    .collect::<Option<_>>()?,
+            },
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } => SemanticType::Builtin {
+                definition,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.substitute_type_parameters(argument, substitutions))
+                    .collect::<Option<_>>()?,
+            },
+            SemanticType::Attribute {
+                attribute,
+                parameters,
+            } => SemanticType::Attribute {
+                attribute,
+                parameters: parameters
+                    .into_iter()
+                    .map(|parameter| self.substitute_type_parameters(parameter, substitutions))
+                    .collect::<Option<_>>()?,
+            },
+        };
+        self.arena.intern(substituted).ok()
+    }
+
     #[must_use]
     pub fn record_definition(&self, symbol: SymbolId) -> Option<&RecordDefinition> {
         self.record_definitions.get(&symbol)
@@ -604,6 +751,140 @@ impl<'index> SignatureResolver<'index> {
         self.records_by_type
             .get(&type_id)
             .and_then(|symbol| self.record_definitions.get(symbol))
+    }
+
+    pub fn record_instances(
+        &self,
+        definition: SymbolId,
+    ) -> impl Iterator<Item = &RecordDefinition> {
+        self.record_instances
+            .iter()
+            .filter(move |((source, _), _)| *source == definition)
+            .filter_map(|(_, symbol)| self.record_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub fn record_is_generic(&self, definition: SymbolId) -> bool {
+        self.record_type_parameters
+            .get(&definition)
+            .is_some_and(|parameters| !parameters.is_empty())
+    }
+
+    pub fn union_instances(&self, definition: SymbolId) -> impl Iterator<Item = &UnionDefinition> {
+        self.union_instances
+            .iter()
+            .filter(move |((source, _), _)| *source == definition)
+            .filter_map(|(_, symbol)| self.union_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub fn union_is_generic(&self, definition: SymbolId) -> bool {
+        self.union_type_parameters
+            .get(&definition)
+            .is_some_and(|parameters| !parameters.is_empty())
+    }
+
+    pub(crate) fn instantiate_record(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+    ) -> Option<RecordDefinition> {
+        let key = (definition, arguments.to_vec());
+        if let Some(symbol) = self.record_instances.get(&key) {
+            return self.record_definitions.get(symbol).cloned();
+        }
+        let parameters = self.record_type_parameters.get(&definition)?.clone();
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        if parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .eq(arguments.iter().copied())
+        {
+            return self.record_definitions.get(&definition).cloned();
+        }
+        let substitutions = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        let template = self.record_definitions.get(&definition)?.clone();
+        let symbol = SymbolId::from_raw(self.next_instance_symbol);
+        self.next_instance_symbol = self.next_instance_symbol.saturating_add(1);
+        let mut fields = template.fields.clone();
+        for field in &mut fields {
+            field.field_type = self.substitute_type_parameters(field.field_type, &substitutions)?;
+            field.field = FieldId::from_raw(self.next_field);
+            self.next_field = self.next_field.saturating_add(1);
+        }
+        let type_id = self.substitute_type_parameters(template.type_id, &substitutions)?;
+        let instance = RecordDefinition {
+            symbol,
+            type_id,
+            fields,
+            span: template.span,
+        };
+        self.record_instances.insert(key, symbol);
+        self.records_by_type.insert(type_id, symbol);
+        self.record_definitions.insert(symbol, instance.clone());
+        Some(instance)
+    }
+
+    pub(crate) fn instantiate_union(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+    ) -> Option<UnionDefinition> {
+        let key = (definition, arguments.to_vec());
+        if let Some(symbol) = self.union_instances.get(&key) {
+            return self.union_definitions.get(symbol).cloned();
+        }
+        let parameters = self.union_type_parameters.get(&definition)?.clone();
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        if parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .eq(arguments.iter().copied())
+        {
+            return self.union_definitions.get(&definition).cloned();
+        }
+        let substitutions = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        let template = self.union_definitions.get(&definition)?.clone();
+        let symbol = SymbolId::from_raw(self.next_instance_symbol);
+        self.next_instance_symbol = self.next_instance_symbol.saturating_add(1);
+        let mut cases = template.cases.clone();
+        for case in &mut cases {
+            for (_, parameter_type, _) in &mut case.parameters {
+                *parameter_type =
+                    self.substitute_type_parameters(*parameter_type, &substitutions)?;
+            }
+        }
+        let type_id = self
+            .arena
+            .intern(SemanticType::TaggedUnion {
+                definition: symbol,
+                source: definition,
+                arguments: arguments.to_vec(),
+            })
+            .ok()?;
+        let instance = UnionDefinition {
+            symbol,
+            type_id,
+            cases,
+            span: template.span,
+        };
+        self.union_instances.insert(key, symbol);
+        self.union_instance_sources.insert(symbol, definition);
+        self.unions_by_type.insert(type_id, symbol);
+        self.union_definitions.insert(symbol, instance.clone());
+        Some(instance)
     }
 
     #[must_use]
@@ -645,6 +926,26 @@ impl<'index> SignatureResolver<'index> {
     #[must_use]
     pub fn union_definition(&self, symbol: SymbolId) -> Option<&UnionDefinition> {
         self.union_definitions.get(&symbol)
+    }
+
+    #[must_use]
+    pub fn union_definition_for_type(&self, type_id: TypeId) -> Option<&UnionDefinition> {
+        self.unions_by_type
+            .get(&type_id)
+            .and_then(|symbol| self.union_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub(crate) fn union_type_parameter_count(&self, symbol: SymbolId) -> Option<usize> {
+        self.union_type_parameters.get(&symbol).map(Vec::len)
+    }
+
+    #[must_use]
+    pub(crate) fn union_source_symbol(&self, symbol: SymbolId) -> SymbolId {
+        self.union_instance_sources
+            .get(&symbol)
+            .copied()
+            .unwrap_or(symbol)
     }
 
     #[must_use]
@@ -740,7 +1041,8 @@ impl<'index> SignatureResolver<'index> {
         defer_defaults: bool,
     ) -> RecordDefinitionResult {
         let mut diagnostics = Vec::new();
-        let generics = BTreeMap::new();
+        let (type_parameters, generics) =
+            self.resolve_data_type_parameters(syntax.type_parameters(), &mut diagnostics);
         let mut pending_fields = Vec::new();
         let mut semantic_fields = Vec::new();
         let mut names = BTreeMap::new();
@@ -825,6 +1127,7 @@ impl<'index> SignatureResolver<'index> {
             None
         };
         if let Some(definition) = &definition {
+            self.record_type_parameters.insert(symbol, type_parameters);
             self.records_by_type
                 .entry(definition.type_id())
                 .or_insert(symbol);
@@ -884,7 +1187,8 @@ impl<'index> SignatureResolver<'index> {
         syntax: &UnionDeclarationSyntax,
     ) -> UnionDefinitionResult {
         let mut diagnostics = Vec::new();
-        let generics = BTreeMap::new();
+        let (type_parameters, generics) =
+            self.resolve_data_type_parameters(syntax.type_parameters(), &mut diagnostics);
         let mut cases = Vec::new();
         let mut names = BTreeMap::new();
         for case in syntax.cases() {
@@ -920,9 +1224,17 @@ impl<'index> SignatureResolver<'index> {
                 span: case.span(),
             });
         }
+        let generic_arguments = type_parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .collect();
         let type_id = self
             .arena
-            .intern(SemanticType::TaggedUnion { definition: symbol })
+            .intern(SemanticType::TaggedUnion {
+                definition: symbol,
+                source: symbol,
+                arguments: generic_arguments,
+            })
             .ok();
         let definition = if diagnostics.is_empty() {
             type_id.map(|type_id| UnionDefinition {
@@ -935,12 +1247,52 @@ impl<'index> SignatureResolver<'index> {
             None
         };
         if let Some(definition) = &definition {
+            self.union_type_parameters.insert(symbol, type_parameters);
+            self.unions_by_type.insert(definition.type_id(), symbol);
             self.union_definitions.insert(symbol, definition.clone());
         }
         UnionDefinitionResult {
             definition,
             diagnostics,
         }
+    }
+
+    fn resolve_data_type_parameters(
+        &mut self,
+        syntax: &[GenericParameterSyntax],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> (
+        Vec<ResolvedTypeParameter>,
+        BTreeMap<String, (ParameterId, TypeId)>,
+    ) {
+        let mut resolved = Vec::new();
+        let mut by_name = BTreeMap::new();
+        let mut spans = BTreeMap::new();
+        for parameter in syntax {
+            if let Some(original) = spans.get(parameter.name()) {
+                diagnostics.push(type_diagnostics::duplicate_type_parameter(
+                    parameter.span(),
+                    parameter.name(),
+                    *original,
+                ));
+                continue;
+            }
+            let id = ParameterId::from_raw(self.next_parameter);
+            self.next_parameter = self.next_parameter.saturating_add(1);
+            let type_id = self
+                .arena
+                .intern(SemanticType::TypeParameter(id))
+                .expect("new data type parameter is canonical");
+            spans.insert(parameter.name().to_owned(), parameter.span());
+            by_name.insert(parameter.name().to_owned(), (id, type_id));
+            resolved.push(ResolvedTypeParameter {
+                parameter: id,
+                name: parameter.name().to_owned(),
+                type_id,
+                span: parameter.span(),
+            });
+        }
+        (resolved, by_name)
     }
 
     pub(crate) fn resolve_annotation(
@@ -1234,6 +1586,75 @@ impl<'index> SignatureResolver<'index> {
             return resolved;
         }
         let arguments = self.resolve_types(module, arguments, generics, diagnostics)?;
+        let canonical_arguments = arguments
+            .iter()
+            .map(ResolvedType::type_id)
+            .collect::<Option<Vec<_>>>()?;
+        if let Some(parameters) = self.record_type_parameters.get(&symbol).cloned() {
+            if parameters.len() != arguments.len() {
+                diagnostics.push(type_diagnostics::wrong_type_arity(
+                    syntax.span(),
+                    &name,
+                    u16::try_from(parameters.len()).unwrap_or(u16::MAX),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let template_arguments: Vec<_> = parameters
+                .iter()
+                .map(ResolvedTypeParameter::type_id)
+                .collect();
+            let definition = if canonical_arguments == template_arguments {
+                self.record_definitions.get(&symbol).cloned()
+            } else {
+                self.instantiate_record(symbol, &canonical_arguments)
+            }?;
+            return Some(resolved(
+                ResolvedTypeKind::Declaration {
+                    symbol: definition.symbol(),
+                    arguments,
+                },
+                Some(definition.type_id()),
+                syntax.span(),
+            ));
+        }
+        if let Some(parameters) = self.union_type_parameters.get(&symbol).cloned() {
+            if parameters.len() != arguments.len() {
+                diagnostics.push(type_diagnostics::wrong_type_arity(
+                    syntax.span(),
+                    &name,
+                    u16::try_from(parameters.len()).unwrap_or(u16::MAX),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let template_arguments: Vec<_> = parameters
+                .iter()
+                .map(ResolvedTypeParameter::type_id)
+                .collect();
+            let definition = if canonical_arguments == template_arguments {
+                self.union_definitions.get(&symbol).cloned()
+            } else {
+                self.instantiate_union(symbol, &canonical_arguments)
+            }?;
+            return Some(resolved(
+                ResolvedTypeKind::Declaration {
+                    symbol: definition.symbol(),
+                    arguments,
+                },
+                Some(definition.type_id()),
+                syntax.span(),
+            ));
+        }
+        if !arguments.is_empty() {
+            diagnostics.push(type_diagnostics::wrong_type_arity(
+                syntax.span(),
+                &name,
+                0,
+                arguments.len(),
+            ));
+            return None;
+        }
         let type_id = self
             .record_definitions
             .get(&symbol)

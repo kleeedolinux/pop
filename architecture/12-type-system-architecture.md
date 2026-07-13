@@ -191,6 +191,13 @@ Generic instantiation:
 4. solves and validates all remaining variables;
 5. records canonical generic arguments in HIR.
 
+The bootstrap subset currently requires explicit function and tagged-union case
+type arguments, supports ordered invariant parameters on functions, records,
+and tagged unions, and fully specializes every reachable concrete instance in
+MIR. Equivalent instances are deduplicated. Type-argument inference, portable
+generic reference metadata, and representation-compatible typed code sharing
+remain later extensions of the same semantic model. See ADR 0050.
+
 Compile-time generic code may branch on permitted type/attribute queries. Each
 accepted branch still produces ordinary fully typed HIR.
 

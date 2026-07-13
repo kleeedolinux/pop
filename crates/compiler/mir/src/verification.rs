@@ -158,11 +158,10 @@ impl<'mir> MirSchema<'mir> {
                     schema.collect_fields(record.type_id, &record.fields, false, errors);
                 }
                 MirDeclarationKind::Union(union) => {
-                    if arena.get(union.type_id)
-                        != Some(&SemanticType::TaggedUnion {
-                            definition: declaration.symbol,
-                        })
-                    {
+                    if !matches!(
+                        arena.get(union.type_id),
+                        Some(SemanticType::TaggedUnion { .. })
+                    ) {
                         errors.push(MirVerificationError::InvalidDeclarationType {
                             symbol: declaration.symbol,
                             type_id: union.type_id,

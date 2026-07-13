@@ -290,6 +290,38 @@ fn rejects_managed_declarations_without_emitting_a_fallback() {
 }
 
 #[test]
+fn rejects_specialized_generic_data_without_emitting_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = value }\n\
+             return result\n\
+         end\n\
+         function main(): Int\n\
+             local value: Box<Int> = boxed<<Int>>(7)\n\
+             return value.value\n\
+         end\n",
+    );
+    let entry = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("entry")
+        .symbol();
+    let error = lower_mir_to_c(
+        &mir,
+        &types,
+        CLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect_err("experimental C must remain fail-closed for generic data");
+
+    assert!(matches!(error, CBackendError::UnsupportedDeclarations));
+}
+
+#[test]
 fn typed_integer_and_literal_string_output_use_safe_c_adapters() {
     let (mir, types) = lower(
         "namespace Main\n\

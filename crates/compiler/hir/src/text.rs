@@ -465,7 +465,13 @@ fn dump_statements(
             }
             HirStatementKind::Call(call) => {
                 output.push_str("do ");
-                dump_call(output, call.dispatch(), call.arguments(), arena);
+                dump_call(
+                    output,
+                    call.dispatch(),
+                    call.type_arguments(),
+                    call.arguments(),
+                    arena,
+                );
                 output.push('\n');
             }
             HirStatementKind::Expression(expression) => {
@@ -715,9 +721,10 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
         HirExpressionKind::Call {
             dispatch,
+            type_arguments,
             arguments,
         } => {
-            dump_call(output, dispatch, arguments, arena);
+            dump_call(output, dispatch, type_arguments, arguments, arena);
         }
         HirExpressionKind::InterfaceUpcast { value, interface } => {
             let _ = write!(output, "convert.interface i{} ", interface.raw());
@@ -747,26 +754,27 @@ fn dump_float_value(output: &mut String, value: FloatValue) {
 fn dump_call(
     output: &mut String,
     dispatch: &HirCallDispatch,
+    type_arguments: &[TypeId],
     arguments: &[HirExpression],
     arena: &TypeArena,
 ) {
     match dispatch {
         HirCallDispatch::Standard { function } => {
-            let _ = write!(output, "call.standard sf{}(", function.raw());
+            let _ = write!(output, "call.standard sf{}", function.raw());
         }
         HirCallDispatch::Direct { function } => {
-            let _ = write!(output, "call.direct s{}(", function.raw());
+            let _ = write!(output, "call.direct s{}", function.raw());
         }
         HirCallDispatch::Referenced { function } => {
             let _ = write!(
                 output,
-                "call.reference b{}:s{}(",
+                "call.reference b{}:s{}",
                 function.bubble().raw(),
                 function.symbol().raw()
             );
         }
         HirCallDispatch::DirectMethod { method } => {
-            let _ = write!(output, "call.method m{}(", method.raw());
+            let _ = write!(output, "call.method m{}", method.raw());
         }
         HirCallDispatch::InterfaceMethod {
             interface,
@@ -775,7 +783,7 @@ fn dump_call(
         } => {
             let _ = write!(
                 output,
-                "call.interface i{} im{} slot{}(",
+                "call.interface i{} im{} slot{}",
                 interface.raw(),
                 method.raw(),
                 slot
@@ -784,9 +792,19 @@ fn dump_call(
         HirCallDispatch::Indirect { callee } => {
             output.push_str("call.indirect ");
             dump_expression(output, callee, arena);
-            output.push('(');
         }
     }
+    if !type_arguments.is_empty() {
+        output.push_str("<<");
+        for (index, argument) in type_arguments.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&type_text(*argument, arena));
+        }
+        output.push_str(">>");
+    }
+    output.push('(');
     for (index, argument) in arguments.iter().enumerate() {
         if index != 0 {
             output.push_str(", ");

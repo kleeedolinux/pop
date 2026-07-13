@@ -58,6 +58,51 @@ fn execute_pair(
 }
 
 #[test]
+fn specialized_generics_execute_identically_before_and_after_optimization() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private record Box<T>\n\
+             value: T\n\
+         end\n\
+         private union Choice<T>\n\
+             Value(value: T)\n\
+             Empty\n\
+         end\n\
+         private function identity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         private function boxed<T>(value: T): Box<T>\n\
+             local result: Box<T> = { value = identity<<T>>(value) }\n\
+             return result\n\
+         end\n\
+         private function choose<T>(value: T): Choice<T>\n\
+             return Choice.Value<<T>>(value)\n\
+         end\n\
+         public function run(): Int\n\
+             local box: Box<Int> = boxed<<Int>>(7)\n\
+             local choice: Choice<Int> = choose<<Int>>(box.value)\n\
+             match choice\n\
+             when Choice.Value(value) then\n\
+                 return value\n\
+             when Choice.Empty then\n\
+                 return 0\n\
+             end\n\
+         end\n",
+        "run",
+    );
+
+    let (returned, _) = execute_pair(&mir, &arena, entry);
+    assert_eq!(returned, vec![integer("7")]);
+    assert!(mir.functions().iter().all(|function| {
+        function
+            .parameters()
+            .iter()
+            .chain(function.results())
+            .all(|type_id| !arena.contains_type_parameter(*type_id))
+    }));
+}
+
+#[test]
 fn escaping_mutating_closure_uses_shared_cells_and_portable_allocation_events() {
     let (mir, arena, entry) = lower(
         "namespace Main\n\

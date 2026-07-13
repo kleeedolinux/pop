@@ -28,6 +28,7 @@ fn verifier_rejects_collection_elements_with_inconsistent_types() {
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        type_parameters: Vec::new(),
         parameters: Vec::new(),
         results: Vec::new(),
         body: vec![HirStatement {
@@ -72,6 +73,7 @@ fn verifier_rejects_array_access_on_a_non_array_base() {
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        type_parameters: Vec::new(),
         parameters: Vec::new(),
         results: Vec::new(),
         body: vec![HirStatement {
@@ -395,6 +397,7 @@ fn bubble_verifier_rejects_direct_call_argument_and_result_spoofing() {
                     dispatch: HirCallDispatch::Direct {
                         function: SymbolId::from_raw(1),
                     },
+                    type_arguments: Vec::new(),
                     arguments: Vec::new(),
                     span,
                 }),
@@ -407,6 +410,7 @@ fn bubble_verifier_rejects_direct_call_argument_and_result_spoofing() {
                             dispatch: HirCallDispatch::Direct {
                                 function: SymbolId::from_raw(1),
                             },
+                            type_arguments: Vec::new(),
                             arguments: vec![string_expression(string, span)],
                         },
                         type_id: string,
@@ -477,6 +481,7 @@ fn bubble_verifier_rejects_indirect_call_argument_and_result_spoofing() {
                     dispatch: HirCallDispatch::Indirect {
                         callee: Box::new(parameter_expression(0, callable, span)),
                     },
+                    type_arguments: Vec::new(),
                     arguments: Vec::new(),
                     span,
                 }),
@@ -489,6 +494,7 @@ fn bubble_verifier_rejects_indirect_call_argument_and_result_spoofing() {
                             dispatch: HirCallDispatch::Indirect {
                                 callee: Box::new(parameter_expression(0, callable, span)),
                             },
+                            type_arguments: Vec::new(),
                             arguments: vec![string_expression(string, span)],
                         },
                         type_id: string,
@@ -648,6 +654,7 @@ fn bubble_verifier_checks_receiver_method_signatures_against_class_schema() {
             HirStatement {
                 kind: HirStatementKind::Call(HirCall {
                     dispatch: HirCallDispatch::DirectMethod { method },
+                    type_arguments: Vec::new(),
                     arguments: vec![string_expression(string, span)],
                     span,
                 }),
@@ -658,6 +665,7 @@ fn bubble_verifier_checks_receiver_method_signatures_against_class_schema() {
                     values: vec![HirExpression {
                         kind: HirExpressionKind::Call {
                             dispatch: HirCallDispatch::DirectMethod { method },
+                            type_arguments: Vec::new(),
                             arguments: vec![
                                 string_expression(string, span),
                                 string_expression(string, span),
@@ -725,6 +733,8 @@ fn bubble_verifier_checks_declaration_field_and_union_case_schema() {
     let union_type = arena
         .intern(SemanticType::TaggedUnion {
             definition: union_symbol,
+            source: union_symbol,
+            arguments: Vec::new(),
         })
         .expect("union type");
     let span = test_span();
@@ -968,6 +978,8 @@ fn match_verifier_rejects_duplicate_missing_and_mistyped_case_tables() {
     let union_type = arena
         .intern(SemanticType::TaggedUnion {
             definition: union_symbol,
+            source: union_symbol,
+            arguments: Vec::new(),
         })
         .expect("union type");
     let span = test_span();
@@ -1178,6 +1190,7 @@ fn interface_verifier_rejects_wrong_slots_mappings_arguments_and_results() {
                             method: interface_method,
                             slot: 8,
                         },
+                        type_arguments: Vec::new(),
                         arguments: vec![
                             parameter_expression(0, interface_type, span),
                             string_expression(string, span),
@@ -1250,6 +1263,7 @@ fn hir_function_with_symbol(
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        type_parameters: Vec::new(),
         parameters,
         results,
         body,
@@ -1329,6 +1343,7 @@ fn verify_expression_statement(
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        type_parameters: Vec::new(),
         parameters: Vec::new(),
         results: Vec::new(),
         body: vec![HirStatement {

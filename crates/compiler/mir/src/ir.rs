@@ -1224,6 +1224,11 @@ impl MirUnionSwitchArm {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirVerificationError {
+    GenericSpecializationBudgetExceeded {
+        limit: usize,
+    },
+    UnknownGenericTemplate(SymbolId),
+    InvalidGenericSpecialization(SymbolId),
     InvalidType(TypeId),
     DuplicateValue(ValueId),
     UnknownValue(ValueId),

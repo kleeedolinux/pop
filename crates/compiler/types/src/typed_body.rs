@@ -220,6 +220,7 @@ impl TypedAssignmentTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedCall {
     pub(crate) dispatch: TypedCallDispatch,
+    pub(crate) type_arguments: Vec<TypeId>,
     pub(crate) arguments: Vec<TypedExpression>,
     pub(crate) span: SourceSpan,
 }
@@ -228,6 +229,11 @@ impl TypedCall {
     #[must_use]
     pub const fn dispatch(&self) -> &TypedCallDispatch {
         &self.dispatch
+    }
+
+    #[must_use]
+    pub fn type_arguments(&self) -> &[TypeId] {
+        &self.type_arguments
     }
 
     #[must_use]
@@ -394,6 +400,7 @@ pub enum TypedExpressionKind {
     },
     DirectCall {
         function: SymbolId,
+        type_arguments: Vec<TypeId>,
         arguments: Vec<TypedExpression>,
     },
     ReferencedCall {
