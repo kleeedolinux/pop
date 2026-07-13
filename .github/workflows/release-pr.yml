@@ -39,6 +39,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install LLVM 22
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22
+
+      - name: Export LLVM prefix
+        shell: bash
+        run: echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
+
       - name: Build release changelog and PR branch
         id: prep
         shell: bash
