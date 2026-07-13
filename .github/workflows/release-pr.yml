@@ -86,7 +86,7 @@ jobs:
             dist/pop-${{ matrix.target }}.zip.sha256
 
   publish:
-    if: github.repository == 'poplanguages/pop' && github.actor == 'kleeedolinux'
+    if: github.repository == 'poplanguage/pop' && github.actor == 'kleeedolinux'
     needs: build
     runs-on: ubuntu-latest
 
