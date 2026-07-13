@@ -55,7 +55,8 @@ HirExpr =
   | Function | Closure{functionId, captures} | Call{dispatch, effects}
   | Construct{classId}
   | FieldGet{fieldId} | FieldSet{fieldId}
-  | Record | RecordUpdate | Tuple | Array | Table | Convert{kind}
+  | Record | RecordUpdate | Tuple | Array | Table | TableGet | TableSet
+  | Convert{kind}
   | Return | Break | Continue | Await
 ```
 
@@ -91,6 +92,9 @@ HIR invariants:
 - a fixed result pack retains exact element types; grouped multiple assignment
   retains resolved targets until MIR emits target locations, values, typed
   projections, and stores in the order fixed by ADR 0045.
+- table lookup and mutation retain exact key/value types; MIR makes optional
+  lookup, insert-or-replace allocation effects, managed maps, and barriers
+  explicit under ADR 0046.
 
 ## Compile-time HIR and values
 

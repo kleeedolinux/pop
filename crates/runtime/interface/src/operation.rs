@@ -5,6 +5,8 @@ pub enum RuntimeOperation {
     AllocateArrayFilled,
     AllocateTable,
     TupleMake,
+    TableGet,
+    TableSet,
     ArrayGet,
     ArrayLength,
     ArrayGetChecked,

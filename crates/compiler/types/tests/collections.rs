@@ -261,6 +261,50 @@ fn indexed_array_assignment_rejects_the_wrong_element_type() {
 }
 
 #[test]
+fn typed_table_indexing_returns_optional_and_assignment_inserts_or_replaces() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(): Int?\n\
+             local scores: {[String]: Int} = { alice = 10 }\n\
+             scores[\"alice\"] = 11\n\
+             scores[\"bruno\"] = 12\n\
+             return scores[\"bruno\"]\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    assert!(fixture.result.body().is_some());
+}
+
+#[test]
+fn typed_table_access_rejects_incompatible_or_unhashable_keys_and_values() {
+    for source in [
+        "namespace Example\n\
+         public function collections(scores: {[String]: Int}): Int?\n\
+             return scores[1]\n\
+         end\n",
+        "namespace Example\n\
+         public function collections()\n\
+             local scores: {[String]: Int} = {}\n\
+             scores[\"alice\"] = \"wrong\"\n\
+         end\n",
+        "namespace Example\n\
+         public function collections(key: {Int}): String?\n\
+             local values: {[{Int}]: String} = {}\n\
+             return values[key]\n\
+         end\n",
+    ] {
+        let fixture = check_function(source);
+        assert!(fixture.result.body().is_none(), "{source}");
+        assert!(!fixture.result.diagnostics().is_empty(), "{source}");
+    }
+}
+
+#[test]
 fn fixed_array_core_operations_are_fully_typed() {
     let fixture = check_function(
         "namespace Example\n\

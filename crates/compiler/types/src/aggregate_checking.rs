@@ -312,6 +312,28 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     span,
                 })
             }
+            Some(SemanticType::Table { key, value }) => {
+                if !self.is_supported_table_key(key) {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        index.span(),
+                        "table index",
+                        self.type_name(key),
+                    ));
+                    return None;
+                }
+                let typed_key = self
+                    .check_expression_expected(index, Some(ExpectedExpressionType::plain(key)))?;
+                self.require_same_type(key, typed_key.type_id(), typed_key.span(), span);
+                let result_type = self.resolver.arena_mut().optional(value).ok()?;
+                self.diagnostics.is_empty().then_some(TypedExpression {
+                    kind: TypedExpressionKind::TableGet {
+                        table: Box::new(base),
+                        key: Box::new(typed_key),
+                    },
+                    type_id: result_type,
+                    span,
+                })
+            }
             _ => {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
@@ -321,6 +343,17 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 None
             }
         }
+    }
+
+    fn is_supported_table_key(&self, type_id: TypeId) -> bool {
+        matches!(
+            self.resolver.arena().get(type_id),
+            Some(SemanticType::Primitive(
+                crate::PrimitiveType::Boolean
+                    | crate::PrimitiveType::Integer(_)
+                    | crate::PrimitiveType::String
+            ))
+        )
     }
 
     pub(crate) fn check_aggregate_literal(

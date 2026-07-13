@@ -218,6 +218,14 @@ pub(crate) fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec
 pub(crate) fn runtime_declarations() -> Vec<String> {
     vec![
         format!(
+            "declare i64 @{}(i64, i64, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::TableGet)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64, i1, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::TableSet)
+        ),
+        format!(
             "declare i64 @{}(i64, i64) nounwind",
             native_runtime_symbol(RuntimeOperation::ArrayGet)
         ),

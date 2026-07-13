@@ -93,6 +93,11 @@ concatenation and primitive-format helpers. The format tag is selected from the
 verified MIR operand kind and cannot request a runtime type lookup or universal
 formatting fallback.
 
+ADR 0046 advances the bootstrap native ABI to version 1.6 with typed table get
+and insert-or-replace operations. Key comparison follows the compiler-approved
+canonical key contract, and table growth preserves stable managed identity and
+precise key/value maps.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry

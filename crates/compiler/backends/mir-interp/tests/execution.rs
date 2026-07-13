@@ -115,6 +115,57 @@ fn fixed_packs_destructure_swap_and_preserve_target_before_value_order() {
 }
 
 #[test]
+fn typed_tables_lookup_replace_insert_and_preserve_insertion_order() {
+    // ADR 0046: replacement keeps position and insertion appends.
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function build(): {[String]: Int}\n\
+             local scores: {[String]: Int} = { alice = 10 }\n\
+             scores[\"alice\"] = 11\n\
+             scores[\"bruno\"] = 12\n\
+             return scores\n\
+         end\n\
+         public function lookup(key: String): Int?\n\
+             local scores: {[String]: Int} = { alice = 10 }\n\
+             scores[\"bruno\"] = 12\n\
+             return scores[key]\n\
+         end\n",
+    );
+    let build = mir.functions()[0].symbol();
+    let lookup = mir.functions()[1].symbol();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+    assert_eq!(
+        interpreter.call(build, &[]).expect("table build"),
+        vec![MirValue::Table(vec![
+            (MirValue::String("alice".to_owned()), int(11)),
+            (MirValue::String("bruno".to_owned()), int(12)),
+        ])]
+    );
+    assert_eq!(
+        interpreter
+            .call(lookup, &[MirValue::String("bruno".to_owned())])
+            .expect("present key"),
+        vec![int(12)]
+    );
+    assert_eq!(
+        interpreter
+            .call(lookup, &[MirValue::String("missing".to_owned())])
+            .expect("missing key"),
+        vec![MirValue::Nil]
+    );
+
+    let optimized = optimize_mir(mir, &types).expect("optimized table MIR");
+    let optimized_interpreter =
+        MirInterpreter::new(&optimized, &types).expect("verified optimized MIR");
+    assert_eq!(
+        optimized_interpreter
+            .call(lookup, &[MirValue::String("bruno".to_owned())])
+            .expect("optimized present key"),
+        vec![int(12)]
+    );
+}
+
+#[test]
 fn mutable_locals_flow_through_loop_backedges_and_branch_joins() {
     let (mir, types) = executable_source(
         "namespace Main\n\

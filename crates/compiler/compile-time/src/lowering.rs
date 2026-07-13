@@ -427,6 +427,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::FieldSet { .. }
         | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
         TypedStatementKind::Call(call) => match call.dispatch() {
@@ -484,7 +485,9 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::ClassConstruction
         }
         TypedExpressionKind::RecordUpdate { .. } => UnsupportedCompileTimeConstruct::RecordUpdate,
-        TypedExpressionKind::Table(_) => UnsupportedCompileTimeConstruct::Table,
+        TypedExpressionKind::Table(_) | TypedExpressionKind::TableGet { .. } => {
+            UnsupportedCompileTimeConstruct::Table
+        }
         TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. } => {

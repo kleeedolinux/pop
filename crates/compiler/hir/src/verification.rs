@@ -1273,6 +1273,25 @@ impl Verifier<'_> {
                         self.verify_expression_type(*element, value);
                     }
                 }
+                HirStatementKind::TableSet { table, key, value } => {
+                    self.verify_expression(table, &visible);
+                    self.verify_expression(key, &visible);
+                    self.verify_expression(value, &visible);
+                    if let Some(SemanticType::Table {
+                        key: key_type,
+                        value: value_type,
+                    }) = self.arena.get(table.type_id())
+                    {
+                        self.verify_expression_type(*key_type, key);
+                        self.verify_expression_type(*value_type, value);
+                    } else {
+                        self.errors
+                            .push(HirVerificationError::InvalidCollectionType {
+                                type_id: table.type_id(),
+                                span: statement.span(),
+                            });
+                    }
+                }
                 HirStatementKind::CompoundArraySet {
                     array,
                     index,
@@ -1415,6 +1434,30 @@ impl Verifier<'_> {
                 }
                 Some(*element_type)
             }
+            HirAssignmentTarget::Table {
+                table,
+                key,
+                value_type,
+            } => {
+                self.verify_expression(table, visible);
+                self.verify_expression(key, visible);
+                self.verify_type(*value_type, span);
+                if let Some(SemanticType::Table {
+                    key: key_type,
+                    value,
+                }) = self.arena.get(table.type_id())
+                {
+                    self.verify_expression_type(*key_type, key);
+                    if value != value_type {
+                        self.errors
+                            .push(HirVerificationError::InvalidFixedPack { span });
+                    }
+                } else {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*value_type)
+            }
         }
     }
 
@@ -1468,6 +1511,38 @@ impl Verifier<'_> {
             }
             HirExpressionKind::ArrayGet { array, index } => {
                 self.verify_array_get(array, index, visible);
+            }
+            HirExpressionKind::TableGet { table, key } => {
+                self.verify_expression(table, visible);
+                self.verify_expression(key, visible);
+                let Some(SemanticType::Table {
+                    key: key_type,
+                    value: value_type,
+                }) = self.arena.get(table.type_id())
+                else {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: table.type_id(),
+                            span: table.span(),
+                        });
+                    return;
+                };
+                self.verify_expression_type(*key_type, key);
+                let nil = self.arena.source_type("nil");
+                let valid_result = matches!(
+                    self.arena.get(expression.type_id()),
+                    Some(SemanticType::Union(members))
+                        if members.len() == 2
+                            && members.contains(value_type)
+                            && nil.is_some_and(|nil| members.contains(&nil))
+                );
+                if !valid_result {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
             }
             HirExpressionKind::TupleGet { tuple, index } => {
                 self.verify_expression(tuple, visible);
@@ -2985,6 +3060,7 @@ fn collect_local_binding_map(
             | HirStatementKind::FieldSet { .. }
             | HirStatementKind::CompoundFieldSet { .. }
             | HirStatementKind::ArraySet { .. }
+            | HirStatementKind::TableSet { .. }
             | HirStatementKind::CompoundArraySet { .. }
             | HirStatementKind::MultipleAssignment { .. }
             | HirStatementKind::Call(_)
@@ -3125,6 +3201,11 @@ fn collect_written_bindings(
                 collect_cell_captures(index, written);
                 collect_cell_captures(value, written);
             }
+            HirStatementKind::TableSet { table, key, value } => {
+                collect_cell_captures(table, written);
+                collect_cell_captures(key, written);
+                collect_cell_captures(value, written);
+            }
             HirStatementKind::CompoundArraySet {
                 array,
                 index,
@@ -3148,6 +3229,10 @@ fn collect_written_bindings(
                         HirAssignmentTarget::Array { array, index, .. } => {
                             collect_cell_captures(array, written);
                             collect_cell_captures(index, written);
+                        }
+                        HirAssignmentTarget::Table { table, key, .. } => {
+                            collect_cell_captures(table, written);
+                            collect_cell_captures(key, written);
                         }
                     }
                 }
@@ -3183,6 +3268,10 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::ArrayGetChecked { array, index } => {
             collect_cell_captures(array, written);
             collect_cell_captures(index, written);
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            collect_cell_captures(table, written);
+            collect_cell_captures(key, written);
         }
         HirExpressionKind::ArrayCreate {
             length,

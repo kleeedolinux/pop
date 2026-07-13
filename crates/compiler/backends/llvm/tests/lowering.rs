@@ -1017,6 +1017,9 @@ public class Box\n\
         return not self.enabled and self.small == 9 and self.single > minimumSingle and self.wide > minimumWide\n\
     end\n\
 end\n\
+private function lookup(scores: {[String]: Float32}, key: String): Float32?\n\
+    return scores[key]\n\
+end\n\
 private function aggregates(): Boolean\n\
     local zeroSingle: Float32 = 0\n\
     local minimumWide: Float64 = 1\n\
@@ -1024,6 +1027,7 @@ private function aggregates(): Boolean\n\
     local flags: {Boolean} = { true, false }\n\
     local singles: {Float32} = { 1, 3 }\n\
     local scores: {[String]: Float32} = { first = 1, second = 3 }\n\
+    scores[\"third\"] = 5\n\
     local box = Box.new()\n\
     box:mutate()\n\
     return settings.enabled and settings.small == 7 and settings.single > zeroSingle and settings.wide > minimumWide and box:isValid()\n\
@@ -1040,6 +1044,10 @@ end\n",
     assert!(
         text.contains("call i64 @pop_rt_allocate_table(i64 2, i1 1, i1 0)"),
         "typed tables must use specialized managed-key/scalar-value storage: {text}"
+    );
+    assert!(
+        text.contains("@pop_rt_table_set") && text.contains("@pop_rt_table_get"),
+        "typed table access and mutation must use the closed table ABI: {text}"
     );
     let result = link_with_runtime_and_run(&module, "scalar-aggregate-storage");
     assert_eq!(

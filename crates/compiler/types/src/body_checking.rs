@@ -978,6 +978,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::FieldSet { .. }
         | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. }
         | TypedStatementKind::MultipleAssignment { .. }
         | TypedStatementKind::Call(_)

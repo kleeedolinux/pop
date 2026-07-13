@@ -4,6 +4,7 @@ mod access;
 mod adapter;
 mod heap;
 mod relocation;
+mod table;
 mod trace;
 
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};

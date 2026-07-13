@@ -776,6 +776,17 @@ pub enum MirInstructionKind {
         key_map: ArrayElementMap,
         value_map: ArrayElementMap,
     },
+    TableGet {
+        table: ValueId,
+        key: ValueId,
+    },
+    TableSet {
+        table: ValueId,
+        key: ValueId,
+        value: ValueId,
+        key_map: ArrayElementMap,
+        value_map: ArrayElementMap,
+    },
     ArrayGet {
         array: ValueId,
         index: ValueId,

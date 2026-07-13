@@ -1362,6 +1362,63 @@ fn verify_instruction_types(
                 verify_operand_type(instruction.result(), *entry_value, value, values, errors);
             }
         }
+        MirInstructionKind::TableGet { table, key } => {
+            let Some(table_type) = values.get(table).copied() else {
+                return;
+            };
+            let Some(SemanticType::Table {
+                key: key_type,
+                value: value_type,
+            }) = arena.get(table_type).cloned()
+            else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *table,
+                    found: table_type,
+                });
+                return;
+            };
+            verify_operand_type(instruction.result(), *key, key_type, values, errors);
+            if !is_optional_of(arena, instruction.result_type(), value_type) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map,
+            value_map,
+        } => {
+            let Some(table_type) = values.get(table).copied() else {
+                return;
+            };
+            let Some(SemanticType::Table {
+                key: key_type,
+                value: value_type,
+            }) = arena.get(table_type).cloned()
+            else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *table,
+                    found: table_type,
+                });
+                return;
+            };
+            verify_operand_type(instruction.result(), *key, key_type, values, errors);
+            verify_operand_type(instruction.result(), *value, value_type, values, errors);
+            if (*key_map, *value_map) != table_element_maps(arena, table_type)
+                || arena.source_type("nil") != Some(instruction.result_type())
+            {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::ArrayGet { array, index } => {
             let Some(array_type) = values.get(array).copied() else {
                 return;
@@ -2522,6 +2579,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::ConvertFloat { operand, .. }
         | MirInstructionKind::StringFormat { value: operand, .. } => vec![*operand],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
+        MirInstructionKind::TableGet { table, key } => vec![*table, *key],
         MirInstructionKind::ArrayLength { array } => vec![*array],
         MirInstructionKind::ArrayGetChecked { array, index } => vec![*array, *index],
         MirInstructionKind::ArraySet {
@@ -2531,6 +2589,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             ..
         } => vec![*array, *index, *value],
         MirInstructionKind::ArrayFill { array, value, .. } => vec![*array, *value],
+        MirInstructionKind::TableSet {
+            table, key, value, ..
+        } => vec![*table, *key, *value],
         MirInstructionKind::RecordMake { fields, .. } => {
             fields.iter().map(|(_, value)| *value).collect()
         }

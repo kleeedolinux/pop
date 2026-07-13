@@ -6,7 +6,7 @@ use pop_runtime_native_abi::{INVALID_HANDLE, NATIVE_ABI_VERSION, symbol};
 #[test]
 fn abi_version_and_invalid_handle_are_explicit() {
     assert_eq!(NATIVE_ABI_VERSION.major(), 1);
-    assert_eq!(NATIVE_ABI_VERSION.minor(), 5);
+    assert_eq!(NATIVE_ABI_VERSION.minor(), 6);
     assert_eq!(INVALID_HANDLE, 0);
 }
 
@@ -18,6 +18,8 @@ fn supported_symbols_are_unique_and_native() {
         RuntimeOperation::AllocateArrayFilled,
         RuntimeOperation::AllocateTable,
         RuntimeOperation::TupleMake,
+        RuntimeOperation::TableGet,
+        RuntimeOperation::TableSet,
         RuntimeOperation::ArrayGet,
         RuntimeOperation::ArrayLength,
         RuntimeOperation::ArrayGetChecked,

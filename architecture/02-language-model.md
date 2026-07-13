@@ -190,6 +190,12 @@ Specialized ordered/persistent collections can be ordinary generic library
 values without changing literal semantics. Every read and write remains
 statically typed.
 
+`table[key]` requires the table's exact key type and returns an optional value;
+a missing key returns `nil`. `table[key] = value` inserts or replaces one entry
+and may grow the table while preserving identity and deterministic insertion
+order. Assigning `nil` stores a typed optional value rather than deleting an
+entry. See ADR 0046.
+
 Tables do not define lexical namespaces, class identity, ordinary method
 lookup, module initialization, records, or tuples. Pop Lang does not inherit the
 full Lua metamethod system. Operator customization and iteration use explicit

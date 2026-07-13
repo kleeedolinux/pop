@@ -119,6 +119,11 @@ pub enum TypedStatementKind {
         index: TypedExpression,
         value: TypedExpression,
     },
+    TableSet {
+        table: TypedExpression,
+        key: TypedExpression,
+        value: TypedExpression,
+    },
     CompoundArraySet {
         array: TypedExpression,
         index: TypedExpression,
@@ -192,6 +197,11 @@ pub enum TypedAssignmentTarget {
         index: TypedExpression,
         element_type: TypeId,
     },
+    Table {
+        table: TypedExpression,
+        key: TypedExpression,
+        value_type: TypeId,
+    },
 }
 
 impl TypedAssignmentTarget {
@@ -200,7 +210,8 @@ impl TypedAssignmentTarget {
         match self {
             Self::Local { value_type, .. }
             | Self::Capture { value_type, .. }
-            | Self::Field { value_type, .. } => *value_type,
+            | Self::Field { value_type, .. }
+            | Self::Table { value_type, .. } => *value_type,
             Self::Array { element_type, .. } => *element_type,
         }
     }
@@ -313,6 +324,10 @@ pub enum TypedExpressionKind {
     ArrayGet {
         array: Box<TypedExpression>,
         index: Box<TypedExpression>,
+    },
+    TableGet {
+        table: Box<TypedExpression>,
+        key: Box<TypedExpression>,
     },
     TupleGet {
         tuple: Box<TypedExpression>,

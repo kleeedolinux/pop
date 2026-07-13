@@ -422,6 +422,15 @@ fn dump_statements(
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
+            HirStatementKind::TableSet { table, key, value } => {
+                output.push_str("table.set ");
+                dump_expression(output, table, arena);
+                output.push('[');
+                dump_expression(output, key, arena);
+                output.push_str("] = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::CompoundArraySet {
                 array,
                 index,
@@ -464,6 +473,12 @@ fn dump_assignment_target(output: &mut String, target: &HirAssignmentTarget, are
         }
         HirAssignmentTarget::Array { array, index, .. } => {
             dump_array_get(output, array, index, arena);
+        }
+        HirAssignmentTarget::Table { table, key, .. } => {
+            dump_expression(output, table, arena);
+            output.push('[');
+            dump_expression(output, key, arena);
+            output.push(']');
         }
     }
 }
@@ -545,6 +560,12 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
         HirExpressionKind::ArrayGet { array, index } => {
             dump_array_get(output, array, index, arena);
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            output.push_str("table.get ");
+            dump_expression(output, table, arena);
+            output.push(' ');
+            dump_expression(output, key, arena);
         }
         HirExpressionKind::TupleGet { tuple, index } => {
             let _ = write!(output, "tuple.get {index} ");

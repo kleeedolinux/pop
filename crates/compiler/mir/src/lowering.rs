@@ -310,6 +310,12 @@ enum LoweredAssignmentTarget {
         array_type: TypeId,
         element_type: TypeId,
     },
+    Table {
+        table: ValueId,
+        key: ValueId,
+        table_type: TypeId,
+        value_type: TypeId,
+    },
 }
 
 struct FunctionBuilder<'hir> {
@@ -432,6 +438,11 @@ fn visit_statement_closures(
             visit_expression_closures(index, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
+        HirStatementKind::TableSet { table, key, value } => {
+            visit_expression_closures(table, parameters, locals);
+            visit_expression_closures(key, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
         HirStatementKind::CompoundArraySet {
             array,
             index,
@@ -452,6 +463,10 @@ fn visit_statement_closures(
                     HirAssignmentTarget::Array { array, index, .. } => {
                         visit_expression_closures(array, parameters, locals);
                         visit_expression_closures(index, parameters, locals);
+                    }
+                    HirAssignmentTarget::Table { table, key, .. } => {
+                        visit_expression_closures(table, parameters, locals);
+                        visit_expression_closures(key, parameters, locals);
                     }
                 }
             }
@@ -492,6 +507,7 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         | HirStatementKind::FieldSet { .. }
         | HirStatementKind::CompoundFieldSet { .. }
         | HirStatementKind::ArraySet { .. }
+        | HirStatementKind::TableSet { .. }
         | HirStatementKind::CompoundArraySet { .. }
         | HirStatementKind::MultipleAssignment { .. }
         | HirStatementKind::Call(_)
@@ -527,6 +543,10 @@ fn visit_expression_closures(
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. } => {
             visit_expression_closures(base, parameters, locals);
+        }
+        HirExpressionKind::TableGet { table, key } => {
+            visit_expression_closures(table, parameters, locals);
+            visit_expression_closures(key, parameters, locals);
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
@@ -1067,6 +1087,28 @@ impl<'hir> FunctionBuilder<'hir> {
                         statement.span(),
                     );
                 }
+                HirStatementKind::TableSet { table, key, value } => {
+                    let table_type = table.type_id();
+                    let (key_map, value_map) = table_element_maps(self.arena, table_type);
+                    let table = self.lower_expression(table);
+                    let key = self.lower_expression(key);
+                    let value = self.lower_expression(value);
+                    let nil = self
+                        .arena
+                        .source_type("nil")
+                        .expect("validated type arena always contains nil");
+                    self.emit(
+                        MirInstructionKind::TableSet {
+                            table,
+                            key,
+                            value,
+                            key_map,
+                            value_map,
+                        },
+                        nil,
+                        statement.span(),
+                    );
+                }
                 HirStatementKind::CompoundArraySet {
                     array,
                     index,
@@ -1117,6 +1159,7 @@ impl<'hir> FunctionBuilder<'hir> {
                             | LoweredAssignmentTarget::Capture { value_type, .. } => *value_type,
                             LoweredAssignmentTarget::Field { value_type, .. } => *value_type,
                             LoweredAssignmentTarget::Array { element_type, .. } => *element_type,
+                            LoweredAssignmentTarget::Table { value_type, .. } => *value_type,
                         };
                         let projected = self.emit(
                             MirInstructionKind::TupleGet {
@@ -1187,6 +1230,19 @@ impl<'hir> FunctionBuilder<'hir> {
                     index,
                     array_type,
                     element_type: *element_type,
+                }
+            }
+            HirAssignmentTarget::Table {
+                table,
+                key,
+                value_type,
+            } => {
+                let table_type = table.type_id();
+                LoweredAssignmentTarget::Table {
+                    table: self.lower_expression(table),
+                    key: self.lower_expression(key),
+                    table_type,
+                    value_type: *value_type,
                 }
             }
         }
@@ -1266,6 +1322,29 @@ impl<'hir> FunctionBuilder<'hir> {
                         index,
                         value,
                         element_map: array_element_map(self.arena, array_type),
+                    },
+                    nil,
+                    span,
+                );
+            }
+            LoweredAssignmentTarget::Table {
+                table,
+                key,
+                table_type,
+                ..
+            } => {
+                let (key_map, value_map) = table_element_maps(self.arena, table_type);
+                let nil = self
+                    .arena
+                    .source_type("nil")
+                    .expect("validated type arena always contains nil");
+                self.emit(
+                    MirInstructionKind::TableSet {
+                        table,
+                        key,
+                        value,
+                        key_map,
+                        value_map,
                     },
                     nil,
                     span,
@@ -1719,6 +1798,10 @@ impl<'hir> FunctionBuilder<'hir> {
                     entries: self.lower_table_entries(entries),
                 }
             }
+            HirExpressionKind::TableGet { table, key } => MirInstructionKind::TableGet {
+                table: self.lower_expression(table),
+                key: self.lower_expression(key),
+            },
             HirExpressionKind::Unary { operator, operand } => {
                 let operand = self.lower_expression(operand);
                 match operator {
@@ -2636,6 +2719,22 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
                 effects
             }
         }
+        MirInstructionKind::TableSet {
+            key_map, value_map, ..
+        } => {
+            let effects = MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ]);
+            if *key_map == ArrayElementMap::ManagedReference
+                || *value_map == ArrayElementMap::ManagedReference
+            {
+                effects.with(MirEffect::WritesManagedReference)
+            } else {
+                effects
+            }
+        }
         MirInstructionKind::TupleMake(_)
         | MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
@@ -2700,6 +2799,7 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleGet { .. }
         | MirInstructionKind::ArrayGet { .. }
+        | MirInstructionKind::TableGet { .. }
         | MirInstructionKind::ArrayLength { .. }
         | MirInstructionKind::FloatAdd { .. }
         | MirInstructionKind::FloatSubtract { .. }

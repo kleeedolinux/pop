@@ -350,6 +350,25 @@ pub(crate) fn lower_instruction(
             key_map,
             value_map,
         } => lower_table_make(&result, entries, *key_map, *value_map, value_types, types)?,
+        MirInstructionKind::TableGet { table, key } => {
+            lower_table_get(&result, *table, *key, value_types, types)?
+        }
+        MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map,
+            value_map,
+        } => lower_table_set(
+            &result,
+            *table,
+            *key,
+            *value,
+            *key_map,
+            *value_map,
+            value_types,
+            types,
+        )?,
         MirInstructionKind::RecordMake { fields, .. } => {
             let slot_count = u32::try_from(fields.len())
                 .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
@@ -2282,21 +2301,92 @@ pub(crate) fn lower_table_make(
         u8::from(key_map == ArrayElementMap::ManagedReference),
         u8::from(value_map == ArrayElementMap::ManagedReference),
     )];
-    for (entry, (key, value)) in entries.iter().enumerate() {
-        for (offset, item) in [*key, *value].into_iter().enumerate() {
-            let type_id = *values
-                .get(&item)
-                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-            let (conversions, stored) =
-                lower_runtime_slot_store(item, type_id, &llvm_type(type_id, types)?)?;
-            lines.extend(conversions);
-            lines.push(format!(
-                "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-                native_runtime_symbol(RuntimeOperation::FieldSet),
-                entry * 2 + offset + 1
-            ));
-        }
+    for (key, value) in entries {
+        let key_type = *values
+            .get(key)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let value_type = *values
+            .get(value)
+            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let (key_conversions, stored_key) =
+            lower_runtime_slot_store(*key, key_type, &llvm_type(key_type, types)?)?;
+        let (value_conversions, stored_value) =
+            lower_runtime_slot_store(*value, value_type, &llvm_type(value_type, types)?)?;
+        lines.extend(key_conversions);
+        lines.extend(value_conversions);
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {stored_key}, i64 {stored_value}, i1 {}, i1 {})",
+            native_runtime_symbol(RuntimeOperation::TableSet),
+            u8::from(key_map == ArrayElementMap::ManagedReference),
+            u8::from(value_map == ArrayElementMap::ManagedReference),
+        ));
     }
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_table_get(
+    result: &str,
+    table: ValueId,
+    key: ValueId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let key_type = *values
+        .get(&key)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored_key) =
+        lower_runtime_slot_store(key, key_type, &llvm_type(key_type, types)?)?;
+    lines.push(format!(
+        "{result} = call i64 @{}(i64 %v{}, i64 {stored_key}, i1 {})",
+        native_runtime_symbol(RuntimeOperation::TableGet),
+        table.raw(),
+        u8::from(is_managed_type(key_type, types)),
+    ));
+    Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_table_set(
+    result: &str,
+    table: ValueId,
+    key: ValueId,
+    value: ValueId,
+    key_map: ArrayElementMap,
+    value_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let key_type = *values
+        .get(&key)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored_key) =
+        lower_runtime_slot_store(key, key_type, &llvm_type(key_type, types)?)?;
+    let (value_conversions, stored_value) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    lines.extend(value_conversions);
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result}_stored = call i8 @{}(i64 %v{}, i64 {stored_key}, i64 {stored_value}, i1 {}, i1 {})",
+            native_runtime_symbol(RuntimeOperation::TableSet),
+            table.raw(),
+            u8::from(key_map == ArrayElementMap::ManagedReference),
+            u8::from(value_map == ArrayElementMap::ManagedReference),
+        ),
+        format!("{result}_valid = icmp ne i8 {result}_stored, 0"),
+        format!("br i1 {result}_valid, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
     Ok(lines.join("\n"))
 }
 

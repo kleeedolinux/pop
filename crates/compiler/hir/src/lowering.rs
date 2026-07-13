@@ -404,6 +404,11 @@ fn lower_statement(
             index: lower_expression(index, interface_slots),
             value: lower_expression(value, interface_slots),
         },
+        TypedStatementKind::TableSet { table, key, value } => HirStatementKind::TableSet {
+            table: lower_expression(table, interface_slots),
+            key: lower_expression(key, interface_slots),
+            value: lower_expression(value, interface_slots),
+        },
         TypedStatementKind::CompoundArraySet {
             array,
             index,
@@ -477,6 +482,15 @@ fn lower_assignment_target(
             array: lower_expression(array, interface_slots),
             index: lower_expression(index, interface_slots),
             element_type: *element_type,
+        },
+        TypedAssignmentTarget::Table {
+            table,
+            key,
+            value_type,
+        } => HirAssignmentTarget::Table {
+            table: lower_expression(table, interface_slots),
+            key: lower_expression(key, interface_slots),
+            value_type: *value_type,
         },
     }
 }
@@ -572,6 +586,10 @@ fn lower_expression(
         TypedExpressionKind::ArrayGet { array, index } => HirExpressionKind::ArrayGet {
             array: Box::new(lower_expression(array, interface_slots)),
             index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::TableGet { table, key } => HirExpressionKind::TableGet {
+            table: Box::new(lower_expression(table, interface_slots)),
+            key: Box::new(lower_expression(key, interface_slots)),
         },
         TypedExpressionKind::TupleGet { tuple, index } => HirExpressionKind::TupleGet {
             tuple: Box::new(lower_expression(tuple, interface_slots)),
@@ -971,6 +989,11 @@ fn first_unknown_interface_call(
             } => first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
                 .or_else(|| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::TableSet { table, key, value } => {
+                first_unknown_interface_expression(table, slots)
+                    .or_else(|| first_unknown_interface_expression(key, slots))
+                    .or_else(|| first_unknown_interface_expression(value, slots))
+            }
             TypedStatementKind::CompoundArraySet {
                 array,
                 index,
@@ -1033,6 +1056,10 @@ fn first_unknown_interface_target(
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
         }
+        TypedAssignmentTarget::Table { table, key, .. } => {
+            first_unknown_interface_expression(table, slots)
+                .or_else(|| first_unknown_interface_expression(key, slots))
+        }
     }
 }
 
@@ -1067,6 +1094,10 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::ArrayGet { array, index } => {
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedExpressionKind::TableGet { table, key } => {
+            first_unknown_interface_expression(table, slots)
+                .or_else(|| first_unknown_interface_expression(key, slots))
         }
         TypedExpressionKind::TupleGet { tuple, .. } => {
             first_unknown_interface_expression(tuple, slots)
@@ -1230,6 +1261,11 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
             } => first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
                 .or_else(|| first_compile_time_only_expression(value)),
+            TypedStatementKind::TableSet { table, key, value } => {
+                first_compile_time_only_expression(table)
+                    .or_else(|| first_compile_time_only_expression(key))
+                    .or_else(|| first_compile_time_only_expression(value))
+            }
             TypedStatementKind::CompoundArraySet {
                 array,
                 index,
@@ -1258,6 +1294,10 @@ fn first_compile_time_only_target(target: &TypedAssignmentTarget) -> Option<Sour
         TypedAssignmentTarget::Array { array, index, .. } => {
             first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
+        }
+        TypedAssignmentTarget::Table { table, key, .. } => {
+            first_compile_time_only_expression(table)
+                .or_else(|| first_compile_time_only_expression(key))
         }
     }
 }
@@ -1296,6 +1336,8 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             .find_map(|field| first_compile_time_only_expression(field.value())),
         TypedExpressionKind::ArrayGet { array, index } => first_compile_time_only_expression(array)
             .or_else(|| first_compile_time_only_expression(index)),
+        TypedExpressionKind::TableGet { table, key } => first_compile_time_only_expression(table)
+            .or_else(|| first_compile_time_only_expression(key)),
         TypedExpressionKind::TupleGet { tuple, .. } => first_compile_time_only_expression(tuple),
         TypedExpressionKind::ArrayCreate {
             length,

@@ -1049,6 +1049,7 @@ pub(crate) fn llvm_block_exit_label(
                 | MirInstructionKind::CheckedIntegerRemainder { .. }
                 | MirInstructionKind::IntegerNegate { .. }
                 | MirInstructionKind::ArraySet { .. }
+                | MirInstructionKind::TableSet { .. }
                 | MirInstructionKind::ArrayFill { .. } => "continue",
                 MirInstructionKind::GcSafePoint { .. } => "poll_continue",
                 MirInstructionKind::ArrayCreate { .. } => "create",

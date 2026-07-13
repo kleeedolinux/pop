@@ -88,7 +88,7 @@ verification and forced-minor tests prove register/frame updates.
 
 ### Native ABI and implementation staging
 
-Native ABI 1.5 remains the bootstrap stable-handle ABI. It cannot be linked as a
+Native ABI 1.6 remains the bootstrap stable-handle ABI. It cannot be linked as a
 production moving runtime. The first production native ABI uses major version
 2 and either:
 

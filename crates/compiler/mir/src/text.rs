@@ -723,6 +723,26 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             value_map: parse_array_element_map(value_map, line)?,
         });
     }
+    if let Some(operands) = text.strip_prefix("tableGet ") {
+        let (table, key) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::TableGet { table, key });
+    }
+    if let Some(operands) = text.strip_prefix("tableSet ") {
+        let (key_map, rest) = operands
+            .split_once(' ')
+            .ok_or_else(|| error(line, "table set key map"))?;
+        let (value_map, operands) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "table set value map"))?;
+        let (table, key, value) = parse_three_values(operands, line)?;
+        return Ok(MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map: parse_array_element_map(key_map, line)?,
+            value_map: parse_array_element_map(value_map, line)?,
+        });
+    }
     if let Some(operands) = text.strip_prefix("arrayGet ") {
         let (array, index) = parse_two_values(operands, line)?;
         return Ok(MirInstructionKind::ArrayGet { array, index });

@@ -113,7 +113,10 @@ These are distinct semantic types even if optimized layouts overlap.
   mutability semantics.
 - An array has one element type and integer indexing.
 - A table preserves selected Luau collection behavior with statically known key
-  and value types.
+  and value types. An indexed read returns an optional value; indexed assignment
+  inserts or replaces an entry without changing the invariant table type. Only
+  key types with accepted canonical equality and hashing are indexable. See ADR
+  0046.
 
 Specialized ordered/persistent maps are ordinary nominal standard-library types
 built on these primitives rather than a separate core language type.

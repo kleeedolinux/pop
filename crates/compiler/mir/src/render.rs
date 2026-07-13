@@ -342,6 +342,26 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "tableMake {key_map} {value_map} ");
             dump_table_entries(output, entries);
         }
+        MirInstructionKind::TableGet { table, key } => {
+            dump_binary(output, "tableGet", *table, *key);
+        }
+        MirInstructionKind::TableSet {
+            table,
+            key,
+            value,
+            key_map,
+            value_map,
+        } => {
+            let key_map = array_element_map_name(*key_map);
+            let value_map = array_element_map_name(*value_map);
+            let _ = write!(
+                output,
+                "tableSet {key_map} {value_map} v{} v{} v{}",
+                table.raw(),
+                key.raw(),
+                value.raw()
+            );
+        }
         MirInstructionKind::ArrayGet { array, index } => {
             dump_binary(output, "arrayGet", *array, *index);
         }

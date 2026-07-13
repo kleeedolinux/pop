@@ -5,7 +5,8 @@ use pop_runtime_native::{
     pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
     pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
     pop_rt_pin, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_unpin, request_abi_collection,
+    pop_rt_string_format, pop_rt_string_read, pop_rt_table_get, pop_rt_table_set, pop_rt_unpin,
+    request_abi_collection,
 };
 use pop_runtime_native_abi::StringFormatTag;
 use std::ffi::CString;
@@ -22,7 +23,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 5);
+    assert_eq!(pop_rt_abi_minor(), 6);
     assert_eq!(pop_rt_gc_stage(), 1);
 }
 
@@ -255,6 +256,42 @@ fn bootstrap_abi_allocates_and_tracks_opaque_handles() {
     assert_ne!(object, 0);
     assert_eq!(pop_rt_field_set(object, 1, 77), 1);
     assert_eq!(pop_rt_field_get(object, 1), 77);
+}
+
+#[test]
+fn typed_table_abi_replaces_and_grows_without_changing_identity() {
+    let _guard = abi_test_lock();
+    let table = pop_rt_allocate_table(1, 0, 0);
+    assert_ne!(table, 0);
+    assert_eq!(pop_rt_table_get(table, 7, 0), 0);
+    assert_eq!(pop_rt_table_set(table, 7, 10, 0, 0), 1);
+    assert_eq!(pop_rt_table_get(table, 7, 0), 10);
+    assert_eq!(pop_rt_table_set(table, 7, 11, 0, 0), 1);
+    assert_eq!(pop_rt_table_get(table, 7, 0), 11);
+    assert_eq!(pop_rt_table_set(table, 8, 12, 0, 0), 1);
+    assert_eq!(pop_rt_table_get(table, 8, 0), 12);
+
+    let first = allocate_utf8_string_literal(b"alice");
+    let equal = allocate_utf8_string_literal(b"alice");
+    let strings = pop_rt_allocate_table(0, 1, 0);
+    assert_ne!(first, 0);
+    assert_ne!(equal, 0);
+    assert_ne!(strings, 0);
+    assert_eq!(pop_rt_table_set(strings, first, 42, 1, 0), 1);
+    assert_eq!(pop_rt_table_get(strings, equal, 1), 42);
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(30, &[strings]), 1);
+    assert_eq!(abi_safe_point(31, &[first]), 1);
+    assert_eq!(abi_safe_point(32, &[equal]), 0);
+
+    let managed_values = pop_rt_allocate_table(0, 0, 1);
+    let child = pop_rt_allocate_object(0);
+    assert_ne!(managed_values, 0);
+    assert_ne!(child, 0);
+    assert_eq!(pop_rt_table_set(managed_values, 1, child, 0, 1), 1);
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(33, &[managed_values]), 1);
+    assert_eq!(abi_safe_point(34, &[child]), 1);
 }
 
 #[test]

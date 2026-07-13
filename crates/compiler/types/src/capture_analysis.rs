@@ -97,6 +97,11 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
             finalize_expression_captures(index, written);
             finalize_expression_captures(value, written);
         }
+        TypedStatementKind::TableSet { table, key, value } => {
+            finalize_expression_captures(table, written);
+            finalize_expression_captures(key, written);
+            finalize_expression_captures(value, written);
+        }
         TypedStatementKind::CompoundArraySet {
             array,
             index,
@@ -118,6 +123,10 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                     TypedAssignmentTarget::Array { array, index, .. } => {
                         finalize_expression_captures(array, written);
                         finalize_expression_captures(index, written);
+                    }
+                    TypedAssignmentTarget::Table { table, key, .. } => {
+                        finalize_expression_captures(table, written);
+                        finalize_expression_captures(key, written);
                     }
                 }
             }
@@ -182,6 +191,10 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::ArrayGetChecked { array, index } => {
             finalize_expression_captures(array, written);
             finalize_expression_captures(index, written);
+        }
+        TypedExpressionKind::TableGet { table, key } => {
+            finalize_expression_captures(table, written);
+            finalize_expression_captures(key, written);
         }
         TypedExpressionKind::TupleGet { tuple, .. } => {
             finalize_expression_captures(tuple, written);

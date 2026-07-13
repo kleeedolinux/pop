@@ -561,6 +561,54 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 );
                 return Ok(RuntimeValue::managed(visible, reference));
             }
+            MirInstructionKind::TableGet { table, key } => {
+                let (MirValue::Table(entries), key) = (
+                    &value(values, *table)?.visible,
+                    &value(values, *key)?.visible,
+                ) else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                return Ok(RuntimeValue::visible(
+                    entries
+                        .iter()
+                        .find(|(candidate, _)| candidate == key)
+                        .map_or(MirValue::Nil, |(_, value)| value.clone()),
+                ));
+            }
+            MirInstructionKind::TableSet {
+                table,
+                key,
+                value: stored,
+                ..
+            } => {
+                let owner = value(values, *table)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let key = value(values, *key)?.visible.clone();
+                let stored = value(values, *stored)?.visible.clone();
+                let mut updated = false;
+                for candidate in values.values_mut() {
+                    if candidate.reference != Some(owner) {
+                        continue;
+                    }
+                    let MirValue::Table(entries) = &mut candidate.visible else {
+                        continue;
+                    };
+                    if let Some((_, current)) = entries
+                        .iter_mut()
+                        .find(|(candidate_key, _)| *candidate_key == key)
+                    {
+                        *current = stored.clone();
+                    } else {
+                        entries.push((key.clone(), stored.clone()));
+                    }
+                    updated = true;
+                }
+                if !updated {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                MirValue::Nil
+            }
             MirInstructionKind::ArrayGet { array, index } => {
                 let (MirValue::Array(elements), MirValue::Integer(index)) = (
                     &value(values, *array)?.visible,

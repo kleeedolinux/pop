@@ -119,6 +119,46 @@ fn fixed_packs_preserve_hir_grouping_and_lower_to_tuple_projection() {
 }
 
 #[test]
+fn typed_table_access_lowers_to_verified_optional_get_and_insert_or_replace_set() {
+    // ADR 0046 keeps associative access typed and backend-neutral.
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/tables.pop",
+        "namespace Main\n\
+         public function lookup(key: String): Int?\n\
+             local scores: {[String]: Int} = { alice = 10 }\n\
+             scores[\"alice\"] = 11\n\
+             scores[\"bruno\"] = 12\n\
+             return scores[key]\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let hir_dump = hir.dump(front_end.types());
+    assert!(hir_dump.contains("table.set"), "{hir_dump}");
+    assert!(hir_dump.contains("table.get"), "{hir_dump}");
+
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("tableSet managed scalar"), "{dump}");
+    assert!(dump.contains("tableGet"), "{dump}");
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+    let reparsed = parse_mir_dump(&dump).expect("MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+}
+
+#[test]
 fn repeat_until_lowers_to_portable_body_condition_exit_and_backedge_cfg() {
     // ADR 0032 deliberately keeps repeat-until out of the MIR instruction set.
     let source = SourceFile::new(

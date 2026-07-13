@@ -810,6 +810,18 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 element_type,
             });
         }
+        if let TypedExpressionKind::TableGet { table, key } = target.kind {
+            let Some(SemanticType::Table { value, .. }) =
+                self.resolver.arena().get(table.type_id()).cloned()
+            else {
+                return None;
+            };
+            return Some(TypedAssignmentTarget::Table {
+                table: *table,
+                key: *key,
+                value_type: value,
+            });
+        }
         let TypedExpressionKind::Field { base, field } = target.kind else {
             self.diagnostics.push(type_diagnostics::invalid_operator(
                 span,
@@ -899,6 +911,24 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return Some(TypedStatementKind::ArraySet {
                 array: *array,
                 index: *index,
+                value,
+            });
+        }
+        if let TypedExpressionKind::TableGet { table, key } = target.kind {
+            let Some(SemanticType::Table {
+                value: value_type, ..
+            }) = self.resolver.arena().get(table.type_id()).cloned()
+            else {
+                return None;
+            };
+            let value = self.check_expression_expected(
+                value,
+                Some(ExpectedExpressionType::plain(value_type)),
+            )?;
+            self.require_same_type(value_type, value.type_id(), value.span(), span);
+            return Some(TypedStatementKind::TableSet {
+                table: *table,
+                key: *key,
                 value,
             });
         }

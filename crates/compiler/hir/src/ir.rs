@@ -1344,6 +1344,11 @@ pub enum HirStatementKind {
         index: HirExpression,
         value: HirExpression,
     },
+    TableSet {
+        table: HirExpression,
+        key: HirExpression,
+        value: HirExpression,
+    },
     CompoundArraySet {
         array: HirExpression,
         index: HirExpression,
@@ -1411,6 +1416,11 @@ pub enum HirAssignmentTarget {
         array: HirExpression,
         index: HirExpression,
         element_type: TypeId,
+    },
+    Table {
+        table: HirExpression,
+        key: HirExpression,
+        value_type: TypeId,
     },
 }
 
@@ -1558,6 +1568,10 @@ pub enum HirExpressionKind {
     ArrayGet {
         array: Box<HirExpression>,
         index: Box<HirExpression>,
+    },
+    TableGet {
+        table: Box<HirExpression>,
+        key: Box<HirExpression>,
     },
     TupleGet {
         tuple: Box<HirExpression>,
