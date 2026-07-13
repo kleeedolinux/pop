@@ -1,0 +1,158 @@
+name: Release PR
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-pr-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  release_pr:
+    name: Create release pull request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Reject untrusted tag pushers
+        if: github.actor != 'kleeedolinux'
+        run: |
+          echo "Tag pushes are restricted to trusted maintainers."
+          exit 1
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build release changelog and PR branch
+        id: prep
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import os
+          import re
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          match = re.fullmatch(r"v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?", tag)
+          if not match:
+              raise SystemExit(f"tag {tag!r} is not semantic versioned")
+
+          prerelease = match.group("prerelease") or ""
+          release_kind = "prerelease" if prerelease else "release"
+
+          def git(*args, check=True):
+              return subprocess.run(["git", *args], check=check, capture_output=True, text=True).stdout.strip()
+
+          def parse_version(value):
+              value = value.removeprefix("v")
+              main, sep, pre = value.partition("-")
+              major, minor, patch = (int(part) for part in main.split("."))
+              pre_parts = tuple(pre.split(".")) if sep else ()
+              return major, minor, patch, pre_parts
+
+          def version_key(value):
+              major, minor, patch, pre_parts = parse_version(value)
+              stable_rank = 1 if not pre_parts else 0
+              pre_rank = tuple((0, int(part)) if part.isdigit() else (1, part) for part in pre_parts)
+              return major, minor, patch, stable_rank, pre_rank
+
+          all_tags = [line for line in git("tag", "--list", "v*").splitlines() if match.fullmatch(line)]
+          current = tag
+          previous = ""
+          for candidate in sorted(all_tags, key=version_key):
+              if version_key(candidate) < version_key(current):
+                  previous = candidate
+              elif candidate == current:
+                  break
+
+          range_spec = f"{previous}..{current}" if previous else current
+          commits = git("log", "--no-merges", "--format=%s", range_spec).splitlines()
+          contributors = git("shortlog", "-sne", range_spec).splitlines()
+
+          archive = subprocess.run(
+              ["git", "archive", "--format=tar", current],
+              check=True,
+              capture_output=True,
+          ).stdout
+          checksum = hashlib.sha256(archive).hexdigest()
+
+          changelog = Path("CHANGELOG.md")
+          existing = changelog.read_text(encoding="utf-8") if changelog.exists() else "# Changelog\n"
+          section = [f"## {current}", f"Type: {release_kind}"]
+          if previous:
+              section.append(f"Changes since: {previous}")
+          if commits:
+              section.append("")
+              section.append("### Commits")
+              section.extend(f"- {line}" for line in commits)
+          if contributors:
+              section.append("")
+              section.append("### Contributors")
+              section.extend(f"- {line}" for line in contributors)
+          section.append("")
+          section.append("### Checksum")
+          section.append(f"- sha256(source archive): `{checksum}`")
+          section.append("")
+          changelog.write_text(existing.rstrip() + "\n\n" + "\n".join(section).rstrip() + "\n", encoding="utf-8")
+
+          branch = f"release/{current}"
+          subprocess.run(["git", "switch", "-c", branch], check=True)
+          subprocess.run(["git", "add", "CHANGELOG.md"], check=True)
+          subprocess.run(
+              [
+                  "git",
+                  "commit",
+                  "-m",
+                  f"chore(release): {current}",
+                  "--author",
+                  "release-bot <release-bot@users.noreply.github.com>",
+              ],
+              check=True,
+          )
+          subprocess.run(["git", "push", "origin", f"HEAD:{branch}", "--force-with-lease"], check=True)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"tag={current}", file=output)
+              print(f"branch={branch}", file=output)
+              print(f"kind={release_kind}", file=output)
+              print(f"previous={previous}", file=output)
+              print(f"checksum={checksum}", file=output)
+          PY
+
+      - name: Create or update the release PR
+        shell: bash
+        run: |
+          title="release: ${{ steps.prep.outputs.tag }}"
+          body="Automated release PR for \`${{ steps.prep.outputs.tag }}\`.
+
+- Kind: \`${{ steps.prep.outputs.kind }}\`
+- Previous published version: \`${{ steps.prep.outputs.previous || 'none' }}\`
+- Source archive checksum: \`${{ steps.prep.outputs.checksum }}\`
+
+Review the generated \`CHANGELOG.md\`, approve it, and merge to publish."
+
+          pr_number="$(gh pr list --head "${{ steps.prep.outputs.branch }}" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" --title "$title" --body "$body"
+          else
+            gh pr create \
+              --base "${{ github.event.repository.default_branch }}" \
+              --head "${{ steps.prep.outputs.branch }}" \
+              --title "$title" \
+              --body "$body" \
+              --label release \
+              --assignee kleeedolinux
+          fi
