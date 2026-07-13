@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Semantic version tag to release, for example v1.2.3 or v1.2.3-rc.1"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -45,7 +51,7 @@ jobs:
           import tempfile
           from pathlib import Path
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ.get("INPUT_TAG") or os.environ["GITHUB_REF_NAME"]
           match = re.fullmatch(r"v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?", tag)
           if not match:
               raise SystemExit(f"tag {tag!r} is not semantic versioned")
@@ -131,6 +137,8 @@ jobs:
               print(f"previous={previous}", file=output)
               print(f"checksum={checksum}", file=output)
           PY
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
 
       - name: Create or update the release PR
         shell: bash
