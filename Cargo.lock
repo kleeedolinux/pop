@@ -100,7 +100,6 @@ dependencies = [
 name = "pop-backend-c"
 version = "0.1.0"
 dependencies = [
- "pop-backend-api",
  "pop-driver",
  "pop-foundation",
  "pop-mir",
