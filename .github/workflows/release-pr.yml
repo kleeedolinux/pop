@@ -1,4 +1,4 @@
-name: Release PR
+name: Publish Release
 
 on:
   push:
@@ -7,199 +7,55 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Semantic version tag to release, for example v1.2.3 or v1.2.3-rc.1"
+        description: "Semantic version tag, for example v1.2.3 or v1.2.3-rc.1"
         required: true
         type: string
 
 permissions:
   contents: write
-  pull-requests: write
-
-concurrency:
-  group: release-pr-${{ github.ref }}
-  cancel-in-progress: false
 
 env:
   GH_TOKEN: ${{ github.token }}
 
 jobs:
-  release_pr:
-    name: Create release pull request
+  publish:
+    if: github.actor == 'kleeedolinux'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Reject untrusted tag pushers
-        if: github.actor != 'kleeedolinux'
-        run: |
-          echo "Tag pushes are restricted to trusted maintainers."
-          exit 1
-
       - name: Check out source
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Install LLVM 22
-        uses: actions/cache@v4
-        id: llvm-cache
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-llvm-22-apt
-
-      - name: Install LLVM 22 packages
+      - name: Publish release
         shell: bash
-        run: |
-          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 22
-
-      - name: Export LLVM prefix
-        shell: bash
-        run: |
-          echo "LLVM_SYS_221_PREFIX=/usr/lib/llvm-22" >> "$GITHUB_ENV"
-          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
-
-      - name: Configure Git identity
-        run: |
-          git config user.name "release-bot"
-          git config user.email "release-bot@users.noreply.github.com"
-
-      - name: Cache Cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-release-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-release-cargo-
-
-      - name: Build release changelog and PR branch
-        id: prep
-        shell: bash
-        run: |
-          python3 <<'PY'
-          import hashlib
-          import os
-          import re
-          import subprocess
-          import tempfile
-          from pathlib import Path
-
-          tag = os.environ.get("INPUT_TAG") or os.environ["GITHUB_REF_NAME"]
-          version_pattern = re.compile(r"v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:-(?P<prerelease>[0-9A-Za-z.-]+))?")
-          tag_match = version_pattern.fullmatch(tag)
-          if not tag_match:
-              raise SystemExit(f"tag {tag!r} is not semantic versioned")
-
-          prerelease = tag_match.group("prerelease") or ""
-          release_kind = "prerelease" if prerelease else "release"
-
-          def git(*args, check=True):
-              return subprocess.run(["git", *args], check=check, capture_output=True, text=True).stdout.strip()
-
-          def parse_version(value):
-              value = value.removeprefix("v")
-              main, sep, pre = value.partition("-")
-              major, minor, patch = (int(part) for part in main.split("."))
-              pre_parts = tuple(pre.split(".")) if sep else ()
-              return major, minor, patch, pre_parts
-
-          def version_key(value):
-              major, minor, patch, pre_parts = parse_version(value)
-              stable_rank = 1 if not pre_parts else 0
-              pre_rank = tuple((0, int(part)) if part.isdigit() else (1, part) for part in pre_parts)
-              return major, minor, patch, stable_rank, pre_rank
-
-          all_tags = [line for line in git("tag", "--list", "v*").splitlines() if version_pattern.fullmatch(line)]
-          current = tag
-          previous = ""
-          for candidate in sorted(all_tags, key=version_key):
-              if version_key(candidate) < version_key(current):
-                  previous = candidate
-              elif candidate == current:
-                  break
-
-          range_spec = f"{previous}..{current}" if previous else current
-          commits = git("log", "--no-merges", "--format=%s", range_spec).splitlines()
-          contributors = git("shortlog", "-sne", range_spec).splitlines()
-
-          archive = subprocess.run(
-              ["git", "archive", "--format=tar", current],
-              check=True,
-              capture_output=True,
-          ).stdout
-          checksum = hashlib.sha256(archive).hexdigest()
-
-          changelog = Path("CHANGELOG.md")
-          existing = changelog.read_text(encoding="utf-8") if changelog.exists() else "# Changelog\n"
-          section = [f"## {current}", f"Type: {release_kind}"]
-          if previous:
-              section.append(f"Changes since: {previous}")
-          if commits:
-              section.append("")
-              section.append("### Commits")
-              section.extend(f"- {line}" for line in commits)
-          if contributors:
-              section.append("")
-              section.append("### Contributors")
-              section.extend(f"- {line}" for line in contributors)
-          section.append("")
-          section.append("### Checksum")
-          section.append(f"- sha256(source archive): `{checksum}`")
-          section.append("")
-          changelog.write_text(existing.rstrip() + "\n\n" + "\n".join(section).rstrip() + "\n", encoding="utf-8")
-
-          branch = f"release/{current}"
-          subprocess.run(["git", "switch", "-c", branch], check=True)
-          subprocess.run(["git", "add", "CHANGELOG.md"], check=True)
-          subprocess.run(
-              [
-                  "git",
-                  "commit",
-                  "-m",
-                  f"chore(release): {current}",
-                  "--author",
-                  "release-bot <release-bot@users.noreply.github.com>",
-              ],
-              check=True,
-          )
-          subprocess.run(["git", "push", "origin", f"HEAD:{branch}", "--force-with-lease"], check=True)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print(f"tag={current}", file=output)
-              print(f"branch={branch}", file=output)
-              print(f"kind={release_kind}", file=output)
-              print(f"previous={previous}", file=output)
-              print(f"checksum={checksum}", file=output)
-          PY
         env:
           INPUT_TAG: ${{ inputs.tag }}
-
-      - name: Create or update the release PR
-        shell: bash
         run: |
-          title="release: ${{ steps.prep.outputs.tag }}"
-          body=$(cat <<EOF
-          Automated release PR for \`${{ steps.prep.outputs.tag }}\`.
+          set -euo pipefail
 
-          - Kind: \`${{ steps.prep.outputs.kind }}\`
-          - Previous published version: \`${{ steps.prep.outputs.previous || 'none' }}\`
-          - Source archive checksum: \`${{ steps.prep.outputs.checksum }}\`
-
-          Review the generated \`CHANGELOG.md\`, approve it, and merge to publish.
-          EOF
-          )
-
-          pr_number="$(gh pr list --head "${{ steps.prep.outputs.branch }}" --state open --json number --jq '.[0].number // empty')"
-          if [[ -n "$pr_number" ]]; then
-            gh pr edit "$pr_number" --title "$title" --body "$body"
-          else
-            gh pr create \
-              --base "${{ github.event.repository.default_branch }}" \
-              --head "${{ steps.prep.outputs.branch }}" \
-              --title "$title" \
-              --body "$body" \
-              --assignee kleeedolinux
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version tag: $tag"
+            exit 1
           fi
+
+          if ! git rev-parse "$tag^{commit}" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+          fi
+
+          archive="/tmp/${tag}.tar.gz"
+          checksum="/tmp/${tag}.tar.gz.sha256"
+          git archive --format=tar "$tag" | gzip -n > "$archive"
+          sha256sum "$archive" > "$checksum"
+
+          prerelease_args=()
+          [[ "$tag" == *-* ]] && prerelease_args+=(--prerelease)
+
+          gh release create "$tag" \
+            "$archive" \
+            "$checksum" \
+            --title "$tag" \
+            --generate-notes \
+            "${prerelease_args[@]}"
