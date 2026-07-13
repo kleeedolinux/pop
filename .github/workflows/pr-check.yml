@@ -34,6 +34,13 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install LLVM 22
+        uses: actions/cache@v4
+        id: llvm-cache
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-llvm-22-apt
+
+      - name: Install LLVM 22 packages
         shell: bash
         run: |
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
