@@ -57,7 +57,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/llvm-22
-          key: ${{ runner.os }}-${{ matrix.target }}-llvm-22
+          key: ${{ runner.os }}-${{ matrix.target }}-llvm-22-dev-v2
 
       - name: Install LLVM 22
         if: steps.llvm-cache.outputs.cache-hit != 'true'
@@ -66,6 +66,7 @@ jobs:
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 22
+          sudo apt-get install -y llvm-22-dev
           sudo mkdir -p /opt/llvm-22
           sudo cp -a /usr/lib/llvm-22/. /opt/llvm-22/
           sudo chown -R "$USER":"$USER" /opt/llvm-22
