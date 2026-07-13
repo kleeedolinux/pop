@@ -71,6 +71,7 @@ pub enum TokenKind {
     GreaterThan,
     GreaterThanEqual,
     At,
+    QuestionQuestion,
     Question,
     Pipe,
     Plus,
@@ -279,6 +280,10 @@ impl Lexer<'_> {
             b'>' if remaining.starts_with(">=") => {
                 self.cursor += 2;
                 TokenKind::GreaterThanEqual
+            }
+            b'?' if remaining.starts_with("??") => {
+                self.cursor += 2;
+                TokenKind::QuestionQuestion
             }
             _ => {
                 self.cursor += char::from(byte).len_utf8();

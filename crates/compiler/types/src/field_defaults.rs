@@ -127,6 +127,7 @@ fn evaluate_constant(
             }
         }
         ExpressionSyntaxKind::InterpolatedString(_)
+        | ExpressionSyntaxKind::OptionalPropagate { .. }
         | ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }
@@ -526,6 +527,7 @@ const fn unary_text(operator: UnaryOperator) -> &'static str {
 const fn binary_text(operator: BinaryOperator) -> &'static str {
     match operator {
         BinaryOperator::Or => "or",
+        BinaryOperator::OptionalDefault => "??",
         BinaryOperator::And => "and",
         BinaryOperator::Equal => "==",
         BinaryOperator::NotEqual => "~=",

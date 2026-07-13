@@ -332,8 +332,49 @@ fn lower_statement(
                 .map(|statement| lower_statement(statement, interface_slots))
                 .collect(),
         },
+        TypedStatementKind::OptionalIf {
+            binding,
+            local,
+            name,
+            inner_type,
+            initializer,
+            then_body,
+            else_body,
+        } => HirStatementKind::OptionalIf {
+            binding: *binding,
+            local: *local,
+            name: name.clone(),
+            inner_type: *inner_type,
+            initializer: lower_expression(initializer, interface_slots),
+            then_body: then_body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+            else_body: else_body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
         TypedStatementKind::While { condition, body } => HirStatementKind::While {
             condition: lower_expression(condition, interface_slots),
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
+        TypedStatementKind::OptionalWhile {
+            binding,
+            local,
+            name,
+            inner_type,
+            initializer,
+            body,
+        } => HirStatementKind::OptionalWhile {
+            binding: *binding,
+            local: *local,
+            name: name.clone(),
+            inner_type: *inner_type,
+            initializer: lower_expression(initializer, interface_slots),
             body: body
                 .iter()
                 .map(|statement| lower_statement(statement, interface_slots))
@@ -714,6 +755,22 @@ fn lower_expression(
             left: Box::new(lower_expression(left, interface_slots)),
             right: Box::new(lower_expression(right, interface_slots)),
         },
+        TypedExpressionKind::OptionalDefault { optional, fallback } => {
+            HirExpressionKind::OptionalDefault {
+                optional: Box::new(lower_expression(optional, interface_slots)),
+                fallback: Box::new(lower_expression(fallback, interface_slots)),
+            }
+        }
+        TypedExpressionKind::OptionalPropagate {
+            optional,
+            enclosing_result,
+        } => HirExpressionKind::OptionalPropagate {
+            optional: Box::new(lower_expression(optional, interface_slots)),
+            enclosing_result: *enclosing_result,
+        },
+        TypedExpressionKind::OptionalNarrow { optional } => HirExpressionKind::OptionalNarrow {
+            optional: Box::new(lower_expression(optional, interface_slots)),
+        },
         TypedExpressionKind::Conditional {
             condition,
             when_true,
@@ -973,10 +1030,22 @@ fn first_unknown_interface_call(
             } => first_unknown_interface_expression(condition, slots)
                 .or_else(|| first_unknown_interface_call(then_body, slots))
                 .or_else(|| first_unknown_interface_call(else_body, slots)),
+            TypedStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => first_unknown_interface_expression(initializer, slots)
+                .or_else(|| first_unknown_interface_call(then_body, slots))
+                .or_else(|| first_unknown_interface_call(else_body, slots)),
             TypedStatementKind::While { condition, body } => {
                 first_unknown_interface_expression(condition, slots)
                     .or_else(|| first_unknown_interface_call(body, slots))
             }
+            TypedStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => first_unknown_interface_expression(initializer, slots)
+                .or_else(|| first_unknown_interface_call(body, slots)),
             TypedStatementKind::RepeatUntil { body, condition } => {
                 first_unknown_interface_call(body, slots)
                     .or_else(|| first_unknown_interface_expression(condition, slots))
@@ -1169,6 +1238,14 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(left, slots)
                 .or_else(|| first_unknown_interface_expression(right, slots))
         }
+        TypedExpressionKind::OptionalDefault { optional, fallback } => {
+            first_unknown_interface_expression(optional, slots)
+                .or_else(|| first_unknown_interface_expression(fallback, slots))
+        }
+        TypedExpressionKind::OptionalPropagate { optional, .. }
+        | TypedExpressionKind::OptionalNarrow { optional } => {
+            first_unknown_interface_expression(optional, slots)
+        }
         TypedExpressionKind::Conditional {
             condition,
             when_true,
@@ -1246,10 +1323,22 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
             } => first_compile_time_only_expression(condition)
                 .or_else(|| first_compile_time_only_statement(then_body))
                 .or_else(|| first_compile_time_only_statement(else_body)),
+            TypedStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => first_compile_time_only_expression(initializer)
+                .or_else(|| first_compile_time_only_statement(then_body))
+                .or_else(|| first_compile_time_only_statement(else_body)),
             TypedStatementKind::While { condition, body } => {
                 first_compile_time_only_expression(condition)
                     .or_else(|| first_compile_time_only_statement(body))
             }
+            TypedStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => first_compile_time_only_expression(initializer)
+                .or_else(|| first_compile_time_only_statement(body)),
             TypedStatementKind::RepeatUntil { body, condition } => {
                 first_compile_time_only_statement(body)
                     .or_else(|| first_compile_time_only_expression(condition))
@@ -1401,6 +1490,14 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
         TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
             .or_else(|| first_compile_time_only_expression(right)),
+        TypedExpressionKind::OptionalDefault { optional, fallback } => {
+            first_compile_time_only_expression(optional)
+                .or_else(|| first_compile_time_only_expression(fallback))
+        }
+        TypedExpressionKind::OptionalPropagate { optional, .. }
+        | TypedExpressionKind::OptionalNarrow { optional } => {
+            first_compile_time_only_expression(optional)
+        }
         TypedExpressionKind::Conditional {
             condition,
             when_true,

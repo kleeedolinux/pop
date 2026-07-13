@@ -159,6 +159,79 @@ fn typed_table_access_lowers_to_verified_optional_get_and_insert_or_replace_set(
 }
 
 #[test]
+fn optional_control_lowers_to_typed_presence_cfg_without_backend_reconstruction() {
+    // ADR 0051: optional binding/defaulting/propagation all become explicit
+    // presence tests and dominated typed extraction in canonical MIR.
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optionals.pop",
+        "namespace Main\n\
+         private function choose(value: String?, fallback: String): String?\n\
+             local selected = value ?? fallback\n\
+             local propagated = value?\n\
+             if local bound = value then\n\
+                 use(bound)\n\
+             end\n\
+             while local bound = value do\n\
+                 use(bound)\n\
+                 break\n\
+             end\n\
+             if value ~= nil then\n\
+                 use(value)\n\
+             end\n\
+             return value\n\
+         end\n\
+         private function use(value: String)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir_dump = front_end
+        .hir()
+        .expect("optional HIR")
+        .dump(front_end.types());
+    assert!(hir_dump.contains("optional.default"), "{hir_dump}");
+    assert!(hir_dump.contains("optional.propagate"), "{hir_dump}");
+    assert!(hir_dump.contains("optionalIf"), "{hir_dump}");
+    assert!(hir_dump.contains("optionalWhile"), "{hir_dump}");
+
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified optional MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("optionalIsPresent"), "{dump}");
+    assert!(dump.contains("optionalGet"), "{dump}");
+    assert!(dump.contains("condBranch"), "{dump}");
+    assert!(!dump.contains("optionalIf"), "{dump}");
+    assert!(!dump.contains("optionalWhile"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("dynamic"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("llvm"), "{dump}");
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+    let reparsed = parse_mir_dump(&dump).expect("optional MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+    assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
+
+    let unguarded = dump.replacen("optionalIsPresent v0", "compareEqual v0 v0", 1);
+    let unguarded = parse_mir_dump(&unguarded).expect("unguarded optional MIR parses");
+    assert!(matches!(
+        verify_mir_bubble(&unguarded, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::OptionalGetWithoutPresence { .. }
+        ))
+    ));
+}
+
+#[test]
 fn repeat_until_lowers_to_portable_body_condition_exit_and_backedge_cfg() {
     // ADR 0032 deliberately keeps repeat-until out of the MIR instruction set.
     let source = SourceFile::new(

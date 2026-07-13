@@ -324,9 +324,57 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::OptionalIf {
+                binding,
+                local,
+                name,
+                inner_type,
+                initializer,
+                then_body,
+                else_body,
+            } => {
+                let _ = write!(
+                    output,
+                    "optionalIf bind#{} l{} {}:{} = ",
+                    binding.raw(),
+                    local.raw(),
+                    name,
+                    type_text(*inner_type, arena)
+                );
+                dump_expression(output, initializer, arena);
+                output.push('\n');
+                dump_statements(output, then_body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("else\n");
+                dump_statements(output, else_body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::While { condition, body } => {
                 output.push_str("while ");
                 dump_expression(output, condition, arena);
+                output.push('\n');
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
+            HirStatementKind::OptionalWhile {
+                binding,
+                local,
+                name,
+                inner_type,
+                initializer,
+                body,
+            } => {
+                let _ = write!(
+                    output,
+                    "optionalWhile bind#{} l{} {}:{} = ",
+                    binding.raw(),
+                    local.raw(),
+                    name,
+                    type_text(*inner_type, arena)
+                );
+                dump_expression(output, initializer, arena);
                 output.push('\n');
                 dump_statements(output, body, arena, depth + 1);
                 output.push_str(&indentation);
@@ -704,6 +752,30 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             output.push_str(binary_text(*operator));
             output.push(' ');
             dump_expression(output, right, arena);
+            output.push(')');
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            output.push_str("optional.default(");
+            dump_expression(output, optional, arena);
+            output.push_str(", ");
+            dump_expression(output, fallback, arena);
+            output.push(')');
+        }
+        HirExpressionKind::OptionalPropagate {
+            optional,
+            enclosing_result,
+        } => {
+            let _ = write!(
+                output,
+                "optional.propagate result:{}(",
+                type_text(*enclosing_result, arena)
+            );
+            dump_expression(output, optional, arena);
+            output.push(')');
+        }
+        HirExpressionKind::OptionalNarrow { optional } => {
+            output.push_str("optional.narrow(");
+            dump_expression(output, optional, arena);
             output.push(')');
         }
         HirExpressionKind::Conditional {

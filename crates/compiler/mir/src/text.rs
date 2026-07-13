@@ -805,6 +805,16 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             element_map: parse_array_element_map(element_map, line)?,
         });
     }
+    if let Some(optional) = text.strip_prefix("optionalIsPresent ") {
+        return Ok(MirInstructionKind::OptionalIsPresent {
+            optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),
+        });
+    }
+    if let Some(optional) = text.strip_prefix("optionalGet ") {
+        return Ok(MirInstructionKind::OptionalGet {
+            optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),
+        });
+    }
     if let Some(operation) = parse_numeric_operation(text, line)? {
         return Ok(operation);
     }

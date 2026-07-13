@@ -417,6 +417,7 @@ fn lower_compile_time_literal(expression: &TypedExpression) -> CompileTimeExpres
 fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTimeLoweringError> {
     let construct = match statement.kind() {
         TypedStatementKind::While { .. }
+        | TypedStatementKind::OptionalWhile { .. }
         | TypedStatementKind::RepeatUntil { .. }
         | TypedStatementKind::NumericFor { .. }
         | TypedStatementKind::Break
@@ -431,6 +432,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
+        TypedStatementKind::OptionalIf { .. } => UnsupportedCompileTimeConstruct::OptionalFlow,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
                 UnsupportedCompileTimeConstruct::ResultlessCall
@@ -505,6 +507,11 @@ fn unsupported_compile_time_construct(
         TypedExpressionKind::StandardCall { .. } => UnsupportedCompileTimeConstruct::ResultlessCall,
         TypedExpressionKind::StringConcat { .. } | TypedExpressionKind::StringFormat { .. } => {
             UnsupportedCompileTimeConstruct::StringComposition
+        }
+        TypedExpressionKind::OptionalDefault { .. }
+        | TypedExpressionKind::OptionalPropagate { .. }
+        | TypedExpressionKind::OptionalNarrow { .. } => {
+            UnsupportedCompileTimeConstruct::OptionalFlow
         }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::AttributeQuery { .. }

@@ -79,6 +79,21 @@ fn typed_fixture() -> TypedFixture {
              else\n\
                  return right\n\
              end\n\
+         end\n\
+         private function optional(value: String?, fallback: String): String?\n\
+             local selected = value ?? fallback\n\
+             local propagated = value?\n\
+             if local bound = value then\n\
+                 local copy = bound\n\
+             end\n\
+             while local bound = value do\n\
+                 local copy = bound\n\
+                 break\n\
+             end\n\
+             if value ~= nil then\n\
+                 local narrowed = value\n\
+             end\n\
+             return value\n\
          end\n",
     )
     .expect("source");
@@ -172,6 +187,53 @@ fn construction_preserves_static_types_owners_and_direct_dispatch() {
             dispatch: HirCallDispatch::Direct { function },
             ..
         } if *function == fixture.functions[0].0.symbol()
+    ));
+    assert!(verify_hir_function(&hir, &fixture.arena, &known).is_ok());
+}
+
+#[test]
+fn construction_retains_typed_optional_control_until_mir() {
+    // ADR 0051: HIR keeps optional control distinct so MIR lowering, rather
+    // than a backend, owns presence tests, typed extraction, and lazy edges.
+    let fixture = typed_fixture();
+    let known: BTreeSet<_> = fixture
+        .functions
+        .iter()
+        .map(|(signature, _, _)| signature.symbol())
+        .collect();
+    let (signature, body, visibility) = fixture
+        .functions
+        .iter()
+        .find(|(signature, _, _)| signature.name() == "optional")
+        .expect("optional");
+    let hir = build_hir_function(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(4),
+        *visibility,
+        signature,
+        body,
+        &fixture.arena,
+        &known,
+    )
+    .expect("verified optional HIR");
+
+    assert!(matches!(
+        hir.body()[0].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::OptionalDefault { .. })
+    ));
+    assert!(matches!(
+        hir.body()[1].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::OptionalPropagate { .. })
+    ));
+    assert!(matches!(
+        hir.body()[2].kind(),
+        HirStatementKind::OptionalIf { then_body, .. } if then_body.len() == 1
+    ));
+    assert!(matches!(
+        hir.body()[3].kind(),
+        HirStatementKind::OptionalWhile { body, .. } if body.len() == 2
     ));
     assert!(verify_hir_function(&hir, &fixture.arena, &known).is_ok());
 }

@@ -1,6 +1,9 @@
 use pop_runtime_interface::RuntimeOperation;
 
-/// Returns the native C symbol for an operation implemented by ABI 1.6.
+/// ABI 1.7 lookup adapter that separates presence from a scalar payload.
+pub const TABLE_GET_CHECKED_SYMBOL: &str = "pop_rt_table_get_checked";
+
+/// Returns the native C symbol for an operation implemented by ABI 1.7.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.

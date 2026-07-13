@@ -37,6 +37,20 @@ There is no user-visible `dynamic`, `any`, or unknown value on which operations
 can be performed. A top type may exist for type-theory purposes only if values
 must be narrowed to a concrete supported type before use.
 
+### Optional flow
+
+Optional values use absence-aware control rather than Lua truthiness. A stable
+place narrows across `== nil` and `~= nil` branches. `if local value = optional`
+and `while local value = optional` evaluate the optional once, test presence,
+and bind the immutable non-`nil` value only inside the successful body.
+
+`optional ?? fallback` lazily produces the inner type, evaluating `fallback`
+only when the optional is `nil`. Postfix `optional?` produces the inner value
+or returns `nil` from an enclosing function with a single optional result. The
+operand and result inner types need not match. It does not propagate `Result`,
+catch traps/panic, perform truthiness, or call a dynamic/user-defined operator.
+See ADR 0051.
+
 ### Static boundaries
 
 - JSON and similar data are decoded into a declared schema, a tagged data tree,
@@ -391,6 +405,10 @@ Checked operations name their `TrapKind`; panic calls record whether unwinding
 propagates or enters a cleanup block, and cleanup resumes unwinding explicitly.
 Expected failure remains a typed result value and is not folded into the panic
 mechanism. See ADR 0022.
+
+The exact `Result` propagation syntax and cleanup interaction remain separate
+from ADR 0051's optional-only postfix `?` contract until the typed-error
+workflow is accepted.
 
 Namespace constants are deterministically evaluated once by the front end.
 Runtime uses substitute the resulting exact typed immutable value into HIR;

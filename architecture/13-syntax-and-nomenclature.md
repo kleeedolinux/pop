@@ -133,6 +133,22 @@ Quoted strings use the portable escapes `\\`, `\"`, `\'`, `\n`, `\r`, `\t`,
 form, universal `toString`, implicit formatting conversion, or runtime type
 inspection. See ADR 0041.
 
+Optional control keeps ordinary Luau blocks and adds only local expression
+punctuation:
+
+```luau
+if local user = findUser(id) then
+    local name = user.displayName ?? "anonymous"
+    return name
+end
+```
+
+`if local` and `while local` bind a present optional value in their body. `??`
+is a right-associative lazy default operator that binds more tightly than `or`
+and less tightly than `and`. Postfix `?` propagates `nil` only from a
+single-optional-result function. It is not an unchecked unwrap or a general
+user-defined operator. See ADR 0051.
+
 ## File shape
 
 Checked documentation and typed attributes for the file-scoped namespace

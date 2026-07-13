@@ -316,6 +316,7 @@ fn verify_function(
         }
     }
     let dominators = compute_dominators(function, &blocks);
+    let optional_presence = compute_optional_presence_facts(function, &blocks);
     let facts = ControlFlowFacts {
         values: &definitions.values,
         root_handles: &definitions.root_handles,
@@ -329,6 +330,16 @@ fn verify_function(
         for (index, instruction) in block.instructions.iter().enumerate() {
             for operand in instruction_operands(&instruction.kind) {
                 verify_value_use(operand, block.block, index, &facts, errors);
+            }
+            if let MirInstructionKind::OptionalGet { optional } = instruction.kind()
+                && !optional_presence
+                    .get(&block.block())
+                    .is_some_and(|present| present.contains(optional))
+            {
+                errors.push(MirVerificationError::OptionalGetWithoutPresence {
+                    instruction: instruction.result(),
+                    optional: *optional,
+                });
             }
             let referenced_function = match instruction.kind() {
                 MirInstructionKind::CallDirect { function, .. }
@@ -1114,6 +1125,120 @@ fn compute_dominators(
     }
 }
 
+fn compute_optional_presence_facts(
+    function: &MirFunction,
+    blocks: &BTreeMap<BlockId, &MirBlock>,
+) -> BTreeMap<BlockId, BTreeSet<ValueId>> {
+    let Some(entry) = function.blocks.first().map(MirBlock::block) else {
+        return BTreeMap::new();
+    };
+    let reachable = reachable_blocks(entry, blocks);
+    let mut conditions = BTreeMap::new();
+    let mut all_optionals = BTreeSet::new();
+    for block in &function.blocks {
+        for instruction in block.instructions() {
+            if let MirInstructionKind::OptionalIsPresent { optional } = instruction.kind() {
+                conditions.insert(instruction.result(), (*optional, true));
+                all_optionals.insert(*optional);
+            }
+        }
+    }
+    for block in &function.blocks {
+        for instruction in block.instructions() {
+            if let MirInstructionKind::BooleanNot { operand } = instruction.kind()
+                && let Some((optional, present_when_true)) = conditions.get(operand).copied()
+            {
+                conditions.insert(instruction.result(), (optional, !present_when_true));
+            }
+        }
+    }
+
+    let mut predecessors: BTreeMap<BlockId, Vec<BlockId>> =
+        blocks.keys().map(|block| (*block, Vec::new())).collect();
+    for block in &function.blocks {
+        for target in block_targets(block) {
+            if let Some(incoming) = predecessors.get_mut(&target) {
+                incoming.push(block.block());
+            }
+        }
+    }
+    let mut facts: BTreeMap<BlockId, BTreeSet<ValueId>> = blocks
+        .keys()
+        .map(|block| {
+            let initial = if *block == entry || !reachable.contains(block) {
+                BTreeSet::new()
+            } else {
+                all_optionals.clone()
+            };
+            (*block, initial)
+        })
+        .collect();
+
+    loop {
+        let mut changed = false;
+        for block in reachable.iter().copied().filter(|block| *block != entry) {
+            let mut incoming = predecessors[&block]
+                .iter()
+                .filter(|predecessor| reachable.contains(predecessor))
+                .map(|predecessor| {
+                    optional_edge_facts(
+                        &facts[predecessor],
+                        blocks[predecessor].terminator(),
+                        block,
+                        &conditions,
+                    )
+                });
+            let mut next = incoming.next().unwrap_or_default();
+            for predecessor in incoming {
+                next = next.intersection(&predecessor).copied().collect();
+            }
+            if facts[&block] != next {
+                facts.insert(block, next);
+                changed = true;
+            }
+        }
+        if !changed {
+            return facts;
+        }
+    }
+}
+
+fn optional_edge_facts(
+    incoming: &BTreeSet<ValueId>,
+    terminator: &MirTerminator,
+    target: BlockId,
+    conditions: &BTreeMap<ValueId, (ValueId, bool)>,
+) -> BTreeSet<ValueId> {
+    let mut facts = incoming.clone();
+    let MirTerminator::ConditionalBranch {
+        condition,
+        when_true,
+        when_false,
+    } = terminator
+    else {
+        return facts;
+    };
+    let Some((optional, present_when_true)) = conditions.get(condition).copied() else {
+        return facts;
+    };
+    if when_true == when_false {
+        facts.remove(&optional);
+    } else if target == *when_true {
+        if present_when_true {
+            facts.insert(optional);
+        } else {
+            facts.remove(&optional);
+        }
+    } else if target == *when_false {
+        if present_when_true {
+            facts.remove(&optional);
+        } else {
+            facts.insert(optional);
+        }
+    }
+    facts
+}
+
 fn reachable_blocks(entry: BlockId, blocks: &BTreeMap<BlockId, &MirBlock>) -> BTreeSet<BlockId> {
     let mut reachable = BTreeSet::new();
     let mut pending = vec![entry];
@@ -1244,6 +1369,32 @@ fn verify_instruction_types(
         return;
     }
     match instruction.kind() {
+        MirInstructionKind::OptionalIsPresent { optional } => {
+            let valid_operand = values
+                .get(optional)
+                .copied()
+                .and_then(|type_id| optional_inner_type(arena, type_id))
+                .is_some();
+            if !valid_operand || arena.source_type("Boolean") != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::OptionalGet { optional } => {
+            let valid = values
+                .get(optional)
+                .copied()
+                .and_then(|type_id| optional_inner_type(arena, type_id))
+                == Some(instruction.result_type());
+            if !valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::StringConcat { left, right } => {
             let Some(string) = arena.source_type("String") else {
                 return;
@@ -2328,6 +2479,26 @@ fn is_optional_of(arena: &TypeArena, candidate: TypeId, element: TypeId) -> bool
     )
 }
 
+fn optional_inner_type(arena: &TypeArena, optional: TypeId) -> Option<TypeId> {
+    let nil = arena.source_type("nil")?;
+    let SemanticType::Union(members) = arena.get(optional)? else {
+        return None;
+    };
+    if !members.contains(&nil) {
+        return None;
+    }
+    let present = members
+        .iter()
+        .copied()
+        .filter(|member| *member != nil)
+        .collect::<Vec<_>>();
+    match present.as_slice() {
+        [inner] => Some(*inner),
+        [] => None,
+        _ => arena.find(&SemanticType::Union(present)),
+    }
+}
+
 fn verify_operand_type(
     instruction: ValueId,
     operand: ValueId,
@@ -2605,6 +2776,8 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. }
         | MirInstructionKind::StringConcat { left, right } => vec![*left, *right],
         MirInstructionKind::BooleanNot { operand }
+        | MirInstructionKind::OptionalIsPresent { optional: operand }
+        | MirInstructionKind::OptionalGet { optional: operand }
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. }
         | MirInstructionKind::ConvertInteger { operand, .. }

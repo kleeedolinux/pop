@@ -1334,8 +1334,24 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_statements(then_body, instances);
                 remap_aggregate_statements(else_body, instances);
             }
+            HirStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                remap_aggregate_expression(initializer, instances);
+                remap_aggregate_statements(then_body, instances);
+                remap_aggregate_statements(else_body, instances);
+            }
             HirStatementKind::While { condition, body } => {
                 remap_aggregate_expression(condition, instances);
+                remap_aggregate_statements(body, instances);
+            }
+            HirStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                remap_aggregate_expression(initializer, instances);
                 remap_aggregate_statements(body, instances);
             }
             HirStatementKind::RepeatUntil { body, condition } => {
@@ -1479,6 +1495,14 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             remap_aggregate_expression(array, instances);
             remap_aggregate_expression(value, instances);
         }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            remap_aggregate_expression(optional, instances);
+            remap_aggregate_expression(fallback, instances);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            remap_aggregate_expression(optional, instances);
+        }
         HirExpressionKind::Record { record, fields } => {
             if let Some(instance) = instances.symbol(expression.type_id) {
                 *record = instance;
@@ -1589,8 +1613,24 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                 collect_statement_calls(then_body, calls);
                 collect_statement_calls(else_body, calls);
             }
+            HirStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_expression_calls(initializer, calls);
+                collect_statement_calls(then_body, calls);
+                collect_statement_calls(else_body, calls);
+            }
             HirStatementKind::While { condition, body } => {
                 collect_expression_calls(condition, calls);
+                collect_statement_calls(body, calls);
+            }
+            HirStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                collect_expression_calls(initializer, calls);
                 collect_statement_calls(body, calls);
             }
             HirStatementKind::RepeatUntil { body, condition } => {
@@ -1715,6 +1755,14 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
         HirExpressionKind::ArrayFill { array, value } => {
             collect_expression_calls(array, calls);
             collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            collect_expression_calls(optional, calls);
+            collect_expression_calls(fallback, calls);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            collect_expression_calls(optional, calls);
         }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
@@ -1841,8 +1889,30 @@ fn specialize_statement(
             specialize_statements(then_body, substitutions, instances, arena)?;
             specialize_statements(else_body, substitutions, instances, arena)?;
         }
+        HirStatementKind::OptionalIf {
+            inner_type,
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            specialize_type(inner_type, substitutions, arena)?;
+            specialize_expression(initializer, substitutions, instances, arena)?;
+            specialize_statements(then_body, substitutions, instances, arena)?;
+            specialize_statements(else_body, substitutions, instances, arena)?;
+        }
         HirStatementKind::While { condition, body } => {
             specialize_expression(condition, substitutions, instances, arena)?;
+            specialize_statements(body, substitutions, instances, arena)?;
+        }
+        HirStatementKind::OptionalWhile {
+            inner_type,
+            initializer,
+            body,
+            ..
+        } => {
+            specialize_type(inner_type, substitutions, arena)?;
+            specialize_expression(initializer, substitutions, instances, arena)?;
             specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::RepeatUntil { body, condition } => {
@@ -2047,6 +2117,20 @@ fn specialize_expression(
         HirExpressionKind::ArrayFill { array, value } => {
             specialize_expression(array, substitutions, instances, arena)?;
             specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            specialize_expression(optional, substitutions, instances, arena)?;
+            specialize_expression(fallback, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::OptionalPropagate {
+            optional,
+            enclosing_result,
+        } => {
+            specialize_type(enclosing_result, substitutions, arena)?;
+            specialize_expression(optional, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::OptionalNarrow { optional } => {
+            specialize_expression(optional, substitutions, instances, arena)?;
         }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
@@ -2267,8 +2351,25 @@ pub enum HirStatementKind {
         then_body: Vec<HirStatement>,
         else_body: Vec<HirStatement>,
     },
+    OptionalIf {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: HirExpression,
+        then_body: Vec<HirStatement>,
+        else_body: Vec<HirStatement>,
+    },
     While {
         condition: HirExpression,
+        body: Vec<HirStatement>,
+    },
+    OptionalWhile {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: HirExpression,
         body: Vec<HirStatement>,
     },
     RepeatUntil {
@@ -2606,6 +2707,17 @@ pub enum HirExpressionKind {
         operator: TypedBinaryOperator,
         left: Box<HirExpression>,
         right: Box<HirExpression>,
+    },
+    OptionalDefault {
+        optional: Box<HirExpression>,
+        fallback: Box<HirExpression>,
+    },
+    OptionalPropagate {
+        optional: Box<HirExpression>,
+        enclosing_result: TypeId,
+    },
+    OptionalNarrow {
+        optional: Box<HirExpression>,
     },
     Conditional {
         condition: Box<HirExpression>,

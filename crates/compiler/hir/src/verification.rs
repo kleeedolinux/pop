@@ -1211,11 +1211,55 @@ impl Verifier<'_> {
                     self.verify_statements(then_body, &visible);
                     self.verify_statements(else_body, &visible);
                 }
+                HirStatementKind::OptionalIf {
+                    binding,
+                    local,
+                    inner_type,
+                    initializer,
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.verify_expression(initializer, &visible);
+                    self.verify_optional_binding(
+                        *binding,
+                        *local,
+                        *inner_type,
+                        initializer,
+                        statement.span(),
+                    );
+                    let mut then_visible = visible.clone();
+                    then_visible.insert(*local);
+                    self.verify_statements(then_body, &then_visible);
+                    self.verify_statements(else_body, &visible);
+                }
                 HirStatementKind::While { condition, body } => {
                     self.verify_expression(condition, &visible);
                     self.verify_condition(condition);
                     self.loop_depth = self.loop_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
+                }
+                HirStatementKind::OptionalWhile {
+                    binding,
+                    local,
+                    inner_type,
+                    initializer,
+                    body,
+                    ..
+                } => {
+                    self.verify_expression(initializer, &visible);
+                    self.verify_optional_binding(
+                        *binding,
+                        *local,
+                        *inner_type,
+                        initializer,
+                        statement.span(),
+                    );
+                    let mut body_visible = visible.clone();
+                    body_visible.insert(*local);
+                    self.loop_depth = self.loop_depth.saturating_add(1);
+                    self.verify_statements(body, &body_visible);
                     self.loop_depth = self.loop_depth.saturating_sub(1);
                 }
                 HirStatementKind::RepeatUntil { body, condition } => {
@@ -1719,6 +1763,52 @@ impl Verifier<'_> {
                 self.verify_expression(right, visible);
                 self.verify_binary_operator(expression, *operator, left, right);
             }
+            HirExpressionKind::OptionalDefault { optional, fallback } => {
+                self.verify_expression(optional, visible);
+                self.verify_expression(fallback, visible);
+                if let Some(inner) = self.optional_inner_type(optional.type_id()) {
+                    self.verify_expression_type(inner, expression);
+                    self.verify_expression_type(inner, fallback);
+                } else {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: optional.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::OptionalPropagate {
+                optional,
+                enclosing_result,
+            } => {
+                self.verify_expression(optional, visible);
+                if let Some(inner) = self.optional_inner_type(optional.type_id()) {
+                    self.verify_expression_type(inner, expression);
+                } else {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: optional.type_id(),
+                        span: expression.span(),
+                    });
+                }
+                if self.results.as_slice() != [*enclosing_result]
+                    || self.optional_inner_type(*enclosing_result).is_none()
+                {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: *enclosing_result,
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::OptionalNarrow { optional } => {
+                self.verify_expression(optional, visible);
+                if let Some(inner) = self.optional_inner_type(optional.type_id()) {
+                    self.verify_expression_type(inner, expression);
+                } else {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: optional.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
             HirExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -1822,6 +1912,52 @@ impl Verifier<'_> {
             .ok()
             .and_then(|raw| self.parameter_types.get(raw))
             .copied()
+    }
+
+    fn optional_inner_type(&self, optional: TypeId) -> Option<TypeId> {
+        let nil = self.arena.source_type("nil")?;
+        let SemanticType::Union(members) = self.arena.get(optional)? else {
+            return None;
+        };
+        if !members.contains(&nil) {
+            return None;
+        }
+        let present = members
+            .iter()
+            .copied()
+            .filter(|member| *member != nil)
+            .collect::<Vec<_>>();
+        match present.as_slice() {
+            [inner] => Some(*inner),
+            [] => None,
+            _ => self.arena.find(&SemanticType::Union(present)),
+        }
+    }
+
+    fn verify_optional_binding(
+        &mut self,
+        binding: BindingId,
+        local: LocalId,
+        inner_type: TypeId,
+        initializer: &HirExpression,
+        span: SourceSpan,
+    ) {
+        self.verify_type(inner_type, span);
+        if self.optional_inner_type(initializer.type_id()) != Some(inner_type) {
+            self.errors.push(HirVerificationError::InvalidType {
+                type_id: initializer.type_id(),
+                span,
+            });
+        }
+        if self.local_types.insert(local, inner_type).is_some() {
+            self.errors
+                .push(HirVerificationError::DuplicateLocal(local));
+        }
+        self.local_bindings.insert(local, binding);
+        if !self.bindings.insert(binding) {
+            self.errors
+                .push(HirVerificationError::DuplicateBinding(binding));
+        }
     }
 
     fn parameter_binding(&self, parameter: ValueParameterId) -> Option<BindingId> {
@@ -2974,7 +3110,12 @@ fn valid_hir_binary_operator(
             boolean == Some(left) && left == right && left == result
         }
         TypedBinaryOperator::Equal | TypedBinaryOperator::NotEqual => {
-            left == right && boolean == Some(result) && hir_supports_default_equality(arena, left)
+            boolean == Some(result)
+                && ((left == right && hir_supports_default_equality(arena, left))
+                    || arena.source_type("nil").is_some_and(|nil| {
+                        left == nil && optional_inner_type(arena, right).is_some()
+                            || right == nil && optional_inner_type(arena, left).is_some()
+                    }))
         }
         TypedBinaryOperator::LessThan
         | TypedBinaryOperator::LessThanOrEqual
@@ -2991,6 +3132,26 @@ fn valid_hir_binary_operator(
         TypedBinaryOperator::Remainder => {
             left == right && left == result && is_hir_integer(arena, left)
         }
+    }
+}
+
+fn optional_inner_type(arena: &TypeArena, optional: TypeId) -> Option<TypeId> {
+    let nil = arena.source_type("nil")?;
+    let SemanticType::Union(members) = arena.get(optional)? else {
+        return None;
+    };
+    if !members.contains(&nil) {
+        return None;
+    }
+    let present = members
+        .iter()
+        .copied()
+        .filter(|member| *member != nil)
+        .collect::<Vec<_>>();
+    match present.as_slice() {
+        [inner] => Some(*inner),
+        [] => None,
+        _ => arena.find(&SemanticType::Union(present)),
     }
 }
 
@@ -3137,7 +3298,27 @@ fn collect_local_binding_map(
                 collect_local_binding_map(then_body, local_bindings);
                 collect_local_binding_map(else_body, local_bindings);
             }
+            HirStatementKind::OptionalIf {
+                local,
+                binding,
+                then_body,
+                else_body,
+                ..
+            } => {
+                local_bindings.insert(*local, *binding);
+                collect_local_binding_map(then_body, local_bindings);
+                collect_local_binding_map(else_body, local_bindings);
+            }
             HirStatementKind::While { body, .. } | HirStatementKind::RepeatUntil { body, .. } => {
+                collect_local_binding_map(body, local_bindings);
+            }
+            HirStatementKind::OptionalWhile {
+                local,
+                binding,
+                body,
+                ..
+            } => {
+                local_bindings.insert(*local, *binding);
                 collect_local_binding_map(body, local_bindings);
             }
             HirStatementKind::NumericFor {
@@ -3239,8 +3420,42 @@ fn collect_written_bindings(
                     written,
                 );
             }
+            HirStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_cell_captures(initializer, written);
+                collect_written_bindings(
+                    then_body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+                collect_written_bindings(
+                    else_body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
             HirStatementKind::While { condition, body } => {
                 collect_cell_captures(condition, written);
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
+            HirStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                collect_cell_captures(initializer, written);
                 collect_written_bindings(
                     body,
                     parameter_bindings,
@@ -3433,6 +3648,14 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::Binary { left, right, .. } => {
             collect_cell_captures(left, written);
             collect_cell_captures(right, written);
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            collect_cell_captures(optional, written);
+            collect_cell_captures(fallback, written);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            collect_cell_captures(optional, written);
         }
         HirExpressionKind::Conditional {
             condition,

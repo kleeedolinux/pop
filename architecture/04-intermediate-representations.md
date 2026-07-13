@@ -136,6 +136,7 @@ Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
 Collections:   arrayCreate, arrayLength, arrayGetOptional, arrayGetChecked,
                arraySet, arrayFill, tableGet, tableSet
+Optionals:     optionalIsPresent, optionalGet
 Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume
 Debug:         debugValue, sourceScope
 ```
@@ -143,6 +144,13 @@ Debug:         debugValue, sourceScope
 `checkedDowncast` has a named static target and typed optional/result output. It
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
+
+Optional comparison narrowing, pattern binding, lazy `??`, and postfix `?`
+remain typed HIR concepts until canonical MIR lowers them to explicit branches
+and typed joins. `optionalGet` names the exact optional value and inner type and
+is verified only on paths dominated by the matching successful
+`optionalIsPresent`; it is never an unchecked fallback. Optional propagation's
+absent edge is an ordinary typed `return nil`. See ADR 0051.
 
 HIR generic calls retain their ordered semantic type arguments. The bootstrap
 MIR lowering fully specializes reachable concrete functions and generic data
@@ -165,6 +173,8 @@ MIR invariants:
 
 - each block has one terminator;
 - each value dominates its uses, or arrives as a block argument;
+- each `optionalGet` is dominated by a successful presence test of the same
+  optional value and exact inner type;
 - operand and result types are valid for the operation;
 - control-flow edges pass declared block arguments;
 - potentially failing operations have explicit trap/unwind/result semantics;

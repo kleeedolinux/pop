@@ -77,8 +77,25 @@ pub enum TypedStatementKind {
         then_body: Vec<TypedStatement>,
         else_body: Vec<TypedStatement>,
     },
+    OptionalIf {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: TypedExpression,
+        then_body: Vec<TypedStatement>,
+        else_body: Vec<TypedStatement>,
+    },
     While {
         condition: TypedExpression,
+        body: Vec<TypedStatement>,
+    },
+    OptionalWhile {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: TypedExpression,
         body: Vec<TypedStatement>,
     },
     RepeatUntil {
@@ -392,6 +409,17 @@ pub enum TypedExpressionKind {
         operator: TypedBinaryOperator,
         left: Box<TypedExpression>,
         right: Box<TypedExpression>,
+    },
+    OptionalDefault {
+        optional: Box<TypedExpression>,
+        fallback: Box<TypedExpression>,
+    },
+    OptionalPropagate {
+        optional: Box<TypedExpression>,
+        enclosing_result: TypeId,
+    },
+    OptionalNarrow {
+        optional: Box<TypedExpression>,
     },
     Conditional {
         condition: Box<TypedExpression>,

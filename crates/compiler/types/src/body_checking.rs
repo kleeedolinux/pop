@@ -53,13 +53,16 @@ pub(crate) struct Binding {
 pub(crate) enum BindingKind {
     Local(LocalId),
     LoopLocal(LocalId),
+    ImmutableLocal(LocalId),
     Parameter(ValueParameterId),
 }
 
 impl BindingKind {
     pub(crate) const fn capture_source(self) -> CaptureSource {
         match self {
-            Self::Local(local) | Self::LoopLocal(local) => CaptureSource::Local(local),
+            Self::Local(local) | Self::LoopLocal(local) | Self::ImmutableLocal(local) => {
+                CaptureSource::Local(local)
+            }
             Self::Parameter(parameter) => CaptureSource::Parameter(parameter),
         }
     }
@@ -155,6 +158,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) written_bindings: BTreeSet<BindingId>,
     pub(crate) signature_stack: Vec<ResolvedFunctionSignature>,
     pub(crate) loop_depth: u32,
+    pub(crate) flow_narrowings: Vec<BTreeMap<BindingId, TypeId>>,
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
@@ -179,6 +183,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             written_bindings: BTreeSet::new(),
             signature_stack: Vec::new(),
             loop_depth: 0,
+            flow_narrowings: Vec::new(),
         }
     }
 
@@ -389,7 +394,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 receiver,
                 method,
                 arguments,
-            } => self.check_receiver_method_call(receiver, method, arguments, span),
+            } => {
+                let result = self.check_receiver_method_call(receiver, method, arguments, span);
+                self.invalidate_flow_narrowings();
+                result
+            }
             ExpressionSyntaxKind::Array(elements) => {
                 self.check_array_literal(elements, expected.map(|expected| expected.type_id), span)
             }
@@ -420,6 +429,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             ExpressionSyntaxKind::Unary { operator, operand } => {
                 self.check_unary(*operator, operand, expected, span)
+            }
+            ExpressionSyntaxKind::OptionalPropagate { operand } => {
+                self.check_optional_propagate(operand, span)
             }
             ExpressionSyntaxKind::Binary {
                 operator,
@@ -454,13 +466,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 })
             }
             ExpressionSyntaxKind::Call { callee, arguments } => {
-                self.check_call(callee, arguments, span)
+                let result = self.check_call(callee, arguments, span);
+                self.invalidate_flow_narrowings();
+                result
             }
             ExpressionSyntaxKind::GenericCall {
                 callee,
                 type_arguments,
                 arguments,
-            } => self.check_generic_call(callee, type_arguments, arguments, span),
+            } => {
+                let result = self.check_generic_call(callee, type_arguments, arguments, span);
+                self.invalidate_flow_narrowings();
+                result
+            }
         }
     }
 
@@ -1054,6 +1072,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id: binding.type_id,
             span,
         };
+        let effective_type = self.effective_binding_type(binding);
+        if effective_type != binding.type_id {
+            expression = TypedExpression {
+                kind: TypedExpressionKind::OptionalNarrow {
+                    optional: Box::new(expression),
+                },
+                type_id: effective_type,
+                span,
+            };
+        }
         for field_name in &path[1..] {
             if let Some(definition) = self
                 .resolver
@@ -1117,6 +1145,83 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .copied()
     }
 
+    pub(crate) fn effective_binding_type(&self, binding: Binding) -> TypeId {
+        if self.function_depth == binding.function_depth
+            && let Some(narrowed) = self
+                .flow_narrowings
+                .iter()
+                .rev()
+                .find_map(|facts| facts.get(&binding.id))
+        {
+            return *narrowed;
+        }
+        binding.type_id
+    }
+
+    pub(crate) fn optional_inner(&mut self, type_id: TypeId) -> Option<TypeId> {
+        let nil = self.resolver.arena().source_type("nil")?;
+        let SemanticType::Union(members) = self.resolver.arena().get(type_id)?.clone() else {
+            return None;
+        };
+        if !members.contains(&nil) {
+            return None;
+        }
+        let present = members
+            .into_iter()
+            .filter(|member| *member != nil)
+            .collect::<Vec<_>>();
+        match present.as_slice() {
+            [inner] => Some(*inner),
+            [] => None,
+            _ => self.resolver.arena_mut().union(present).ok(),
+        }
+    }
+
+    pub(crate) fn invalidate_flow_binding(&mut self, binding: BindingId) {
+        for facts in &mut self.flow_narrowings {
+            facts.remove(&binding);
+        }
+    }
+
+    pub(crate) fn invalidate_flow_narrowings(&mut self) {
+        for facts in &mut self.flow_narrowings {
+            facts.clear();
+        }
+    }
+
+    fn check_optional_propagate(
+        &mut self,
+        operand: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let optional = self.check_expression(operand)?;
+        let Some(inner_type) = self.optional_inner(optional.type_id()) else {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id()]);
+            return None;
+        };
+        let Some(signature) = self.signature_stack.last() else {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id()]);
+            return None;
+        };
+        if signature.results().len() != 1 {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id()]);
+            return None;
+        }
+        let enclosing_result = signature.results()[0].type_id()?;
+        if self.optional_inner(enclosing_result).is_none() {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id(), enclosing_result]);
+            return None;
+        }
+        Some(TypedExpression {
+            kind: TypedExpressionKind::OptionalPropagate {
+                optional: Box::new(optional),
+                enclosing_result,
+            },
+            type_id: inner_type,
+            span,
+        })
+    }
+
     pub(crate) fn binding_reference_kind(
         &mut self,
         binding: Binding,
@@ -1127,9 +1232,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .map(TypedExpressionKind::Capture);
         }
         Some(match binding.kind {
-            BindingKind::Local(local) | BindingKind::LoopLocal(local) => {
-                TypedExpressionKind::Local(local)
-            }
+            BindingKind::Local(local)
+            | BindingKind::LoopLocal(local)
+            | BindingKind::ImmutableLocal(local) => TypedExpressionKind::Local(local),
             BindingKind::Parameter(parameter) => TypedExpressionKind::Parameter(parameter),
         })
     }
@@ -1204,6 +1309,11 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
             then_body,
             else_body,
             ..
+        }
+        | TypedStatementKind::OptionalIf {
+            then_body,
+            else_body,
+            ..
         } => {
             !else_body.is_empty()
                 && statements_definitely_return(then_body)
@@ -1221,6 +1331,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::While { .. }
+        | TypedStatementKind::OptionalWhile { .. }
         | TypedStatementKind::NumericFor { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
@@ -1268,9 +1379,12 @@ pub(crate) const fn typed_unary(operator: SyntaxUnaryOperator) -> TypedUnaryOper
     }
 }
 
-pub(crate) const fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryOperator {
+pub(crate) fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryOperator {
     match operator {
         SyntaxBinaryOperator::Or => TypedBinaryOperator::Or,
+        SyntaxBinaryOperator::OptionalDefault => {
+            unreachable!("optional default has a distinct typed expression")
+        }
         SyntaxBinaryOperator::And => TypedBinaryOperator::And,
         SyntaxBinaryOperator::Equal => TypedBinaryOperator::Equal,
         SyntaxBinaryOperator::NotEqual => TypedBinaryOperator::NotEqual,
@@ -1297,6 +1411,7 @@ pub(crate) const fn unary_text(operator: SyntaxUnaryOperator) -> &'static str {
 pub(crate) const fn binary_text(operator: SyntaxBinaryOperator) -> &'static str {
     match operator {
         SyntaxBinaryOperator::Or => "or",
+        SyntaxBinaryOperator::OptionalDefault => "??",
         SyntaxBinaryOperator::And => "and",
         SyntaxBinaryOperator::Equal => "==",
         SyntaxBinaryOperator::NotEqual => "~=",

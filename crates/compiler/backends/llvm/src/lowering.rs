@@ -1013,8 +1013,13 @@ pub(crate) fn initialize_array_outputs(
         .filter(|instruction| {
             matches!(
                 instruction.kind(),
-                MirInstructionKind::ArrayLength { .. } | MirInstructionKind::ArrayGetChecked { .. }
+                MirInstructionKind::ArrayGet { .. }
+                    | MirInstructionKind::TableGet { .. }
+                    | MirInstructionKind::ArrayLength { .. }
+                    | MirInstructionKind::ArrayGetChecked { .. }
             ) && match instruction.kind() {
+                MirInstructionKind::ArrayGet { .. } => true,
+                MirInstructionKind::TableGet { .. } => true,
                 MirInstructionKind::ArrayLength { array }
                 | MirInstructionKind::ArrayGetChecked { array, .. } => {
                     direct_scalar_arrays.origin(*array).is_none()

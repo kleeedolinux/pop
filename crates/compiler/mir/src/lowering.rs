@@ -547,8 +547,27 @@ fn visit_statement_closures(
                 visit_statement_closures(nested, parameters, locals);
             }
         }
+        HirStatementKind::OptionalIf {
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit_expression_closures(initializer, parameters, locals);
+            for nested in then_body.iter().chain(else_body) {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
         HirStatementKind::While { condition, body } => {
             visit_expression_closures(condition, parameters, locals);
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
+        HirStatementKind::OptionalWhile {
+            initializer, body, ..
+        } => {
+            visit_expression_closures(initializer, parameters, locals);
             for nested in body {
                 visit_statement_closures(nested, parameters, locals);
             }
@@ -654,10 +673,19 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
             contains_continue_for_current_loop(then_body)
                 || contains_continue_for_current_loop(else_body)
         }
+        HirStatementKind::OptionalIf {
+            then_body,
+            else_body,
+            ..
+        } => {
+            contains_continue_for_current_loop(then_body)
+                || contains_continue_for_current_loop(else_body)
+        }
         HirStatementKind::Match { arms, .. } => arms
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
         HirStatementKind::While { .. }
+        | HirStatementKind::OptionalWhile { .. }
         | HirStatementKind::RepeatUntil { .. }
         | HirStatementKind::NumericFor { .. }
         | HirStatementKind::Local { .. }
@@ -769,6 +797,14 @@ fn visit_expression_closures(
         }
         HirExpressionKind::Unary { operand, .. } => {
             visit_expression_closures(operand, parameters, locals);
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            visit_expression_closures(optional, parameters, locals);
+            visit_expression_closures(fallback, parameters, locals);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            visit_expression_closures(optional, parameters, locals);
         }
         HirExpressionKind::Conditional {
             condition,
@@ -1079,9 +1115,24 @@ impl<'hir> FunctionBuilder<'hir> {
                     then_body,
                     else_body,
                 } => self.lower_if(condition, then_body, else_body),
+                HirStatementKind::OptionalIf {
+                    local,
+                    inner_type,
+                    initializer,
+                    then_body,
+                    else_body,
+                    ..
+                } => self.lower_optional_if(*local, *inner_type, initializer, then_body, else_body),
                 HirStatementKind::While { condition, body } => {
                     self.lower_while(condition, body);
                 }
+                HirStatementKind::OptionalWhile {
+                    local,
+                    inner_type,
+                    initializer,
+                    body,
+                    ..
+                } => self.lower_optional_while(*local, *inner_type, initializer, body),
                 HirStatementKind::RepeatUntil { body, condition } => {
                     self.lower_repeat_until(body, condition);
                 }
@@ -1591,6 +1642,58 @@ impl<'hir> FunctionBuilder<'hir> {
         self.install_state(&state, &join_arguments);
     }
 
+    fn lower_optional_if(
+        &mut self,
+        local: LocalId,
+        inner_type: TypeId,
+        initializer: &HirExpression,
+        then_body: &[HirStatement],
+        else_body: &[HirStatement],
+    ) {
+        let optional = self.lower_expression(initializer);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            initializer.span(),
+        );
+        let state = self.live_state(initializer.span());
+        let then_block = self.new_block();
+        let else_block = self.new_block();
+        let (join_block, join_arguments) = self.new_block_with_arguments(&state.specs);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: then_block,
+            when_false: else_block,
+        });
+
+        let outer_parameters = self.parameters.clone();
+        let outer_locals = self.locals.clone();
+        self.current = then_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            inner_type,
+            initializer.span(),
+        );
+        self.locals.insert(local, value);
+        self.lower_statements(then_body);
+        let then_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
+        self.branch_with_state_if_open(join_block, &state);
+
+        self.parameters = outer_parameters;
+        self.locals = outer_locals;
+        self.current = else_block;
+        self.lower_statements(else_body);
+        let else_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
+        self.branch_with_state_if_open(join_block, &state);
+
+        self.current = join_block;
+        if !then_reaches_join && !else_reaches_join {
+            self.terminate(MirTerminator::Unreachable);
+            return;
+        }
+        self.install_state(&state, &join_arguments);
+    }
+
     fn lower_while(&mut self, condition: &HirExpression, body: &[HirStatement]) {
         let state = self.live_state(condition.span());
         let initial_values = self.state_values(&state);
@@ -1623,6 +1726,62 @@ impl<'hir> FunctionBuilder<'hir> {
         self.install_state(&state, &condition_arguments);
         self.branch_with_state_if_open(exit_block, &state);
         self.current = exit_block;
+        self.install_state(&state, &exit_arguments);
+    }
+
+    fn lower_optional_while(
+        &mut self,
+        local: LocalId,
+        inner_type: TypeId,
+        initializer: &HirExpression,
+        body: &[HirStatement],
+    ) {
+        let state = self.live_state(initializer.span());
+        let initial_values = self.state_values(&state);
+        let (condition_block, condition_arguments) = self.new_block_with_arguments(&state.specs);
+        let body_block = self.new_block();
+        let exit_edge = self.new_block();
+        let (exit_block, exit_arguments) = self.new_block_with_arguments(&state.specs);
+        self.branch_with_arguments_if_open(condition_block, initial_values);
+
+        self.current = condition_block;
+        self.install_state(&state, &condition_arguments);
+        let optional = self.lower_expression(initializer);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            initializer.span(),
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: body_block,
+            when_false: exit_edge,
+        });
+
+        self.current = body_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            inner_type,
+            initializer.span(),
+        );
+        self.locals.insert(local, value);
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: state.clone(),
+            continue_target: condition_block,
+            continue_state: state.clone(),
+        });
+        self.lower_statements(body);
+        self.loop_stack
+            .pop()
+            .expect("optional while loop context was pushed");
+        self.branch_with_state_if_open(condition_block, &state);
+
+        self.current = exit_edge;
+        self.install_state(&state, &condition_arguments);
+        self.branch_with_state_if_open(exit_block, &state);
+        self.current = exit_block;
+        self.locals.remove(&local);
         self.install_state(&state, &exit_arguments);
     }
 
@@ -1997,6 +2156,33 @@ impl<'hir> FunctionBuilder<'hir> {
                 left,
                 right,
             } => return self.lower_binary_expression(expression, *operator, left, right),
+            HirExpressionKind::OptionalDefault { optional, fallback } => {
+                return self.lower_optional_default(
+                    optional,
+                    fallback,
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
+            HirExpressionKind::OptionalPropagate {
+                optional,
+                enclosing_result,
+            } => {
+                return self.lower_optional_propagate(
+                    optional,
+                    *enclosing_result,
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
+            HirExpressionKind::OptionalNarrow { optional } => {
+                let optional = self.lower_expression(optional);
+                return self.emit(
+                    MirInstructionKind::OptionalGet { optional },
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
             HirExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -2275,6 +2461,39 @@ impl<'hir> FunctionBuilder<'hir> {
                 expression.span(),
             );
         }
+        if matches!(
+            operator,
+            TypedBinaryOperator::Equal | TypedBinaryOperator::NotEqual
+        ) {
+            let optional = if matches!(right.kind(), HirExpressionKind::Nil)
+                && optional_inner_type(self.arena, left.type_id()).is_some()
+            {
+                Some(left)
+            } else if matches!(left.kind(), HirExpressionKind::Nil)
+                && optional_inner_type(self.arena, right.type_id()).is_some()
+            {
+                Some(right)
+            } else {
+                None
+            };
+            if let Some(optional) = optional {
+                let optional = self.lower_expression(optional);
+                let present = self.emit(
+                    MirInstructionKind::OptionalIsPresent { optional },
+                    expression.type_id(),
+                    expression.span(),
+                );
+                return if operator == TypedBinaryOperator::Equal {
+                    self.emit(
+                        MirInstructionKind::BooleanNot { operand: present },
+                        expression.type_id(),
+                        expression.span(),
+                    )
+                } else {
+                    present
+                };
+            }
+        }
         let operand_type = left.type_id();
         let left = self.lower_expression(left);
         let right = self.lower_expression(right);
@@ -2283,6 +2502,85 @@ impl<'hir> FunctionBuilder<'hir> {
             expression.type_id(),
             expression.span(),
         )
+    }
+
+    fn lower_optional_default(
+        &mut self,
+        optional: &HirExpression,
+        fallback: &HirExpression,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let optional = self.lower_expression(optional);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        let present_block = self.new_block();
+        let fallback_block = self.new_block();
+        let (join_block, result) = self.new_block_with_argument(result_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: present_block,
+            when_false: fallback_block,
+        });
+        self.current = present_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            result_type,
+            span,
+        );
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![value],
+        });
+        self.current = fallback_block;
+        let fallback = self.lower_expression(fallback);
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![fallback],
+        });
+        self.current = join_block;
+        result
+    }
+
+    fn lower_optional_propagate(
+        &mut self,
+        optional: &HirExpression,
+        enclosing_result: TypeId,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let optional = self.lower_expression(optional);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        let present_block = self.new_block();
+        let absent_block = self.new_block();
+        let (join_block, result) = self.new_block_with_argument(result_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: present_block,
+            when_false: absent_block,
+        });
+        self.current = absent_block;
+        let nil = self.emit(MirInstructionKind::NilConstant, enclosing_result, span);
+        self.terminate(MirTerminator::Return { values: vec![nil] });
+        self.current = present_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            result_type,
+            span,
+        );
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![value],
+        });
+        self.current = join_block;
+        result
     }
 
     fn lower_compound_value(
@@ -2756,6 +3054,26 @@ fn lower_binary(
     }
 }
 
+fn optional_inner_type(arena: &TypeArena, optional: TypeId) -> Option<TypeId> {
+    let nil = arena.source_type("nil")?;
+    let SemanticType::Union(members) = arena.get(optional)? else {
+        return None;
+    };
+    if !members.contains(&nil) {
+        return None;
+    }
+    let present = members
+        .iter()
+        .copied()
+        .filter(|member| *member != nil)
+        .collect::<Vec<_>>();
+    match present.as_slice() {
+        [inner] => Some(*inner),
+        [] => None,
+        _ => arena.find(&SemanticType::Union(present)),
+    }
+}
+
 fn numeric_binary(
     arena: &TypeArena,
     operand_type: TypeId,
@@ -2970,6 +3288,8 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::OptionalIsPresent { .. }
+        | MirInstructionKind::OptionalGet { .. }
         | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleGet { .. }

@@ -43,8 +43,27 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 finalize_statement_captures(statement, written);
             }
         }
+        TypedStatementKind::OptionalIf {
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            finalize_expression_captures(initializer, written);
+            for statement in then_body.iter_mut().chain(else_body.iter_mut()) {
+                finalize_statement_captures(statement, written);
+            }
+        }
         TypedStatementKind::While { condition, body } => {
             finalize_expression_captures(condition, written);
+            for statement in body {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedStatementKind::OptionalWhile {
+            initializer, body, ..
+        } => {
+            finalize_expression_captures(initializer, written);
             for statement in body {
                 finalize_statement_captures(statement, written);
             }
@@ -245,6 +264,16 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::Binary { left, right, .. } => {
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
+        }
+        TypedExpressionKind::OptionalDefault { optional, fallback } => {
+            finalize_expression_captures(optional, written);
+            finalize_expression_captures(fallback, written);
+        }
+        TypedExpressionKind::OptionalPropagate { optional, .. } => {
+            finalize_expression_captures(optional, written);
+        }
+        TypedExpressionKind::OptionalNarrow { optional } => {
+            finalize_expression_captures(optional, written);
         }
         TypedExpressionKind::StringConcat { left, right } => {
             finalize_expression_captures(left, written);

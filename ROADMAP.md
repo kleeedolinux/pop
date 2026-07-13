@@ -38,7 +38,7 @@ and does not define the work remaining for `0.1.0`.
 
 ### 1. Complete the base language
 
-- [ ] Implement optional flow narrowing, pattern binding, defaulting, and
+- [x] Implement optional flow narrowing, pattern binding, defaulting, and
   propagation operators without weakening static typing.
 - [ ] Implement the complete typed-error workflow: declarations, `Result`,
   propagation, matching boundaries, explicit MIR failure and cleanup

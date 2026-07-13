@@ -47,7 +47,8 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     assert!(text.contains("add i64"));
     assert!(text.contains("ret i64"));
     assert!(
-        text.contains("declare i64 @pop_rt_array_get(i64, i64) nounwind")
+        text.contains("declare i8 @pop_rt_array_get_checked(i64, i64, ptr) nounwind")
+            && text.contains("declare i8 @pop_rt_table_get_checked(i64, i64, i1, ptr) nounwind")
             && text.contains("declare i8 @pop_rt_array_set(i64, i64, i64) nounwind")
             && text.contains("declare i64 @pop_rt_field_get(i64, i64) nounwind")
             && text.contains("declare i8 @pop_rt_field_set(i64, i64, i64) nounwind"),
@@ -105,6 +106,100 @@ fn nominal_enum_constants_and_equality_lower_to_i32() {
     assert!(text.contains("icmp eq i32"), "{text}");
     let result = link_with_runtime_and_run(&module, "enum");
     assert_eq!(result.status.code(), Some(7), "{text}");
+}
+
+#[test]
+fn optional_presence_and_extraction_use_a_typed_private_llvm_representation() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optional.pop",
+        "namespace Main\n\
+         public function choose(value: Int?, fallback: Int): Int\n\
+             return value ?? fallback\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified optional MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM optional lowering")
+    .to_string();
+
+    assert!(text.contains("extractvalue { i1, i64 }"), "{text}");
+    assert!(!text.to_ascii_lowercase().contains("dynamic"), "{text}");
+    let input = std::env::temp_dir().join("pop-backend-llvm-optionals.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-optionals.bc");
+    fs::write(&input, &text).expect("write optional LLVM input");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected optional IR: {}\n{text}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+#[test]
+fn optional_scalar_collection_reads_execute_without_a_zero_sentinel() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optionalNative.pop",
+        "namespace Main\n\
+         function main(): Int\n\
+             local values: {Int} = { 0 }\n\
+             local present = values[1] ?? 7\n\
+             local absent = values[2] ?? 7\n\
+             local scores: {[String]: Int} = { zero = 0 }\n\
+             local tablePresent = scores[\"zero\"] ?? 7\n\
+             local tableAbsent = scores[\"missing\"] ?? 7\n\
+             return present * 10 + absent + tablePresent * 10 + tableAbsent\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified optional collection MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM optional collection lowering");
+    let result = link_with_runtime_and_run(&module, "optional-scalar");
+    assert_eq!(result.status.code(), Some(14), "{}", module);
 }
 
 #[test]

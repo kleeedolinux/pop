@@ -93,15 +93,41 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 then_body,
                 else_body,
             } => {
+                let narrowing = self.optional_narrowing(condition);
                 let condition = self.check_condition(condition)?;
-                let then_body = self.check_nested_statements(signature, then_body);
-                let else_body = self.check_nested_statements(signature, else_body);
+                let then_body = if let Some((binding, inner, true)) = narrowing {
+                    self.check_nested_statements_with_narrowing(
+                        signature, then_body, binding, inner,
+                    )
+                } else {
+                    self.check_nested_statements(signature, then_body)
+                };
+                let else_body = if let Some((binding, inner, false)) = narrowing {
+                    self.check_nested_statements_with_narrowing(
+                        signature, else_body, binding, inner,
+                    )
+                } else {
+                    self.check_nested_statements(signature, else_body)
+                };
                 TypedStatementKind::If {
                     condition,
                     then_body,
                     else_body,
                 }
             }
+            StatementSyntaxKind::OptionalIf {
+                name,
+                initializer,
+                then_body,
+                else_body,
+            } => self.check_optional_if(
+                signature,
+                name,
+                initializer,
+                then_body,
+                else_body,
+                statement.span(),
+            )?,
             StatementSyntaxKind::While { condition, body } => {
                 let condition = self.check_condition(condition)?;
                 self.loop_depth = self.loop_depth.saturating_add(1);
@@ -109,6 +135,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.loop_depth = self.loop_depth.saturating_sub(1);
                 TypedStatementKind::While { condition, body }
             }
+            StatementSyntaxKind::OptionalWhile {
+                name,
+                initializer,
+                body,
+            } => self.check_optional_while(signature, name, initializer, body, statement.span())?,
             StatementSyntaxKind::RepeatUntil { body, condition } => {
                 self.check_repeat_until(signature, body, condition)?
             }
@@ -288,7 +319,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
         }?;
         let checked = match invocation {
-            CheckedInvocation::Call(checked) => checked,
+            CheckedInvocation::Call(checked) => {
+                self.invalidate_flow_narrowings();
+                checked
+            }
             CheckedInvocation::Value(value) => {
                 return Some(TypedStatementKind::Expression(value));
             }
@@ -763,7 +797,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
-            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+            if matches!(
+                binding.kind,
+                BindingKind::LoopLocal(_) | BindingKind::ImmutableLocal(_)
+            ) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
                     "multiple assignment",
@@ -781,6 +818,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 return None;
             }
             self.written_bindings.insert(binding.id);
+            self.invalidate_flow_binding(binding.id);
             return match target_kind {
                 TypedExpressionKind::Local(local) => Some(TypedAssignmentTarget::Local {
                     binding: binding.id,
@@ -859,7 +897,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
-            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+            if matches!(
+                binding.kind,
+                BindingKind::LoopLocal(_) | BindingKind::ImmutableLocal(_)
+            ) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
                     "assignment",
@@ -882,6 +923,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             )?;
             self.require_same_type(binding.type_id, value.type_id(), value.span(), span);
             self.written_bindings.insert(binding.id);
+            self.invalidate_flow_binding(binding.id);
             return match target_kind {
                 TypedExpressionKind::Local(local) => {
                     Some(TypedStatementKind::LocalSet { local, value })
@@ -973,7 +1015,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
-            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+            if matches!(
+                binding.kind,
+                BindingKind::LoopLocal(_) | BindingKind::ImmutableLocal(_)
+            ) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
                     "compound assignment",
@@ -1003,6 +1048,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.check_compound_operator(operator, binding.type_id, right.type_id(), span)?;
             let value = compound_expression(current, right, operator, span);
             self.written_bindings.insert(binding.id);
+            self.invalidate_flow_binding(binding.id);
             return match target_kind {
                 TypedExpressionKind::Local(local) => {
                     Some(TypedStatementKind::LocalSet { local, value })
@@ -1118,6 +1164,143 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .pop()
             .expect("nested lexical scope was just pushed");
         typed
+    }
+
+    fn check_nested_statements_with_narrowing(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        statements: &[StatementSyntax],
+        binding: BindingId,
+        inner_type: pop_foundation::TypeId,
+    ) -> Vec<TypedStatement> {
+        self.flow_narrowings
+            .push(BTreeMap::from([(binding, inner_type)]));
+        let typed = self.check_nested_statements(signature, statements);
+        self.flow_narrowings
+            .pop()
+            .expect("flow narrowing was just pushed");
+        typed
+    }
+
+    fn optional_narrowing(
+        &mut self,
+        condition: &ExpressionSyntax,
+    ) -> Option<(BindingId, pop_foundation::TypeId, bool)> {
+        let ExpressionSyntaxKind::Binary {
+            operator,
+            left,
+            right,
+        } = condition.kind()
+        else {
+            return None;
+        };
+        let present_on_true = match operator {
+            SyntaxBinaryOperator::NotEqual => true,
+            SyntaxBinaryOperator::Equal => false,
+            _ => return None,
+        };
+        let name = match (left.kind(), right.kind()) {
+            (ExpressionSyntaxKind::Name(path), ExpressionSyntaxKind::Nil)
+            | (ExpressionSyntaxKind::Nil, ExpressionSyntaxKind::Name(path))
+                if path.len() == 1 =>
+            {
+                &path[0]
+            }
+            _ => return None,
+        };
+        let binding = self.binding_by_name(name)?;
+        let inner = self.optional_inner(binding.type_id)?;
+        Some((binding.id, inner, present_on_true))
+    }
+
+    fn check_optional_if(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        initializer: &ExpressionSyntax,
+        then_statements: &[StatementSyntax],
+        else_statements: &[StatementSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let initializer = self.check_expression(initializer)?;
+        let Some(inner_type) = self.optional_inner(initializer.type_id()) else {
+            self.invalid_operator(span, "if local", &[initializer.type_id()]);
+            return None;
+        };
+        let (binding, local, then_body) =
+            self.check_optional_binding_body(signature, name, inner_type, then_statements, false);
+        let else_body = self.check_nested_statements(signature, else_statements);
+        Some(TypedStatementKind::OptionalIf {
+            binding,
+            local,
+            name: name.to_owned(),
+            inner_type,
+            initializer,
+            then_body,
+            else_body,
+        })
+    }
+
+    fn check_optional_while(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        initializer: &ExpressionSyntax,
+        statements: &[StatementSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let initializer = self.check_expression(initializer)?;
+        let Some(inner_type) = self.optional_inner(initializer.type_id()) else {
+            self.invalid_operator(span, "while local", &[initializer.type_id()]);
+            return None;
+        };
+        let (binding, local, body) =
+            self.check_optional_binding_body(signature, name, inner_type, statements, true);
+        Some(TypedStatementKind::OptionalWhile {
+            binding,
+            local,
+            name: name.to_owned(),
+            inner_type,
+            initializer,
+            body,
+        })
+    }
+
+    fn check_optional_binding_body(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        inner_type: pop_foundation::TypeId,
+        statements: &[StatementSyntax],
+        is_loop: bool,
+    ) -> (BindingId, LocalId, Vec<TypedStatement>) {
+        let local = LocalId::from_raw(self.next_local);
+        self.next_local = self.next_local.saturating_add(1);
+        let binding = BindingId::from_raw(self.next_binding);
+        self.next_binding = self.next_binding.saturating_add(1);
+        self.scopes.push(BTreeMap::from([(
+            name.to_owned(),
+            Binding {
+                id: binding,
+                kind: BindingKind::ImmutableLocal(local),
+                type_id: inner_type,
+                function_depth: self.function_depth,
+            },
+        )]));
+        if is_loop {
+            self.loop_depth = self.loop_depth.saturating_add(1);
+        }
+        let body = statements
+            .iter()
+            .filter_map(|statement| self.check_statement(signature, statement))
+            .collect();
+        if is_loop {
+            self.loop_depth = self.loop_depth.saturating_sub(1);
+        }
+        self.scopes
+            .pop()
+            .expect("optional binding scope was just pushed");
+        (binding, local, body)
     }
 
     pub(crate) fn check_repeat_until(
@@ -1374,6 +1557,11 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
             then_body,
             else_body,
             ..
+        }
+        | StatementSyntaxKind::OptionalIf {
+            then_body,
+            else_body,
+            ..
         } => {
             contains_continue_for_current_loop(then_body)
                 || contains_continue_for_current_loop(else_body)
@@ -1382,6 +1570,7 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
         StatementSyntaxKind::While { .. }
+        | StatementSyntaxKind::OptionalWhile { .. }
         | StatementSyntaxKind::RepeatUntil { .. }
         | StatementSyntaxKind::NumericFor { .. }
         | StatementSyntaxKind::Local { .. }

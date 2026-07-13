@@ -738,6 +738,98 @@ fn logical_operators_short_circuit_before_trapping_right_operands() {
 }
 
 #[test]
+fn optional_flow_distinguishes_absent_from_present_false_and_zero() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function choose(value: Int?, fallback: Int): Int\n\
+             return value ?? fallback\n\
+         end\n\
+         public function isPresent(value: Boolean?): Int\n\
+             if local present = value then\n\
+                 return 1\n\
+             end\n\
+             return 0\n\
+         end\n\
+         public function propagate(value: Int?): Int?\n\
+             value?\n\
+             return value\n\
+         end\n\
+         private function trapDefault(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public function lazy(value: Int?): Int\n\
+             return value ?? trapDefault()\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified optional MIR");
+
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[int(0), int(7)])
+            .expect("present zero"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[MirValue::Nil, int(7)])
+            .expect("absent default"),
+        vec![int(7)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[MirValue::Boolean(false)],)
+            .expect("present false"),
+        vec![int(1)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[MirValue::Nil])
+            .expect("absent Boolean"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[2].symbol(), &[MirValue::Nil])
+            .expect("propagated absence"),
+        vec![MirValue::Nil]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[2].symbol(), &[int(0)])
+            .expect("propagated presence"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[4].symbol(), &[int(0)])
+            .expect("present value skips fallback"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[4].symbol(), &[MirValue::Nil])
+            .expect_err("absent value evaluates fallback"),
+        trap(TrapKind::DivisionByZero)
+    );
+
+    let optimized = optimize_mir(mir, &types).expect("optimized optional MIR");
+    let optimized_interpreter =
+        MirInterpreter::new(&optimized, &types).expect("verified optimized optional MIR");
+    assert_eq!(
+        optimized_interpreter
+            .call(optimized.functions()[0].symbol(), &[int(0), int(7)])
+            .expect("optimized present zero"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        optimized_interpreter
+            .call(optimized.functions()[0].symbol(), &[MirValue::Nil, int(7)])
+            .expect("optimized absent default"),
+        vec![int(7)]
+    );
+}
+
+#[test]
 fn zero_result_calls_execute_for_every_resolved_dispatch_kind() {
     let (mir, types) = executable_source(
         "namespace Main\n\

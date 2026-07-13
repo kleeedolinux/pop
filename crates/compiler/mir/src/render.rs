@@ -322,6 +322,12 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "const.boolean {value}");
         }
         MirInstructionKind::NilConstant => output.push_str("const.nil"),
+        MirInstructionKind::OptionalIsPresent { optional } => {
+            dump_unary(output, "optionalIsPresent", *optional);
+        }
+        MirInstructionKind::OptionalGet { optional } => {
+            dump_unary(output, "optionalGet", *optional);
+        }
         MirInstructionKind::EnumConstant {
             definition,
             case,

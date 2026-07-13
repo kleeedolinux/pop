@@ -428,6 +428,16 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
+            MirInstructionKind::OptionalIsPresent { optional } => {
+                MirValue::Boolean(!matches!(value(values, *optional)?.visible, MirValue::Nil))
+            }
+            MirInstructionKind::OptionalGet { optional } => {
+                let present = value(values, *optional)?.visible.clone();
+                if matches!(present, MirValue::Nil) {
+                    return Err(ExecutionError::InvalidControlFlow);
+                }
+                present
+            }
             MirInstructionKind::EnumConstant {
                 definition,
                 case,

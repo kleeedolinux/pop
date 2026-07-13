@@ -98,6 +98,11 @@ and insert-or-replace operations. Key comparison follows the compiler-approved
 canonical key contract, and table growth preserves stable managed identity and
 precise key/value maps.
 
+ADR 0051 advances the bootstrap native ABI to version 1.7. Optional array and
+table lookup adapters return a presence status separately from an out payload,
+so a present scalar zero or `false` cannot collide with absence. LLVM's private
+typed optional pair is not a MIR or PLRI value representation.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry

@@ -506,6 +506,19 @@ fn runtime_free_c_rejects_repeat_until_safe_points_without_a_fallback() {
 }
 
 #[test]
+fn runtime_free_c_rejects_optional_flow_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function choose(value: Int?, fallback: Int): Int\n\
+             return value ?? fallback\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(&mir, &types, CLoweringOptions::default())
+        .expect_err("runtime-free C has no optional representation");
+    assert!(matches!(error, CBackendError::UnsupportedType(_)));
+}
+
+#[test]
 fn runtime_free_c_rejects_numeric_range_safe_points_without_a_fallback() {
     let (mir, types) = lower(
         "namespace Main\n\

@@ -70,7 +70,10 @@ impl BodyParser<'_> {
                 break;
             }
             self.position += 1;
-            let right_precedence = if operator == BinaryOperator::Concat {
+            let right_precedence = if matches!(
+                operator,
+                BinaryOperator::Concat | BinaryOperator::OptionalDefault
+            ) {
                 precedence
             } else {
                 precedence + 1
@@ -118,6 +121,17 @@ impl BodyParser<'_> {
     fn parse_postfix(&mut self) -> Result<ExpressionSyntax, FunctionBodyError> {
         let mut expression = self.parse_primary()?;
         loop {
+            if let Some(question) = self.consume(TokenKind::Question) {
+                let start = expression.span().range().start();
+                expression = self.expression(
+                    ExpressionSyntaxKind::OptionalPropagate {
+                        operand: Box::new(expression),
+                    },
+                    start,
+                    question.range().end(),
+                );
+                continue;
+            }
             if self.current_kind() == Some(TokenKind::LeftBrace)
                 && let ExpressionSyntaxKind::Name(type_name) = expression.kind()
             {
@@ -609,19 +623,20 @@ impl BodyParser<'_> {
     fn current_binary_operator(&self) -> Option<(BinaryOperator, u8)> {
         Some(match self.current_kind()? {
             TokenKind::Or => (BinaryOperator::Or, 1),
-            TokenKind::And => (BinaryOperator::And, 2),
-            TokenKind::EqualEqual => (BinaryOperator::Equal, 3),
-            TokenKind::TildeEqual => (BinaryOperator::NotEqual, 3),
-            TokenKind::LessThan => (BinaryOperator::LessThan, 3),
-            TokenKind::LessThanEqual => (BinaryOperator::LessThanOrEqual, 3),
-            TokenKind::GreaterThan => (BinaryOperator::GreaterThan, 3),
-            TokenKind::GreaterThanEqual => (BinaryOperator::GreaterThanOrEqual, 3),
-            TokenKind::DotDot => (BinaryOperator::Concat, 4),
-            TokenKind::Plus => (BinaryOperator::Add, 5),
-            TokenKind::Minus => (BinaryOperator::Subtract, 5),
-            TokenKind::Star => (BinaryOperator::Multiply, 6),
-            TokenKind::Slash => (BinaryOperator::Divide, 6),
-            TokenKind::Percent => (BinaryOperator::Remainder, 6),
+            TokenKind::QuestionQuestion => (BinaryOperator::OptionalDefault, 2),
+            TokenKind::And => (BinaryOperator::And, 3),
+            TokenKind::EqualEqual => (BinaryOperator::Equal, 4),
+            TokenKind::TildeEqual => (BinaryOperator::NotEqual, 4),
+            TokenKind::LessThan => (BinaryOperator::LessThan, 4),
+            TokenKind::LessThanEqual => (BinaryOperator::LessThanOrEqual, 4),
+            TokenKind::GreaterThan => (BinaryOperator::GreaterThan, 4),
+            TokenKind::GreaterThanEqual => (BinaryOperator::GreaterThanOrEqual, 4),
+            TokenKind::DotDot => (BinaryOperator::Concat, 5),
+            TokenKind::Plus => (BinaryOperator::Add, 6),
+            TokenKind::Minus => (BinaryOperator::Subtract, 6),
+            TokenKind::Star => (BinaryOperator::Multiply, 7),
+            TokenKind::Slash => (BinaryOperator::Divide, 7),
+            TokenKind::Percent => (BinaryOperator::Remainder, 7),
             _ => return None,
         })
     }

@@ -103,6 +103,32 @@ fn lexer_preserves_typed_string_composition_tokens_losslessly() {
 }
 
 #[test]
+fn lexer_distinguishes_optional_default_and_propagation_tokens() {
+    // ADR 0051: `??` is one defaulting token while postfix `?` remains a
+    // distinct propagation token (and the existing optional-type suffix).
+    let source = source("primary ?? fallback?\n");
+    let result = lex(&source);
+
+    assert!(result.diagnostics().is_empty());
+    assert_eq!(result.reconstruct(&source), source.text());
+    let significant = result
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind().is_trivia())
+        .map(|token| token.kind())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        significant,
+        [
+            TokenKind::Identifier,
+            TokenKind::QuestionQuestion,
+            TokenKind::Identifier,
+            TokenKind::Question,
+        ]
+    );
+}
+
+#[test]
 fn lexer_rejects_invalid_or_non_scalar_string_escapes() {
     for text in [r#""bad\q""#, r#""bad\x0""#, r#""bad\u{D800}""#] {
         let result = lex(&source(text));

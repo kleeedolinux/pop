@@ -5,8 +5,8 @@ use pop_runtime_native::{
     pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
     pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
     pop_rt_pin, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_table_get, pop_rt_table_set, pop_rt_unpin,
-    request_abi_collection,
+    pop_rt_string_format, pop_rt_string_read, pop_rt_table_get, pop_rt_table_get_checked,
+    pop_rt_table_set, pop_rt_unpin, request_abi_collection,
 };
 use pop_runtime_native_abi::StringFormatTag;
 use std::ffi::CString;
@@ -23,7 +23,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 6);
+    assert_eq!(pop_rt_abi_minor(), 7);
     assert_eq!(pop_rt_gc_stage(), 1);
 }
 
@@ -259,6 +259,7 @@ fn bootstrap_abi_allocates_and_tracks_opaque_handles() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn typed_table_abi_replaces_and_grows_without_changing_identity() {
     let _guard = abi_test_lock();
     let table = pop_rt_allocate_table(1, 0, 0);
@@ -270,6 +271,19 @@ fn typed_table_abi_replaces_and_grows_without_changing_identity() {
     assert_eq!(pop_rt_table_get(table, 7, 0), 11);
     assert_eq!(pop_rt_table_set(table, 8, 12, 0, 0), 1);
     assert_eq!(pop_rt_table_get(table, 8, 0), 12);
+
+    assert_eq!(pop_rt_table_set(table, 9, 0, 0, 0), 1);
+    let mut present_zero = u64::MAX;
+    let mut missing = u64::MAX;
+    // SAFETY: Both output pointers address live writable `u64` values.
+    unsafe {
+        assert_eq!(
+            pop_rt_table_get_checked(table, 9, 0, &raw mut present_zero),
+            1
+        );
+        assert_eq!(pop_rt_table_get_checked(table, 10, 0, &raw mut missing), 0);
+    }
+    assert_eq!(present_zero, 0);
 
     let first = allocate_utf8_string_literal(b"alice");
     let equal = allocate_utf8_string_literal(b"alice");

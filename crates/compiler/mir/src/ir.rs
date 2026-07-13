@@ -793,6 +793,12 @@ pub enum MirInstructionKind {
     },
     BooleanConstant(bool),
     NilConstant,
+    OptionalIsPresent {
+        optional: ValueId,
+    },
+    OptionalGet {
+        optional: ValueId,
+    },
     EnumConstant {
         definition: SymbolId,
         case: EnumCaseId,
@@ -1281,6 +1287,10 @@ pub enum MirVerificationError {
     InvalidInstructionType {
         instruction: ValueId,
         result_type: TypeId,
+    },
+    OptionalGetWithoutPresence {
+        instruction: ValueId,
+        optional: ValueId,
     },
     WrongOperandType {
         instruction: ValueId,
