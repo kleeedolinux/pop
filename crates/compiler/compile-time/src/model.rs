@@ -518,6 +518,8 @@ pub enum UnsupportedCompileTimeConstruct {
     Table,
     UnionCase,
     StringComposition,
+    OptionalFlow,
+    TypedFailure,
 }
 
 /// A deterministic failure to translate accepted typed syntax into restricted

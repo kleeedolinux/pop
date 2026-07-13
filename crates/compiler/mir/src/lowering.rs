@@ -7,14 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, BlockId, CaptureId, ClassId, FieldId, FileId, FunctionId, LocalId, MethodId,
-    SourceSpan, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, ValueId, ValueParameterId,
+    BindingId, BlockId, CaptureId, ClassId, CleanupScopeId, FieldId, FileId, FunctionId, LocalId,
+    MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId,
+    ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
-    HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirExpression, HirExpressionKind,
-    HirFieldValue, HirFunction, HirMatchArm, HirStatement, HirStatementKind, HirTableEntry,
-    hir_generic_call_instances, specialize_hir_function,
+    HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirErrorMatchArm, HirExpression,
+    HirExpressionKind, HirFieldValue, HirFunction, HirMatchArm, HirResultMatchArm, HirStatement,
+    HirStatementKind, HirTableEntry, hir_generic_call_instances, specialize_hir_function,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
@@ -65,12 +66,60 @@ pub fn lower_hir_bubble(
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
+    let empty_function_effects = BTreeMap::new();
+    let empty_method_effects = BTreeMap::new();
+    let mut provisional_functions: Vec<_> = specialized_hir_functions
+        .iter()
+        .map(|function| {
+            lower_function(
+                function,
+                arena,
+                &gc_schema,
+                &reference_effects,
+                &empty_function_effects,
+                &empty_method_effects,
+            )
+            .0
+        })
+        .collect();
+    let mut provisional_methods: Vec<_> = hir
+        .methods()
+        .iter()
+        .map(|method| MirMethod {
+            method: method.method(),
+            class: method.class(),
+            function: lower_function(
+                method.function(),
+                arena,
+                &gc_schema,
+                &reference_effects,
+                &empty_function_effects,
+                &empty_method_effects,
+            )
+            .0,
+        })
+        .collect();
+    recompute_callable_effects(&mut provisional_functions, &mut provisional_methods);
+    let function_effects: BTreeMap<_, _> = provisional_functions
+        .iter()
+        .map(|function| (function.symbol(), function.effects()))
+        .collect();
+    let method_effects: BTreeMap<_, _> = provisional_methods
+        .iter()
+        .map(|method| (method.method(), method.function().effects()))
+        .collect();
     let mut nested_functions = Vec::new();
     let mut functions: Vec<_> = specialized_hir_functions
         .iter()
         .map(|function| {
-            let (function, mut nested) =
-                lower_function(function, arena, &gc_schema, &reference_effects);
+            let (function, mut nested) = lower_function(
+                function,
+                arena,
+                &gc_schema,
+                &reference_effects,
+                &function_effects,
+                &method_effects,
+            );
             nested_functions.append(&mut nested);
             function
         })
@@ -80,8 +129,14 @@ pub fn lower_hir_bubble(
         .methods()
         .iter()
         .map(|method| {
-            let (function, mut nested) =
-                lower_function(method.function(), arena, &gc_schema, &reference_effects);
+            let (function, mut nested) = lower_function(
+                method.function(),
+                arena,
+                &gc_schema,
+                &reference_effects,
+                &function_effects,
+                &method_effects,
+            );
             nested_functions.append(&mut nested);
             MirMethod {
                 method: method.method(),
@@ -317,6 +372,22 @@ fn lower_declaration(declaration: &HirDeclaration) -> Option<MirDeclaration> {
                 })
                 .collect(),
         }),
+        HirDeclarationKind::Error(error) => MirDeclarationKind::Error(MirErrorDeclaration {
+            error: error.error(),
+            type_id: error.type_id(),
+            cases: error
+                .cases()
+                .iter()
+                .map(|case| MirErrorCase {
+                    case: case.case(),
+                    parameters: case
+                        .parameters()
+                        .iter()
+                        .map(pop_hir::HirNamedType::type_id)
+                        .collect(),
+                })
+                .collect(),
+        }),
         HirDeclarationKind::Enum(enumeration) => MirDeclarationKind::Enum(MirEnumDeclaration {
             type_id: enumeration.type_id(),
             cases: enumeration
@@ -395,9 +466,18 @@ fn lower_function(
     arena: &TypeArena,
     gc_schema: &LoweringGcSchema,
     reference_effects: &BTreeMap<SymbolIdentity, MirEffectSummary>,
+    function_effects: &BTreeMap<SymbolId, MirEffectSummary>,
+    method_effects: &BTreeMap<MethodId, MirEffectSummary>,
 ) -> (MirFunction, Vec<MirNestedFunction>) {
-    let (mut lowered, nested) =
-        FunctionBuilder::new(function, arena, gc_schema, reference_effects).lower();
+    let (mut lowered, nested) = FunctionBuilder::new(
+        function,
+        arena,
+        gc_schema,
+        reference_effects,
+        function_effects,
+        method_effects,
+    )
+    .lower();
     lowered.function = function.function();
     (lowered, nested)
 }
@@ -433,9 +513,16 @@ impl LoweringGcSchema {
 }
 
 struct BuildingBlock {
+    cleanup: Option<MirCleanupBlock>,
     arguments: Vec<MirBlockArgument>,
     instructions: Vec<MirInstruction>,
     terminator: MirTerminator,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveCleanup<'hir> {
+    scope: CleanupScopeId,
+    body: &'hir [HirStatement],
 }
 
 #[derive(Clone)]
@@ -451,6 +538,7 @@ struct LoopContext {
     break_state: LiveState,
     continue_target: BlockId,
     continue_state: LiveState,
+    cleanup_depth: usize,
 }
 
 enum LoweredAssignmentTarget {
@@ -490,6 +578,8 @@ struct FunctionBuilder<'hir> {
     arena: &'hir TypeArena,
     gc_schema: &'hir LoweringGcSchema,
     reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
+    function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
+    method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
     blocks: Vec<BuildingBlock>,
     current: BlockId,
     next_value: u32,
@@ -501,6 +591,9 @@ struct FunctionBuilder<'hir> {
     cell_locals: BTreeSet<LocalId>,
     nested_functions: Vec<MirNestedFunction>,
     loop_stack: Vec<LoopContext>,
+    active_cleanups: Vec<ActiveCleanup<'hir>>,
+    next_cleanup_scope: u32,
+    current_cleanup: Option<MirCleanupBlock>,
 }
 
 fn collect_cell_sources(
@@ -547,8 +640,27 @@ fn visit_statement_closures(
                 visit_statement_closures(nested, parameters, locals);
             }
         }
+        HirStatementKind::OptionalIf {
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit_expression_closures(initializer, parameters, locals);
+            for nested in then_body.iter().chain(else_body) {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
         HirStatementKind::While { condition, body } => {
             visit_expression_closures(condition, parameters, locals);
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
+            }
+        }
+        HirStatementKind::OptionalWhile {
+            initializer, body, ..
+        } => {
+            visit_expression_closures(initializer, parameters, locals);
             for nested in body {
                 visit_statement_closures(nested, parameters, locals);
             }
@@ -582,6 +694,31 @@ fn visit_statement_closures(
                 for nested in arm.body() {
                     visit_statement_closures(nested, parameters, locals);
                 }
+            }
+        }
+        HirStatementKind::ErrorMatch {
+            scrutinee, arms, ..
+        } => {
+            visit_expression_closures(scrutinee, parameters, locals);
+            for arm in arms {
+                for nested in arm.body() {
+                    visit_statement_closures(nested, parameters, locals);
+                }
+            }
+        }
+        HirStatementKind::ResultMatch {
+            scrutinee, arms, ..
+        } => {
+            visit_expression_closures(scrutinee, parameters, locals);
+            for arm in arms {
+                for nested in arm.body() {
+                    visit_statement_closures(nested, parameters, locals);
+                }
+            }
+        }
+        HirStatementKind::Defer { body } => {
+            for nested in body {
+                visit_statement_closures(nested, parameters, locals);
             }
         }
         HirStatementKind::FieldSet { base, value, .. } => {
@@ -654,10 +791,26 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
             contains_continue_for_current_loop(then_body)
                 || contains_continue_for_current_loop(else_body)
         }
+        HirStatementKind::OptionalIf {
+            then_body,
+            else_body,
+            ..
+        } => {
+            contains_continue_for_current_loop(then_body)
+                || contains_continue_for_current_loop(else_body)
+        }
         HirStatementKind::Match { arms, .. } => arms
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
+        HirStatementKind::ErrorMatch { arms, .. } => arms
+            .iter()
+            .any(|arm| contains_continue_for_current_loop(arm.body())),
+        HirStatementKind::ResultMatch { arms, .. } => arms
+            .iter()
+            .any(|arm| contains_continue_for_current_loop(arm.body())),
+        HirStatementKind::Defer { body } => contains_continue_for_current_loop(body),
         HirStatementKind::While { .. }
+        | HirStatementKind::OptionalWhile { .. }
         | HirStatementKind::RepeatUntil { .. }
         | HirStatementKind::NumericFor { .. }
         | HirStatementKind::Local { .. }
@@ -756,6 +909,14 @@ fn visit_expression_closures(
         | HirExpressionKind::UnionCase {
             arguments: elements,
             ..
+        }
+        | HirExpressionKind::ResultCase {
+            arguments: elements,
+            ..
+        }
+        | HirExpressionKind::ErrorCase {
+            arguments: elements,
+            ..
         } => {
             for element in elements {
                 visit_expression_closures(element, parameters, locals);
@@ -769,6 +930,17 @@ fn visit_expression_closures(
         }
         HirExpressionKind::Unary { operand, .. } => {
             visit_expression_closures(operand, parameters, locals);
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            visit_expression_closures(optional, parameters, locals);
+            visit_expression_closures(fallback, parameters, locals);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            visit_expression_closures(optional, parameters, locals);
+        }
+        HirExpressionKind::ResultPropagate { result, .. } => {
+            visit_expression_closures(result, parameters, locals);
         }
         HirExpressionKind::Conditional {
             condition,
@@ -803,6 +975,8 @@ impl<'hir> FunctionBuilder<'hir> {
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
+        function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
+        method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
     ) -> Self {
         let parameter_specs: Vec<_> = hir
             .parameters()
@@ -818,6 +992,8 @@ impl<'hir> FunctionBuilder<'hir> {
             arena,
             gc_schema,
             reference_effects,
+            function_effects,
+            method_effects,
         )
     }
 
@@ -827,6 +1003,8 @@ impl<'hir> FunctionBuilder<'hir> {
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
+        function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
+        method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
     ) -> Self {
         let parameter_specs = closure
             .parameters()
@@ -862,6 +1040,8 @@ impl<'hir> FunctionBuilder<'hir> {
             arena,
             gc_schema,
             reference_effects,
+            function_effects,
+            method_effects,
         )
     }
 
@@ -875,6 +1055,8 @@ impl<'hir> FunctionBuilder<'hir> {
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
+        function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
+        method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
     ) -> Self {
         let mut arguments = Vec::new();
         let mut parameters = BTreeMap::new();
@@ -900,7 +1082,10 @@ impl<'hir> FunctionBuilder<'hir> {
             arena,
             gc_schema,
             reference_effects,
+            function_effects,
+            method_effects,
             blocks: vec![BuildingBlock {
+                cleanup: None,
                 arguments,
                 instructions: Vec::new(),
                 terminator: MirTerminator::Missing,
@@ -915,6 +1100,9 @@ impl<'hir> FunctionBuilder<'hir> {
             cell_locals,
             nested_functions: Vec::new(),
             loop_stack: Vec::new(),
+            active_cleanups: Vec::new(),
+            next_cleanup_scope: 0,
+            current_cleanup: None,
         }
     }
 
@@ -936,6 +1124,7 @@ impl<'hir> FunctionBuilder<'hir> {
             .enumerate()
             .map(|(index, block)| MirBlock {
                 block: BlockId::from_raw(u32::try_from(index).unwrap_or(u32::MAX)),
+                cleanup: block.cleanup,
                 arguments: block.arguments,
                 instructions: block.instructions,
                 terminator: block.terminator,
@@ -972,7 +1161,8 @@ impl<'hir> FunctionBuilder<'hir> {
         }
     }
 
-    fn lower_statements(&mut self, statements: &[HirStatement]) {
+    fn lower_statements(&mut self, statements: &'hir [HirStatement]) {
+        let cleanup_base = self.active_cleanups.len();
         for statement in statements {
             if !matches!(self.current_block().terminator, MirTerminator::Missing) {
                 self.current = self.new_block();
@@ -1072,6 +1262,7 @@ impl<'hir> FunctionBuilder<'hir> {
                         .iter()
                         .map(|value| self.lower_expression(value))
                         .collect();
+                    self.emit_cleanups_to(0, MirCleanupExitReason::Return);
                     self.terminate(MirTerminator::Return { values });
                 }
                 HirStatementKind::If {
@@ -1079,9 +1270,24 @@ impl<'hir> FunctionBuilder<'hir> {
                     then_body,
                     else_body,
                 } => self.lower_if(condition, then_body, else_body),
+                HirStatementKind::OptionalIf {
+                    local,
+                    inner_type,
+                    initializer,
+                    then_body,
+                    else_body,
+                    ..
+                } => self.lower_optional_if(*local, *inner_type, initializer, then_body, else_body),
                 HirStatementKind::While { condition, body } => {
                     self.lower_while(condition, body);
                 }
+                HirStatementKind::OptionalWhile {
+                    local,
+                    inner_type,
+                    initializer,
+                    body,
+                    ..
+                } => self.lower_optional_while(*local, *inner_type, initializer, body),
                 HirStatementKind::RepeatUntil { body, condition } => {
                     self.lower_repeat_until(body, condition);
                 }
@@ -1110,6 +1316,7 @@ impl<'hir> FunctionBuilder<'hir> {
                         .last()
                         .cloned()
                         .expect("verified HIR resolves break inside a loop");
+                    self.emit_cleanups_to(context.cleanup_depth, MirCleanupExitReason::Break);
                     self.branch_with_state_if_open(context.break_target, &context.break_state);
                 }
                 HirStatementKind::Continue => {
@@ -1118,6 +1325,7 @@ impl<'hir> FunctionBuilder<'hir> {
                         .last()
                         .cloned()
                         .expect("verified HIR resolves continue inside a loop");
+                    self.emit_cleanups_to(context.cleanup_depth, MirCleanupExitReason::Continue);
                     self.branch_with_state_if_open(
                         context.continue_target,
                         &context.continue_state,
@@ -1129,6 +1337,22 @@ impl<'hir> FunctionBuilder<'hir> {
                     arms,
                 } => {
                     self.lower_match(scrutinee, *union, arms);
+                }
+                HirStatementKind::ErrorMatch {
+                    scrutinee,
+                    error,
+                    arms,
+                } => self.lower_error_match(scrutinee, *error, arms),
+                HirStatementKind::ResultMatch {
+                    scrutinee,
+                    result,
+                    result_type,
+                    arms,
+                } => self.lower_result_match(scrutinee, *result, *result_type, arms),
+                HirStatementKind::Defer { body } => {
+                    let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                    self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                    self.active_cleanups.push(ActiveCleanup { scope, body });
                 }
                 HirStatementKind::FieldSet { base, field, value } => {
                     let base = self.lower_expression(base);
@@ -1345,6 +1569,36 @@ impl<'hir> FunctionBuilder<'hir> {
                 }
             }
         }
+        if matches!(self.current_block().terminator, MirTerminator::Missing) {
+            self.emit_cleanups_to(cleanup_base, MirCleanupExitReason::Normal);
+        }
+        self.active_cleanups.truncate(cleanup_base);
+    }
+
+    fn emit_cleanups_to(&mut self, depth: usize, reason: MirCleanupExitReason) {
+        let registered = self.active_cleanups.clone();
+        for index in (depth..registered.len()).rev() {
+            let cleanup = registered[index];
+            let target = self.new_cleanup_block(MirCleanupBlock {
+                scope: cleanup.scope,
+                reason,
+            });
+            self.branch_if_open(target);
+            self.current = target;
+            self.active_cleanups = registered[..index].to_vec();
+            let previous_cleanup = self.current_cleanup.replace(MirCleanupBlock {
+                scope: cleanup.scope,
+                reason,
+            });
+            self.lower_statements(cleanup.body);
+            self.current_cleanup = previous_cleanup;
+        }
+        self.active_cleanups = registered;
+        if depth < self.active_cleanups.len() {
+            let continuation = self.new_block();
+            self.branch_if_open(continuation);
+            self.current = continuation;
+        }
     }
 
     fn lower_assignment_target(
@@ -1517,7 +1771,12 @@ impl<'hir> FunctionBuilder<'hir> {
         }
     }
 
-    fn lower_match(&mut self, scrutinee: &HirExpression, union: SymbolId, arms: &[HirMatchArm]) {
+    fn lower_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        union: SymbolId,
+        arms: &'hir [HirMatchArm],
+    ) {
         let scrutinee = self.lower_expression(scrutinee);
         let dispatch_block = self.current;
         let join = self.new_block();
@@ -1554,11 +1813,117 @@ impl<'hir> FunctionBuilder<'hir> {
         self.current = join;
     }
 
+    fn lower_error_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        error: pop_foundation::ErrorId,
+        arms: &'hir [HirErrorMatchArm],
+    ) {
+        let scrutinee = self.lower_expression(scrutinee);
+        let dispatch_block = self.current;
+        let join = self.new_block();
+        let outer_locals = self.locals.clone();
+        let mut switch_arms = Vec::new();
+        for arm in arms {
+            let specs: Vec<_> = arm
+                .bindings()
+                .iter()
+                .map(|binding| (binding.type_id(), binding.span()))
+                .collect();
+            let (block, arguments) = self.new_block_with_arguments(&specs);
+            switch_arms.push(MirErrorSwitchArm {
+                case: arm.case(),
+                target: block,
+            });
+            self.current = block;
+            self.locals.clone_from(&outer_locals);
+            for (binding, argument) in arm.bindings().iter().zip(arguments) {
+                if let Some(local) = binding.local() {
+                    self.locals.insert(local, argument);
+                }
+            }
+            self.lower_statements(arm.body());
+            self.branch_if_open(join);
+        }
+        self.locals = outer_locals;
+        self.current = dispatch_block;
+        self.terminate(MirTerminator::ErrorSwitch {
+            scrutinee,
+            error,
+            arms: switch_arms,
+        });
+        self.current = join;
+    }
+
+    fn lower_result_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        result_definition: pop_foundation::BuiltinTypeId,
+        _result_type: TypeId,
+        arms: &'hir [HirResultMatchArm],
+    ) {
+        let result_value = self.lower_expression(scrutinee);
+        let is_ok = self.emit(
+            MirInstructionKind::ResultIsOk {
+                result: result_value,
+                definition: result_definition,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            scrutinee.span(),
+        );
+        let dispatch = self.current;
+        let join = self.new_block();
+        let outer_locals = self.locals.clone();
+        let mut ok_block = None;
+        let mut error_block = None;
+        for arm in arms {
+            let block = self.new_block();
+            if arm.case() == ResultCaseId::from_raw(0) {
+                ok_block = Some(block);
+            } else {
+                error_block = Some(block);
+            }
+            self.current = block;
+            self.locals.clone_from(&outer_locals);
+            let binding = &arm.bindings()[0];
+            let value = self.emit(
+                if arm.case() == ResultCaseId::from_raw(0) {
+                    MirInstructionKind::ResultGetOk {
+                        result: result_value,
+                        definition: result_definition,
+                    }
+                } else {
+                    MirInstructionKind::ResultGetError {
+                        result: result_value,
+                        definition: result_definition,
+                    }
+                },
+                binding.type_id(),
+                binding.span(),
+            );
+            if let Some(local) = binding.local() {
+                self.locals.insert(local, value);
+            }
+            self.lower_statements(arm.body());
+            self.branch_if_open(join);
+        }
+        self.locals = outer_locals;
+        let ok_block = ok_block.expect("verified Result match has Ok arm");
+        let error_block = error_block.expect("verified Result match has Error arm");
+        self.current = dispatch;
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: is_ok,
+            when_true: ok_block,
+            when_false: error_block,
+        });
+        self.current = join;
+    }
+
     fn lower_if(
         &mut self,
         condition: &HirExpression,
-        then_body: &[HirStatement],
-        else_body: &[HirStatement],
+        then_body: &'hir [HirStatement],
+        else_body: &'hir [HirStatement],
     ) {
         let condition_span = condition.span();
         let condition = self.lower_expression(condition);
@@ -1591,7 +1956,59 @@ impl<'hir> FunctionBuilder<'hir> {
         self.install_state(&state, &join_arguments);
     }
 
-    fn lower_while(&mut self, condition: &HirExpression, body: &[HirStatement]) {
+    fn lower_optional_if(
+        &mut self,
+        local: LocalId,
+        inner_type: TypeId,
+        initializer: &HirExpression,
+        then_body: &'hir [HirStatement],
+        else_body: &'hir [HirStatement],
+    ) {
+        let optional = self.lower_expression(initializer);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            initializer.span(),
+        );
+        let state = self.live_state(initializer.span());
+        let then_block = self.new_block();
+        let else_block = self.new_block();
+        let (join_block, join_arguments) = self.new_block_with_arguments(&state.specs);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: then_block,
+            when_false: else_block,
+        });
+
+        let outer_parameters = self.parameters.clone();
+        let outer_locals = self.locals.clone();
+        self.current = then_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            inner_type,
+            initializer.span(),
+        );
+        self.locals.insert(local, value);
+        self.lower_statements(then_body);
+        let then_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
+        self.branch_with_state_if_open(join_block, &state);
+
+        self.parameters = outer_parameters;
+        self.locals = outer_locals;
+        self.current = else_block;
+        self.lower_statements(else_body);
+        let else_reaches_join = matches!(self.current_block().terminator, MirTerminator::Missing);
+        self.branch_with_state_if_open(join_block, &state);
+
+        self.current = join_block;
+        if !then_reaches_join && !else_reaches_join {
+            self.terminate(MirTerminator::Unreachable);
+            return;
+        }
+        self.install_state(&state, &join_arguments);
+    }
+
+    fn lower_while(&mut self, condition: &HirExpression, body: &'hir [HirStatement]) {
         let state = self.live_state(condition.span());
         let initial_values = self.state_values(&state);
         let (condition_block, condition_arguments) = self.new_block_with_arguments(&state.specs);
@@ -1613,6 +2030,7 @@ impl<'hir> FunctionBuilder<'hir> {
             break_state: state.clone(),
             continue_target: condition_block,
             continue_state: state.clone(),
+            cleanup_depth: self.active_cleanups.len(),
         });
         self.lower_statements(body);
         self.loop_stack
@@ -1626,7 +2044,64 @@ impl<'hir> FunctionBuilder<'hir> {
         self.install_state(&state, &exit_arguments);
     }
 
-    fn lower_repeat_until(&mut self, body: &[HirStatement], condition: &HirExpression) {
+    fn lower_optional_while(
+        &mut self,
+        local: LocalId,
+        inner_type: TypeId,
+        initializer: &HirExpression,
+        body: &'hir [HirStatement],
+    ) {
+        let state = self.live_state(initializer.span());
+        let initial_values = self.state_values(&state);
+        let (condition_block, condition_arguments) = self.new_block_with_arguments(&state.specs);
+        let body_block = self.new_block();
+        let exit_edge = self.new_block();
+        let (exit_block, exit_arguments) = self.new_block_with_arguments(&state.specs);
+        self.branch_with_arguments_if_open(condition_block, initial_values);
+
+        self.current = condition_block;
+        self.install_state(&state, &condition_arguments);
+        let optional = self.lower_expression(initializer);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            initializer.span(),
+        );
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: body_block,
+            when_false: exit_edge,
+        });
+
+        self.current = body_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            inner_type,
+            initializer.span(),
+        );
+        self.locals.insert(local, value);
+        self.loop_stack.push(LoopContext {
+            break_target: exit_block,
+            break_state: state.clone(),
+            continue_target: condition_block,
+            continue_state: state.clone(),
+            cleanup_depth: self.active_cleanups.len(),
+        });
+        self.lower_statements(body);
+        self.loop_stack
+            .pop()
+            .expect("optional while loop context was pushed");
+        self.branch_with_state_if_open(condition_block, &state);
+
+        self.current = exit_edge;
+        self.install_state(&state, &condition_arguments);
+        self.branch_with_state_if_open(exit_block, &state);
+        self.current = exit_block;
+        self.locals.remove(&local);
+        self.install_state(&state, &exit_arguments);
+    }
+
+    fn lower_repeat_until(&mut self, body: &'hir [HirStatement], condition: &HirExpression) {
         let state = self.live_state(condition.span());
         let initial_values = self.state_values(&state);
         let outer_locals = self.locals.clone();
@@ -1649,6 +2124,7 @@ impl<'hir> FunctionBuilder<'hir> {
             break_state: state.clone(),
             continue_target: condition_block,
             continue_state: state.clone(),
+            cleanup_depth: self.active_cleanups.len(),
         });
         self.lower_statements(body);
         self.loop_stack
@@ -1690,7 +2166,7 @@ impl<'hir> FunctionBuilder<'hir> {
         first: &HirExpression,
         last: &HirExpression,
         step: &HirExpression,
-        body: &[HirStatement],
+        body: &'hir [HirStatement],
         span: SourceSpan,
     ) {
         let first = self.lower_expression(first);
@@ -1819,6 +2295,7 @@ impl<'hir> FunctionBuilder<'hir> {
             break_state: outer_state.clone(),
             continue_target: increment_block,
             continue_state: continue_state.clone(),
+            cleanup_depth: self.active_cleanups.len(),
         });
         self.lower_statements(body);
         self.loop_stack
@@ -1997,6 +2474,49 @@ impl<'hir> FunctionBuilder<'hir> {
                 left,
                 right,
             } => return self.lower_binary_expression(expression, *operator, left, right),
+            HirExpressionKind::OptionalDefault { optional, fallback } => {
+                return self.lower_optional_default(
+                    optional,
+                    fallback,
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
+            HirExpressionKind::OptionalPropagate {
+                optional,
+                enclosing_result,
+            } => {
+                return self.lower_optional_propagate(
+                    optional,
+                    *enclosing_result,
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
+            HirExpressionKind::ResultPropagate {
+                result,
+                result_definition,
+                success_type,
+                error_type,
+                enclosing_result,
+            } => {
+                return self.lower_result_propagate(
+                    result,
+                    *result_definition,
+                    *success_type,
+                    *error_type,
+                    *enclosing_result,
+                    expression.span(),
+                );
+            }
+            HirExpressionKind::OptionalNarrow { optional } => {
+                let optional = self.lower_expression(optional);
+                return self.emit(
+                    MirInstructionKind::OptionalGet { optional },
+                    expression.type_id(),
+                    expression.span(),
+                );
+            }
             HirExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -2122,6 +2642,30 @@ impl<'hir> FunctionBuilder<'hir> {
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
             },
+            HirExpressionKind::ResultCase {
+                result,
+                case,
+                arguments,
+            } => MirInstructionKind::ResultMake {
+                result: *result,
+                case: *case,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.lower_expression(argument))
+                    .collect(),
+            },
+            HirExpressionKind::ErrorCase {
+                error,
+                case,
+                arguments,
+            } => MirInstructionKind::ErrorMake {
+                error: *error,
+                case: *case,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.lower_expression(argument))
+                    .collect(),
+            },
         };
         self.emit(kind, expression.type_id(), expression.span())
     }
@@ -2133,6 +2677,8 @@ impl<'hir> FunctionBuilder<'hir> {
             self.arena,
             self.gc_schema,
             self.reference_effects,
+            self.function_effects,
+            self.method_effects,
         )
         .lower();
         let captures: Vec<_> = closure
@@ -2275,6 +2821,39 @@ impl<'hir> FunctionBuilder<'hir> {
                 expression.span(),
             );
         }
+        if matches!(
+            operator,
+            TypedBinaryOperator::Equal | TypedBinaryOperator::NotEqual
+        ) {
+            let optional = if matches!(right.kind(), HirExpressionKind::Nil)
+                && optional_inner_type(self.arena, left.type_id()).is_some()
+            {
+                Some(left)
+            } else if matches!(left.kind(), HirExpressionKind::Nil)
+                && optional_inner_type(self.arena, right.type_id()).is_some()
+            {
+                Some(right)
+            } else {
+                None
+            };
+            if let Some(optional) = optional {
+                let optional = self.lower_expression(optional);
+                let present = self.emit(
+                    MirInstructionKind::OptionalIsPresent { optional },
+                    expression.type_id(),
+                    expression.span(),
+                );
+                return if operator == TypedBinaryOperator::Equal {
+                    self.emit(
+                        MirInstructionKind::BooleanNot { operand: present },
+                        expression.type_id(),
+                        expression.span(),
+                    )
+                } else {
+                    present
+                };
+            }
+        }
         let operand_type = left.type_id();
         let left = self.lower_expression(left);
         let right = self.lower_expression(right);
@@ -2283,6 +2862,153 @@ impl<'hir> FunctionBuilder<'hir> {
             expression.type_id(),
             expression.span(),
         )
+    }
+
+    fn lower_optional_default(
+        &mut self,
+        optional: &HirExpression,
+        fallback: &HirExpression,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let optional = self.lower_expression(optional);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        let present_block = self.new_block();
+        let fallback_block = self.new_block();
+        let (join_block, result) = self.new_block_with_argument(result_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: present_block,
+            when_false: fallback_block,
+        });
+        self.current = present_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            result_type,
+            span,
+        );
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![value],
+        });
+        self.current = fallback_block;
+        let fallback = self.lower_expression(fallback);
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![fallback],
+        });
+        self.current = join_block;
+        result
+    }
+
+    fn lower_optional_propagate(
+        &mut self,
+        optional: &HirExpression,
+        enclosing_result: TypeId,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let optional = self.lower_expression(optional);
+        let present = self.emit(
+            MirInstructionKind::OptionalIsPresent { optional },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        let present_block = self.new_block();
+        let absent_block = self.new_block();
+        let (join_block, result) = self.new_block_with_argument(result_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: present,
+            when_true: present_block,
+            when_false: absent_block,
+        });
+        self.current = absent_block;
+        let nil = self.emit(MirInstructionKind::NilConstant, enclosing_result, span);
+        self.emit_cleanups_to(0, MirCleanupExitReason::Return);
+        self.terminate(MirTerminator::Return { values: vec![nil] });
+        self.current = present_block;
+        let value = self.emit(
+            MirInstructionKind::OptionalGet { optional },
+            result_type,
+            span,
+        );
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![value],
+        });
+        self.current = join_block;
+        result
+    }
+
+    fn lower_result_propagate(
+        &mut self,
+        result: &HirExpression,
+        result_definition: pop_foundation::BuiltinTypeId,
+        success_type: TypeId,
+        error_type: TypeId,
+        enclosing_result: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let result = self.lower_expression(result);
+        let is_ok = self.emit(
+            MirInstructionKind::ResultIsOk {
+                result,
+                definition: result_definition,
+            },
+            self.arena.source_type("Boolean").expect("Boolean"),
+            span,
+        );
+        let success_block = self.new_block();
+        let error_block = self.new_block();
+        let (join_block, success) = self.new_block_with_argument(success_type, span);
+        self.terminate(MirTerminator::ConditionalBranch {
+            condition: is_ok,
+            when_true: success_block,
+            when_false: error_block,
+        });
+
+        self.current = error_block;
+        let error = self.emit(
+            MirInstructionKind::ResultGetError {
+                result,
+                definition: result_definition,
+            },
+            error_type,
+            span,
+        );
+        let propagated = self.emit(
+            MirInstructionKind::ResultMake {
+                result: result_definition,
+                case: ResultCaseId::from_raw(1),
+                arguments: vec![error],
+            },
+            enclosing_result,
+            span,
+        );
+        self.emit_cleanups_to(0, MirCleanupExitReason::ResultFailure);
+        self.terminate(MirTerminator::Return {
+            values: vec![propagated],
+        });
+
+        self.current = success_block;
+        let value = self.emit(
+            MirInstructionKind::ResultGetOk {
+                result,
+                definition: result_definition,
+            },
+            success_type,
+            span,
+        );
+        self.terminate(MirTerminator::Branch {
+            target: join_block,
+            arguments: vec![value],
+        });
+        self.current = join_block;
+        success
     }
 
     fn lower_compound_value(
@@ -2420,7 +3146,11 @@ impl<'hir> FunctionBuilder<'hir> {
                     .iter()
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
-                declared_effects: MirEffectSummary::empty(),
+                declared_effects: self
+                    .function_effects
+                    .get(function)
+                    .copied()
+                    .unwrap_or_default(),
                 unwind: MirUnwindAction::Propagate,
             },
             HirCallDispatch::Referenced { function } => MirInstructionKind::CallReferenced {
@@ -2442,7 +3172,7 @@ impl<'hir> FunctionBuilder<'hir> {
                     .iter()
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
-                declared_effects: MirEffectSummary::empty(),
+                declared_effects: self.method_effects.get(method).copied().unwrap_or_default(),
                 unwind: MirUnwindAction::Propagate,
             },
             HirCallDispatch::InterfaceMethod {
@@ -2475,6 +3205,57 @@ impl<'hir> FunctionBuilder<'hir> {
         }
     }
 
+    fn attach_cleanup_unwind(
+        &mut self,
+        mut instruction: MirInstructionKind,
+    ) -> (MirInstructionKind, MirUnwindAction) {
+        if self.active_cleanups.is_empty()
+            || !local_instruction_effects(&instruction).contains(MirEffect::MayUnwind)
+        {
+            return (instruction, MirUnwindAction::Propagate);
+        }
+        let call_block = self.current;
+        let registered = std::mem::take(&mut self.active_cleanups);
+        let cleanups = registered.clone();
+        let mut cleanup_entry = None;
+        for cleanup in cleanups.into_iter().rev() {
+            let block = self.new_cleanup_block(MirCleanupBlock {
+                scope: cleanup.scope,
+                reason: MirCleanupExitReason::Unwind,
+            });
+            if cleanup_entry.is_none() {
+                cleanup_entry = Some(block);
+            } else {
+                self.branch_if_open(block);
+            }
+            self.current = block;
+            let previous_cleanup = self.current_cleanup.replace(MirCleanupBlock {
+                scope: cleanup.scope,
+                reason: MirCleanupExitReason::Unwind,
+            });
+            self.lower_statements(cleanup.body);
+            self.current_cleanup = previous_cleanup;
+        }
+        self.terminate(MirTerminator::ResumeUnwind);
+        self.current = call_block;
+        self.active_cleanups = registered;
+        let cleanup = cleanup_entry.expect("active cleanup set is nonempty");
+        let unwind = match &mut instruction {
+            MirInstructionKind::CallDirect { unwind, .. }
+            | MirInstructionKind::CallReferenced { unwind, .. }
+            | MirInstructionKind::CallDirectMethod { unwind, .. }
+            | MirInstructionKind::CallInterface { unwind, .. }
+            | MirInstructionKind::CallIndirect { unwind, .. } => Some(unwind),
+            _ => None,
+        };
+        if let Some(unwind) = unwind {
+            *unwind = MirUnwindAction::Cleanup(cleanup);
+            (instruction, MirUnwindAction::Propagate)
+        } else {
+            (instruction, MirUnwindAction::Cleanup(cleanup))
+        }
+    }
+
     fn lower_table_entries(&mut self, entries: &[HirTableEntry]) -> Vec<(ValueId, ValueId)> {
         let mut lowered = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -2486,6 +3267,7 @@ impl<'hir> FunctionBuilder<'hir> {
     }
 
     fn emit(&mut self, kind: MirInstructionKind, type_id: TypeId, span: SourceSpan) -> ValueId {
+        let (kind, unwind) = self.attach_cleanup_unwind(kind);
         let value = ValueId::from_raw(self.next_value);
         self.next_value = self.next_value.saturating_add(1);
         let effects = local_instruction_effects(&kind);
@@ -2495,12 +3277,14 @@ impl<'hir> FunctionBuilder<'hir> {
             kind,
             effects,
             effects_explicit: false,
+            unwind,
             span,
         });
         value
     }
 
     fn emit_effect(&mut self, kind: MirInstructionKind, span: SourceSpan) {
+        let (kind, unwind) = self.attach_cleanup_unwind(kind);
         let instruction = ValueId::from_raw(self.next_value);
         self.next_value = self.next_value.saturating_add(1);
         let effects = local_instruction_effects(&kind);
@@ -2510,6 +3294,7 @@ impl<'hir> FunctionBuilder<'hir> {
             kind,
             effects,
             effects_explicit: false,
+            unwind,
             span,
         });
     }
@@ -2517,11 +3302,18 @@ impl<'hir> FunctionBuilder<'hir> {
     fn new_block(&mut self) -> BlockId {
         let id = BlockId::from_raw(u32::try_from(self.blocks.len()).unwrap_or(u32::MAX));
         self.blocks.push(BuildingBlock {
+            cleanup: self.current_cleanup,
             arguments: Vec::new(),
             instructions: Vec::new(),
             terminator: MirTerminator::Missing,
         });
         id
+    }
+
+    fn new_cleanup_block(&mut self, cleanup: MirCleanupBlock) -> BlockId {
+        let block = self.new_block();
+        self.blocks[block.raw() as usize].cleanup = Some(cleanup);
+        block
     }
 
     fn new_block_with_argument(&mut self, type_id: TypeId, span: SourceSpan) -> (BlockId, ValueId) {
@@ -2756,6 +3548,26 @@ fn lower_binary(
     }
 }
 
+fn optional_inner_type(arena: &TypeArena, optional: TypeId) -> Option<TypeId> {
+    let nil = arena.source_type("nil")?;
+    let SemanticType::Union(members) = arena.get(optional)? else {
+        return None;
+    };
+    if !members.contains(&nil) {
+        return None;
+    }
+    let present = members
+        .iter()
+        .copied()
+        .filter(|member| *member != nil)
+        .collect::<Vec<_>>();
+    match present.as_slice() {
+        [inner] => Some(*inner),
+        [] => None,
+        _ => arena.find(&SemanticType::Union(present)),
+    }
+}
+
 fn numeric_binary(
     arena: &TypeArena,
     operand_type: TypeId,
@@ -2859,6 +3671,7 @@ pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeA
                 | SemanticType::Class { .. }
                 | SemanticType::Interface { .. }
                 | SemanticType::Builtin { .. }
+                | SemanticType::ErrorUnion { .. }
         )
     )
 }
@@ -2970,6 +3783,13 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::OptionalIsPresent { .. }
+        | MirInstructionKind::OptionalGet { .. }
+        | MirInstructionKind::ResultMake { .. }
+        | MirInstructionKind::ErrorMake { .. }
+        | MirInstructionKind::ResultIsOk { .. }
+        | MirInstructionKind::ResultGetOk { .. }
+        | MirInstructionKind::ResultGetError { .. }
         | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleGet { .. }
@@ -3012,13 +3832,14 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
 pub(crate) fn terminator_effects(terminator: &MirTerminator) -> MirEffectSummary {
     match terminator {
         MirTerminator::Trap(_) => MirEffectSummary::empty().with(MirEffect::MayTrap),
-        MirTerminator::Panic(_) | MirTerminator::ContinueUnwind(_) => {
-            MirEffectSummary::empty().with(MirEffect::MayUnwind)
-        }
+        MirTerminator::Panic(_)
+        | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind => MirEffectSummary::empty().with(MirEffect::MayUnwind),
         MirTerminator::Missing
         | MirTerminator::Branch { .. }
         | MirTerminator::ConditionalBranch { .. }
         | MirTerminator::UnionSwitch { .. }
+        | MirTerminator::ErrorSwitch { .. }
         | MirTerminator::Return { .. }
         | MirTerminator::Unreachable => MirEffectSummary::empty(),
     }
@@ -3040,23 +3861,25 @@ fn conservative_indirect_effects() -> MirEffectSummary {
 }
 
 fn recompute_effects(bubble: &mut MirBubble) {
-    let mut function_effects: BTreeMap<_, _> = bubble
-        .functions
+    recompute_callable_effects(&mut bubble.functions, &mut bubble.methods);
+}
+
+fn recompute_callable_effects(functions: &mut [MirFunction], methods: &mut [MirMethod]) {
+    let mut function_effects: BTreeMap<_, _> = functions
         .iter()
         .map(|function| (function.symbol, function.effects))
         .collect();
-    let mut method_effects: BTreeMap<_, _> = bubble
-        .methods
+    let mut method_effects: BTreeMap<_, _> = methods
         .iter()
         .map(|method| (method.method, method.function.effects))
         .collect();
     loop {
         let mut changed = false;
-        for function in &mut bubble.functions {
+        for function in &mut *functions {
             changed |= recompute_function_effects(function, &function_effects, &method_effects);
             function_effects.insert(function.symbol, function.effects);
         }
-        for method in &mut bubble.methods {
+        for method in &mut *methods {
             changed |= recompute_function_effects(
                 &mut method.function,
                 &function_effects,
@@ -3227,6 +4050,7 @@ fn empty_safe_point(result: ValueId, safe_point: SafePointId, span: SourceSpan) 
         },
         effects: MirEffectSummary::empty().with(MirEffect::GcSafePoint),
         effects_explicit: true,
+        unwind: MirUnwindAction::Propagate,
         span,
     }
 }
@@ -3293,7 +4117,7 @@ pub(crate) fn expected_safe_point_roots(
                     live.remove(&instruction.result);
                 }
                 if !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. }) {
-                    if let Some(target) = instruction_unwind_target(&instruction.kind)
+                    if let Some(target) = instruction_unwind_target(instruction)
                         && let Some(cleanup_live) = live_in.get(&target)
                     {
                         live.extend(cleanup_live.iter().copied());
@@ -3336,7 +4160,7 @@ pub(crate) fn expected_safe_point_roots(
                 live.remove(&instruction.result);
             }
             if !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. }) {
-                if let Some(target) = instruction_unwind_target(&instruction.kind)
+                if let Some(target) = instruction_unwind_target(instruction)
                     && let Some(cleanup_live) = live_in.get(&target)
                 {
                     live.extend(cleanup_live.iter().copied());
@@ -3370,11 +4194,16 @@ fn normal_live_out(
             .iter()
             .flat_map(|arm| live_in.get(&arm.target).into_iter().flatten().copied())
             .collect(),
+        MirTerminator::ErrorSwitch { arms, .. } => arms
+            .iter()
+            .flat_map(|arm| live_in.get(&arm.target).into_iter().flatten().copied())
+            .collect(),
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind
         | MirTerminator::Unreachable => BTreeSet::new(),
     }
 }

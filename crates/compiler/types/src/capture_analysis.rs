@@ -43,8 +43,27 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 finalize_statement_captures(statement, written);
             }
         }
+        TypedStatementKind::OptionalIf {
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            finalize_expression_captures(initializer, written);
+            for statement in then_body.iter_mut().chain(else_body.iter_mut()) {
+                finalize_statement_captures(statement, written);
+            }
+        }
         TypedStatementKind::While { condition, body } => {
             finalize_expression_captures(condition, written);
+            for statement in body {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedStatementKind::OptionalWhile {
+            initializer, body, ..
+        } => {
+            finalize_expression_captures(initializer, written);
             for statement in body {
                 finalize_statement_captures(statement, written);
             }
@@ -78,6 +97,31 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 for statement in &mut arm.body {
                     finalize_statement_captures(statement, written);
                 }
+            }
+        }
+        TypedStatementKind::ErrorMatch {
+            scrutinee, arms, ..
+        } => {
+            finalize_expression_captures(scrutinee, written);
+            for arm in arms {
+                for statement in &mut arm.body {
+                    finalize_statement_captures(statement, written);
+                }
+            }
+        }
+        TypedStatementKind::ResultMatch {
+            scrutinee, arms, ..
+        } => {
+            finalize_expression_captures(scrutinee, written);
+            for arm in arms {
+                for statement in &mut arm.body {
+                    finalize_statement_captures(statement, written);
+                }
+            }
+        }
+        TypedStatementKind::Defer { body } => {
+            for statement in body {
+                finalize_statement_captures(statement, written);
             }
         }
         TypedStatementKind::FieldSet { base, value, .. } => {
@@ -232,6 +276,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             }
         }
         TypedExpressionKind::UnionCase { arguments, .. }
+        | TypedExpressionKind::ResultCase { arguments, .. }
+        | TypedExpressionKind::ErrorCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
         | TypedExpressionKind::ReferencedCall { arguments, .. }
         | TypedExpressionKind::StandardCall { arguments, .. } => {
@@ -245,6 +291,19 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::Binary { left, right, .. } => {
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
+        }
+        TypedExpressionKind::OptionalDefault { optional, fallback } => {
+            finalize_expression_captures(optional, written);
+            finalize_expression_captures(fallback, written);
+        }
+        TypedExpressionKind::OptionalPropagate { optional, .. } => {
+            finalize_expression_captures(optional, written);
+        }
+        TypedExpressionKind::ResultPropagate { result, .. } => {
+            finalize_expression_captures(result, written);
+        }
+        TypedExpressionKind::OptionalNarrow { optional } => {
+            finalize_expression_captures(optional, written);
         }
         TypedExpressionKind::StringConcat { left, right } => {
             finalize_expression_captures(left, written);

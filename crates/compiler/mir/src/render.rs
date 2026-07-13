@@ -31,6 +31,27 @@ pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration
             );
             dump_union_cases(output, &union.cases);
         }
+        MirDeclarationKind::Error(error) => {
+            let _ = write!(
+                output,
+                "type.error s{} e{} t{} cases ",
+                declaration.symbol.raw(),
+                error.error.raw(),
+                error.type_id.raw()
+            );
+            if error.cases.is_empty() {
+                output.push('-');
+            } else {
+                for (index, case) in error.cases.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    let _ = write!(output, "errorCase#{}(", case.case.raw());
+                    dump_type_ids(output, &case.parameters);
+                    output.push(')');
+                }
+            }
+        }
         MirDeclarationKind::Enum(enumeration) => {
             let _ = write!(
                 output,
@@ -281,7 +302,16 @@ fn dump_blocks(output: &mut String, blocks: &[MirBlock]) {
                 argument.type_id.raw()
             );
         }
-        output.push_str("):\n");
+        output.push(')');
+        if let Some(cleanup) = block.cleanup {
+            let _ = write!(
+                output,
+                " cleanup scope#{} reason {}",
+                cleanup.scope.raw(),
+                dump_cleanup_reason(cleanup.reason)
+            );
+        }
+        output.push_str(":\n");
         for instruction in &block.instructions {
             if let Some(result_type) = instruction.result_type {
                 let _ = write!(
@@ -294,11 +324,26 @@ fn dump_blocks(output: &mut String, blocks: &[MirBlock]) {
                 let _ = write!(output, "    do v{} ", instruction.result.raw());
             }
             dump_instruction(output, &instruction.kind);
+            if let MirUnwindAction::Cleanup(target) = instruction.unwind {
+                let _ = write!(output, " unwind cleanup:b{}", target.raw());
+            }
             output.push('\n');
         }
         output.push_str("    ");
         dump_terminator(output, &block.terminator);
         output.push('\n');
+    }
+}
+
+const fn dump_cleanup_reason(reason: MirCleanupExitReason) -> &'static str {
+    match reason {
+        MirCleanupExitReason::Normal => "normal",
+        MirCleanupExitReason::Return => "return",
+        MirCleanupExitReason::ResultFailure => "resultFailure",
+        MirCleanupExitReason::Break => "break",
+        MirCleanupExitReason::Continue => "continue",
+        MirCleanupExitReason::Unwind => "unwind",
+        MirCleanupExitReason::Cancellation => "cancellation",
     }
 }
 
@@ -322,6 +367,62 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "const.boolean {value}");
         }
         MirInstructionKind::NilConstant => output.push_str("const.nil"),
+        MirInstructionKind::OptionalIsPresent { optional } => {
+            dump_unary(output, "optionalIsPresent", *optional);
+        }
+        MirInstructionKind::OptionalGet { optional } => {
+            dump_unary(output, "optionalGet", *optional);
+        }
+        MirInstructionKind::ResultMake {
+            result,
+            case,
+            arguments,
+        } => {
+            let _ = write!(
+                output,
+                "resultMake bt{} resultCase#{} ",
+                result.raw(),
+                case.raw()
+            );
+            dump_value_list(output, arguments);
+        }
+        MirInstructionKind::ErrorMake {
+            error,
+            case,
+            arguments,
+        } => {
+            let _ = write!(
+                output,
+                "errorMake e{} errorCase#{} ",
+                error.raw(),
+                case.raw()
+            );
+            dump_value_list(output, arguments);
+        }
+        MirInstructionKind::ResultIsOk { result, definition } => {
+            let _ = write!(
+                output,
+                "resultIsOk bt{} v{}",
+                definition.raw(),
+                result.raw()
+            );
+        }
+        MirInstructionKind::ResultGetOk { result, definition } => {
+            let _ = write!(
+                output,
+                "resultGetOk bt{} v{}",
+                definition.raw(),
+                result.raw()
+            );
+        }
+        MirInstructionKind::ResultGetError { result, definition } => {
+            let _ = write!(
+                output,
+                "resultGetError bt{} v{}",
+                definition.raw(),
+                result.raw()
+            );
+        }
         MirInstructionKind::EnumConstant {
             definition,
             case,
@@ -924,6 +1025,25 @@ fn dump_terminator(output: &mut String, terminator: &MirTerminator) {
             }
             output.push(']');
         }
+        MirTerminator::ErrorSwitch {
+            scrutinee,
+            error,
+            arms,
+        } => {
+            let _ = write!(
+                output,
+                "errorSwitch v{} e{} [",
+                scrutinee.raw(),
+                error.raw()
+            );
+            for (index, arm) in arms.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                let _ = write!(output, "errorCase#{}:b{}", arm.case.raw(), arm.target.raw());
+            }
+            output.push(']');
+        }
         MirTerminator::Return { values } => dump_values(output, "return", values),
         MirTerminator::Trap(trap) => {
             let _ = write!(output, "trap {}", trap_kind_text(trap.kind()));
@@ -936,6 +1056,7 @@ fn dump_terminator(output: &mut String, terminator: &MirTerminator) {
             output.push_str("resumeUnwind ");
             dump_unwind_reason(output, reason);
         }
+        MirTerminator::ResumeUnwind => output.push_str("resumeCurrentUnwind"),
         MirTerminator::Unreachable => output.push_str("unreachable"),
     }
 }
@@ -1102,6 +1223,7 @@ const fn trap_kind_text(kind: pop_runtime_interface::TrapKind) -> &'static str {
 fn dump_panic_payload(output: &mut String, payload: &PanicPayload) {
     match payload.kind() {
         pop_runtime_interface::PanicKind::RuntimeInvariant => output.push_str("RuntimeInvariant"),
+        pop_runtime_interface::PanicKind::DoublePanic => output.push_str("DoublePanic"),
         pop_runtime_interface::PanicKind::OutOfMemory {
             requested_objects,
             requested_slots,

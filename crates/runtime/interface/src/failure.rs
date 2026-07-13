@@ -90,6 +90,7 @@ impl Trap {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PanicKind {
     RuntimeInvariant,
+    DoublePanic,
     OutOfMemory {
         requested_objects: u64,
         requested_slots: u64,

@@ -326,6 +326,161 @@ fn equality_uses_luau_tokens_and_comparison_precedence() {
 }
 
 #[test]
+fn parses_optional_binding_defaulting_and_propagation_without_truthiness() {
+    // ADR 0051 gives each optional control form a distinct syntax node so
+    // later typing/HIR cannot reinterpret it as Boolean truthiness.
+    let body = parse_body(
+        "namespace Example\n\
+         private function choose(primary: String?, secondary: String?): String?\n\
+             local selected = primary ?? secondary ?? \"fallback\"\n\
+             local propagated = secondary?\n\
+             if local value = primary then\n\
+                 return value\n\
+             else\n\
+                 use(propagated)\n\
+             end\n\
+             while local value = secondary do\n\
+                 use(value)\n\
+             end\n\
+             return selected\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("defaulting local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        ExpressionSyntaxKind::Binary {
+            operator: BinaryOperator::OptionalDefault,
+            right,
+            ..
+        } if matches!(
+            right.kind(),
+            ExpressionSyntaxKind::Binary {
+                operator: BinaryOperator::OptionalDefault,
+                ..
+            }
+        )
+    ));
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[1].kind() else {
+        panic!("propagation local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        ExpressionSyntaxKind::OptionalPropagate { operand }
+            if matches!(operand.kind(), ExpressionSyntaxKind::Name(path) if path == &["secondary"])
+    ));
+
+    assert!(matches!(
+        body.statements()[2].kind(),
+        StatementSyntaxKind::OptionalIf {
+            name,
+            initializer,
+            then_body,
+            else_body,
+        } if name == "value"
+            && matches!(initializer.kind(), ExpressionSyntaxKind::Name(path) if path == &["primary"])
+            && then_body.len() == 1
+            && else_body.len() == 1
+    ));
+    assert!(matches!(
+        body.statements()[3].kind(),
+        StatementSyntaxKind::OptionalWhile {
+            name,
+            initializer,
+            body,
+        } if name == "value"
+            && matches!(initializer.kind(), ExpressionSyntaxKind::Name(path) if path == &["secondary"])
+            && body.len() == 1
+    ));
+}
+
+#[test]
+fn parses_result_propagation_and_lexical_cleanup_as_distinct_nodes() {
+    let body = parse_body(
+        "namespace Example\n\
+         private function load(path: Path): Result<String, LoadError>\n\
+             local handle = try acquire(path)\n\
+             defer\n\
+                 close(handle)\n\
+             end\n\
+             return Result.Ok(read(handle))\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("propagating local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        ExpressionSyntaxKind::ResultPropagate { operand }
+            if matches!(operand.kind(), ExpressionSyntaxKind::Call { .. })
+    ));
+    assert!(matches!(
+        body.statements()[1].kind(),
+        StatementSyntaxKind::Defer { body } if body.len() == 1
+    ));
+}
+
+#[test]
+fn malformed_optional_binding_reports_an_owned_recovery_expectation() {
+    let text = "namespace Example\n\
+                private function invalid(value: String?)\n\
+                    if local = value then\n\
+                    end\n\
+                end\n";
+    let source =
+        SourceFile::new(FileId::from_raw(0), "src/body.pop", text).expect("source fixture");
+    let syntax = parse_file(&source);
+    let function = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+        .expect("function declaration");
+    let signature = parse_function_signature(&source, &syntax, function).expect("signature");
+    let error = parse_function_body(&source, &syntax, function, &signature)
+        .expect_err("malformed optional binding must not become ordinary truthiness");
+    assert_eq!(error.expectation(), "optional binding name");
+}
+
+#[test]
+fn optional_default_precedence_sits_between_or_and_and() {
+    let body = parse_body(
+        "namespace Example\n\
+         private function choose(flag: Boolean, primary: Boolean?, secondary: Boolean): Boolean\n\
+             return flag or primary ?? secondary and true\n\
+         end\n",
+    );
+    let StatementSyntaxKind::Return { values } = body.statements()[0].kind() else {
+        panic!("return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        ExpressionSyntaxKind::Binary {
+            operator: BinaryOperator::Or,
+            right,
+            ..
+        } if matches!(
+            right.kind(),
+            ExpressionSyntaxKind::Binary {
+                operator: BinaryOperator::OptionalDefault,
+                right,
+                ..
+            } if matches!(
+                right.kind(),
+                ExpressionSyntaxKind::Binary {
+                    operator: BinaryOperator::And,
+                    ..
+                }
+            )
+        )
+    ));
+}
+
+#[test]
 fn parses_decimal_literals_complete_ordering_and_numeric_cast_calls() {
     // ADR 0040 keeps casts Luau-light as target-type calls while representing
     // decimal literals and complete ordering explicitly in syntax.

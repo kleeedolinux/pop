@@ -417,3 +417,46 @@ pub fn duplicate_binding(
         Vec::new(),
     ))
 }
+
+#[must_use]
+pub fn invalid_result_propagation(
+    span: SourceSpan,
+    operand: impl Into<String>,
+    enclosing: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2024"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.invalidResultPropagation"),
+        vec![
+            DiagnosticArgument::Identifier(operand.into()),
+            DiagnosticArgument::Identifier(enclosing.into()),
+        ],
+        span,
+    )
+}
+
+#[must_use]
+pub fn ambiguous_result_case(span: SourceSpan, case: impl Into<String>) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2025"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.ambiguousResultCase"),
+        vec![DiagnosticArgument::Identifier(case.into())],
+        span,
+    )
+}
+
+#[must_use]
+pub fn illegal_cleanup_control(span: SourceSpan, control: impl Into<String>) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2026"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.illegalCleanupControl"),
+        vec![DiagnosticArgument::Identifier(control.into())],
+        span,
+    )
+}

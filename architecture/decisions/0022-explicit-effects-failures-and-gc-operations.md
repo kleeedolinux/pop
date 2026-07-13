@@ -31,6 +31,8 @@ present only on eligible compile-time functions and cannot escape into runtime
 function types.
 
 Expected recoverable failures remain ordinary typed `Result<T, E>` values.
+Their source construction, exact prefix propagation, nominal error declarations,
+and lexical cleanup interaction are fixed by ADR 0052.
 Runtime traps use a closed backend-neutral `TrapKind`; checked operations name
 their possible trap explicitly, and an unconditional trap is a terminator.
 Traps do not become catchable exceptions.

@@ -104,6 +104,9 @@ Representative HIR passes include:
 - materializing implicit numeric and subtype conversions;
 - resolving class construction and method dispatch;
 - closure capture analysis;
+- retaining typed result propagation and registered lexical cleanup until MIR
+  can emit dominated payload extraction and explicit last-in, first-out exit
+  chains;
 - async/coroutine transformation planning;
 - exhaustiveness validation;
 - monomorphization planning or generic dictionary selection;
@@ -115,6 +118,9 @@ Lowering converts structured expressions into control-flow graphs. It makes
 evaluation order, temporaries, calls, branches, cleanup, and failure edges
 explicit. Closure environments, object allocation, tuple results, tagged
 unions, and typed collection operations become backend-neutral primitives.
+Result propagation becomes a typed conditional failure edge, while every edge
+leaving registered cleanup scopes traverses their explicit MIR cleanup blocks
+in last-in, first-out order. See ADR 0052.
 
 Compile-time-only functions, symbol descriptors, and UDAs do not lower to
 runtime MIR. If explicitly retained metadata is requested, the compiler emits a

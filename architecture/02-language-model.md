@@ -37,6 +37,35 @@ There is no user-visible `dynamic`, `any`, or unknown value on which operations
 can be performed. A top type may exist for type-theory purposes only if values
 must be narrowed to a concrete supported type before use.
 
+### Optional flow
+
+Optional values use absence-aware control rather than Lua truthiness. A stable
+place narrows across `== nil` and `~= nil` branches. `if local value = optional`
+and `while local value = optional` evaluate the optional once, test presence,
+and bind the immutable non-`nil` value only inside the successful body.
+
+`optional ?? fallback` lazily produces the inner type, evaluating `fallback`
+only when the optional is `nil`. Postfix `optional?` produces the inner value
+or returns `nil` from an enclosing function with a single optional result. The
+operand and result inner types need not match. It does not propagate `Result`,
+catch traps/panic, perform truthiness, or call a dynamic/user-defined operator.
+See ADR 0051.
+
+### Typed results and cleanup
+
+`Result<T, TError>` is the reserved `Pop.Standard` tagged union with exact
+`Ok(value: T)` and `Error(error: TError)` cases. Closed nominal `error`
+declarations give recoverable error families stable identities and use the
+same Luau-shaped payload and exhaustive-match surface as tagged unions without
+becoming ordinary unions or an exception hierarchy.
+
+Prefix `try expression` evaluates one `Result<T, TError>` and either produces
+its `T` value or returns `Result.Error(error)` through every active cleanup
+scope from a function returning `Result<U, TError>`. Error types must match
+exactly; conversion requires an explicit exhaustive match. `defer ... end`
+registers deterministic lexical cleanup which runs once in last-in, first-out
+order on every scope exit other than a runtime trap. See ADR 0052.
+
 ### Static boundaries
 
 - JSON and similar data are decoded into a declared schema, a tagged data tree,
@@ -373,7 +402,9 @@ ADR 0020.
 
 ## Errors and effects
 
-Recoverable failures use typed result values with light propagation syntax.
+Recoverable failures use the reserved typed `Result<T, TError>` union. Prefix
+`try` propagates an exact error type, while exhaustive `match` is the recovery
+boundary. Closed `error` declarations define stable nominal error families.
 `panic` represents violated invariants and unwinds for cleanup/diagnostics before
 the task/application policy decides termination. IR distinguishes:
 
@@ -390,7 +421,9 @@ Function types, HIR/MIR functions, and calls carry closed effect summaries.
 Checked operations name their `TrapKind`; panic calls record whether unwinding
 propagates or enters a cleanup block, and cleanup resumes unwinding explicitly.
 Expected failure remains a typed result value and is not folded into the panic
-mechanism. See ADR 0022.
+mechanism. Registered `defer ... end` blocks run in lexical last-in, first-out
+order on normal, result-failure, loop-control, unwind, and cancellation exits;
+canonical MIR owns those cleanup edges. See ADR 0022 and ADR 0052.
 
 Namespace constants are deterministically evaluated once by the front end.
 Runtime uses substitute the resulting exact typed immutable value into HIR;

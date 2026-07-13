@@ -537,6 +537,136 @@ fn types_structured_control_flow_and_proves_returns_on_both_branches() {
 }
 
 #[test]
+fn types_optional_binding_defaulting_propagation_and_nil_narrowing() {
+    // ADR 0051: optional control is presence-based and keeps the inner type in
+    // typed bodies; postfix propagation only requires an optional function
+    // result and does not relate the operand/result inner types.
+    let fixture = check_function(
+        "namespace Example\n\
+         private function choose(value: String?, enabled: Boolean?, fallback: String): Boolean?\n\
+             local selected = value ?? fallback\n\
+             local present = value?\n\
+             if value ~= nil then\n\
+                 useString(value)\n\
+             end\n\
+             if local bound = enabled then\n\
+                 useBoolean(bound)\n\
+             else\n\
+                 useString(selected)\n\
+             end\n\
+             while local bound = enabled do\n\
+                 useBoolean(bound)\n\
+                 break\n\
+             end\n\
+             return enabled\n\
+         end\n\
+         private function useString(value: String)\n\
+         end\n\
+         private function useBoolean(value: Boolean)\n\
+         end\n",
+        "choose",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let body = fixture.result.body().expect("typed optional body");
+    let string = fixture.arena.source_type("String").expect("String");
+    let boolean = fixture.arena.source_type("Boolean").expect("Boolean");
+    assert!(matches!(
+        body.statements()[0].kind(),
+        TypedStatementKind::Local { initializer, local_type, .. }
+            if *local_type == string
+                && matches!(initializer.kind(), TypedExpressionKind::OptionalDefault { .. })
+    ));
+    assert!(matches!(
+        body.statements()[1].kind(),
+        TypedStatementKind::Local { initializer, local_type, .. }
+            if *local_type == string
+                && matches!(initializer.kind(), TypedExpressionKind::OptionalPropagate { .. })
+    ));
+    assert!(matches!(
+        body.statements()[3].kind(),
+        TypedStatementKind::OptionalIf {
+            name,
+            inner_type,
+            then_body,
+            else_body,
+            ..
+        } if name == "bound"
+            && *inner_type == boolean
+            && then_body.len() == 1
+            && else_body.len() == 1
+    ));
+    assert!(matches!(
+        body.statements()[4].kind(),
+        TypedStatementKind::OptionalWhile {
+            name,
+            inner_type,
+            body,
+            ..
+        } if name == "bound" && *inner_type == boolean && body.len() == 2
+    ));
+}
+
+#[test]
+fn rejects_invalid_optional_control_without_dynamic_fallback() {
+    for source in [
+        "namespace Example\n\
+         private function invalid(): Int\n\
+             return 1 ?? 2\n\
+         end\n",
+        "namespace Example\n\
+         private function invalid(): Int?\n\
+             local value = 1?\n\
+             return value\n\
+         end\n",
+        "namespace Example\n\
+         private function invalid(value: Int?): Int\n\
+             local present = value?\n\
+             return present\n\
+         end\n",
+        "namespace Example\n\
+         private function invalid(value: Int?): Int\n\
+             if local present = value then\n\
+                 return present\n\
+             else\n\
+                 return present\n\
+             end\n\
+         end\n",
+        "namespace Example\n\
+         private function useString(value: String)\n\
+         end\n\
+         private function invalid(value: String?, replacement: String?)\n\
+             local current = value\n\
+             if current ~= nil then\n\
+                 current = replacement\n\
+                 useString(current)\n\
+             end\n\
+         end\n",
+        "namespace Example\n\
+         private function useString(value: String)\n\
+         end\n\
+         private function invalid(value: String?, replacement: String?)\n\
+             local current = value\n\
+             local function clear()\n\
+                 current = replacement\n\
+             end\n\
+             if current ~= nil then\n\
+                 clear()\n\
+                 useString(current)\n\
+             end\n\
+         end\n",
+    ] {
+        let fixture = check_function(source, "invalid");
+        assert!(fixture.result.body().is_none(), "accepted:\n{source}");
+        assert!(!fixture.result.diagnostics().is_empty(), "{source}");
+    }
+}
+
+#[test]
 fn repeat_until_requires_boolean_conditions_and_keeps_body_locals_scoped_to_the_loop() {
     // ADR 0032: the body scope includes its corresponding `until` condition,
     // but does not escape the completed repeat-until statement.

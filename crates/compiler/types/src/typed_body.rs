@@ -5,9 +5,10 @@
 //! modules so downstream phases can depend on a stable typed contract.
 
 use pop_foundation::{
-    AttributeId, BindingId, CaptureId, ClassId, Diagnostic, EnumCaseId, FieldId, InterfaceId,
-    InterfaceMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, SourceSpan,
-    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, BuiltinTypeId, CaptureId, ClassId, Diagnostic, EnumCaseId, ErrorCaseId,
+    ErrorId, FieldId, InterfaceId, InterfaceMethodId, LocalId, MethodId, ModuleId,
+    NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
+    TypeId, UnionCaseId, ValueParameterId,
 };
 
 use crate::{
@@ -77,8 +78,25 @@ pub enum TypedStatementKind {
         then_body: Vec<TypedStatement>,
         else_body: Vec<TypedStatement>,
     },
+    OptionalIf {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: TypedExpression,
+        then_body: Vec<TypedStatement>,
+        else_body: Vec<TypedStatement>,
+    },
     While {
         condition: TypedExpression,
+        body: Vec<TypedStatement>,
+    },
+    OptionalWhile {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: TypedExpression,
         body: Vec<TypedStatement>,
     },
     RepeatUntil {
@@ -101,6 +119,20 @@ pub enum TypedStatementKind {
         scrutinee: TypedExpression,
         union: SymbolId,
         arms: Vec<TypedMatchArm>,
+    },
+    ErrorMatch {
+        scrutinee: TypedExpression,
+        error: ErrorId,
+        arms: Vec<TypedErrorMatchArm>,
+    },
+    ResultMatch {
+        scrutinee: TypedExpression,
+        result: BuiltinTypeId,
+        result_type: TypeId,
+        arms: Vec<TypedResultMatchArm>,
+    },
+    Defer {
+        body: Vec<TypedStatement>,
     },
     FieldSet {
         base: TypedExpression,
@@ -370,6 +402,16 @@ pub enum TypedExpressionKind {
         case: UnionCaseId,
         arguments: Vec<TypedExpression>,
     },
+    ResultCase {
+        result: BuiltinTypeId,
+        case: ResultCaseId,
+        arguments: Vec<TypedExpression>,
+    },
+    ErrorCase {
+        error: ErrorId,
+        case: ErrorCaseId,
+        arguments: Vec<TypedExpression>,
+    },
     EnumCase {
         definition: SymbolId,
         case: EnumCaseId,
@@ -392,6 +434,24 @@ pub enum TypedExpressionKind {
         operator: TypedBinaryOperator,
         left: Box<TypedExpression>,
         right: Box<TypedExpression>,
+    },
+    OptionalDefault {
+        optional: Box<TypedExpression>,
+        fallback: Box<TypedExpression>,
+    },
+    OptionalPropagate {
+        optional: Box<TypedExpression>,
+        enclosing_result: TypeId,
+    },
+    ResultPropagate {
+        result: Box<TypedExpression>,
+        result_definition: BuiltinTypeId,
+        success_type: TypeId,
+        error_type: TypeId,
+        enclosing_result: TypeId,
+    },
+    OptionalNarrow {
+        optional: Box<TypedExpression>,
     },
     Conditional {
         condition: Box<TypedExpression>,
@@ -616,6 +676,72 @@ impl TypedMatchArm {
 
     #[must_use]
     pub const fn case(&self) -> UnionCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub fn bindings(&self) -> &[TypedMatchBinding] {
+        &self.bindings
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[TypedStatement] {
+        &self.body
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedErrorMatchArm {
+    pub(crate) error: ErrorId,
+    pub(crate) case: ErrorCaseId,
+    pub(crate) bindings: Vec<TypedMatchBinding>,
+    pub(crate) body: Vec<TypedStatement>,
+    pub(crate) span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedResultMatchArm {
+    pub(crate) case: ResultCaseId,
+    pub(crate) bindings: Vec<TypedMatchBinding>,
+    pub(crate) body: Vec<TypedStatement>,
+    pub(crate) span: SourceSpan,
+}
+
+impl TypedResultMatchArm {
+    #[must_use]
+    pub const fn case(&self) -> ResultCaseId {
+        self.case
+    }
+
+    #[must_use]
+    pub fn bindings(&self) -> &[TypedMatchBinding] {
+        &self.bindings
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[TypedStatement] {
+        &self.body
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+impl TypedErrorMatchArm {
+    #[must_use]
+    pub const fn error(&self) -> ErrorId {
+        self.error
+    }
+
+    #[must_use]
+    pub const fn case(&self) -> ErrorCaseId {
         self.case
     }
 

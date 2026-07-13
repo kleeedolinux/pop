@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, CaptureId, ClassId, EnumCaseId, FieldId, InterfaceId, InterfaceMethodId, LocalId,
-    MethodId, NestedFunctionId, SourceSpan, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
-    ValueParameterId,
+    BindingId, CaptureId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, InterfaceId,
+    InterfaceMethodId, LocalId, MethodId, NestedFunctionId, ResultCaseId, SourceSpan, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -138,6 +138,26 @@ pub enum HirVerificationError {
     DuplicateEnumCase {
         enumeration: SymbolId,
         case: EnumCaseId,
+    },
+    DuplicateError(ErrorId),
+    DuplicateErrorCase {
+        error: ErrorId,
+        case: ErrorCaseId,
+    },
+    InvalidErrorCase {
+        error: ErrorId,
+        case: ErrorCaseId,
+        span: SourceSpan,
+    },
+    InvalidResultCase {
+        case: ResultCaseId,
+        span: SourceSpan,
+    },
+    InvalidResultPropagation {
+        span: SourceSpan,
+    },
+    InvalidCleanupControl {
+        span: SourceSpan,
     },
     UnknownEnumCase {
         enumeration: SymbolId,
@@ -351,6 +371,11 @@ struct HirUnionSchema {
 }
 
 #[derive(Clone)]
+struct HirErrorSchema {
+    cases: BTreeMap<ErrorCaseId, Vec<TypeId>>,
+}
+
+#[derive(Clone)]
 struct HirClassSchema {
     definition: SymbolId,
     type_id: TypeId,
@@ -394,6 +419,7 @@ struct HirSchema {
     declared_methods: BTreeMap<MethodId, HirDeclaredMethod>,
     records: BTreeMap<SymbolId, HirAggregateSchema>,
     unions: BTreeMap<SymbolId, HirUnionSchema>,
+    errors: BTreeMap<ErrorId, HirErrorSchema>,
     enums: BTreeMap<SymbolId, (TypeId, BTreeMap<EnumCaseId, u32>)>,
     classes: BTreeMap<ClassId, HirClassSchema>,
     interfaces: BTreeMap<InterfaceId, HirInterfaceSchema>,
@@ -414,6 +440,7 @@ impl HirSchema {
             declared_methods: BTreeMap::new(),
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
+            errors: BTreeMap::new(),
             enums: BTreeMap::new(),
             classes: BTreeMap::new(),
             interfaces: BTreeMap::new(),
@@ -518,6 +545,42 @@ impl HirSchema {
                         cases,
                     },
                 );
+            }
+            HirDeclarationKind::Error(error) => {
+                if !matches!(
+                    arena.get(error.type_id),
+                    Some(SemanticType::ErrorUnion {
+                        definition,
+                        source,
+                        ..
+                    }) if *definition == error.error && *source == declaration.symbol()
+                ) {
+                    errors.push(HirVerificationError::InvalidDeclarationType {
+                        symbol: declaration.symbol(),
+                        type_id: error.type_id,
+                        span: declaration.span(),
+                    });
+                }
+                let mut cases = BTreeMap::new();
+                for case in &error.cases {
+                    for parameter in &case.parameters {
+                        verify_schema_type(arena, parameter.type_id, parameter.span, errors);
+                    }
+                    let parameters = case.parameters.iter().map(HirNamedType::type_id).collect();
+                    if cases.insert(case.case, parameters).is_some() {
+                        errors.push(HirVerificationError::DuplicateErrorCase {
+                            error: error.error,
+                            case: case.case,
+                        });
+                    }
+                }
+                if self
+                    .errors
+                    .insert(error.error, HirErrorSchema { cases })
+                    .is_some()
+                {
+                    errors.push(HirVerificationError::DuplicateError(error.error));
+                }
             }
             HirDeclarationKind::Enum(enumeration) => {
                 if arena.get(enumeration.type_id)
@@ -1026,6 +1089,7 @@ fn verify_hir_callable_with_schema(
         nested_functions: BTreeSet::new(),
         cell_bindings,
         loop_depth: 0,
+        cleanup_depth: 0,
         errors: Vec::new(),
     };
     for parameter in &function.parameters {
@@ -1077,6 +1141,7 @@ struct Verifier<'arena> {
     nested_functions: BTreeSet<NestedFunctionId>,
     cell_bindings: BTreeSet<BindingId>,
     loop_depth: u32,
+    cleanup_depth: u32,
     errors: Vec<HirVerificationError>,
 }
 
@@ -1196,6 +1261,12 @@ impl Verifier<'_> {
                     }
                 }
                 HirStatementKind::Return { values } => {
+                    if self.cleanup_depth != 0 {
+                        self.errors
+                            .push(HirVerificationError::InvalidCleanupControl {
+                                span: statement.span(),
+                            });
+                    }
                     for value in values {
                         self.verify_expression(value, &visible);
                     }
@@ -1211,11 +1282,55 @@ impl Verifier<'_> {
                     self.verify_statements(then_body, &visible);
                     self.verify_statements(else_body, &visible);
                 }
+                HirStatementKind::OptionalIf {
+                    binding,
+                    local,
+                    inner_type,
+                    initializer,
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.verify_expression(initializer, &visible);
+                    self.verify_optional_binding(
+                        *binding,
+                        *local,
+                        *inner_type,
+                        initializer,
+                        statement.span(),
+                    );
+                    let mut then_visible = visible.clone();
+                    then_visible.insert(*local);
+                    self.verify_statements(then_body, &then_visible);
+                    self.verify_statements(else_body, &visible);
+                }
                 HirStatementKind::While { condition, body } => {
                     self.verify_expression(condition, &visible);
                     self.verify_condition(condition);
                     self.loop_depth = self.loop_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
+                }
+                HirStatementKind::OptionalWhile {
+                    binding,
+                    local,
+                    inner_type,
+                    initializer,
+                    body,
+                    ..
+                } => {
+                    self.verify_expression(initializer, &visible);
+                    self.verify_optional_binding(
+                        *binding,
+                        *local,
+                        *inner_type,
+                        initializer,
+                        statement.span(),
+                    );
+                    let mut body_visible = visible.clone();
+                    body_visible.insert(*local);
+                    self.loop_depth = self.loop_depth.saturating_add(1);
+                    self.verify_statements(body, &body_visible);
                     self.loop_depth = self.loop_depth.saturating_sub(1);
                 }
                 HirStatementKind::RepeatUntil { body, condition } => {
@@ -1272,6 +1387,12 @@ impl Verifier<'_> {
                     self.loop_depth = self.loop_depth.saturating_sub(1);
                 }
                 HirStatementKind::Break | HirStatementKind::Continue => {
+                    if self.cleanup_depth != 0 {
+                        self.errors
+                            .push(HirVerificationError::InvalidCleanupControl {
+                                span: statement.span(),
+                            });
+                    }
                     if self.loop_depth == 0 {
                         self.errors
                             .push(HirVerificationError::LoopControlOutsideLoop {
@@ -1284,6 +1405,35 @@ impl Verifier<'_> {
                     union,
                     arms,
                 } => self.verify_match(scrutinee, *union, arms, statement.span(), &visible),
+                HirStatementKind::ErrorMatch {
+                    scrutinee,
+                    error,
+                    arms,
+                } => self.verify_error_match(scrutinee, *error, arms, statement.span(), &visible),
+                HirStatementKind::ResultMatch {
+                    scrutinee,
+                    result,
+                    result_type,
+                    arms,
+                } => self.verify_result_match(
+                    scrutinee,
+                    *result,
+                    *result_type,
+                    arms,
+                    statement.span(),
+                    &visible,
+                ),
+                HirStatementKind::Defer { body } => {
+                    if self.cleanup_depth != 0 {
+                        self.errors
+                            .push(HirVerificationError::InvalidCleanupControl {
+                                span: statement.span(),
+                            });
+                    }
+                    self.cleanup_depth = self.cleanup_depth.saturating_add(1);
+                    self.verify_statements(body, &visible);
+                    self.cleanup_depth = self.cleanup_depth.saturating_sub(1);
+                }
                 HirStatementKind::FieldSet { base, field, value } => {
                     self.verify_expression(base, &visible);
                     self.verify_expression(value, &visible);
@@ -1550,6 +1700,16 @@ impl Verifier<'_> {
             | HirExpressionKind::UnionCase { .. } => {
                 self.verify_schema_expression(expression, visible);
             }
+            HirExpressionKind::ResultCase {
+                result,
+                case,
+                arguments,
+            } => self.verify_result_case(*result, *case, arguments, expression, visible),
+            HirExpressionKind::ErrorCase {
+                error,
+                case,
+                arguments,
+            } => self.verify_error_case(*error, *case, arguments, expression, visible),
             HirExpressionKind::EnumCase {
                 definition,
                 case,
@@ -1719,6 +1879,85 @@ impl Verifier<'_> {
                 self.verify_expression(right, visible);
                 self.verify_binary_operator(expression, *operator, left, right);
             }
+            HirExpressionKind::OptionalDefault { optional, fallback } => {
+                self.verify_expression(optional, visible);
+                self.verify_expression(fallback, visible);
+                if let Some(inner) = self.optional_inner_type(optional.type_id()) {
+                    self.verify_expression_type(inner, expression);
+                    self.verify_expression_type(inner, fallback);
+                } else {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: optional.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::OptionalPropagate {
+                optional,
+                enclosing_result,
+            } => {
+                self.verify_expression(optional, visible);
+                if let Some(inner) = self.optional_inner_type(optional.type_id()) {
+                    self.verify_expression_type(inner, expression);
+                } else {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: optional.type_id(),
+                        span: expression.span(),
+                    });
+                }
+                if self.results.as_slice() != [*enclosing_result]
+                    || self.optional_inner_type(*enclosing_result).is_none()
+                {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: *enclosing_result,
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::ResultPropagate {
+                result,
+                result_definition,
+                success_type,
+                error_type,
+                enclosing_result,
+            } => {
+                self.verify_expression(result, visible);
+                let operand_valid = matches!(
+                    self.arena.get(result.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if definition == result_definition
+                            && arguments.as_slice() == [*success_type, *error_type]
+                );
+                let enclosing_valid = matches!(
+                    self.arena.get(*enclosing_result),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if definition == result_definition
+                            && arguments.len() == 2
+                            && arguments[1] == *error_type
+                );
+                if !operand_valid
+                    || !enclosing_valid
+                    || self.results.as_slice() != [*enclosing_result]
+                    || expression.type_id() != *success_type
+                    || self.cleanup_depth != 0
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidResultPropagation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::OptionalNarrow { optional } => {
+                self.verify_expression(optional, visible);
+                if let Some(inner) = self.optional_inner_type(optional.type_id()) {
+                    self.verify_expression_type(inner, expression);
+                } else {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: optional.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
             HirExpressionKind::Conditional {
                 condition,
                 when_true,
@@ -1822,6 +2061,52 @@ impl Verifier<'_> {
             .ok()
             .and_then(|raw| self.parameter_types.get(raw))
             .copied()
+    }
+
+    fn optional_inner_type(&self, optional: TypeId) -> Option<TypeId> {
+        let nil = self.arena.source_type("nil")?;
+        let SemanticType::Union(members) = self.arena.get(optional)? else {
+            return None;
+        };
+        if !members.contains(&nil) {
+            return None;
+        }
+        let present = members
+            .iter()
+            .copied()
+            .filter(|member| *member != nil)
+            .collect::<Vec<_>>();
+        match present.as_slice() {
+            [inner] => Some(*inner),
+            [] => None,
+            _ => self.arena.find(&SemanticType::Union(present)),
+        }
+    }
+
+    fn verify_optional_binding(
+        &mut self,
+        binding: BindingId,
+        local: LocalId,
+        inner_type: TypeId,
+        initializer: &HirExpression,
+        span: SourceSpan,
+    ) {
+        self.verify_type(inner_type, span);
+        if self.optional_inner_type(initializer.type_id()) != Some(inner_type) {
+            self.errors.push(HirVerificationError::InvalidType {
+                type_id: initializer.type_id(),
+                span,
+            });
+        }
+        if self.local_types.insert(local, inner_type).is_some() {
+            self.errors
+                .push(HirVerificationError::DuplicateLocal(local));
+        }
+        self.local_bindings.insert(local, binding);
+        if !self.bindings.insert(binding) {
+            self.errors
+                .push(HirVerificationError::DuplicateBinding(binding));
+        }
     }
 
     fn parameter_binding(&self, parameter: ValueParameterId) -> Option<BindingId> {
@@ -1981,6 +2266,7 @@ impl Verifier<'_> {
         );
         let saved_cell_bindings = std::mem::replace(&mut self.cell_bindings, nested_cell_bindings);
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let saved_cleanup_depth = std::mem::replace(&mut self.cleanup_depth, 0);
         for parameter in &closure.parameters {
             self.verify_type(parameter.type_id, parameter.span);
             if !self.bindings.insert(parameter.binding) {
@@ -1997,6 +2283,7 @@ impl Verifier<'_> {
         self.capture_modes = saved_capture_modes;
         self.cell_bindings = saved_cell_bindings;
         self.loop_depth = saved_loop_depth;
+        self.cleanup_depth = saved_cleanup_depth;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2116,6 +2403,227 @@ impl Verifier<'_> {
                     });
                 }
             }
+        }
+    }
+
+    fn verify_error_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        error: ErrorId,
+        arms: &[HirErrorMatchArm],
+        span: SourceSpan,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        self.verify_expression(scrutinee, visible);
+        let schema = self
+            .schema
+            .and_then(|schema| schema.errors.get(&error))
+            .cloned();
+        let valid_scrutinee = matches!(
+            self.arena.get(scrutinee.type_id()),
+            Some(SemanticType::ErrorUnion { definition, .. }) if *definition == error
+        );
+        if !valid_scrutinee || self.schema.is_some() && schema.is_none() {
+            self.errors.push(HirVerificationError::InvalidErrorCase {
+                error,
+                case: ErrorCaseId::from_raw(u32::MAX),
+                span,
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for arm in arms {
+            let expected = schema
+                .as_ref()
+                .and_then(|schema| schema.cases.get(&arm.case));
+            if arm.error != error
+                || !seen.insert(arm.case)
+                || self.schema.is_some() && expected.is_none()
+            {
+                self.errors.push(HirVerificationError::InvalidErrorCase {
+                    error,
+                    case: arm.case,
+                    span: arm.span,
+                });
+            }
+            self.verify_match_bindings(
+                &arm.bindings,
+                expected.map(Vec::as_slice),
+                &arm.body,
+                visible,
+            );
+        }
+        if let Some(schema) = schema {
+            for case in schema.cases.keys() {
+                if !seen.contains(case) {
+                    self.errors.push(HirVerificationError::InvalidErrorCase {
+                        error,
+                        case: *case,
+                        span,
+                    });
+                }
+            }
+        }
+    }
+
+    fn verify_result_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        result: pop_foundation::BuiltinTypeId,
+        result_type: TypeId,
+        arms: &[HirResultMatchArm],
+        span: SourceSpan,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        self.verify_expression(scrutinee, visible);
+        let parts = match self.arena.get(result_type) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == result && arguments.len() == 2 => Some(arguments.clone()),
+            _ => None,
+        };
+        if scrutinee.type_id() != result_type || parts.is_none() {
+            self.errors.push(HirVerificationError::InvalidResultCase {
+                case: ResultCaseId::from_raw(u32::MAX),
+                span,
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for arm in arms {
+            let expected = usize::try_from(arm.case.raw())
+                .ok()
+                .and_then(|index| parts.as_ref().and_then(|parts| parts.get(index)))
+                .map(std::slice::from_ref);
+            if !seen.insert(arm.case) || expected.is_none() {
+                self.errors.push(HirVerificationError::InvalidResultCase {
+                    case: arm.case,
+                    span: arm.span,
+                });
+            }
+            self.verify_match_bindings(&arm.bindings, expected, &arm.body, visible);
+        }
+        for case in [ResultCaseId::from_raw(0), ResultCaseId::from_raw(1)] {
+            if !seen.contains(&case) {
+                self.errors
+                    .push(HirVerificationError::InvalidResultCase { case, span });
+            }
+        }
+    }
+
+    fn verify_match_bindings(
+        &mut self,
+        bindings: &[HirMatchBinding],
+        expected: Option<&[TypeId]>,
+        body: &[HirStatement],
+        visible: &BTreeSet<LocalId>,
+    ) {
+        let mut arm_visible = visible.clone();
+        if expected.is_some_and(|types| types.len() != bindings.len()) {
+            self.errors.push(HirVerificationError::InvalidFixedPack {
+                span: bindings
+                    .first()
+                    .map_or_else(empty_span, HirMatchBinding::span),
+            });
+        }
+        for (index, binding) in bindings.iter().enumerate() {
+            self.verify_type(binding.type_id, binding.span);
+            if expected
+                .and_then(|types| types.get(index))
+                .is_some_and(|expected| *expected != binding.type_id)
+            {
+                self.errors
+                    .push(HirVerificationError::ExpressionTypeMismatch {
+                        expected: expected
+                            .and_then(|types| types.get(index))
+                            .copied()
+                            .unwrap(),
+                        found: binding.type_id,
+                        span: binding.span,
+                    });
+            }
+            match (binding.binding, binding.local, binding.name.as_str()) {
+                (None, None, "_") => {}
+                (Some(binding_id), Some(local), name) if name != "_" => {
+                    if self.local_types.insert(local, binding.type_id).is_some() {
+                        self.errors
+                            .push(HirVerificationError::DuplicateLocal(local));
+                    }
+                    self.local_bindings.insert(local, binding_id);
+                    if !self.bindings.insert(binding_id) {
+                        self.errors
+                            .push(HirVerificationError::DuplicateBinding(binding_id));
+                    }
+                    arm_visible.insert(local);
+                }
+                _ => self
+                    .errors
+                    .push(HirVerificationError::InvalidIgnoredMatchBinding { span: binding.span }),
+            }
+        }
+        self.verify_statements(body, &arm_visible);
+    }
+
+    fn verify_result_case(
+        &mut self,
+        result: pop_foundation::BuiltinTypeId,
+        case: ResultCaseId,
+        arguments: &[HirExpression],
+        expression: &HirExpression,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        for argument in arguments {
+            self.verify_expression(argument, visible);
+        }
+        let expected = match self.arena.get(expression.type_id()) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == result => usize::try_from(case.raw())
+                .ok()
+                .and_then(|index| arguments.get(index))
+                .copied(),
+            _ => None,
+        };
+        if arguments.len() != 1 || expected != arguments.first().map(HirExpression::type_id) {
+            self.errors.push(HirVerificationError::InvalidResultCase {
+                case,
+                span: expression.span(),
+            });
+        }
+    }
+
+    fn verify_error_case(
+        &mut self,
+        error: ErrorId,
+        case: ErrorCaseId,
+        arguments: &[HirExpression],
+        expression: &HirExpression,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        for argument in arguments {
+            self.verify_expression(argument, visible);
+        }
+        let expected = self
+            .schema
+            .and_then(|schema| schema.errors.get(&error))
+            .and_then(|schema| schema.cases.get(&case));
+        let valid_type = matches!(
+            self.arena.get(expression.type_id()),
+            Some(SemanticType::ErrorUnion { definition, .. }) if *definition == error
+        );
+        let valid_arguments = expected.is_some_and(|types| {
+            types.len() == arguments.len()
+                && types
+                    .iter()
+                    .zip(arguments)
+                    .all(|(expected, argument)| *expected == argument.type_id())
+        });
+        if !valid_type || self.schema.is_some() && !valid_arguments {
+            self.errors.push(HirVerificationError::InvalidErrorCase {
+                error,
+                case,
+                span: expression.span(),
+            });
         }
     }
 
@@ -2974,7 +3482,12 @@ fn valid_hir_binary_operator(
             boolean == Some(left) && left == right && left == result
         }
         TypedBinaryOperator::Equal | TypedBinaryOperator::NotEqual => {
-            left == right && boolean == Some(result) && hir_supports_default_equality(arena, left)
+            boolean == Some(result)
+                && ((left == right && hir_supports_default_equality(arena, left))
+                    || arena.source_type("nil").is_some_and(|nil| {
+                        left == nil && optional_inner_type(arena, right).is_some()
+                            || right == nil && optional_inner_type(arena, left).is_some()
+                    }))
         }
         TypedBinaryOperator::LessThan
         | TypedBinaryOperator::LessThanOrEqual
@@ -2991,6 +3504,26 @@ fn valid_hir_binary_operator(
         TypedBinaryOperator::Remainder => {
             left == right && left == result && is_hir_integer(arena, left)
         }
+    }
+}
+
+fn optional_inner_type(arena: &TypeArena, optional: TypeId) -> Option<TypeId> {
+    let nil = arena.source_type("nil")?;
+    let SemanticType::Union(members) = arena.get(optional)? else {
+        return None;
+    };
+    if !members.contains(&nil) {
+        return None;
+    }
+    let present = members
+        .iter()
+        .copied()
+        .filter(|member| *member != nil)
+        .collect::<Vec<_>>();
+    match present.as_slice() {
+        [inner] => Some(*inner),
+        [] => None,
+        _ => arena.find(&SemanticType::Union(present)),
     }
 }
 
@@ -3137,7 +3670,27 @@ fn collect_local_binding_map(
                 collect_local_binding_map(then_body, local_bindings);
                 collect_local_binding_map(else_body, local_bindings);
             }
+            HirStatementKind::OptionalIf {
+                local,
+                binding,
+                then_body,
+                else_body,
+                ..
+            } => {
+                local_bindings.insert(*local, *binding);
+                collect_local_binding_map(then_body, local_bindings);
+                collect_local_binding_map(else_body, local_bindings);
+            }
             HirStatementKind::While { body, .. } | HirStatementKind::RepeatUntil { body, .. } => {
+                collect_local_binding_map(body, local_bindings);
+            }
+            HirStatementKind::OptionalWhile {
+                local,
+                binding,
+                body,
+                ..
+            } => {
+                local_bindings.insert(*local, *binding);
                 collect_local_binding_map(body, local_bindings);
             }
             HirStatementKind::NumericFor {
@@ -3159,6 +3712,27 @@ fn collect_local_binding_map(
                     collect_local_binding_map(&arm.body, local_bindings);
                 }
             }
+            HirStatementKind::ErrorMatch { arms, .. } => {
+                for arm in arms {
+                    for binding in &arm.bindings {
+                        if let (Some(binding), Some(local)) = (binding.binding, binding.local) {
+                            local_bindings.insert(local, binding);
+                        }
+                    }
+                    collect_local_binding_map(&arm.body, local_bindings);
+                }
+            }
+            HirStatementKind::ResultMatch { arms, .. } => {
+                for arm in arms {
+                    for binding in &arm.bindings {
+                        if let (Some(binding), Some(local)) = (binding.binding, binding.local) {
+                            local_bindings.insert(local, binding);
+                        }
+                    }
+                    collect_local_binding_map(&arm.body, local_bindings);
+                }
+            }
+            HirStatementKind::Defer { body } => collect_local_binding_map(body, local_bindings),
             HirStatementKind::LocalSet { .. }
             | HirStatementKind::ParameterSet { .. }
             | HirStatementKind::CaptureSet { .. }
@@ -3239,8 +3813,42 @@ fn collect_written_bindings(
                     written,
                 );
             }
+            HirStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_cell_captures(initializer, written);
+                collect_written_bindings(
+                    then_body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+                collect_written_bindings(
+                    else_body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
             HirStatementKind::While { condition, body } => {
                 collect_cell_captures(condition, written);
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
+            HirStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                collect_cell_captures(initializer, written);
                 collect_written_bindings(
                     body,
                     parameter_bindings,
@@ -3292,6 +3900,41 @@ fn collect_written_bindings(
                     );
                 }
             }
+            HirStatementKind::ErrorMatch {
+                scrutinee, arms, ..
+            } => {
+                collect_cell_captures(scrutinee, written);
+                for arm in arms {
+                    collect_written_bindings(
+                        &arm.body,
+                        parameter_bindings,
+                        capture_bindings,
+                        local_bindings,
+                        written,
+                    );
+                }
+            }
+            HirStatementKind::ResultMatch {
+                scrutinee, arms, ..
+            } => {
+                collect_cell_captures(scrutinee, written);
+                for arm in arms {
+                    collect_written_bindings(
+                        &arm.body,
+                        parameter_bindings,
+                        capture_bindings,
+                        local_bindings,
+                        written,
+                    );
+                }
+            }
+            HirStatementKind::Defer { body } => collect_written_bindings(
+                body,
+                parameter_bindings,
+                capture_bindings,
+                local_bindings,
+                written,
+            ),
             HirStatementKind::FieldSet { base, value, .. } => {
                 collect_cell_captures(base, written);
                 collect_cell_captures(value, written);
@@ -3417,6 +4060,8 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             }
         }
         HirExpressionKind::UnionCase { arguments, .. }
+        | HirExpressionKind::ResultCase { arguments, .. }
+        | HirExpressionKind::ErrorCase { arguments, .. }
         | HirExpressionKind::Call { arguments, .. } => {
             for argument in arguments {
                 collect_cell_captures(argument, written);
@@ -3433,6 +4078,17 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::Binary { left, right, .. } => {
             collect_cell_captures(left, written);
             collect_cell_captures(right, written);
+        }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            collect_cell_captures(optional, written);
+            collect_cell_captures(fallback, written);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            collect_cell_captures(optional, written);
+        }
+        HirExpressionKind::ResultPropagate { result, .. } => {
+            collect_cell_captures(result, written);
         }
         HirExpressionKind::Conditional {
             condition,

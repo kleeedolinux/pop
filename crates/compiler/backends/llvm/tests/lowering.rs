@@ -47,7 +47,8 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
     assert!(text.contains("add i64"));
     assert!(text.contains("ret i64"));
     assert!(
-        text.contains("declare i64 @pop_rt_array_get(i64, i64) nounwind")
+        text.contains("declare i8 @pop_rt_array_get_checked(i64, i64, ptr) nounwind")
+            && text.contains("declare i8 @pop_rt_table_get_checked(i64, i64, i1, ptr) nounwind")
             && text.contains("declare i8 @pop_rt_array_set(i64, i64, i64) nounwind")
             && text.contains("declare i64 @pop_rt_field_get(i64, i64) nounwind")
             && text.contains("declare i8 @pop_rt_field_set(i64, i64, i64) nounwind"),
@@ -105,6 +106,100 @@ fn nominal_enum_constants_and_equality_lower_to_i32() {
     assert!(text.contains("icmp eq i32"), "{text}");
     let result = link_with_runtime_and_run(&module, "enum");
     assert_eq!(result.status.code(), Some(7), "{text}");
+}
+
+#[test]
+fn optional_presence_and_extraction_use_a_typed_private_llvm_representation() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optional.pop",
+        "namespace Main\n\
+         public function choose(value: Int?, fallback: Int): Int\n\
+             return value ?? fallback\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified optional MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM optional lowering")
+    .to_string();
+
+    assert!(text.contains("extractvalue { i1, i64 }"), "{text}");
+    assert!(!text.to_ascii_lowercase().contains("dynamic"), "{text}");
+    let input = std::env::temp_dir().join("pop-backend-llvm-optionals.ll");
+    let output = std::env::temp_dir().join("pop-backend-llvm-optionals.bc");
+    fs::write(&input, &text).expect("write optional LLVM input");
+    let assembled = Command::new("llvm-as")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("llvm-as must be installed");
+    assert!(
+        assembled.status.success(),
+        "llvm-as rejected optional IR: {}\n{text}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(output);
+}
+
+#[test]
+fn optional_scalar_collection_reads_execute_without_a_zero_sentinel() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optionalNative.pop",
+        "namespace Main\n\
+         function main(): Int\n\
+             local values: {Int} = { 0 }\n\
+             local present = values[1] ?? 7\n\
+             local absent = values[2] ?? 7\n\
+             local scores: {[String]: Int} = { zero = 0 }\n\
+             local tablePresent = scores[\"zero\"] ?? 7\n\
+             local tableAbsent = scores[\"missing\"] ?? 7\n\
+             return present * 10 + absent + tablePresent * 10 + tableAbsent\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified optional collection MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM optional collection lowering");
+    let result = link_with_runtime_and_run(&module, "optional-scalar");
+    assert_eq!(result.status.code(), Some(14), "{}", module);
 }
 
 #[test]
@@ -1738,4 +1833,133 @@ fn backend_rejects_unverified_mir_instead_of_emitting_partial_llvm() {
     let error = lower_mir_to_llvm_ir(&mir, &arena, &target(), LlvmLoweringOptions::default())
         .expect_err("invalid MIR must be rejected");
     assert!(error.to_string().contains("MIR verification"));
+}
+
+#[test]
+fn typed_results_errors_and_cleanup_lower_without_backend_semantic_fallback() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/errors.pop",
+        "namespace Main\n\
+         --- <summary>Describes loading failures.</summary>\n\
+         public error LoadError\n\
+             --- <summary>Loading failed.</summary>\n\
+             Failed\n\
+         end\n\
+         private function fail(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n\
+         --- <error type=\"LoadError.Failed\">Loading failed.</error>\n\
+         public function forward(): Result<Int, LoadError>\n\
+             defer\n\
+                 print(\"cleanup\")\n\
+             end\n\
+             local invoke = fail\n\
+             local value = try invoke()\n\
+             return Result.Ok(value)\n\
+         end\n\
+         public function describe(error: LoadError): String\n\
+             match error\n\
+             when LoadError.Failed then\n\
+                 return \"failed\"\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let llvm = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering")
+    .to_string();
+
+    assert!(llvm.contains("icmp eq i64"), "{llvm}");
+    assert!(llvm.contains("@pop_rt_field_get"), "{llvm}");
+    assert!(llvm.contains("@pop_rt_field_set"), "{llvm}");
+    assert!(llvm.contains("switch i64"), "{llvm}");
+    assert!(llvm.contains("@pop_rt_continue_unwind"), "{llvm}");
+    assert!(!llvm.to_ascii_lowercase().contains("dynamic"), "{llvm}");
+}
+
+#[test]
+fn typed_result_failure_runs_managed_cleanup_in_native_execution() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nativeErrors.pop",
+        "namespace Main\n\
+         private error LoadError\n\
+             Failed\n\
+         end\n\
+         private class Marker\n\
+             public count: Int = 0\n\
+         end\n\
+         private function fail(): Result<Int, LoadError>\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n\
+         private function forward(marker: Marker): Result<Int, LoadError>\n\
+             defer\n\
+                 marker.count = marker.count + 1\n\
+             end\n\
+             local value = try fail()\n\
+             return Result.Ok(value)\n\
+         end\n\
+         private function main(): Int\n\
+             local marker = Marker {}\n\
+             local result = forward(marker)\n\
+             match result\n\
+             when Result.Ok(value) then\n\
+                 return value\n\
+             when Result.Error(error) then\n\
+                 match error\n\
+                 when LoadError.Failed then\n\
+                     return marker.count\n\
+                 end\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+
+    let result = link_with_runtime_and_run(&module, "typed-result-cleanup");
+    assert_eq!(result.status.code(), Some(1), "{module}");
 }

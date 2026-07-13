@@ -18,6 +18,7 @@ pop-backend-c.workspace = true
 pop-backend-llvm.workspace = true
 pop-compile-time.workspace = true
 pop-diagnostics.workspace = true
+pop-documentation.workspace = true
 pop-foundation.workspace = true
 pop-hir.workspace = true
 pop-library-bridge.workspace = true

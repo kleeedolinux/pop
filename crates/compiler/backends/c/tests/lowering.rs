@@ -290,6 +290,38 @@ fn rejects_managed_declarations_without_emitting_a_fallback() {
 }
 
 #[test]
+fn rejects_typed_results_errors_and_cleanup_without_emitting_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private error LoadError\n\
+             Failed\n\
+         end\n\
+         private function fail(): Result<Int, LoadError>\n\
+             defer\n\
+                 print(\"cleanup\")\n\
+             end\n\
+             return Result.Error(LoadError.Failed())\n\
+         end\n\
+         function main(): Int\n\
+             local result = fail()\n\
+             match result\n\
+             when Result.Ok(value) then\n\
+                 return value\n\
+             when Result.Error(error) then\n\
+                 match error\n\
+                 when LoadError.Failed then\n\
+                     return 1\n\
+                 end\n\
+             end\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(&mir, &types, CLoweringOptions::default())
+        .expect_err("experimental C must reject typed error declarations");
+
+    assert!(matches!(error, CBackendError::UnsupportedDeclarations));
+}
+
+#[test]
 fn rejects_specialized_generic_data_without_emitting_a_fallback() {
     let (mir, types) = lower(
         "namespace Main\n\
@@ -503,6 +535,19 @@ fn runtime_free_c_rejects_repeat_until_safe_points_without_a_fallback() {
         error,
         CBackendError::UnsupportedInstruction { .. }
     ));
+}
+
+#[test]
+fn runtime_free_c_rejects_optional_flow_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function choose(value: Int?, fallback: Int): Int\n\
+             return value ?? fallback\n\
+         end\n",
+    );
+    let error = lower_mir_to_c(&mir, &types, CLoweringOptions::default())
+        .expect_err("runtime-free C has no optional representation");
+    assert!(matches!(error, CBackendError::UnsupportedType(_)));
 }
 
 #[test]

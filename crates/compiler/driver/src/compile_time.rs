@@ -213,6 +213,7 @@ pub(crate) fn evaluate_declaration_defaults(
                 diagnostics,
             ),
             HirDeclarationKind::Union(_)
+            | HirDeclarationKind::Error(_)
             | HirDeclarationKind::Enum(_)
             | HirDeclarationKind::Interface(_) => {}
         }

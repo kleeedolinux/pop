@@ -118,6 +118,15 @@ impl TypeArena {
                     arguments: substituted_arguments,
                 }
             }
+            SemanticType::ErrorUnion {
+                definition,
+                source,
+                arguments,
+            } => SemanticType::ErrorUnion {
+                definition,
+                source,
+                arguments: arguments.into_iter().map(map).collect::<Option<Vec<_>>>()?,
+            },
             SemanticType::Tuple(values) => {
                 SemanticType::Tuple(values.into_iter().map(map).collect::<Option<_>>()?)
             }
@@ -172,11 +181,14 @@ impl TypeArena {
             },
         };
         self.find(&substituted).or_else(|| {
-            let SemanticType::TaggedUnion {
-                source, arguments, ..
-            } = &substituted
-            else {
-                return None;
+            let (source, arguments, is_error) = match &substituted {
+                SemanticType::TaggedUnion {
+                    source, arguments, ..
+                } => (*source, arguments, false),
+                SemanticType::ErrorUnion {
+                    source, arguments, ..
+                } => (*source, arguments, true),
+                _ => return None,
             };
             self.interned
                 .iter()
@@ -185,7 +197,20 @@ impl TypeArena {
                         source: candidate_source,
                         arguments: candidate_arguments,
                         ..
-                    } if candidate_source == source && candidate_arguments == arguments => {
+                    } if !is_error
+                        && *candidate_source == source
+                        && candidate_arguments == arguments =>
+                    {
+                        Some(*type_id)
+                    }
+                    SemanticType::ErrorUnion {
+                        source: candidate_source,
+                        arguments: candidate_arguments,
+                        ..
+                    } if is_error
+                        && *candidate_source == source
+                        && candidate_arguments == arguments =>
+                    {
                         Some(*type_id)
                     }
                     _ => None,
@@ -300,7 +325,8 @@ fn referenced_types(semantic: &SemanticType) -> Vec<TypeId> {
         | SemanticType::TypeParameter(_)
         | SemanticType::Opaque(_)
         | SemanticType::Error => Vec::new(),
-        SemanticType::TaggedUnion { arguments, .. } => arguments.clone(),
+        SemanticType::TaggedUnion { arguments, .. }
+        | SemanticType::ErrorUnion { arguments, .. } => arguments.clone(),
         SemanticType::Tuple(elements)
         | SemanticType::Union(elements)
         | SemanticType::Attribute {

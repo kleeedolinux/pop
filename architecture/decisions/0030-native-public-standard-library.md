@@ -101,7 +101,9 @@ or moved only through focused feature ADRs and conformance work.
 
 ## Unresolved questions
 
-- Exact language syntax for error propagation, scoped cleanup, and async.
+- Exact language syntax for async functions, awaiting, cancellation, and
+  suspension-capable cleanup. Synchronous typed-result propagation and lexical
+  cleanup are fixed by ADR 0052.
 - The initial fixed prelude snapshot and foundation Package publication model.
 - Which portable HTTP, crypto, and database value contracts are practical before
   the first supported runtime targets exist.

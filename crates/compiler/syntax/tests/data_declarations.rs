@@ -1,8 +1,8 @@
 use pop_foundation::FileId;
 use pop_source::SourceFile;
 use pop_syntax::{
-    ExpressionSyntaxKind, NodeKind, TypeSyntaxKind, parse_file, parse_record_declaration,
-    parse_union_declaration,
+    ExpressionSyntaxKind, NodeKind, TypeSyntaxKind, parse_error_declaration, parse_file,
+    parse_record_declaration, parse_union_declaration,
 };
 
 #[test]
@@ -81,6 +81,41 @@ fn tagged_union_cases_preserve_typed_payloads() {
         union.cases()[1].payload()[0].parameter_type().kind(),
         TypeSyntaxKind::Named { path, .. } if path.as_slice() == ["Float"]
     ));
+}
+
+#[test]
+fn error_declarations_preserve_nominal_cases_and_generic_payloads() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/loadError.pop",
+        "namespace Saves\n\
+         public error LoadError<Source>\n\
+             Io(error: Source)\n\
+             InvalidData(message: String)\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    assert!(syntax.diagnostics().is_empty(), "structural syntax");
+    let node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::ErrorDeclaration)
+        .expect("error declaration");
+    let error = parse_error_declaration(&source, &syntax, node).expect("error syntax");
+
+    assert_eq!(error.name(), "LoadError");
+    assert_eq!(error.type_parameters()[0].name(), "Source");
+    assert_eq!(
+        error
+            .cases()
+            .iter()
+            .map(pop_syntax::ErrorCaseSyntax::name)
+            .collect::<Vec<_>>(),
+        ["Io", "InvalidData"]
+    );
+    assert_eq!(error.cases()[0].payload()[0].name(), "error");
 }
 
 #[test]

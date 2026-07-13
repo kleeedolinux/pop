@@ -219,6 +219,7 @@ fn summarize_constant_reduction(function: &mut super::MirFunction) {
             kind: MirInstructionKind::IntegerConstant(summary.induction),
             effects: super::MirEffectSummary::empty(),
             effects_explicit: true,
+            unwind: super::MirUnwindAction::Propagate,
             span: summary.span,
         },
         MirInstruction {
@@ -227,6 +228,7 @@ fn summarize_constant_reduction(function: &mut super::MirFunction) {
             kind: MirInstructionKind::IntegerConstant(summary.accumulator),
             effects: super::MirEffectSummary::empty(),
             effects_explicit: true,
+            unwind: super::MirUnwindAction::Propagate,
             span: summary.span,
         },
     ]);
@@ -721,11 +723,17 @@ fn remap_terminator(terminator: &mut MirTerminator, mapping: &BTreeMap<BlockId, 
                 arm.target = mapping[&arm.target];
             }
         }
+        MirTerminator::ErrorSwitch { arms, .. } => {
+            for arm in arms {
+                arm.target = mapping[&arm.target];
+            }
+        }
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind
         | MirTerminator::Unreachable => {}
     }
 }
@@ -773,10 +781,14 @@ fn used_values(function: &super::MirFunction) -> BTreeSet<ValueId> {
             MirTerminator::UnionSwitch { scrutinee, .. } => {
                 used.insert(*scrutinee);
             }
+            MirTerminator::ErrorSwitch { scrutinee, .. } => {
+                used.insert(*scrutinee);
+            }
             MirTerminator::Missing
             | MirTerminator::Trap(_)
             | MirTerminator::Panic(_)
             | MirTerminator::ContinueUnwind(_)
+            | MirTerminator::ResumeUnwind
             | MirTerminator::Unreachable => {}
         }
     }

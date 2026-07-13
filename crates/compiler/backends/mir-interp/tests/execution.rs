@@ -3,8 +3,8 @@ use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{
     BubbleId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, SymbolId, UnionCaseId,
 };
-use pop_mir::{lower_hir_bubble, optimize_mir};
-use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
+use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
+use pop_runtime_interface::{PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason};
 use pop_source::SourceFile;
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
@@ -64,6 +64,61 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .expect("else branch"),
         vec![int(3)]
     );
+}
+
+#[test]
+fn cleanup_resume_preserves_the_original_unwind_reason() {
+    let mir = parse_mir_dump(concat!(
+        "mir bubble b0 namespace n0\n",
+        "dependencies\n",
+        "function s0 f0() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    panic RuntimeInvariant\n",
+        "function s1 f1() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    do v0 callDirect s0 () effects[MayUnwind] unwind cleanup:b1\n",
+        "    return ()\n",
+        "  b1() cleanup scope#1 reason unwind:\n",
+        "    branch b2 ()\n",
+        "  b2() cleanup scope#0 reason unwind:\n",
+        "    resumeCurrentUnwind\n",
+    ))
+    .expect("cleanup MIR");
+    let types = pop_types::TypeArena::new();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified cleanup MIR");
+
+    assert!(matches!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(payload))))
+            if payload.kind() == PanicKind::RuntimeInvariant
+    ));
+}
+
+#[test]
+fn panic_during_panic_cleanup_becomes_the_terminal_double_panic_kind() {
+    let mir = parse_mir_dump(concat!(
+        "mir bubble b0 namespace n0\n",
+        "dependencies\n",
+        "function s0 f0() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    panic RuntimeInvariant\n",
+        "function s1 f1() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    do v0 callDirect s0 () effects[MayUnwind] unwind cleanup:b1\n",
+        "    return ()\n",
+        "  b1() cleanup scope#0 reason unwind:\n",
+        "    do v1 callDirect s0 () effects[MayUnwind] unwind propagate\n",
+        "    resumeCurrentUnwind\n",
+    ))
+    .expect("double-panic MIR");
+    let types = pop_types::TypeArena::new();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified double-panic MIR");
+
+    assert!(matches!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(payload))))
+            if payload.kind() == PanicKind::DoublePanic
+    ));
 }
 
 #[test]
@@ -734,6 +789,98 @@ fn logical_operators_short_circuit_before_trapping_right_operands() {
             .call(mir.functions()[2].symbol(), &[])
             .expect("true or short-circuits"),
         vec![MirValue::Boolean(true)]
+    );
+}
+
+#[test]
+fn optional_flow_distinguishes_absent_from_present_false_and_zero() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function choose(value: Int?, fallback: Int): Int\n\
+             return value ?? fallback\n\
+         end\n\
+         public function isPresent(value: Boolean?): Int\n\
+             if local present = value then\n\
+                 return 1\n\
+             end\n\
+             return 0\n\
+         end\n\
+         public function propagate(value: Int?): Int?\n\
+             value?\n\
+             return value\n\
+         end\n\
+         private function trapDefault(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public function lazy(value: Int?): Int\n\
+             return value ?? trapDefault()\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified optional MIR");
+
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[int(0), int(7)])
+            .expect("present zero"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[MirValue::Nil, int(7)])
+            .expect("absent default"),
+        vec![int(7)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[MirValue::Boolean(false)],)
+            .expect("present false"),
+        vec![int(1)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[1].symbol(), &[MirValue::Nil])
+            .expect("absent Boolean"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[2].symbol(), &[MirValue::Nil])
+            .expect("propagated absence"),
+        vec![MirValue::Nil]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[2].symbol(), &[int(0)])
+            .expect("propagated presence"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[4].symbol(), &[int(0)])
+            .expect("present value skips fallback"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[4].symbol(), &[MirValue::Nil])
+            .expect_err("absent value evaluates fallback"),
+        trap(TrapKind::DivisionByZero)
+    );
+
+    let optimized = optimize_mir(mir, &types).expect("optimized optional MIR");
+    let optimized_interpreter =
+        MirInterpreter::new(&optimized, &types).expect("verified optimized optional MIR");
+    assert_eq!(
+        optimized_interpreter
+            .call(optimized.functions()[0].symbol(), &[int(0), int(7)])
+            .expect("optimized present zero"),
+        vec![int(0)]
+    );
+    assert_eq!(
+        optimized_interpreter
+            .call(optimized.functions()[0].symbol(), &[MirValue::Nil, int(7)])
+            .expect("optimized absent default"),
+        vec![int(7)]
     );
 }
 

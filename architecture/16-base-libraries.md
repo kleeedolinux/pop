@@ -31,7 +31,9 @@ plan are defined by [Public standard-library architecture](./22-public-standard-
 
 - All runtime operations have compiler-proven types; neither library exposes
   dynamic values, string dispatch, or unrestricted reflection.
-- Expected failures use typed `Result<T, TError>` values. Absence uses `T?`.
+- Expected failures use the reserved `Result<T, TError>` union with exact
+  `Ok`/`Error` cases. Prefix `try` propagates an exact error type; absence uses
+  `T?` and postfix `?`. See ADR 0052.
 - HIR and MIR see backend-neutral semantic identities, never native ABI names.
 - Public APIs prefer values, records, unions, functions, views, iterators,
   streams, explicit capabilities, and real opaque resource handles.

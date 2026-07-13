@@ -138,7 +138,8 @@ budget. Documentation tooling must render effect and cost metadata.
 
 ## Unresolved questions
 
-- Syntax for scoped cleanup and result propagation.
+- Syntax for async, cancellation, and suspension-capable cleanup. Synchronous
+  typed-result propagation and lexical cleanup are fixed by ADR 0052.
 - Which cost/effect facts become signature-level metadata versus checked docs.
 - Generic specialization policy and its code-size controls.
 

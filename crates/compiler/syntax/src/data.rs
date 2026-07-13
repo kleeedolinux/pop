@@ -83,6 +83,90 @@ pub struct UnionDeclarationSyntax {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorDeclarationSyntax {
+    name: String,
+    type_parameters: Vec<GenericParameterSyntax>,
+    cases: Vec<ErrorCaseSyntax>,
+    span: SourceSpan,
+}
+
+impl ErrorDeclarationSyntax {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[GenericParameterSyntax] {
+        &self.type_parameters
+    }
+
+    #[must_use]
+    pub fn cases(&self) -> &[ErrorCaseSyntax] {
+        &self.cases
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorCaseSyntax {
+    attributes: Vec<AttributeUseSyntax>,
+    name: String,
+    payload: Vec<ErrorCaseParameterSyntax>,
+    span: SourceSpan,
+}
+
+impl ErrorCaseSyntax {
+    #[must_use]
+    pub fn attributes(&self) -> &[AttributeUseSyntax] {
+        &self.attributes
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &[ErrorCaseParameterSyntax] {
+        &self.payload
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErrorCaseParameterSyntax {
+    name: String,
+    parameter_type: TypeSyntax,
+    span: SourceSpan,
+}
+
+impl ErrorCaseParameterSyntax {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn parameter_type(&self) -> &TypeSyntax {
+        &self.parameter_type
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnumDeclarationSyntax {
     name: String,
     cases: Vec<EnumCaseSyntax>,
@@ -343,6 +427,81 @@ pub fn parse_union_declaration(
         parser.expect_line_end()?;
     }
     Ok(UnionDeclarationSyntax {
+        name,
+        type_parameters,
+        cases,
+        span: SourceSpan::new(source.id(), node.range()),
+    })
+}
+
+/// Parses one closed nominal recoverable-error declaration.
+///
+/// # Errors
+///
+/// Returns an error when a case or typed payload is malformed.
+pub fn parse_error_declaration(
+    source: &SourceFile,
+    syntax: &SyntaxTree,
+    node: &SyntaxNode,
+) -> Result<ErrorDeclarationSyntax, DataDeclarationError> {
+    let mut parser = DataParser::new(source, syntax, node);
+    if node.kind() != NodeKind::ErrorDeclaration {
+        return Err(parser.error("error declaration"));
+    }
+    if !parser
+        .tokens
+        .iter()
+        .any(|token| token.kind() == TokenKind::Identifier && token.text(source) == "error")
+    {
+        return Err(parser.error("`error`"));
+    }
+    parser.seek(TokenKind::Identifier)?;
+    let name_token = parser.expect(TokenKind::Identifier, "error name")?;
+    let name = name_token.text(source).to_owned();
+    let type_parameters = parser.parse_type_parameters()?;
+    parser.expect(TokenKind::Newline, "line break after error name")?;
+    let mut cases = Vec::new();
+    loop {
+        parser.skip_newlines();
+        let attributes = parser.parse_member_attributes()?;
+        if parser.consume(TokenKind::End).is_some() {
+            if !attributes.is_empty() {
+                return Err(parser.error("member after attribute"));
+            }
+            break;
+        }
+        let case_name = parser.expect(TokenKind::Identifier, "error case name")?;
+        let start = case_name.range().start();
+        let mut end = case_name.range().end();
+        let mut payload = Vec::new();
+        if parser.consume(TokenKind::LeftParenthesis).is_some() {
+            while parser.current_kind() != Some(TokenKind::RightParenthesis) {
+                let parameter = parser.expect(TokenKind::Identifier, "case parameter name")?;
+                parser.expect(TokenKind::Colon, "`:`")?;
+                let parameter_type = parser.parse_type()?;
+                payload.push(ErrorCaseParameterSyntax {
+                    name: parameter.text(source).to_owned(),
+                    parameter_type,
+                    span: SourceSpan::new(source.id(), parameter.range()),
+                });
+                if parser.consume(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+            end = parser
+                .expect(TokenKind::RightParenthesis, "`)`")?
+                .range()
+                .end();
+        }
+        cases.push(ErrorCaseSyntax {
+            attributes,
+            name: case_name.text(source).to_owned(),
+            payload,
+            span: SourceSpan::new(source.id(), ordered_range(start, end)),
+        });
+        parser.expect_line_end()?;
+    }
+    Ok(ErrorDeclarationSyntax {
         name,
         type_parameters,
         cases,

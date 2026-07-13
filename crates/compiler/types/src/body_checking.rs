@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
 use pop_foundation::{
-    BindingId, CaptureId, Diagnostic, FieldId, LocalId, ModuleId, NestedFunctionId, SourceSpan,
-    SymbolId, TypeId, ValueParameterId,
+    BindingId, CaptureId, Diagnostic, FieldId, LocalId, ModuleId, NestedFunctionId, ResultCaseId,
+    SourceSpan, SymbolId, TypeId, ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -53,13 +53,16 @@ pub(crate) struct Binding {
 pub(crate) enum BindingKind {
     Local(LocalId),
     LoopLocal(LocalId),
+    ImmutableLocal(LocalId),
     Parameter(ValueParameterId),
 }
 
 impl BindingKind {
     pub(crate) const fn capture_source(self) -> CaptureSource {
         match self {
-            Self::Local(local) | Self::LoopLocal(local) => CaptureSource::Local(local),
+            Self::Local(local) | Self::LoopLocal(local) | Self::ImmutableLocal(local) => {
+                CaptureSource::Local(local)
+            }
             Self::Parameter(parameter) => CaptureSource::Parameter(parameter),
         }
     }
@@ -84,6 +87,12 @@ pub(crate) enum UnionCaseLookup {
     NotUnion,
     Missing,
     Found(crate::UnionDefinition, crate::UnionCaseDefinition),
+}
+
+pub(crate) enum ErrorCaseLookup {
+    NotError,
+    Missing,
+    Found(crate::ErrorDefinition, crate::ErrorCaseDefinition),
 }
 
 pub(crate) enum BoundPathLookup {
@@ -155,6 +164,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) written_bindings: BTreeSet<BindingId>,
     pub(crate) signature_stack: Vec<ResolvedFunctionSignature>,
     pub(crate) loop_depth: u32,
+    pub(crate) flow_narrowings: Vec<BTreeMap<BindingId, TypeId>>,
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
@@ -179,6 +189,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             written_bindings: BTreeSet::new(),
             signature_stack: Vec::new(),
             loop_depth: 0,
+            flow_narrowings: Vec::new(),
         }
     }
 
@@ -389,7 +400,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 receiver,
                 method,
                 arguments,
-            } => self.check_receiver_method_call(receiver, method, arguments, span),
+            } => {
+                let result = self.check_receiver_method_call(receiver, method, arguments, span);
+                self.invalidate_flow_narrowings();
+                result
+            }
             ExpressionSyntaxKind::Array(elements) => {
                 self.check_array_literal(elements, expected.map(|expected| expected.type_id), span)
             }
@@ -420,6 +435,15 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             ExpressionSyntaxKind::Unary { operator, operand } => {
                 self.check_unary(*operator, operand, expected, span)
+            }
+            ExpressionSyntaxKind::OptionalPropagate { operand } => {
+                self.check_optional_propagate(operand, span)
+            }
+            ExpressionSyntaxKind::ResultPropagate { .. } => {
+                let ExpressionSyntaxKind::ResultPropagate { operand } = expression.kind() else {
+                    unreachable!()
+                };
+                self.check_result_propagate(operand, span)
             }
             ExpressionSyntaxKind::Binary {
                 operator,
@@ -454,13 +478,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 })
             }
             ExpressionSyntaxKind::Call { callee, arguments } => {
-                self.check_call(callee, arguments, span)
+                let result = self.check_call(callee, arguments, expected, span);
+                self.invalidate_flow_narrowings();
+                result
             }
             ExpressionSyntaxKind::GenericCall {
                 callee,
                 type_arguments,
                 arguments,
-            } => self.check_generic_call(callee, type_arguments, arguments, span),
+            } => {
+                let result = self.check_generic_call(callee, type_arguments, arguments, span);
+                self.invalidate_flow_narrowings();
+                result
+            }
         }
     }
 
@@ -481,6 +511,53 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         };
         if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
             return self.check_array_create(type_arguments, arguments, span);
+        }
+        if matches!(path.as_slice(), [result, case] if result == "Result" && matches!(case.as_str(), "Ok" | "Error"))
+        {
+            if type_arguments.len() != 2 {
+                self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                    span,
+                    "Result",
+                    2,
+                    type_arguments.len(),
+                ));
+                return None;
+            }
+            if arguments.len() != 1 {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    span,
+                    "Result case construction",
+                    1,
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let enclosing = self.signature_stack.last().cloned()?;
+            let mut resolved = Vec::with_capacity(2);
+            for argument in type_arguments {
+                let (argument, diagnostics) =
+                    self.resolver
+                        .resolve_annotation(self.module, argument, &enclosing);
+                self.diagnostics.extend(diagnostics);
+                resolved.push(argument?.type_id()?);
+            }
+            let ok = path.last().is_some_and(|case| case == "Ok");
+            let payload_type = if ok { resolved[0] } else { resolved[1] };
+            let payload = self.check_expression_expected(
+                &arguments[0],
+                Some(ExpectedExpressionType::plain(payload_type)),
+            )?;
+            self.require_same_type(payload_type, payload.type_id(), payload.span(), span);
+            let result_type = self.resolver.result_type(resolved[0], resolved[1])?;
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::ResultCase {
+                    result: self.resolver.result_definition()?,
+                    case: ResultCaseId::from_raw(u32::from(!ok)),
+                    arguments: vec![payload],
+                },
+                type_id: result_type,
+                span,
+            });
         }
         if path.len() >= 2 {
             let type_name = path[..path.len() - 1].join(".");
@@ -527,6 +604,44 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     return None;
                 };
                 return self.check_union_case_call(&definition, &case, arguments, span);
+            }
+            if let Some(definition_symbol) = resolution.symbol()
+                && let Some(expected_arity) =
+                    self.resolver.error_type_parameter_count(definition_symbol)
+            {
+                if expected_arity != type_arguments.len() {
+                    self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                        span,
+                        &type_name,
+                        u16::try_from(expected_arity).unwrap_or(u16::MAX),
+                        type_arguments.len(),
+                    ));
+                    return None;
+                }
+                let enclosing = self.signature_stack.last().cloned()?;
+                let mut resolved_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments {
+                    let (resolved, diagnostics) =
+                        self.resolver
+                            .resolve_annotation(self.module, argument, &enclosing);
+                    self.diagnostics.extend(diagnostics);
+                    resolved_arguments.push(resolved?.type_id()?);
+                }
+                let definition = self
+                    .resolver
+                    .instantiate_error(definition_symbol, &resolved_arguments)?;
+                let case_name = path.last()?;
+                let Some(case) = definition
+                    .cases()
+                    .iter()
+                    .find(|case| case.name() == case_name)
+                    .cloned()
+                else {
+                    self.diagnostics
+                        .push(resolution_diagnostics::unknown_name(span, path.join(".")));
+                    return None;
+                };
+                return self.check_error_case_call(&definition, &case, arguments, span);
             }
         }
         let name = path.join(".");
@@ -951,6 +1066,30 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             UnionCaseLookup::Missing => return None,
             UnionCaseLookup::NotUnion => {}
         }
+        match self.lookup_error_case(path, span) {
+            ErrorCaseLookup::Found(definition, case) => {
+                if !case.parameters().is_empty() {
+                    self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                        span,
+                        "error case",
+                        case.parameters().len(),
+                        0,
+                    ));
+                    return None;
+                }
+                return Some(TypedExpression {
+                    kind: TypedExpressionKind::ErrorCase {
+                        error: definition.error(),
+                        case: case.case(),
+                        arguments: Vec::new(),
+                    },
+                    type_id: definition.type_id(),
+                    span,
+                });
+            }
+            ErrorCaseLookup::Missing => return None,
+            ErrorCaseLookup::NotError => {}
+        }
         let name = path.join(".");
         let resolution =
             self.resolver
@@ -1054,6 +1193,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id: binding.type_id,
             span,
         };
+        let effective_type = self.effective_binding_type(binding);
+        if effective_type != binding.type_id {
+            expression = TypedExpression {
+                kind: TypedExpressionKind::OptionalNarrow {
+                    optional: Box::new(expression),
+                },
+                type_id: effective_type,
+                span,
+            };
+        }
         for field_name in &path[1..] {
             if let Some(definition) = self
                 .resolver
@@ -1117,6 +1266,148 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .copied()
     }
 
+    pub(crate) fn effective_binding_type(&self, binding: Binding) -> TypeId {
+        if self.function_depth == binding.function_depth
+            && let Some(narrowed) = self
+                .flow_narrowings
+                .iter()
+                .rev()
+                .find_map(|facts| facts.get(&binding.id))
+        {
+            return *narrowed;
+        }
+        binding.type_id
+    }
+
+    pub(crate) fn optional_inner(&mut self, type_id: TypeId) -> Option<TypeId> {
+        let nil = self.resolver.arena().source_type("nil")?;
+        let SemanticType::Union(members) = self.resolver.arena().get(type_id)?.clone() else {
+            return None;
+        };
+        if !members.contains(&nil) {
+            return None;
+        }
+        let present = members
+            .into_iter()
+            .filter(|member| *member != nil)
+            .collect::<Vec<_>>();
+        match present.as_slice() {
+            [inner] => Some(*inner),
+            [] => None,
+            _ => self.resolver.arena_mut().union(present).ok(),
+        }
+    }
+
+    pub(crate) fn invalidate_flow_binding(&mut self, binding: BindingId) {
+        for facts in &mut self.flow_narrowings {
+            facts.remove(&binding);
+        }
+    }
+
+    pub(crate) fn invalidate_flow_narrowings(&mut self) {
+        for facts in &mut self.flow_narrowings {
+            facts.clear();
+        }
+    }
+
+    fn check_optional_propagate(
+        &mut self,
+        operand: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let optional = self.check_expression(operand)?;
+        let Some(inner_type) = self.optional_inner(optional.type_id()) else {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id()]);
+            return None;
+        };
+        let Some(signature) = self.signature_stack.last() else {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id()]);
+            return None;
+        };
+        if signature.results().len() != 1 {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id()]);
+            return None;
+        }
+        let enclosing_result = signature.results()[0].type_id()?;
+        if self.optional_inner(enclosing_result).is_none() {
+            self.invalid_operator(span, "postfix ?", &[optional.type_id(), enclosing_result]);
+            return None;
+        }
+        Some(TypedExpression {
+            kind: TypedExpressionKind::OptionalPropagate {
+                optional: Box::new(optional),
+                enclosing_result,
+            },
+            type_id: inner_type,
+            span,
+        })
+    }
+
+    fn check_result_propagate(
+        &mut self,
+        operand: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let result = self.check_expression(operand)?;
+        let Some((success_type, error_type)) = self.resolver.result_parts(result.type_id()) else {
+            self.diagnostics
+                .push(type_diagnostics::invalid_result_propagation(
+                    span,
+                    self.type_name(result.type_id()),
+                    "non-Result function",
+                ));
+            return None;
+        };
+        let Some(signature) = self.signature_stack.last() else {
+            self.diagnostics
+                .push(type_diagnostics::invalid_result_propagation(
+                    span,
+                    self.type_name(result.type_id()),
+                    "no enclosing function",
+                ));
+            return None;
+        };
+        if signature.results().len() != 1 {
+            self.diagnostics
+                .push(type_diagnostics::invalid_result_propagation(
+                    span,
+                    self.type_name(result.type_id()),
+                    "enclosing function does not return one Result",
+                ));
+            return None;
+        }
+        let enclosing_result = signature.results()[0].type_id()?;
+        let Some((_, enclosing_error)) = self.resolver.result_parts(enclosing_result) else {
+            self.diagnostics
+                .push(type_diagnostics::invalid_result_propagation(
+                    span,
+                    self.type_name(result.type_id()),
+                    self.type_name(enclosing_result),
+                ));
+            return None;
+        };
+        if error_type != enclosing_error {
+            self.diagnostics
+                .push(type_diagnostics::invalid_result_propagation(
+                    span,
+                    self.type_name(result.type_id()),
+                    self.type_name(enclosing_result),
+                ));
+            return None;
+        }
+        Some(TypedExpression {
+            kind: TypedExpressionKind::ResultPropagate {
+                result: Box::new(result),
+                result_definition: self.resolver.result_definition()?,
+                success_type,
+                error_type,
+                enclosing_result,
+            },
+            type_id: success_type,
+            span,
+        })
+    }
+
     pub(crate) fn binding_reference_kind(
         &mut self,
         binding: Binding,
@@ -1127,9 +1418,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .map(TypedExpressionKind::Capture);
         }
         Some(match binding.kind {
-            BindingKind::Local(local) | BindingKind::LoopLocal(local) => {
-                TypedExpressionKind::Local(local)
-            }
+            BindingKind::Local(local)
+            | BindingKind::LoopLocal(local)
+            | BindingKind::ImmutableLocal(local) => TypedExpressionKind::Local(local),
             BindingKind::Parameter(parameter) => TypedExpressionKind::Parameter(parameter),
         })
     }
@@ -1204,6 +1495,11 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
             then_body,
             else_body,
             ..
+        }
+        | TypedStatementKind::OptionalIf {
+            then_body,
+            else_body,
+            ..
         } => {
             !else_body.is_empty()
                 && statements_definitely_return(then_body)
@@ -1215,13 +1511,27 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
                     .iter()
                     .all(|arm| statements_definitely_return(arm.body()))
         }
+        TypedStatementKind::ErrorMatch { arms, .. } => {
+            !arms.is_empty()
+                && arms
+                    .iter()
+                    .all(|arm| statements_definitely_return(arm.body()))
+        }
+        TypedStatementKind::ResultMatch { arms, .. } => {
+            !arms.is_empty()
+                && arms
+                    .iter()
+                    .all(|arm| statements_definitely_return(arm.body()))
+        }
         TypedStatementKind::Local { .. }
         | TypedStatementKind::MultipleLocal { .. }
         | TypedStatementKind::LocalSet { .. }
         | TypedStatementKind::ParameterSet { .. }
         | TypedStatementKind::CaptureSet { .. }
         | TypedStatementKind::While { .. }
+        | TypedStatementKind::OptionalWhile { .. }
         | TypedStatementKind::NumericFor { .. }
+        | TypedStatementKind::Defer { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }
@@ -1268,9 +1578,12 @@ pub(crate) const fn typed_unary(operator: SyntaxUnaryOperator) -> TypedUnaryOper
     }
 }
 
-pub(crate) const fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryOperator {
+pub(crate) fn typed_binary(operator: SyntaxBinaryOperator) -> TypedBinaryOperator {
     match operator {
         SyntaxBinaryOperator::Or => TypedBinaryOperator::Or,
+        SyntaxBinaryOperator::OptionalDefault => {
+            unreachable!("optional default has a distinct typed expression")
+        }
         SyntaxBinaryOperator::And => TypedBinaryOperator::And,
         SyntaxBinaryOperator::Equal => TypedBinaryOperator::Equal,
         SyntaxBinaryOperator::NotEqual => TypedBinaryOperator::NotEqual,
@@ -1297,6 +1610,7 @@ pub(crate) const fn unary_text(operator: SyntaxUnaryOperator) -> &'static str {
 pub(crate) const fn binary_text(operator: SyntaxBinaryOperator) -> &'static str {
     match operator {
         SyntaxBinaryOperator::Or => "or",
+        SyntaxBinaryOperator::OptionalDefault => "??",
         SyntaxBinaryOperator::And => "and",
         SyntaxBinaryOperator::Equal => "==",
         SyntaxBinaryOperator::NotEqual => "~=",

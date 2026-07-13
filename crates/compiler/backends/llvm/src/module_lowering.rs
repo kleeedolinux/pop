@@ -218,16 +218,12 @@ pub(crate) fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec
 pub(crate) fn runtime_declarations() -> Vec<String> {
     vec![
         format!(
-            "declare i64 @{}(i64, i64, i1) nounwind",
-            native_runtime_symbol(RuntimeOperation::TableGet)
+            "declare i8 @{}(i64, i64, i1, ptr) nounwind",
+            pop_runtime_native_abi::TABLE_GET_CHECKED_SYMBOL
         ),
         format!(
             "declare i8 @{}(i64, i64, i64, i1, i1) nounwind",
             native_runtime_symbol(RuntimeOperation::TableSet)
-        ),
-        format!(
-            "declare i64 @{}(i64, i64) nounwind",
-            native_runtime_symbol(RuntimeOperation::ArrayGet)
         ),
         format!(
             "declare i8 @{}(i64, ptr) nounwind",
@@ -263,6 +259,7 @@ pub(crate) fn collect_field_layout(bubble: &MirBubble) -> BTreeMap<FieldId, u32>
             MirDeclarationKind::Record(record) => (record.fields(), 0_u32),
             MirDeclarationKind::Class(class) => (class.fields(), 1_u32),
             MirDeclarationKind::Union(_)
+            | MirDeclarationKind::Error(_)
             | MirDeclarationKind::Enum(_)
             | MirDeclarationKind::Interface(_) => continue,
         };

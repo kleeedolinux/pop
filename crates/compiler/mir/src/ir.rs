@@ -8,9 +8,10 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FunctionId, InterfaceId,
-    InterfaceMethodId, MethodId, NamespaceId, NestedFunctionId, SourceSpan, StandardFunctionId,
-    SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId, EnumCaseId,
+    ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, MethodId,
+    NamespaceId, NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
@@ -268,9 +269,49 @@ impl MirDeclaration {
 pub enum MirDeclarationKind {
     Record(MirRecordDeclaration),
     Union(MirUnionDeclaration),
+    Error(MirErrorDeclaration),
     Enum(MirEnumDeclaration),
     Class(MirClassDeclaration),
     Interface(MirInterfaceDeclaration),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirErrorDeclaration {
+    pub(crate) error: ErrorId,
+    pub(crate) type_id: TypeId,
+    pub(crate) cases: Vec<MirErrorCase>,
+}
+
+impl MirErrorDeclaration {
+    #[must_use]
+    pub const fn error(&self) -> ErrorId {
+        self.error
+    }
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+    #[must_use]
+    pub fn cases(&self) -> &[MirErrorCase] {
+        &self.cases
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirErrorCase {
+    pub(crate) case: ErrorCaseId,
+    pub(crate) parameters: Vec<TypeId>,
+}
+
+impl MirErrorCase {
+    #[must_use]
+    pub const fn case(&self) -> ErrorCaseId {
+        self.case
+    }
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -663,6 +704,7 @@ impl MirFunction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirBlock {
     pub(crate) block: BlockId,
+    pub(crate) cleanup: Option<MirCleanupBlock>,
     pub(crate) arguments: Vec<MirBlockArgument>,
     pub(crate) instructions: Vec<MirInstruction>,
     pub(crate) terminator: MirTerminator,
@@ -672,6 +714,11 @@ impl MirBlock {
     #[must_use]
     pub const fn block(&self) -> BlockId {
         self.block
+    }
+
+    #[must_use]
+    pub const fn cleanup(&self) -> Option<MirCleanupBlock> {
+        self.cleanup
     }
 
     #[must_use]
@@ -688,6 +735,35 @@ impl MirBlock {
     pub const fn terminator(&self) -> &MirTerminator {
         &self.terminator
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirCleanupBlock {
+    pub(crate) scope: CleanupScopeId,
+    pub(crate) reason: MirCleanupExitReason,
+}
+
+impl MirCleanupBlock {
+    #[must_use]
+    pub const fn scope(self) -> CleanupScopeId {
+        self.scope
+    }
+
+    #[must_use]
+    pub const fn reason(self) -> MirCleanupExitReason {
+        self.reason
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirCleanupExitReason {
+    Normal,
+    Return,
+    ResultFailure,
+    Break,
+    Continue,
+    Unwind,
+    Cancellation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -721,6 +797,7 @@ pub struct MirInstruction {
     pub(crate) kind: MirInstructionKind,
     pub(crate) effects: MirEffectSummary,
     pub(crate) effects_explicit: bool,
+    pub(crate) unwind: MirUnwindAction,
     pub(crate) span: SourceSpan,
 }
 
@@ -773,6 +850,18 @@ impl MirInstruction {
     }
 
     #[must_use]
+    pub const fn unwind_action(&self) -> MirUnwindAction {
+        match &self.kind {
+            MirInstructionKind::CallDirect { unwind, .. }
+            | MirInstructionKind::CallReferenced { unwind, .. }
+            | MirInstructionKind::CallDirectMethod { unwind, .. }
+            | MirInstructionKind::CallInterface { unwind, .. }
+            | MirInstructionKind::CallIndirect { unwind, .. } => *unwind,
+            _ => self.unwind,
+        }
+    }
+
+    #[must_use]
     pub const fn span(&self) -> SourceSpan {
         self.span
     }
@@ -793,6 +882,34 @@ pub enum MirInstructionKind {
     },
     BooleanConstant(bool),
     NilConstant,
+    OptionalIsPresent {
+        optional: ValueId,
+    },
+    OptionalGet {
+        optional: ValueId,
+    },
+    ResultMake {
+        result: BuiltinTypeId,
+        case: ResultCaseId,
+        arguments: Vec<ValueId>,
+    },
+    ErrorMake {
+        error: ErrorId,
+        case: ErrorCaseId,
+        arguments: Vec<ValueId>,
+    },
+    ResultIsOk {
+        result: ValueId,
+        definition: BuiltinTypeId,
+    },
+    ResultGetOk {
+        result: ValueId,
+        definition: BuiltinTypeId,
+    },
+    ResultGetError {
+        result: ValueId,
+        definition: BuiltinTypeId,
+    },
     EnumConstant {
         definition: SymbolId,
         case: EnumCaseId,
@@ -1196,13 +1313,36 @@ pub enum MirTerminator {
         union: SymbolId,
         arms: Vec<MirUnionSwitchArm>,
     },
+    ErrorSwitch {
+        scrutinee: ValueId,
+        error: ErrorId,
+        arms: Vec<MirErrorSwitchArm>,
+    },
     Return {
         values: Vec<ValueId>,
     },
     Trap(Trap),
     Panic(PanicPayload),
     ContinueUnwind(UnwindReason),
+    ResumeUnwind,
     Unreachable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirErrorSwitchArm {
+    pub(crate) case: ErrorCaseId,
+    pub(crate) target: BlockId,
+}
+
+impl MirErrorSwitchArm {
+    #[must_use]
+    pub const fn case(self) -> ErrorCaseId {
+        self.case
+    }
+    #[must_use]
+    pub const fn target(self) -> BlockId {
+        self.target
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1282,6 +1422,10 @@ pub enum MirVerificationError {
         instruction: ValueId,
         result_type: TypeId,
     },
+    OptionalGetWithoutPresence {
+        instruction: ValueId,
+        optional: ValueId,
+    },
     WrongOperandType {
         instruction: ValueId,
         operand: ValueId,
@@ -1318,6 +1462,10 @@ pub enum MirVerificationError {
         union: SymbolId,
         case: UnionCaseId,
     },
+    DuplicateErrorCase {
+        error: ErrorId,
+        case: ErrorCaseId,
+    },
     InvalidDeclarationType {
         symbol: SymbolId,
         type_id: TypeId,
@@ -1343,8 +1491,18 @@ pub enum MirVerificationError {
         union: SymbolId,
         case: UnionCaseId,
     },
+    InvalidResultOperation {
+        instruction: ValueId,
+    },
+    InvalidErrorOperation {
+        instruction: ValueId,
+        error: ErrorId,
+    },
     InvalidUnionSwitch {
         union: SymbolId,
+    },
+    InvalidErrorSwitch {
+        error: ErrorId,
     },
     UnknownInterface(InterfaceId),
     UnknownInterfaceMethod(InterfaceMethodId),
@@ -1425,6 +1583,12 @@ pub enum MirVerificationError {
     },
     InvalidUnwindAction {
         instruction: ValueId,
+    },
+    ResumeOutsideCleanup {
+        block: BlockId,
+    },
+    InvalidCleanupBlock {
+        block: BlockId,
     },
     MissingGcSafePoint {
         instruction: ValueId,

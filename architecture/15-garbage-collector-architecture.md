@@ -1,594 +1,1719 @@
-# Garbage Collector Architecture
+# Pop Garbage Collector Architecture
 
-## Objective
+## Status
 
-Pop Lang's first managed runtime uses a precise, concurrent, generational
-tracing garbage collector designed for:
+This document defines the target architecture for Pop Lang's production garbage collector.
 
-- very fast allocation;
-- short, bounded common pauses;
-- high multicore marking throughput;
-- predictable memory/CPU tuning;
-- native LLVM code and a future VM;
-- thousands of suspended coroutines;
-- no dynamic values or general runtime reflection requirement.
+It is not a claim that the current runtime already implements every mechanism described here. The design is intentionally staged so that correctness infrastructure, allocation performance, concurrency, and low-latency behavior can be validated independently.
 
-“Go-level speed” is a benchmark target, not a claim granted by architecture.
-The collector must be measured against current Go and other relevant runtimes on
-the same workloads, hardware, live-heap sizes, allocation rates, and latency
-percentiles. Pop Lang should beat its own published regression budgets before it
-claims comparative performance.
+The collector is provisionally named **Pop GC**.
 
-## Selected design
+---
 
-The collector, provisionally named **Pop GC**, combines:
+# 1. Objective
 
-- thread-local allocation buffers for the fast path;
-- a moving young generation for short-lived objects;
-- age/size-based promotion;
-- a region-based, mostly non-moving mature heap;
-- parallel stop-the-world minor collections;
-- concurrent snapshot-at-the-beginning marking for major collections;
-- concurrent/lazy sweeping;
-- card marking for mature-to-young references;
-- precise compiler-generated stack and object pointer maps;
-- allocation pacing, background workers, and bounded mutator assists;
-- explicit memory-limit and heap-growth controllers.
+Pop Lang needs a memory-management system that preserves the ergonomics and safety of a garbage-collected language while avoiding the traditional costs associated with a single globally shared managed heap.
 
-This hybrid is intentionally not a copy of Go's collector. Generational
-collection is valuable for Pop Lang's expected allocation-heavy game/server
-workloads, while concurrent mature marking limits pauses as the live heap grows.
+The target is not merely a collector with short average pauses. The target is a runtime architecture in which the most frequent memory-management operations do not require the entire program to stop.
 
-## Performance goals
+Pop GC is designed around the following goals:
 
-Targets are evaluated on a versioned reference benchmark suite and hardware
-profile. Initial release gates should include:
+- extremely fast allocation;
+- very low and predictable latency;
+- no routine global stop-the-world young-generation collection;
+- no full-heap stop-the-world mark or sweep in normal operation;
+- bounded global coordination points;
+- high multicore marking and reclamation throughput;
+- low barrier overhead;
+- precise memory safety;
+- predictable interaction with coroutines, native code, and FFI;
+- efficient execution for games, servers, compilers, tools, and interactive applications;
+- native LLVM code today and a future bytecode or native VM;
+- thousands or millions of suspended coroutines;
+- explicit control over memory limits and latency profiles;
+- a design that can use ownership, borrowing, isolation, and region lifetime information when the compiler can prove them;
+- a conventional managed programming model when the compiler cannot prove stronger lifetime properties.
 
-- allocation fast path: pointer bump with no global lock;
-- no collection work for stack-allocated/scalar-replaced objects;
-- minor GC pause P99 below 2 ms for the interactive benchmark profile;
-- major transition/remark pause P99 below 2 ms and maximum below 10 ms on the
-  documented server profile;
-- default steady-state GC CPU below 10% on allocation-heavy server benchmarks;
-- background marking that completes before the configured heap target;
-- no pause proportional to total heap capacity; pauses may depend on active
-  threads, roots, dirty cards, and bounded young live data;
-- no unbounded finalizer, weak-reference, or Bubble-unload work in a pause.
+The collector must not rely on dynamic values, general-purpose reflection, conservative pointer discovery, or a universal object header.
 
-These numbers are engineering gates, not language-semantic guarantees. Every
-published result includes heap size, live set, roots, allocation rate, core
-count, object graph shape, and percentile methodology.
+## 1.1 What “no stop-the-world” means
 
-## Heap organization
+A literal guarantee that no thread will ever pause is unrealistic for a general-purpose managed runtime.
+
+Threads can still pause or assist because of:
+
+- allocation pressure;
+- hard memory limits;
+- coroutine scheduling;
+- safepoint or epoch acknowledgement;
+- local young-generation collection;
+- object publication;
+- pinning;
+- foreign-code transitions;
+- evacuation reserve exhaustion;
+- operating-system scheduling;
+- page faults;
+- explicit synchronization in the application.
+
+Therefore, the architectural target is more precise:
+
+> Pop GC must not perform routine global pauses whose duration is proportional to total heap size, total live data, or the complete object graph.
+
+Normal collection may use short global handshakes to change epochs, publish thread state, or enable and disable barriers. Those handshakes must have a fixed and tightly bounded amount of collector work. Heap tracing, sweeping, stack processing, card refinement, and most reclamation work must happen concurrently, incrementally, locally, or cooperatively.
+
+The collector should also avoid global pauses caused by the young generation. Young-generation collection should be local to a scheduler or ownership domain whenever possible.
+
+This design uses the term **no global STW in the common path** rather than claiming that no thread can ever be delayed.
+
+## 1.2 Why this objective matters
+
+A collector can have excellent average throughput and still produce poor application behavior.
+
+A game may miss a frame because one pause exceeds its frame budget. A server may have high average request throughput while producing unacceptable P99.9 latency. A compiler or language server may feel unresponsive because the collector competes aggressively for memory bandwidth. A coroutine runtime may experience coordination spikes even when the heap itself is small.
+
+For this reason, Pop GC is evaluated using both collector metrics and application-level metrics.
+
+The collector must optimize:
+
+- mutator throughput;
+- tail latency;
+- memory footprint;
+- memory bandwidth;
+- CPU consumed by collection;
+- allocator scalability;
+- barrier cost;
+- root-processing cost;
+- fragmentation;
+- time spent waiting for global coordination;
+- time spent in mutator assists;
+- operating-system memory-return behavior.
+
+No single metric is sufficient.
+
+## 1.3 Performance target
+
+“Faster than Go” or “faster than C with a runtime” is not granted by architecture.
+
+Such statements are benchmark hypotheses.
+
+All comparative claims must use:
+
+- the same workload;
+- the same hardware;
+- the same operating system;
+- equivalent compiler optimization levels;
+- equivalent memory limits;
+- equivalent live-heap sizes;
+- equivalent allocation rates;
+- equivalent thread counts;
+- equivalent object graph shapes;
+- equivalent latency measurement methods;
+- warm and steady-state measurements;
+- P50, P95, P99, P99.9, and maximum latency where relevant.
+
+Pop GC should first beat its own versioned regression budgets. External comparisons come after the implementation is stable enough to measure honestly.
+
+---
+
+# 2. Design Principles
+
+Pop GC follows several principles.
+
+## 2.1 Do not collect what the compiler can prove does not need collection
+
+The fastest traced allocation is an allocation that never reaches the managed heap.
+
+The compiler should aggressively use:
+
+- stack allocation;
+- scalar replacement;
+- escape analysis;
+- closure-environment elimination;
+- unboxed primitives;
+- specialized generics;
+- allocation sinking;
+- allocation fusion;
+- temporary arenas;
+- ownership transfer;
+- immutable sharing;
+- region lifetime inference.
+
+## 2.2 Keep local memory local
+
+A globally shared heap forces global coordination.
+
+Pop should preserve locality in the memory model:
+
+- thread-local allocation buffers;
+- scheduler-local young generations;
+- coroutine-local temporary storage;
+- isolated regions with a single external owner;
+- explicitly shared mature objects only when sharing is required.
+
+## 2.3 Make sharing explicit in the runtime model
+
+The collector should distinguish:
+
+- local mutable objects;
+- isolated object graphs;
+- immutable shared values;
+- mutable shared values;
+- pinned native-facing objects;
+- large pointer-free buffers;
+- unmanaged resources.
+
+These categories have different safety and collection requirements. Treating all of them identically wastes CPU and memory.
+
+## 2.4 Optimize for memory locality, not only instruction count
+
+Tracing collectors often become limited by memory latency and bandwidth rather than arithmetic.
+
+Pop GC should organize work by pages and regions so that workers scan nearby metadata and objects together.
+
+## 2.5 Keep the common path concrete
+
+Allocation, pointer stores, generation checks, and safepoint polls must not require:
+
+- string lookup;
+- dynamic registration;
+- virtual dispatch;
+- global locks;
+- heap allocation;
+- process-global collector discovery.
+
+The implementation may preserve a backend-neutral runtime contract without inserting abstraction overhead into the native fast path.
+
+## 2.6 Never hide catastrophic fallback behavior
+
+The production collector must not silently perform a full-heap stop-the-world collection because fragmentation, marking debt, or evacuation reserve was mismanaged.
+
+If an emergency mode exists, it must be:
+
+- explicit;
+- measurable;
+- rare;
+- documented;
+- testable;
+- visible in telemetry.
+
+---
+
+# 3. Selected Architecture
+
+Pop GC combines:
+
+- precise compiler-generated pointer maps;
+- thread-local allocation buffers;
+- scheduler-local moving young generations;
+- isolated ownership regions;
+- a shared page-centric mark-region heap;
+- concurrent snapshot-at-the-beginning marking;
+- concurrent or lazy sweeping;
+- concurrent remembered-set refinement;
+- selective concurrent evacuation;
+- side metadata;
+- adaptive pretenuring;
+- explicit pinned and foreign-memory spaces;
+- hard memory limits and adaptive heap growth;
+- bounded mutator assists;
+- stack watermarks and incremental root processing;
+- deterministic resource management outside tracing;
+- no user finalizers in the first production version.
+
+The core heap organization is:
 
 ```text
-ManagedHeap
-  YoungGeneration
-    EdenRegions
-    SurvivorRegions
-  MatureGeneration
-    SizeClassRegions
-    FreeRegionPool
+ManagedMemory
+  StackAndScalarStorage
+  ScopedArenaSpace
+  LocalHeaps
+    LocalHeap[SchedulerId]
+      EdenPages
+      SurvivorPages
+      LocalLargeObjects
+  IsolatedRegionSpace
+  SharedHeap
+    SharedSmallObjectPages
+    SharedMediumObjectRegions
+    SharedEvacuationRegions
   LargeObjectSpace
-  SideMetadata
-    MarkBitmaps
-    CardTable
+    PointerFreeBlobs
+    PointerContainingLargeObjects
+  PinnedSpace
+  RuntimeMetadata
     RegionTable
-    PinCounts
+    PageTable
+    MarkBitmaps
+    ScanBitmaps
+    CardTable
+    RememberedSets
+    ForwardingMetadata
+    PinMetadata
+    OwnershipMetadata
+    StackMapRegistry
 ```
 
-### Regions
+---
 
-The heap is divided into fixed-size aligned regions. The initial candidate is
-2 MiB, selected after page/TLB/fragmentation benchmarks. Region metadata records
-generation, allocation top, live bytes, size class, sweep state, and pinning.
+# 4. Memory Domains
 
-Regions allow parallel ownership, cheap reclamation when empty, bounded card
-tables, and future selective compaction without changing object semantics.
+## 4.1 Stack and scalar storage
 
-### Young generation
+Objects that do not escape their defining scope should not enter the managed heap.
 
-New traced objects normally allocate in Eden through a thread-local allocation
-buffer. A thread-local fast path is:
+The compiler may represent them as:
 
-1. load allocation pointer;
-2. add aligned object size;
-3. compare with buffer limit;
-4. initialize header/pointer fields;
-5. publish the new pointer.
+- machine registers;
+- stack slots;
+- scalarized fields;
+- SSA values;
+- inline aggregates;
+- fixed-size stack buffers.
 
-Refilling a buffer acquires a chunk from the thread's/current Eden region.
-Large, pinned, or policy-selected objects bypass the nursery.
+The collector sees such values only when they contain managed references that remain live at a safepoint.
 
-At minor collection, reachable young objects copy into survivor regions or
-promote to the mature heap. Age threshold, survivor occupancy, object size, and
-copy cost guide promotion. Adaptive sizing keeps the amount of live young data
-within the pause budget.
+The compiler must preserve observable identity. An object cannot be scalar-replaced if the program can observe that two references designate the same object and the transformation would change that result.
 
-### Mature generation
+## 4.2 Scoped arenas
 
-Promoted/long-lived objects occupy size-class or variable-size mature regions.
-Mature objects normally do not move. This keeps FFI, interface dispatch caches,
-and concurrent marking simpler while allowing background sweep.
+A scoped arena supports groups of objects with a common lifetime.
 
-Fragmentation is measured per region. Version one reuses/sweeps regions and can
-return completely empty regions to the OS. Selective mature compaction is
-deferred until fragmentation data proves it necessary; it must use a separate
-bounded design and cannot silently introduce long full-heap pauses.
-
-### Large object space
-
-Objects above an adaptive threshold allocate directly into page-aligned mature
-large-object regions. They never copy during minor collection. Free ranges are
-coalesced in the background. Large arrays expose allocation/retention metrics
-because they can dominate memory even when object counts are low.
-
-## Object representation
-
-A normal traced object conceptually has:
+Example:
 
 ```text
-Object
-  typeInfoPointer
-  fields...
+arena frame {
+    let commands = buildRenderCommands()
+    let particles = updateParticles()
+    render(commands, particles)
+}
 ```
 
-Mark, age, card, and most GC state live in side metadata rather than expanding
-every object header. Locking/identity hash state, if later required, uses a lazy
-side record or carefully specified header bits.
+The arena uses bump allocation and bulk reclamation.
 
-`TypeInfo` contains the minimum runtime-private facts required for collection:
+A reference into an arena must not outlive the arena. The compiler enforces this through lifetime analysis, borrowing rules, escape checks, or explicit annotations.
 
-- object size or layout-class information;
-- precise pointer bitmap or generated scan function;
-- array element stride/pointer map where applicable;
-- nominal type/dispatch identity already required by language semantics;
-- optional destructor only for runtime-internal resources, never user finalizers.
+Arenas are especially useful for:
 
-Field names, UDAs, source declarations, and public reflection data are not
-required by the collector.
+- game frames;
+- parsers;
+- request processing;
+- temporary compiler IR;
+- query execution;
+- serialization;
+- packet assembly;
+- short-lived graph construction.
 
-## Root model
+Arena objects normally require:
+
+- no tracing;
+- no mark bits;
+- no card marking;
+- no per-object reclamation;
+- no finalization.
+
+The runtime may still scan an arena if the arena contains references to other managed spaces. The arena itself is reclaimed as one unit.
+
+## 4.3 Scheduler-local heaps
+
+Each runtime scheduler owns a local young heap.
+
+A local heap contains objects reachable only from:
+
+- the owning scheduler's active threads;
+- coroutines assigned to that scheduler;
+- local runtime structures;
+- local roots;
+- local isolated regions currently owned by that scheduler.
+
+The local heap is collected independently from other schedulers.
+
+The critical invariant is:
+
+> A shared object may not contain a direct reference to an object in a scheduler-local young heap.
+
+This invariant prevents the shared heap from depending on the physical location of young local objects.
+
+Objects may move from local memory to shared memory through an explicit publication operation.
+
+## 4.4 Isolated regions
+
+An isolated region contains an arbitrary object graph with exactly one external owner.
+
+The graph may contain:
+
+- mutable objects;
+- cycles;
+- internal aliasing;
+- arrays;
+- closures;
+- trees;
+- graphs.
+
+The region can move between schedulers or coroutines by transferring ownership.
+
+Conceptually:
+
+```text
+local object graph
+    -> isolate
+    -> move to another owner
+```
+
+The transfer does not require copying every object and does not require atomic reference-count operations on every internal edge.
+
+The type system may expose capabilities similar to:
+
+```text
+local T
+isolated T
+shared T
+borrowed T
+pinned T
+resource T
+```
+
+These names are illustrative. The final language syntax may differ.
+
+The compiler should infer capabilities where possible.
+
+## 4.5 Shared heap
+
+Objects that are intentionally shared across schedulers belong in the shared heap.
+
+Examples include:
+
+- immutable global values;
+- synchronized mutable state;
+- concurrent data structures;
+- intern tables;
+- shared caches;
+- actor registries;
+- module metadata;
+- shared closures;
+- objects referenced by multiple ownership domains.
+
+The shared heap is collected concurrently.
+
+It uses a page-centric mark-region design with selective evacuation.
+
+## 4.6 Large-object space
+
+Large objects bypass copying young generations when copying would be too expensive.
+
+The large-object space distinguishes:
+
+- pointer-free blobs;
+- large pointer arrays;
+- large mixed-layout objects;
+- pinned large objects.
+
+Pointer-free blobs require no tracing after their liveness is established. They may use a simpler allocator and reclamation policy.
+
+Large pointer arrays are divided into scan chunks so that one object cannot monopolize a worker or pause.
+
+## 4.7 Pinned space
+
+Objects with stable addresses belong in a separate pinned space or are promoted into pinned regions.
+
+Pinning must be:
+
+- explicit;
+- scoped;
+- counted;
+- profiled;
+- bounded where possible.
+
+A young object is never exposed to native code and then moved behind its back. It is promoted or copied into a stable-address space before the pointer is exported.
+
+Long-lived pins are reported by the profiler because they can increase fragmentation and reduce evacuation freedom.
+
+---
+
+# 5. Object Representation
+
+Pop GC does not require one universal object header.
+
+## 5.1 Page-described objects
+
+Small-object pages should be monomorphic where practical.
+
+A page descriptor may define:
+
+- object size;
+- alignment;
+- pointer bitmap;
+- scan function;
+- nominal type;
+- dispatch information;
+- array element layout;
+- generation;
+- ownership category.
+
+Objects on such a page may omit a per-object type pointer.
+
+This improves:
+
+- object density;
+- cache locality;
+- scanning speed;
+- metadata locality;
+- memory footprint.
+
+## 5.2 Objects requiring headers
+
+A header may still be required for:
+
+- dynamically dispatched objects;
+- arrays with runtime length;
+- identity hashing;
+- monitor or lock state;
+- forwarding state when side metadata is insufficient;
+- exceptional runtime features.
+
+The header should contain only semantically necessary information.
+
+Mark state, age, card state, pin state, and most forwarding state should live in side metadata.
+
+## 5.3 Reference representation
+
+Managed references may use one of several internal representations:
+
+- direct pointer;
+- compressed offset;
+- region-relative offset;
+- stable handle;
+- tagged capability-aware reference.
+
+The first implementation may use direct pointers, but the ABI should avoid making this choice impossible to change.
+
+The runtime should distinguish types such as:
+
+```text
+ObjectRef
+LocalRef
+SharedRef
+PinnedRef
+Handle
+RawAddress
+```
+
+A raw address is not automatically a managed reference.
+
+---
+
+# 6. Allocation
+
+## 6.1 Thread-local allocation buffers
+
+The normal local allocation path is:
+
+```text
+new_top = alloc_top + aligned_size
+
+if new_top <= alloc_limit:
+    result = alloc_top
+    alloc_top = new_top
+    initialize pointer fields
+    publish object
+    return result
+
+return allocation_slow_path(...)
+```
+
+The fast path requires:
+
+- no global lock;
+- no collector registry lookup;
+- no virtual call;
+- no atomic operation in the common local case.
+
+## 6.2 Publication safety
+
+An object is not visible to another thread until:
+
+- all pointer fields are initialized;
+- required ownership transitions are complete;
+- required barriers have executed;
+- the publication store has the required memory ordering.
+
+The compiler may eliminate barriers for an unpublished object because no other mutator can observe it.
+
+## 6.3 Adaptive pretenuring
+
+Allocation sites with consistently high survival or large copy cost may allocate directly into:
+
+- survivor space;
+- isolated regions;
+- shared mature pages;
+- large-object space;
+- pinned space.
+
+The runtime records survival and promotion statistics by allocation site.
+
+Pretenuring decisions must adapt over time and must not permanently classify an allocation site based on a small sample.
+
+---
+
+# 7. Local Young-Generation Collection
+
+## 7.1 Purpose
+
+The local young generation captures short-lived objects without involving the shared collector.
+
+It uses copying collection because:
+
+- allocation is extremely cheap;
+- dead objects cost almost nothing to reclaim;
+- surviving objects become compact;
+- local ownership reduces synchronization;
+- no global read barrier is required.
+
+## 7.2 Collection scope
+
+A local collection pauses only the owning scheduler's relevant execution context.
+
+It does not stop unrelated schedulers.
+
+Possible phases are:
+
+1. request a local collection;
+2. park or cooperate with the owning scheduler;
+3. publish local roots and TLAB tops;
+4. scan local roots;
+5. scan local remembered references;
+6. evacuate live young objects;
+7. promote or isolate selected survivors;
+8. reset Eden pages;
+9. resume local execution.
+
+## 7.3 Publication during local collection
+
+A local object cannot be published directly into the shared heap.
+
+Publication uses one of the following strategies:
+
+- copy the reachable graph into shared memory;
+- promote the graph into shared memory;
+- freeze it as immutable shared data;
+- transfer it as an isolated region;
+- reject publication if the type is not safely transferable.
+
+The publication operation is an explicit slow path compared with local allocation.
+
+This is intentional. Cheap local allocation is more important than making arbitrary cross-thread sharing free.
+
+## 7.4 Local remembered sets
+
+Local mature objects may point to local young objects.
+
+These edges are recorded by:
+
+- cards;
+- object remembered bits;
+- precise slot logs;
+- compiler-known owner information.
+
+Shared objects never point directly into local young memory, so shared-heap scanning is not required for local collection.
+
+## 7.5 Local large objects
+
+Large local objects may bypass copying Eden.
+
+A pointer-free local blob can be owned directly by the local heap or by an isolated region.
+
+A pointer-containing large object must remain visible to local tracing.
+
+---
+
+# 8. Shared-Heap Collection
+
+## 8.1 Overview
+
+The shared heap uses concurrent snapshot-at-the-beginning marking.
+
+The normal major cycle is:
+
+1. begin a new mark epoch;
+2. perform a short global handshake;
+3. establish root and barrier state;
+4. trace shared objects concurrently;
+5. process roots incrementally;
+6. refine remembered sets concurrently;
+7. require bounded mutator assists if necessary;
+8. complete marking with a bounded handshake;
+9. sweep concurrently;
+10. select evacuation regions;
+11. evacuate selected regions concurrently or incrementally;
+12. update controller targets.
+
+No normal major cycle performs a full-heap stop-the-world mark or sweep.
+
+## 8.2 Snapshot-at-the-beginning
+
+During concurrent marking, overwriting a shared reference must preserve the old value if it belonged to the marking snapshot.
+
+Conceptually:
+
+```text
+old = slot.load()
+
+if shared_marking_active and is_shared_reference(old):
+    satb_log(old)
+
+slot.store(new)
+```
+
+The optimized implementation must keep the fast path minimal.
+
+Thread-local buffers absorb most logging without global synchronization.
+
+## 8.3 Newly allocated shared objects
+
+New shared objects allocated during a mark cycle are treated as live for that cycle.
+
+Their pointer fields must still obey publication and barrier rules.
+
+## 8.4 Page-centric marking
+
+Workers schedule pages rather than arbitrary individual objects whenever practical.
+
+Conceptually:
+
+```text
+SharedPage
+  layout
+  markedBitmap
+  pendingBitmap
+  scannedBitmap
+  objectSize
+  generation
+  ownershipClass
+```
+
+When a reference marks an object, the collector sets the appropriate page bit.
+
+A worker processes pending marked objects in page order.
+
+Benefits include:
+
+- improved cache locality;
+- fewer random metadata accesses;
+- sequential scanning;
+- easier vectorization;
+- reduced queue traffic;
+- better work aggregation.
+
+Pointer-free pages require no field scanning.
+
+## 8.5 Work stealing
+
+Each GC worker owns local work queues.
+
+Workers steal pages, regions, or scan chunks from one another.
+
+Large pointer arrays are divided into chunks so that one large object cannot serialize the cycle.
+
+## 8.6 Concurrent sweeping
+
+Sweeping occurs page by page or region by region.
+
+Completely empty regions may return physical pages to the operating system.
+
+Partially free pages return slots or lines to allocation pools.
+
+Sweep state is visible in side metadata so allocation can safely cooperate with lazy sweeping.
+
+---
+
+# 9. Region and Page Organization
+
+A candidate hierarchy is:
+
+```text
+SuperRegion: 2 MiB
+  Page:      32 KiB to 64 KiB
+    Line:    128 to 256 bytes
+      Slots
+```
+
+These values are not fixed language semantics. They must be selected through benchmark data.
+
+## 9.1 Super-regions
+
+Super-regions support:
+
+- virtual-memory reservation;
+- NUMA placement;
+- page return;
+- fragmentation accounting;
+- large metadata indexing;
+- evacuation-set selection.
+
+## 9.2 Pages
+
+Pages support:
+
+- monomorphic layouts;
+- page-centric marking;
+- size classes;
+- bitmap locality;
+- allocator ownership;
+- concurrent sweep state.
+
+## 9.3 Lines
+
+Lines allow reclamation inside partially live regions.
+
+A mark-region layout can reuse free lines without requiring whole-region compaction.
+
+## 9.4 Region states
+
+A region may be:
+
+```text
+Free
+LocalEden
+LocalSurvivor
+SharedAllocating
+SharedMarking
+SharedSweeping
+EvacuationCandidate
+Evacuating
+Pinned
+LargeObject
+Quarantined
+```
+
+State transitions must be race-safe and explicitly verified.
+
+---
+
+# 10. Fragmentation and Selective Evacuation
+
+## 10.1 Why evacuation is necessary
+
+A permanently non-moving mature heap eventually faces fragmentation.
+
+The runtime must not wait until fragmentation causes an emergency full collection.
+
+It continuously measures:
+
+- live bytes per region;
+- free-line distribution;
+- object size classes;
+- pin density;
+- relocation cost;
+- expected reclaimed space;
+- available evacuation reserve.
+
+## 10.2 Evacuation-set selection
+
+Only a bounded set of poorly utilized regions is selected.
+
+Pinned or highly connected regions may be excluded.
+
+Selection considers:
+
+```text
+benefit =
+    reclaimable_bytes
+    - copy_cost
+    - reference_update_cost
+    - reserve_pressure
+    - pin_penalty
+```
+
+## 10.3 Concurrent evacuation
+
+The preferred long-term design supports concurrent selective evacuation.
+
+During evacuation:
+
+- objects receive forwarding metadata;
+- references are resolved through a barrier or slow path;
+- new references target the relocated object;
+- stale physical addresses are not exposed as stable identity;
+- evacuated regions enter quarantine before reuse.
+
+The collector may use a phase-specific read barrier rather than a permanent barrier.
+
+Conceptually:
+
+```text
+function resolve(reference):
+    if region_state(reference) != Evacuating:
+        return reference
+
+    return resolve_forwarded(reference)
+```
+
+## 10.4 Evacuation reserve
+
+The runtime maintains enough free memory to complete planned evacuation.
+
+A collection must not begin relocation work that cannot finish within the current reserve.
+
+Memory-limit policy must include:
+
+- live shared heap;
+- local heaps;
+- stack memory;
+- GC metadata;
+- evacuation reserve;
+- native runtime allocations;
+- pinned memory;
+- large objects.
+
+## 10.5 No hidden full compaction
+
+If evacuation cannot proceed, the runtime may:
+
+- reduce allocation rate;
+- increase mutator assists;
+- request local promotion changes;
+- avoid selecting additional regions;
+- return an explicit out-of-memory failure.
+
+It must not silently convert the cycle into an unbounded full-heap pause.
+
+---
+
+# 11. Write Barriers
+
+Pop GC uses barrier specialization.
+
+There is no single universal barrier sequence for every pointer store.
+
+## 11.1 Barrier matrix
+
+```text
+Store category                    Required action
+--------------------------------------------------------------
+local -> local                    usually none
+local new object initialization   none before publication
+isolated -> same isolated region  none
+shared -> shared                  SATB during shared marking
+shared -> local                   forbidden
+shared -> isolated                restricted by ownership rules
+shared -> young local             forbidden
+local -> shared                   mark/log shared target if required
+shared -> immutable shared        SATB if overwriting old shared edge
+scalar store                      none
+pointer-free array store          none
+pinned -> shared                  shared barrier rules
+bulk reference move               range barrier
+```
+
+## 11.2 Barrier elimination
+
+The compiler may eliminate a barrier when it proves:
+
+- the owner is unpublished;
+- the slot is initialized for the first time;
+- the owner and target are inside the same isolated region;
+- the store cannot create an inter-generational edge;
+- shared marking is impossible in the current code path;
+- the stored value is null or non-managed;
+- the page contains no managed references.
+
+Barrier elimination must be verified conservatively.
+
+## 11.3 Remembered sets
+
+The common store path should perform only a cheap card or page-state update.
+
+More expensive refinement runs concurrently.
+
+A two-stage design is:
+
+1. dirty a coarse card;
+2. refine dirty cards into precise slot or object sets.
+
+The runtime tracks refinement debt. If debt grows too quickly, allocation pacing or bounded mutator assists must compensate.
+
+## 11.4 Bulk operations
+
+Array copy, fill, deserialization, and object cloning use range barriers.
+
+A bulk primitive must never bypass collector semantics by expanding into untracked native memory operations.
+
+---
+
+# 12. Root Model
 
 Precise roots include:
 
-- live managed references in thread stacks/registers at safe points;
-- active and suspended coroutine frames;
-- module/static roots;
-- runtime scheduler and Bubble-context roots;
-- explicit strong handles used by native runtime/FFI;
-- temporary compiler-described roots around allocation/calls.
+- active managed stack slots;
+- managed references in registers;
+- suspended coroutine frames;
+- module and static roots;
+- runtime scheduler structures;
+- isolated-region owners;
+- shared handles;
+- temporary compiler-described roots;
+- native transition roots;
+- VM registers and frames in the future VM.
 
-Conservative scanning is not the normal mode. It would prevent reliable moving
-young collection and retain false objects.
+Conservative scanning is not the normal mode.
 
-### Stack maps and safe points
+False positives would:
 
-MIR identifies operations that may allocate, block, suspend, call unknown code,
-or poll GC state. Backends produce precise maps from machine locations to live
-managed references.
+- retain dead objects;
+- interfere with relocation;
+- prevent reliable local collection;
+- complicate FFI safety;
+- weaken ownership guarantees.
 
-Safe points occur at:
+---
+
+# 13. Safepoints, Epochs, and Handshakes
+
+## 13.1 Safepoints
+
+Potential safepoints occur at:
 
 - allocation slow paths;
-- function prologues where required;
-- loop backedges after a bounded amount of work;
-- calls that may allocate/block;
-- coroutine suspend/resume transitions;
-- explicit polls inserted into long straight-line code.
+- calls that may allocate or block;
+- loop backedges after bounded work;
+- coroutine suspension;
+- coroutine resumption;
+- foreign-code transitions;
+- explicit runtime polls;
+- selected function prologues;
+- long-running compiler-inserted polling points.
 
-The compiler verifies that no managed derived/interior pointer survives a safe
-point without a recoverable base and offset representation.
+The compiler verifies that no unmanaged interior pointer survives a safepoint unless its base object and offset can be reconstructed safely.
 
-Under ADR 0039, the published root set is mutable and keyed by canonical
-`RootSlot`. A collecting safe point returns only after every relocated stack/
-register root has been rewritten; object fields and runtime handles are updated
-inside the collector. Pop object identity remains stable, but old evacuated
-physical tokens become invalid. The bootstrap stable-handle profile exercises
-the same API without changing tokens.
+## 13.2 Epoch handshakes
 
-## Minor collection
+A global phase transition uses an epoch.
 
-Minor GC is parallel stop-the-world because copying a small bounded nursery is
-usually faster than concurrent young collection and avoids pervasive read
-barriers.
+Each mutator:
 
-### Phases
+1. observes the new epoch;
+2. reaches a poll or transition point;
+3. publishes required local state;
+4. acknowledges the epoch;
+5. resumes or cooperates with the phase.
 
-1. **Request:** set the safepoint epoch and wake GC workers.
-2. **Handshake:** each mutator reaches a safe point and publishes roots/TLAB top.
-3. **Root scan:** workers scan stack/module/runtime roots that can point young.
-4. **Remembered scan:** workers scan dirty mature cards.
-5. **Evacuate:** copy reachable young objects, install forwarding pointers, and
-   update roots/fields.
-6. **Promote:** move policy-selected survivors into mature regions.
-7. **Reclaim:** reset Eden/from-survivor regions in bulk.
-8. **Resume:** publish new nursery/TLAB state and release mutators.
+The coordinator must not process the entire heap while threads are stopped.
 
-Work uses per-worker deques with stealing. Large pointer arrays split into scan
-chunks so one object cannot serialize the entire pause.
+The handshake only establishes a consistent protocol state.
 
-If a major cycle is active, major workers reach a collector handshake before
-young evacuation. Promoted objects are marked in the current major epoch and
-their mature outgoing references enter the major mark queue before mutators
-resume.
+## 13.3 Uncooperative threads
 
-### Pause control
+A thread in foreign code must be in one of these states:
 
-- Nursery capacity adapts to measured allocation rate, survival rate, copy
-  bandwidth, and pause target.
-- Objects larger than the copy budget bypass Eden.
-- A mutator cannot accumulate an unbounded unpublished TLAB.
-- Dirty-card work is bounded by card refinement and feedback to allocation
-  pacing.
-- If survival spikes, promotion increases before the next minor collection.
+- detached from managed roots;
+- operating only through registered handles;
+- inside a bounded non-preemptible transition;
+- parked before a collection requiring its state.
 
-## Major collection
+A foreign call may not hide a managed pointer in untyped memory across a safepoint.
 
-Major GC traces the mature graph concurrently using snapshot-at-the-beginning
-(SATB) semantics.
+---
 
-### Phases
+# 14. Coroutine Integration
 
-1. **Start handshake:** briefly stop/handshake mutators, snapshot roots, enable
-   SATB barriers, and establish the mark epoch.
-2. **Concurrent mark:** background workers trace mature objects while mutators
-   run. Newly allocated mature objects are treated as live for the cycle.
-3. **Drain/assist:** allocation debt may require bounded mutator marking work so
-   allocation cannot outrun the collector indefinitely.
-4. **Remark handshake:** drain thread-local SATB buffers, rescan changed roots,
-   complete marking, and disable the SATB barrier.
-5. **Concurrent sweep:** reclaim dead mature/large objects region by region.
-6. **Controller update:** compute live size, fragmentation, observed mark rate,
-   next target, and worker budget.
+Suspended coroutines should not require resumption for scanning.
 
-The collector never performs a routine full-heap stop-the-world mark or sweep.
-
-## Write barriers
-
-Managed reference stores use a combined barrier:
+Coroutine stacks are represented as stacklets or chunks:
 
 ```text
-function storeReference(owner, slot, value)
-    local previous = slot.load()
-
-    if majorMarking and previous:isMature() then
-        satbBuffer.push(previous)
-    end
-
-    slot.store(value)
-
-    if majorMarking and owner:isYoung() and value:isMature() then
-        majorYoungBuffer.push(value)
-    end
-
-    if owner:isMature() and value:isYoung() then
-        cardTable.mark(owner)
-    end
-end
+Coroutine
+  StackChunk
+    frame descriptors
+    pointer bitmap
+    saved registers
+    next chunk
 ```
 
-This is semantic pseudocode. The optimized barrier uses fast inline generation/
-address checks and calls a slow path only for full SATB buffers or special
-regions.
+A suspended coroutine is quiescent.
 
-- SATB preserves objects reachable at the major snapshot when references are
-  overwritten.
-- The major-young buffer preserves mature objects newly reached through young
-  objects after the initial snapshot.
-- Card marking remembers mature objects that may point to young objects.
-- Null/non-managed stores skip the relevant work.
-- Compiler barrier elimination/coalescing is legal only with a proved GC phase/
-  object-age rule.
-- Bulk moves use dedicated range barriers.
+Its stack chunks can be scanned concurrently as heap-like root containers.
 
-Fixed-array initialization and fill are bulk stores. Scalar arrays require no
-reference barrier. Managed-element arrays use the precise homogeneous element
-map and a range barrier or equivalent per-element combined barriers. Direct
-contiguous backend access requires a scoped pin unless escape analysis proves
-the array is not a managed allocation. See ADR 0034.
+## 14.1 Active-stack watermarks
 
-Read barriers are not required in the selected version-one design.
+Active stacks use watermarks.
 
-## Young/major interaction
+At the beginning of a root-processing epoch:
 
-The young generation is a root source for mature marking, but young objects are
-not themselves swept by a major cycle.
+- the runtime installs or advances a watermark;
+- stack regions below the watermark are known to have been processed;
+- the mutator or a worker incrementally processes remaining frames;
+- stack mutation follows compiler-defined rules.
 
-- The major start snapshot scans existing young-to-mature edges.
-- While major marking is active, young-to-mature stores log/shade the mature
-  target through `majorYoungBuffer`.
-- New young objects are live by construction for the current cycle.
-- A minor collection during major marking pauses major workers at a collector
-  handshake, evacuates young objects, and marks/enqueues promotions.
-- Remark drains SATB and major-young buffers before declaring the mature graph
-  complete.
+This avoids a pause proportional to all active and suspended stacks.
 
-This prevents a mature object from being reclaimed merely because it became
-reachable through a young object during concurrent marking.
+## 14.2 Coroutine migration
 
-## Allocation pacing and memory control
+A coroutine cannot migrate to another scheduler while retaining direct references into the original scheduler's young heap unless one of these actions occurs:
 
-The major controller uses a live-heap growth target conceptually similar to:
+- its reachable local graph is promoted;
+- its graph becomes an isolated transferable region;
+- its local references are copied;
+- migration is delayed until local collection normalizes the state.
+
+The scheduler and collector share the same ownership metadata.
+
+---
+
+# 15. Ownership and Type-System Assistance
+
+The collector does not require every Pop program to use explicit ownership syntax.
+
+However, the language and compiler should be able to prove stronger properties.
+
+## 15.1 Local values
+
+A local value is confined to one ownership domain.
+
+Benefits include:
+
+- no atomic synchronization;
+- local allocation;
+- local collection;
+- no shared write barrier;
+- easier escape analysis.
+
+## 15.2 Isolated values
+
+An isolated value is the unique external reference to an object graph.
+
+It may move between owners without tracing the entire shared heap.
+
+## 15.3 Shared values
+
+A shared value may be referenced by multiple ownership domains.
+
+It must obey:
+
+- immutability; or
+- synchronization requirements; or
+- runtime concurrency primitives.
+
+Shared mutable objects participate fully in shared-heap barriers.
+
+## 15.4 Borrowed values
+
+A borrowed reference does not own the target and cannot outlive the lender.
+
+Borrowing helps the compiler:
+
+- avoid heap allocation;
+- prevent escape;
+- avoid reference counting;
+- avoid pinning;
+- eliminate barriers;
+- preserve local ownership.
+
+## 15.5 Resources
+
+External resources use deterministic lifetime management.
+
+Examples:
+
+- files;
+- sockets;
+- GPU buffers;
+- operating-system handles;
+- native library resources;
+- database connections.
+
+A resource type must be explicitly closed or destroyed at the end of ownership.
+
+GC is not responsible for timely release of external resources.
+
+---
+
+# 16. Finalizers, Weak References, and Resurrection
+
+User finalizers are not supported in the first production version.
+
+They introduce:
+
+- resurrection;
+- unpredictable latency;
+- ordering ambiguity;
+- hidden retention;
+- shutdown complexity;
+- module-unload hazards;
+- collector reentrancy risks.
+
+External resources use deterministic scope and explicit close operations.
+
+Weak references and weak maps are deferred until their semantics are fully specified.
+
+When implemented, they require:
+
+- explicit weak-reference processing;
+- bounded pause work;
+- ephemeron semantics for weak maps;
+- no user code executed while heap locks are held;
+- no accidental resurrection.
+
+---
+
+# 17. FFI, Handles, and Native Code
+
+## 17.1 Raw pointers
+
+Foreign code may not retain a raw pointer to a movable managed object across a safepoint.
+
+## 17.2 Handles
+
+The runtime provides strong handles.
+
+A handle contains:
+
+- an index;
+- a generation;
+- ownership state;
+- strength;
+- optional pin state.
+
+Stale handles are detected.
+
+The collector updates handle targets after relocation.
+
+## 17.3 Pinning
+
+Pinning is lexical where possible:
 
 ```text
-nextTarget = liveHeap + max(minimumHeadroom,
-    (liveHeap + scannableRoots) * heapGrowthPercent / 100)
+with pin(value) as pointer {
+    nativeCall(pointer)
+}
 ```
 
-Default `heapGrowthPercent` begins near 100 and adapts from observed mark
-throughput, allocation rate, latency, and memory pressure. Higher growth spends
-more memory to collect less often; lower growth saves memory with more GC CPU.
+Long asynchronous native ownership should use:
 
-A hard `memoryLimit` overrides the growth target and reserves emergency
-headroom. The controller accounts for heap, GC metadata, stacks, code, and major
-native runtime allocations where measurable.
+- copied buffers;
+- unmanaged allocations;
+- explicit native-owned memory;
+- stable handles.
 
-### GC workers
+## 17.4 Native callbacks
 
-- Dedicated background workers run proportional to available CPU and mark debt.
-- Idle runtime workers can assist without starving application work.
-- The default sustained major-mark CPU budget starts near 20–25% during active
-  marking and adapts.
-- Mutator assists are proportional to allocation debt and individually bounded
-  before yielding/scheduling.
-- Single-core mode uses short cooperative slices rather than pretending work is
-  concurrent.
+Callbacks re-enter managed code through registered runtime transitions.
 
-## Coroutines and scheduler integration
+They must establish:
 
-Suspended coroutines store precise frame maps and are scannable without resuming.
-Coroutine stacks use growable segmented/copied storage with stable logical frame
-descriptors. Stack copying updates managed roots through maps, not conservative
-guessing.
+- managed-thread state;
+- root publication state;
+- scheduler ownership;
+- safepoint participation;
+- exception and panic boundaries.
 
-The scheduler participates in safepoint handshakes. A thread in foreign code is
-either:
+---
 
-- in a no-managed-root state;
-- registered with pinned/handle roots;
-- executing a bounded non-preemptible transition; or
-- cooperatively parked before a collection requiring its roots.
+# 18. LLVM Backend Integration
 
-No coroutine may hide pointers in untyped memory.
+The backend-neutral intermediate representation includes operations such as:
 
-## FFI, handles, and pinning
+```text
+allocateObject
+allocateArray
+allocateInArena
+allocateIsolated
+publishShared
+moveIsolated
+gcSafePoint
+storeReference
+bulkStoreReference
+pin
+unpin
+createHandle
+releaseHandle
+enterForeign
+leaveForeign
+```
 
-Raw managed pointers cannot be retained by foreign code across a safe point.
-FFI uses:
+The LLVM backend lowers these operations using:
 
-- strong handles that the GC updates;
-- weak handles only after their semantics are designed;
-- scoped pins for APIs requiring stable addresses;
-- copied buffers for long or asynchronous foreign ownership;
-- explicitly unmanaged allocations for native-owned memory.
+- precise stack maps;
+- statepoints or an equivalent verified relocation mechanism;
+- concrete allocation fast paths;
+- inline barrier fast paths;
+- compiler-known root liveness.
 
-Pinning a young object promotes it before exposing the address. Pin counts and
-duration are tracked. Excessive/long pins produce profiler warnings because they
-increase mature fragmentation and complicate unloading.
+The MIR expresses semantic events, not LLVM-specific intrinsics.
 
-## LLVM backend integration
+Compiler verification must ensure:
 
-The backend-neutral MIR operations include `allocateObject`, `allocateArray`,
-`gcSafePoint`, `storeReference`, `pin`, `unpin`, and root/handle transitions.
+- every live managed reference is represented at safepoints;
+- optimizations do not hide references;
+- interior pointers are recoverable;
+- relocation updates all required locations;
+- local/shared capability transitions remain valid;
+- barriers are not removed without proof.
 
-The LLVM backend lowers safe points through LLVM statepoints/stack maps or an
-equivalent verified mechanism that supports relocating young references. This
-choice stays confined to the backend; MIR describes liveness and semantic GC
-events, not LLVM intrinsics.
+Stress mode may force collection at every eligible safepoint.
 
-Verification tests inspect emitted stack maps and run forced-GC stress at every
-eligible safe point. Optimizations cannot hide a live managed pointer from the
-map or retain an untracked interior pointer.
+---
 
-## Future VM integration
+# 19. Future VM Integration
 
-The VM uses the same heap/collector where practical, but owns register and frame
-maps directly. Bytecode verification identifies managed-reference slots at every
-safe point. The VM can use cheaper root relocation because values reside in
-known frames/register arrays.
+A future VM uses the same semantic memory model.
 
-GC behavior observable by the language—reachability, weak/finalizer policy,
-identity, and errors—must match the native backend. Pause implementation details
-need not match.
+The VM directly owns:
 
-## Interaction with optimization
+- register maps;
+- frame maps;
+- bytecode safepoints;
+- coroutine frame layouts;
+- relocation updates.
 
-The compiler reduces GC load through:
+The VM may use cheaper root processing because managed references live in known register arrays and frame slots.
 
-- escape analysis and stack allocation;
-- scalar replacement of records/tuples/small objects;
-- allocation sinking and loop hoisting where semantics permit;
-- unboxed primitives and specialized generics;
-- closure-environment elision;
-- write-barrier elimination for new/unpublished objects;
-- arena-like temporary allocation inside compile-time execution only.
+Native and VM backends must agree on language-observable behavior:
 
-Optimization must preserve object identity where observable and cannot convert
-a potentially escaping object to stack storage.
+- reachability;
+- identity;
+- weak-reference semantics;
+- resource behavior;
+- out-of-memory behavior;
+- handle behavior;
+- ownership transfer;
+- pinning rules.
 
-## Finalizers, weak references, and resurrection
+Pause implementation details may differ.
 
-User finalizers are not supported in version one. This removes resurrection,
-ordering, hidden latency, and unload hazards. External resources use explicit
-scope/`close` protocols with diagnostics for leaks in debug mode.
+---
 
-Weak references/weak maps are deferred. When designed, processing must happen
-after marking with bounded pause work and explicit ephemeron semantics. The
-collector does not accidentally expose weak behavior through tables.
+# 20. Allocation Pacing and Memory Control
 
-## Bubble unloading
+## 20.1 Heap-growth target
 
-A `BubbleContext` can unload only after GC proves no live object, type info,
-code pointer, closure, coroutine frame, callback, handle, or module root belongs
-to it. Native code reclamation also waits for all threads to leave its code
-ranges.
+The shared collector uses a target similar to:
 
-Version one does not promise unloadable native contexts. GC metadata includes
-Bubble ownership from the start so the VM/future native implementation can add
-unloading without changing object identity.
+```text
+next_target =
+    live_shared_heap
+    + max(
+        minimum_headroom,
+        weighted_live_memory * growth_percent / 100
+      )
+```
 
-## Failure behavior
+Weighted live memory may include:
 
-Allocation follows this sequence under pressure:
+- live shared heap;
+- scannable roots;
+- selected local promotion pressure;
+- stack memory;
+- GC metadata;
+- evacuation reserve;
+- pinned memory.
 
-1. refill TLAB/region;
-2. request minor or major work based on generation;
-3. assist/poll until collection makes progress;
-4. request OS memory within `memoryLimit`;
-5. perform an emergency synchronous completion of the current cycle;
-6. fail allocation with a deterministic out-of-memory panic.
+## 20.2 Memory limit
 
-The collector does not continue with partially initialized objects, silently
-violate the memory limit, or invoke user code while internal heap locks are held.
+A hard memory limit overrides ordinary growth targets.
 
-## Observability and tuning
+The limit accounts for:
 
-Runtime metrics include:
+- local heaps;
+- shared heap;
+- isolated regions;
+- large-object space;
+- pinned space;
+- stacks;
+- code;
+- metadata;
+- runtime-native allocations;
+- evacuation reserve.
 
-- allocation bytes/rate by type and source allocation site where sampled;
-- live/committed/resident bytes by generation;
-- TLAB refill counts;
-- minor/major cycle count and phase durations;
-- pause distribution, not only averages;
-- survival/promotion rates;
-- mark/scan throughput and GC CPU;
-- dirty cards and SATB buffer pressure;
-- mutator assist time;
-- pinned bytes/duration;
-- fragmentation and returned-to-OS bytes;
-- root counts/scan time by stack/module/handle category.
+The runtime must preserve emergency headroom.
 
-The Stage-1 collector currently exposes saturating per-instance logical counters
-for successful allocations, actual collection cycles (including capacity-
-triggered cycles), reclaimed objects, and scanned objects. These counters make
-benchmark work deterministic without claiming production byte, pause, worker,
-or resident-memory telemetry that has not been implemented.
+## 20.3 GC workers
 
-An execution trace correlates GC phases, safe-point handshakes, scheduler delays,
-allocation assists, and user tasks. Tuning APIs expose `heapGrowthPercent`,
-`memoryLimit`, and latency profile presets without making program correctness
-depend on them.
+Background worker count adapts to:
 
-## Correctness invariants
+- allocation rate;
+- mark debt;
+- remembered-set debt;
+- memory pressure;
+- available cores;
+- application latency profile.
 
-- Every live managed reference is either in a traced object, precise root, or
-  registered handle at each safe point.
+Idle schedulers may assist collection.
+
+GC must not permanently consume all available CPU.
+
+## 20.4 Mutator assists
+
+A mutator that allocates faster than the collector can reclaim memory acquires debt.
+
+The mutator performs bounded work proportional to that debt.
+
+Assist work must:
+
+- be bounded per allocation slow path;
+- yield after a configured budget;
+- avoid unbounded latency spikes;
+- appear in telemetry.
+
+## 20.5 Single-core behavior
+
+On one core, “concurrent” collection becomes cooperative incremental work.
+
+The runtime uses short slices and avoids pretending that background work is free.
+
+---
+
+# 21. Failure Behavior
+
+Allocation under pressure follows a defined sequence:
+
+1. attempt TLAB allocation;
+2. refill from an existing page;
+3. request local collection where applicable;
+4. attempt local promotion, isolation, or pretenuring;
+5. request shared-cycle progress;
+6. perform bounded assist work;
+7. sweep or reuse available pages;
+8. request operating-system memory within the limit;
+9. reduce allocation pacing;
+10. complete required current-cycle work synchronously in bounded slices;
+11. fail with a deterministic out-of-memory panic.
+
+The runtime must not:
+
+- return partially initialized objects;
+- exceed the hard memory limit silently;
+- execute user code while internal heap locks are held;
+- invalidate live handles;
+- reuse quarantined memory too early;
+- hide an emergency full-heap pause.
+
+---
+
+# 22. Safety Invariants
+
+The following invariants are mandatory.
+
+## 22.1 Reachability
+
 - No reachable object is reclaimed.
-- Every evacuated young reference is updated before mutators resume.
-- Mature-to-young stores dirty the owning card before the next minor scan can
-  miss them.
-- SATB buffers preserve overwritten mature references for the active snapshot.
-- Young-to-mature logging preserves mature targets introduced during an active
-  major cycle.
-- Unpublished objects cannot become visible without initialized pointer fields
-  and required barriers.
-- GC metadata lookup is race-safe for every address the allocator publishes.
-- Collection and Bubble unload never reclaim executable/type metadata still
-  reachable by code or objects.
+- Every live managed reference is in a traced object, precise root, isolated-owner record, or registered handle.
+- Every evacuated reference is updated or safely resolved before stale storage is reused.
 
-## Implementation stages
+## 22.2 Local/shared separation
 
-### Implementation ownership
+- Shared objects never point directly into scheduler-local young memory.
+- A local object cannot become shared without an explicit publication transition.
+- Coroutine migration cannot violate local-heap ownership.
+- Isolated regions have exactly one external owner.
 
-[ADR 0038](./decisions/0038-modular-portable-runtime-implementation.md)
-places collector storage, tracing, roots, pins, collection requests, and
-statistics in `pop-runtime-collector`. The crate depends only on the
-backend-neutral PLRI contract and owns no native C exports, process-global
-singleton, platform arguments, or linker behavior. The native facade delegates
-to a concrete collector; the MIR interpreter and future VM can compose the same
-collector without importing the native ABI.
+## 22.3 Barriers
 
-This boundary is also a performance contract: separation adds no runtime
-registry, string lookup, heap allocation, or virtual dispatch to native
-allocation/barrier fast paths. Production TLAB, region, statepoint, and barrier
-fast paths may remain concrete and statically dispatched while preserving the
-same PLRI semantics. Comparative claims still require the benchmark suite below.
+- Overwritten shared references are preserved for an active SATB epoch.
+- Inter-generational local edges are recorded before a local collection can miss them.
+- Bulk operations execute equivalent range barriers.
+- Barrier elimination occurs only under verified compiler proofs.
 
-The Stage-1 implementation separates `heap`, typed `access`, precise `trace`,
-and PLRI `adapter` responsibilities inside the collector crate. The native
-facade separately groups identity, allocation, storage, text/process adapters,
-roots/safe points, failure termination, and private global composition state.
+## 22.4 Publication
 
-### Stage 1: precise stop-the-world collector
+- An object is never published with uninitialized managed pointer fields.
+- Publication uses the required memory ordering.
+- Ownership metadata is visible before shared references become visible.
 
-Build object/stack maps, TLAB allocation, regions, handles, and a simple precise
-mark-sweep collector. This validates correctness infrastructure before adding
-concurrency/generations.
+## 22.5 Metadata
 
-The Milestone 3 executable bootstrap may use a safe stable-handle table instead
-of raw regions/TLABs while proving maps, roots, safe-point publication,
-transitive/cyclic reachability, reclamation, and deterministic allocation
-failure. It must remain labeled as the bootstrap collector; TLABs/regions and
-the production moving/concurrent behavior begin in the subsequent runtime
-stages. See ADR 0022.
+- Metadata lookup is race-safe for every published managed address.
+- Region and page states transition atomically according to the state machine.
+- Mark bits cannot refer to reused memory from a different allocation epoch.
+- Quarantine prevents stale references from observing immediate address reuse.
 
-### Stage 2: moving nursery
+## 22.6 FFI
 
-Add card marking, parallel evacuation, promotion, adaptive nursery sizing, and
-forced-minor stress tests.
+- Raw movable pointers do not survive safepoints in foreign code.
+- Pinned objects do not move while pinned.
+- Handle generations detect stale handles.
+- Native callbacks establish valid runtime state before accessing managed objects.
 
-The first Stage-2 deliverable is a single-mutator relocation conformance
-collector: it really copies survivors, rewrites typed roots/object edges/handles,
-invalidates old tokens, and proves remembered-card behavior. It is not the
-production TLAB/parallel collector. Production selection also requires backend
-and target relocation capability plus native ABI major version 2.
+---
 
-PLRI labels this implementation stage `RelocationConformance`: precise roots,
-a moving nursery, and a generational card barrier are active; mature collection,
-concurrent marking, and SATB are not. Mature objects are retained until later
-stages. This stage cannot satisfy the `ProductionGenerational` runtime profile.
+# 23. Observability
 
-### Stage 3: concurrent mature marking
+The runtime exposes:
 
-Add SATB barriers/buffers, concurrent work stealing, remark, concurrent sweep,
-pacing, assists, and race/stress verification.
+- allocated bytes by domain;
+- allocation rate by type and allocation site;
+- stack-allocation success rate;
+- scalar-replacement counts;
+- arena allocation and bulk-free counts;
+- local-heap size per scheduler;
+- local collection count and duration;
+- local survival and promotion rates;
+- publication count and cost;
+- isolated-region transfer count and cost;
+- shared live bytes;
+- committed and resident bytes;
+- large-object bytes;
+- pinned bytes and pin duration;
+- TLAB refill counts;
+- mark and scan throughput;
+- page queue depth;
+- bytes scanned per live byte;
+- dirty-card backlog;
+- remembered-set refinement time;
+- SATB buffer pressure;
+- mutator assist time;
+- sweep time;
+- evacuation-set size;
+- evacuation reserve;
+- forwarding slow-path counts;
+- fragmentation by region;
+- pages returned to the operating system;
+- root counts by category;
+- root-processing latency;
+- epoch acknowledgement latency;
+- time waiting for uncooperative foreign threads;
+- GC CPU;
+- memory bandwidth where measurable.
 
-### Stage 4: latency and memory engineering
+Application-facing latency metrics include:
 
-Optimize handshakes, root scanning, region reuse, OS page return, huge pages
-where beneficial, NUMA placement, telemetry, and controller adaptation.
+- P50;
+- P95;
+- P99;
+- P99.9;
+- maximum;
+- mutator utilization in 1 ms, 10 ms, and 100 ms windows.
 
-### Stage 5: VM and optional isolation
+A trace should correlate:
 
-Share collector services with VM frames, validate backend conformance, and add
-Bubble ownership/unload proof machinery if required.
+- allocations;
+- local collections;
+- major phases;
+- handshakes;
+- stack watermark progress;
+- scheduler delays;
+- mutator assists;
+- object publication;
+- region transfer;
+- evacuation;
+- FFI transitions;
+- application tasks.
 
-## Benchmark suite
+---
 
-The implemented bootstrap harness emits versioned
-`pop-runtime-benchmark-v1` tab-separated records. Each record names the
-collector stage and workload, graph shape, root count, sample count, operations,
-logical peak objects/slots, collections, reclaimed objects, elapsed nanoseconds,
-per-operation nanoseconds, a named profile, target architecture/operating
-system, build profile, and available parallelism. Workload tests verify the
-logical counters deterministically; timing values are compared only on a named
-hardware/toolchain profile.
+# 24. Performance Gates
 
-The current Stage-1 workload inventory measures isolated scalar-object churn,
-rooted reference-chain tracing, precise managed-reference arrays, scoped pins,
-and capacity-triggered allocation pressure. These are regression baselines for
-the stable-handle collector, not evidence for TLAB allocation, a moving nursery,
-concurrency, or the release latency targets.
+Initial production gates should include:
 
-The suite includes:
+- local allocation fast path is a pointer bump with no global lock;
+- stack-allocated and scalar-replaced objects perform no GC allocation;
+- no routine global young-generation pause;
+- no routine pause proportional to total heap capacity;
+- no routine full-heap stop-the-world mark or sweep;
+- global epoch-transition P99 below the documented latency budget;
+- local collection P99 below the profile-specific budget;
+- major root transition P99 below the profile-specific budget;
+- default steady-state GC CPU within the profile budget;
+- background marking completes before the memory target is exhausted;
+- remembered-set debt remains bounded;
+- evacuation reserve remains sufficient;
+- no unbounded finalizer or weak-reference processing;
+- no unbounded module-unload work in a pause.
+
+These are engineering gates, not language-level timing guarantees.
+
+---
+
+# 25. Implementation Stages
+
+## Stage 1: precise stop-the-world bootstrap
+
+Implement:
+
+- typed heap access;
+- object maps;
+- stack maps;
+- precise roots;
+- handles;
+- deterministic allocation failure;
+- a simple mark-sweep collector;
+- forced-GC stress tests.
+
+This stage validates correctness only.
+
+It is not the production architecture.
+
+## Stage 2: production allocation infrastructure
+
+Implement:
+
+- regions;
+- pages;
+- side metadata;
+- size classes;
+- TLABs;
+- page-described object layouts;
+- pointer-free pages;
+- allocation-site metrics;
+- precise native stack maps.
+
+## Stage 3: scheduler-local young heaps
+
+Implement:
+
+- local Eden pages;
+- local survivor pages;
+- local copying collection;
+- local remembered sets;
+- promotion;
+- coroutine ownership;
+- prohibition of shared-to-local references;
+- publication slow paths.
+
+This stage removes routine global young-generation pauses.
+
+## Stage 4: shared concurrent marking
+
+Implement:
+
+- SATB barriers;
+- thread-local SATB buffers;
+- page-centric marking;
+- work stealing;
+- incremental root processing;
+- stack watermarks;
+- concurrent sweeping;
+- pacing;
+- bounded mutator assists.
+
+## Stage 5: ownership and isolated regions
+
+Implement:
+
+- local capability inference;
+- isolated-region construction;
+- zero-copy ownership transfer;
+- shared immutability;
+- borrowing integration;
+- scoped arenas;
+- compiler barrier elimination from capability proofs.
+
+## Stage 6: latency and fragmentation engineering
+
+Implement:
+
+- fine-grained region accounting;
+- line reuse;
+- evacuation-set selection;
+- forwarding side metadata;
+- phase-specific reference resolution;
+- concurrent selective evacuation;
+- pin-aware relocation;
+- evacuation reserve control;
+- page return and NUMA tuning.
+
+## Stage 7: future VM and module isolation
+
+Implement:
+
+- VM frame maps;
+- bytecode root maps;
+- shared collector services;
+- module ownership metadata;
+- code and type-liveness proof;
+- safe module unloading where supported.
+
+---
+
+# 26. Benchmark Suite
+
+The benchmark suite must include:
 
 - tiny-object allocation and immediate death;
-- closure/coroutine churn;
-- game-frame workload with a strict frame-time budget;
-- high-throughput HTTP/RPC-style server graph;
-- large mostly-live heap with low allocation;
-- pointer-dense trees/graphs and pointer-sparse numeric arrays;
-- high young survival and promotion storms;
-- many threads and many suspended coroutines;
-- large objects, fragmentation, pins, and foreign transitions;
-- memory-limit pressure and out-of-memory behavior.
+- stack-allocation-heavy code;
+- closure and coroutine churn;
+- actor-style message passing;
+- isolated-region transfer;
+- shared mutable graphs;
+- immutable shared graphs;
+- game-frame workloads;
+- HTTP and RPC server workloads;
+- compiler and parser workloads;
+- large mostly-live heaps;
+- low-allocation large heaps;
+- pointer-dense trees and graphs;
+- pointer-sparse numeric arrays;
+- high local survival;
+- promotion storms;
+- heavy publication;
+- many schedulers;
+- many suspended coroutines;
+- large objects;
+- fragmentation;
+- pinning;
+- foreign transitions;
+- memory-limit pressure;
+- deterministic out-of-memory behavior.
 
-Compare end-to-end throughput, memory, GC CPU, P50/P95/P99/max pauses, and tail
-request/frame latency. Microbenchmarks alone cannot establish a fast collector.
+Every result records:
 
-## Design reference
+- collector stage;
+- workload version;
+- compiler version;
+- target architecture;
+- operating system;
+- hardware profile;
+- core count;
+- scheduler count;
+- live heap;
+- committed heap;
+- allocation rate;
+- root count;
+- object graph shape;
+- memory limit;
+- pause percentiles;
+- application latency percentiles;
+- GC CPU;
+- resident memory;
+- memory bandwidth where available.
 
-The official [Go GC guide](https://go.dev/doc/gc-guide) is used for its clear
-cost model, heap-growth tradeoff, pacing concepts, and emphasis on measuring
-latency sources. Pop GC is a distinct design and must be validated independently.
+Microbenchmarks alone cannot establish that the collector is fast.
+
+---
+
+# 27. Summary
+
+Pop GC is not designed as a single global heap with a faster tracing loop.
+
+Its primary architectural advantage comes from reducing how much memory must participate in global collection.
+
+The hierarchy is:
+
+```text
+register or stack
+    ↓
+scoped arena
+    ↓
+scheduler-local young heap
+    ↓
+isolated transferable region
+    ↓
+shared concurrent heap
+    ↓
+pinned or unmanaged native memory
+```
+
+The shared collector remains important, but it is the final destination only for objects that genuinely require sharing.
+
+The resulting design combines:
+
+- GC ergonomics;
+- local copying speed;
+- ownership-guided isolation;
+- page-centric concurrent marking;
+- bounded global coordination;
+- deterministic external resource management;
+- selective relocation;
+- precise compiler/runtime cooperation.
+
+The success criterion is not merely that GC pauses are small.
+
+The success criterion is that Pop programs spend most of their time executing application work, that memory-management costs remain predictable under load, and that the runtime does not need a global full-heap stop-the-world operation in normal execution.

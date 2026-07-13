@@ -56,18 +56,18 @@ pub use required_constants::{
     AttributeParameterId, PendingConstantExpression, RequiredConstantError, RequiredConstantTarget,
 };
 pub use signature_resolution::{
-    EnumCaseDefinition, EnumDefinition, EnumDefinitionResult, RecordDefinition,
-    RecordDefinitionResult, RecordFieldDefinition, ResolvedFunctionParameter,
-    ResolvedFunctionSignature, ResolvedSignatureResult, ResolvedType, ResolvedTypeKind,
-    ResolvedTypeParameter, SignatureResolver, UnionCaseDefinition, UnionDefinition,
-    UnionDefinitionResult,
+    EnumCaseDefinition, EnumDefinition, EnumDefinitionResult, ErrorCaseDefinition, ErrorDefinition,
+    ErrorDefinitionResult, RecordDefinition, RecordDefinitionResult, RecordFieldDefinition,
+    ResolvedFunctionParameter, ResolvedFunctionSignature, ResolvedSignatureResult, ResolvedType,
+    ResolvedTypeKind, ResolvedTypeParameter, SignatureResolver, UnionCaseDefinition,
+    UnionDefinition, UnionDefinitionResult,
 };
 pub use typed_body::{
     CaptureMode, CaptureSource, StringFormatKind, TypedAssignmentTarget, TypedBinaryOperator,
     TypedBody, TypedBodyResult, TypedCall, TypedCallDispatch, TypedCapture, TypedClosure,
-    TypedClosureParameter, TypedCompoundOperator, TypedExpression, TypedExpressionKind,
-    TypedExpressionResult, TypedFieldValue, TypedMatchArm, TypedMatchBinding, TypedStatement,
-    TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
+    TypedClosureParameter, TypedCompoundOperator, TypedErrorMatchArm, TypedExpression,
+    TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm, TypedMatchBinding,
+    TypedResultMatchArm, TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
 };
 
 pub type ClassFieldDefault = FieldDefault;
@@ -225,6 +225,11 @@ pub enum SemanticType {
     Record(Vec<(String, TypeId)>),
     TaggedUnion {
         definition: pop_foundation::SymbolId,
+        source: pop_foundation::SymbolId,
+        arguments: Vec<TypeId>,
+    },
+    ErrorUnion {
+        definition: pop_foundation::ErrorId,
         source: pop_foundation::SymbolId,
         arguments: Vec<TypeId>,
     },

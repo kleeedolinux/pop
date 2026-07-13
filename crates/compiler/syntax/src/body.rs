@@ -65,8 +65,19 @@ pub enum StatementSyntaxKind {
         then_body: Vec<StatementSyntax>,
         else_body: Vec<StatementSyntax>,
     },
+    OptionalIf {
+        name: String,
+        initializer: ExpressionSyntax,
+        then_body: Vec<StatementSyntax>,
+        else_body: Vec<StatementSyntax>,
+    },
     While {
         condition: ExpressionSyntax,
+        body: Vec<StatementSyntax>,
+    },
+    OptionalWhile {
+        name: String,
+        initializer: ExpressionSyntax,
         body: Vec<StatementSyntax>,
     },
     RepeatUntil {
@@ -85,6 +96,9 @@ pub enum StatementSyntaxKind {
     Match {
         scrutinee: ExpressionSyntax,
         arms: Vec<MatchArmSyntax>,
+    },
+    Defer {
+        body: Vec<StatementSyntax>,
     },
     Assignment {
         target: ExpressionSyntax,
@@ -183,6 +197,12 @@ pub enum ExpressionSyntaxKind {
     Tuple(Vec<ExpressionSyntax>),
     Unary {
         operator: UnaryOperator,
+        operand: Box<ExpressionSyntax>,
+    },
+    OptionalPropagate {
+        operand: Box<ExpressionSyntax>,
+    },
+    ResultPropagate {
         operand: Box<ExpressionSyntax>,
     },
     Binary {
@@ -338,6 +358,7 @@ pub enum UnaryOperator {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinaryOperator {
     Or,
+    OptionalDefault,
     And,
     Equal,
     NotEqual,
@@ -514,6 +535,7 @@ impl BodyParser<'_> {
             Some(TokenKind::Break) => self.parse_loop_control(StatementSyntaxKind::Break),
             Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
+            Some(TokenKind::Defer) => self.parse_defer(),
             _ => {
                 let expression = self.parse_expression(0)?;
                 if self.current_kind() == Some(TokenKind::Comma) {
@@ -580,6 +602,17 @@ impl BodyParser<'_> {
         };
         self.position = self.position.saturating_add(1);
         Some(operator)
+    }
+
+    fn parse_defer(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+        let start = self.expect(TokenKind::Defer, "`defer`")?.range().start();
+        self.expect(TokenKind::Newline, "line break after `defer`")?;
+        let body = self.parse_statement_list(&[TokenKind::End])?;
+        let end = self.expect(TokenKind::End, "cleanup `end`")?.range().end();
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::Defer { body },
+            span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
     }
 
     pub(crate) fn parse_statement_list(
@@ -702,6 +735,28 @@ impl BodyParser<'_> {
 
     fn parse_if(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::If, "`if`")?.range().start();
+        if self.consume(TokenKind::Local).is_some() {
+            let (name, initializer) = self.parse_optional_binding()?;
+            self.expect(TokenKind::Then, "`then`")?;
+            self.expect(TokenKind::Newline, "line break after `then`")?;
+            let then_body = self.parse_statement_list(&[TokenKind::Else, TokenKind::End])?;
+            let else_body = if self.consume(TokenKind::Else).is_some() {
+                self.expect(TokenKind::Newline, "line break after `else`")?;
+                self.parse_statement_list(&[TokenKind::End])?
+            } else {
+                Vec::new()
+            };
+            let end = self.expect(TokenKind::End, "`end`")?.range().end();
+            return Ok(StatementSyntax {
+                kind: StatementSyntaxKind::OptionalIf {
+                    name,
+                    initializer,
+                    then_body,
+                    else_body,
+                },
+                span: SourceSpan::new(self.file, ordered_range(start, end)),
+            });
+        }
         let (condition, then_body, else_body) = self.parse_if_parts()?;
         let end = self.expect(TokenKind::End, "`end`")?.range().end();
         Ok(StatementSyntax {
@@ -751,6 +806,21 @@ impl BodyParser<'_> {
 
     fn parse_while(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::While, "`while`")?.range().start();
+        if self.consume(TokenKind::Local).is_some() {
+            let (name, initializer) = self.parse_optional_binding()?;
+            self.expect(TokenKind::Do, "`do`")?;
+            self.expect(TokenKind::Newline, "line break after `do`")?;
+            let body = self.parse_statement_list(&[TokenKind::End])?;
+            let end = self.expect(TokenKind::End, "`end`")?.range().end();
+            return Ok(StatementSyntax {
+                kind: StatementSyntaxKind::OptionalWhile {
+                    name,
+                    initializer,
+                    body,
+                },
+                span: SourceSpan::new(self.file, ordered_range(start, end)),
+            });
+        }
         let condition = self.parse_expression(0)?;
         self.expect(TokenKind::Do, "`do`")?;
         self.expect(TokenKind::Newline, "line break after `do`")?;
@@ -760,6 +830,14 @@ impl BodyParser<'_> {
             kind: StatementSyntaxKind::While { condition, body },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
+    }
+
+    fn parse_optional_binding(&mut self) -> Result<(String, ExpressionSyntax), FunctionBodyError> {
+        let name = self.expect(TokenKind::Identifier, "optional binding name")?;
+        let name = name.text(self.source).to_owned();
+        self.expect(TokenKind::Equal, "`=` in optional binding")?;
+        let initializer = self.parse_expression(0)?;
+        Ok((name, initializer))
     }
 
     fn parse_repeat_until(&mut self) -> Result<StatementSyntax, FunctionBodyError> {

@@ -37,6 +37,10 @@ canonical arguments after defaults and named arguments have been normalized;
 enumeration handle to a validator. Runtime retention remains an explicit
 trusted `@RetainMetadata` capability and is never implied by usage.
 
+ADR 0052 adds `AttributeTarget.Error` for nominal error declarations. It stays
+distinct from `AttributeTarget.Union`; shared attachment mechanics do not merge
+their semantic identities.
+
 Attachments may precede declarations and class/record/union/interface members.
 Because the namespace is the file-scoped header, namespace-targeted attachments
 precede the `namespace` line (and follow any documentation for that namespace);

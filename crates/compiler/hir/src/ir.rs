@@ -8,15 +8,15 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    AttributeId, BindingId, BubbleId, CaptureId, ClassId, EnumCaseId, FieldId, FunctionId,
-    InterfaceId, InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId,
-    SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
-    ValueParameterId,
+    AttributeId, BindingId, BubbleId, BuiltinTypeId, CaptureId, ClassId, EnumCaseId, ErrorCaseId,
+    ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, LocalId, MethodId, ModuleId,
+    NamespaceId, NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
-    ClassMethodDispatch, EnumDefinition, FieldDefault, FloatValue, IntegerValue,
+    ClassMethodDispatch, EnumDefinition, ErrorDefinition, FieldDefault, FloatValue, IntegerValue,
     InterfaceDefinition, NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena,
     TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator, UnionDefinition,
 };
@@ -412,6 +412,46 @@ impl HirDeclaration {
     }
 
     #[must_use]
+    pub fn error(
+        module: ModuleId,
+        bubble: BubbleId,
+        visibility: Visibility,
+        name: impl Into<String>,
+        definition: &ErrorDefinition,
+    ) -> Self {
+        Self {
+            symbol: definition.symbol(),
+            module,
+            bubble,
+            visibility,
+            name: name.into(),
+            kind: HirDeclarationKind::Error(HirErrorDeclaration {
+                error: definition.error(),
+                type_id: definition.type_id(),
+                cases: definition
+                    .cases()
+                    .iter()
+                    .map(|case| HirErrorCase {
+                        case: case.case(),
+                        name: case.name().to_owned(),
+                        parameters: case
+                            .parameters()
+                            .iter()
+                            .map(|(name, type_id, span)| HirNamedType {
+                                name: name.clone(),
+                                type_id: *type_id,
+                                span: *span,
+                            })
+                            .collect(),
+                        span: case.span(),
+                    })
+                    .collect(),
+            }),
+            span: definition.span(),
+        }
+    }
+
+    #[must_use]
     pub fn enumeration(
         module: ModuleId,
         bubble: BubbleId,
@@ -635,10 +675,52 @@ impl HirDeclaration {
 pub enum HirDeclarationKind {
     Record(HirRecordDeclaration),
     Union(HirUnionDeclaration),
+    Error(HirErrorDeclaration),
     Enum(HirEnumDeclaration),
     Class(HirClassDeclaration),
     Interface(HirInterfaceDeclaration),
     Attribute(HirAttributeDeclaration),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirErrorDeclaration {
+    pub(crate) error: ErrorId,
+    pub(crate) type_id: TypeId,
+    pub(crate) cases: Vec<HirErrorCase>,
+}
+
+impl HirErrorDeclaration {
+    #[must_use]
+    pub const fn error(&self) -> ErrorId {
+        self.error
+    }
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+    #[must_use]
+    pub fn cases(&self) -> &[HirErrorCase] {
+        &self.cases
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirErrorCase {
+    pub(crate) case: ErrorCaseId,
+    pub(crate) name: String,
+    pub(crate) parameters: Vec<HirNamedType>,
+    pub(crate) span: SourceSpan,
+}
+
+impl HirErrorCase {
+    #[must_use]
+    pub const fn case(&self) -> ErrorCaseId {
+        self.case
+    }
+    #[must_use]
+    pub fn parameters(&self) -> &[HirNamedType] {
+        &self.parameters
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1334,8 +1416,24 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_statements(then_body, instances);
                 remap_aggregate_statements(else_body, instances);
             }
+            HirStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                remap_aggregate_expression(initializer, instances);
+                remap_aggregate_statements(then_body, instances);
+                remap_aggregate_statements(else_body, instances);
+            }
             HirStatementKind::While { condition, body } => {
                 remap_aggregate_expression(condition, instances);
+                remap_aggregate_statements(body, instances);
+            }
+            HirStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                remap_aggregate_expression(initializer, instances);
                 remap_aggregate_statements(body, instances);
             }
             HirStatementKind::RepeatUntil { body, condition } => {
@@ -1371,6 +1469,23 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
+            HirStatementKind::ErrorMatch {
+                scrutinee, arms, ..
+            } => {
+                remap_aggregate_expression(scrutinee, instances);
+                for arm in arms {
+                    remap_aggregate_statements(&mut arm.body, instances);
+                }
+            }
+            HirStatementKind::ResultMatch {
+                scrutinee, arms, ..
+            } => {
+                remap_aggregate_expression(scrutinee, instances);
+                for arm in arms {
+                    remap_aggregate_statements(&mut arm.body, instances);
+                }
+            }
+            HirStatementKind::Defer { body } => remap_aggregate_statements(body, instances),
             HirStatementKind::FieldSet { base, field, value } => {
                 remap_aggregate_expression(base, instances);
                 *field = instances.field(base.type_id(), *field);
@@ -1479,6 +1594,14 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             remap_aggregate_expression(array, instances);
             remap_aggregate_expression(value, instances);
         }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            remap_aggregate_expression(optional, instances);
+            remap_aggregate_expression(fallback, instances);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            remap_aggregate_expression(optional, instances);
+        }
         HirExpressionKind::Record { record, fields } => {
             if let Some(instance) = instances.symbol(expression.type_id) {
                 *record = instance;
@@ -1516,6 +1639,15 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             for argument in arguments {
                 remap_aggregate_expression(argument, instances);
             }
+        }
+        HirExpressionKind::ResultCase { arguments, .. }
+        | HirExpressionKind::ErrorCase { arguments, .. } => {
+            for argument in arguments {
+                remap_aggregate_expression(argument, instances);
+            }
+        }
+        HirExpressionKind::ResultPropagate { result, .. } => {
+            remap_aggregate_expression(result, instances);
         }
         HirExpressionKind::Array(values) | HirExpressionKind::Tuple(values) => {
             for value in values {
@@ -1589,8 +1721,24 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                 collect_statement_calls(then_body, calls);
                 collect_statement_calls(else_body, calls);
             }
+            HirStatementKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_expression_calls(initializer, calls);
+                collect_statement_calls(then_body, calls);
+                collect_statement_calls(else_body, calls);
+            }
             HirStatementKind::While { condition, body } => {
                 collect_expression_calls(condition, calls);
+                collect_statement_calls(body, calls);
+            }
+            HirStatementKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                collect_expression_calls(initializer, calls);
                 collect_statement_calls(body, calls);
             }
             HirStatementKind::RepeatUntil { body, condition } => {
@@ -1618,6 +1766,23 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                     collect_statement_calls(arm.body(), calls);
                 }
             }
+            HirStatementKind::ErrorMatch {
+                scrutinee, arms, ..
+            } => {
+                collect_expression_calls(scrutinee, calls);
+                for arm in arms {
+                    collect_statement_calls(&arm.body, calls);
+                }
+            }
+            HirStatementKind::ResultMatch {
+                scrutinee, arms, ..
+            } => {
+                collect_expression_calls(scrutinee, calls);
+                for arm in arms {
+                    collect_statement_calls(&arm.body, calls);
+                }
+            }
+            HirStatementKind::Defer { body } => collect_statement_calls(body, calls),
             HirStatementKind::FieldSet { base, value, .. }
             | HirStatementKind::CompoundFieldSet { base, value, .. } => {
                 collect_expression_calls(base, calls);
@@ -1716,6 +1881,14 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
             collect_expression_calls(array, calls);
             collect_expression_calls(value, calls);
         }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            collect_expression_calls(optional, calls);
+            collect_expression_calls(fallback, calls);
+        }
+        HirExpressionKind::OptionalPropagate { optional, .. }
+        | HirExpressionKind::OptionalNarrow { optional } => {
+            collect_expression_calls(optional, calls);
+        }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
             for field in fields {
@@ -1731,6 +1904,12 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
         HirExpressionKind::Array(values)
         | HirExpressionKind::Tuple(values)
         | HirExpressionKind::UnionCase {
+            arguments: values, ..
+        }
+        | HirExpressionKind::ResultCase {
+            arguments: values, ..
+        }
+        | HirExpressionKind::ErrorCase {
             arguments: values, ..
         } => {
             for value in values {
@@ -1751,6 +1930,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
             collect_expression_calls(condition, calls);
             collect_expression_calls(when_true, calls);
             collect_expression_calls(when_false, calls);
+        }
+        HirExpressionKind::ResultPropagate { result, .. } => {
+            collect_expression_calls(result, calls);
         }
         HirExpressionKind::Call {
             dispatch,
@@ -1841,8 +2023,30 @@ fn specialize_statement(
             specialize_statements(then_body, substitutions, instances, arena)?;
             specialize_statements(else_body, substitutions, instances, arena)?;
         }
+        HirStatementKind::OptionalIf {
+            inner_type,
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            specialize_type(inner_type, substitutions, arena)?;
+            specialize_expression(initializer, substitutions, instances, arena)?;
+            specialize_statements(then_body, substitutions, instances, arena)?;
+            specialize_statements(else_body, substitutions, instances, arena)?;
+        }
         HirStatementKind::While { condition, body } => {
             specialize_expression(condition, substitutions, instances, arena)?;
+            specialize_statements(body, substitutions, instances, arena)?;
+        }
+        HirStatementKind::OptionalWhile {
+            inner_type,
+            initializer,
+            body,
+            ..
+        } => {
+            specialize_type(inner_type, substitutions, arena)?;
+            specialize_expression(initializer, substitutions, instances, arena)?;
             specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::RepeatUntil { body, condition } => {
@@ -1874,6 +2078,35 @@ fn specialize_statement(
                 }
                 specialize_statements(&mut arm.body, substitutions, instances, arena)?;
             }
+        }
+        HirStatementKind::ErrorMatch {
+            scrutinee, arms, ..
+        } => {
+            specialize_expression(scrutinee, substitutions, instances, arena)?;
+            for arm in arms {
+                for binding in &mut arm.bindings {
+                    specialize_type(&mut binding.type_id, substitutions, arena)?;
+                }
+                specialize_statements(&mut arm.body, substitutions, instances, arena)?;
+            }
+        }
+        HirStatementKind::ResultMatch {
+            scrutinee,
+            result_type,
+            arms,
+            ..
+        } => {
+            specialize_expression(scrutinee, substitutions, instances, arena)?;
+            specialize_type(result_type, substitutions, arena)?;
+            for arm in arms {
+                for binding in &mut arm.bindings {
+                    specialize_type(&mut binding.type_id, substitutions, arena)?;
+                }
+                specialize_statements(&mut arm.body, substitutions, instances, arena)?;
+            }
+        }
+        HirStatementKind::Defer { body } => {
+            specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::FieldSet { base, value, .. } => {
             specialize_expression(base, substitutions, instances, arena)?;
@@ -2048,6 +2281,20 @@ fn specialize_expression(
             specialize_expression(array, substitutions, instances, arena)?;
             specialize_expression(value, substitutions, instances, arena)?;
         }
+        HirExpressionKind::OptionalDefault { optional, fallback } => {
+            specialize_expression(optional, substitutions, instances, arena)?;
+            specialize_expression(fallback, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::OptionalPropagate {
+            optional,
+            enclosing_result,
+        } => {
+            specialize_type(enclosing_result, substitutions, arena)?;
+            specialize_expression(optional, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::OptionalNarrow { optional } => {
+            specialize_expression(optional, substitutions, instances, arena)?;
+        }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
             for field in fields {
@@ -2063,6 +2310,12 @@ fn specialize_expression(
         HirExpressionKind::Array(values)
         | HirExpressionKind::Tuple(values)
         | HirExpressionKind::UnionCase {
+            arguments: values, ..
+        }
+        | HirExpressionKind::ResultCase {
+            arguments: values, ..
+        }
+        | HirExpressionKind::ErrorCase {
             arguments: values, ..
         } => {
             for value in values {
@@ -2083,6 +2336,18 @@ fn specialize_expression(
             specialize_expression(condition, substitutions, instances, arena)?;
             specialize_expression(when_true, substitutions, instances, arena)?;
             specialize_expression(when_false, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::ResultPropagate {
+            result,
+            success_type,
+            error_type,
+            enclosing_result,
+            ..
+        } => {
+            specialize_expression(result, substitutions, instances, arena)?;
+            specialize_type(success_type, substitutions, arena)?;
+            specialize_type(error_type, substitutions, arena)?;
+            specialize_type(enclosing_result, substitutions, arena)?;
         }
         HirExpressionKind::Call {
             dispatch,
@@ -2267,8 +2532,25 @@ pub enum HirStatementKind {
         then_body: Vec<HirStatement>,
         else_body: Vec<HirStatement>,
     },
+    OptionalIf {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: HirExpression,
+        then_body: Vec<HirStatement>,
+        else_body: Vec<HirStatement>,
+    },
     While {
         condition: HirExpression,
+        body: Vec<HirStatement>,
+    },
+    OptionalWhile {
+        binding: BindingId,
+        local: LocalId,
+        name: String,
+        inner_type: TypeId,
+        initializer: HirExpression,
         body: Vec<HirStatement>,
     },
     RepeatUntil {
@@ -2291,6 +2573,20 @@ pub enum HirStatementKind {
         scrutinee: HirExpression,
         union: SymbolId,
         arms: Vec<HirMatchArm>,
+    },
+    ErrorMatch {
+        scrutinee: HirExpression,
+        error: ErrorId,
+        arms: Vec<HirErrorMatchArm>,
+    },
+    ResultMatch {
+        scrutinee: HirExpression,
+        result: BuiltinTypeId,
+        result_type: TypeId,
+        arms: Vec<HirResultMatchArm>,
+    },
+    Defer {
+        body: Vec<HirStatement>,
     },
     FieldSet {
         base: HirExpression,
@@ -2422,6 +2718,57 @@ impl HirMatchArm {
     #[must_use]
     pub const fn span(&self) -> SourceSpan {
         self.span
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirErrorMatchArm {
+    pub(crate) error: ErrorId,
+    pub(crate) case: ErrorCaseId,
+    pub(crate) bindings: Vec<HirMatchBinding>,
+    pub(crate) body: Vec<HirStatement>,
+    pub(crate) span: SourceSpan,
+}
+
+impl HirErrorMatchArm {
+    #[must_use]
+    pub const fn error(&self) -> ErrorId {
+        self.error
+    }
+    #[must_use]
+    pub const fn case(&self) -> ErrorCaseId {
+        self.case
+    }
+    #[must_use]
+    pub fn bindings(&self) -> &[HirMatchBinding] {
+        &self.bindings
+    }
+    #[must_use]
+    pub fn body(&self) -> &[HirStatement] {
+        &self.body
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirResultMatchArm {
+    pub(crate) case: ResultCaseId,
+    pub(crate) bindings: Vec<HirMatchBinding>,
+    pub(crate) body: Vec<HirStatement>,
+    pub(crate) span: SourceSpan,
+}
+
+impl HirResultMatchArm {
+    #[must_use]
+    pub const fn case(&self) -> ResultCaseId {
+        self.case
+    }
+    #[must_use]
+    pub fn bindings(&self) -> &[HirMatchBinding] {
+        &self.bindings
+    }
+    #[must_use]
+    pub fn body(&self) -> &[HirStatement] {
+        &self.body
     }
 }
 
@@ -2584,6 +2931,16 @@ pub enum HirExpressionKind {
         case: UnionCaseId,
         arguments: Vec<HirExpression>,
     },
+    ResultCase {
+        result: BuiltinTypeId,
+        case: ResultCaseId,
+        arguments: Vec<HirExpression>,
+    },
+    ErrorCase {
+        error: ErrorId,
+        case: ErrorCaseId,
+        arguments: Vec<HirExpression>,
+    },
     EnumCase {
         definition: SymbolId,
         case: EnumCaseId,
@@ -2606,6 +2963,24 @@ pub enum HirExpressionKind {
         operator: TypedBinaryOperator,
         left: Box<HirExpression>,
         right: Box<HirExpression>,
+    },
+    OptionalDefault {
+        optional: Box<HirExpression>,
+        fallback: Box<HirExpression>,
+    },
+    OptionalPropagate {
+        optional: Box<HirExpression>,
+        enclosing_result: TypeId,
+    },
+    ResultPropagate {
+        result: Box<HirExpression>,
+        result_definition: BuiltinTypeId,
+        success_type: TypeId,
+        error_type: TypeId,
+        enclosing_result: TypeId,
+    },
+    OptionalNarrow {
+        optional: Box<HirExpression>,
     },
     Conditional {
         condition: Box<HirExpression>,

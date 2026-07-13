@@ -133,6 +133,45 @@ Quoted strings use the portable escapes `\\`, `\"`, `\'`, `\n`, `\r`, `\t`,
 form, universal `toString`, implicit formatting conversion, or runtime type
 inspection. See ADR 0041.
 
+Optional control keeps ordinary Luau blocks and adds only local expression
+punctuation:
+
+```luau
+if local user = findUser(id) then
+    local name = user.displayName ?? "anonymous"
+    return name
+end
+```
+
+`if local` and `while local` bind a present optional value in their body. `??`
+is a right-associative lazy default operator that binds more tightly than `or`
+and less tightly than `and`. Postfix `?` propagates `nil` only from a
+single-optional-result function. It is not an unchecked unwrap or a general
+user-defined operator. See ADR 0051.
+
+Typed expected failure uses a word rather than reusing optional punctuation:
+
+```luau
+public error LoadError
+    Io(error: Io.Error)
+    InvalidData(message: String)
+end
+
+public function loadName(path: Path): Result<String, LoadError>
+    local player = try loadPlayer(path)
+    defer
+        release(player)
+    end
+    return Result.Ok(player.name)
+end
+```
+
+`Result<T, TError>` has exact `Ok` and `Error` cases. Prefix `try` propagates
+only an identical `TError`; changing error families requires an exhaustive
+match. `error ... end` declares a closed nominal error family with union-shaped
+case payloads. `defer ... end` registers lexical last-in, first-out cleanup.
+Postfix `?` remains optional-only. See ADR 0052.
+
 ## File shape
 
 Checked documentation and typed attributes for the file-scoped namespace
@@ -207,8 +246,8 @@ end
 public const MAX_PLAYERS = 64
 ```
 
-Every namespace-scope record, union, alias, class, interface, enum, attribute,
-function, and constant resolves to one of:
+Every namespace-scope record, union, error, alias, class, interface, enum,
+attribute, function, and constant resolves to one of:
 
 - `public`: visible to dependent Bubbles and present in reference metadata;
 - `internal`: visible to every Module in the same Bubble, absent from
@@ -227,6 +266,11 @@ The declaration prefix grammar is deliberately small:
 ```text
 namespaceDeclaration := [visibility] declaration
 visibility           := "public" | "internal" | "private"
+declaration          := functionDeclaration | recordDeclaration
+                      | unionDeclaration | errorDeclaration
+                      | enumDeclaration | aliasDeclaration
+                      | classDeclaration | interfaceDeclaration
+                      | attributeDeclaration | constDeclaration
 ```
 
 Documentation and attributes precede that prefix. Visibility is stored on the
@@ -238,7 +282,7 @@ public declarations it contains. `using` never changes or forwards visibility.
 Functions live directly in namespaces; no static class, singleton object,
 public-symbol table, or module return value is needed to contain them.
 
-Record fields and union/enum cases follow their containing public type contract.
+Record fields and union/error/enum cases follow their containing public type contract.
 Interface members are public by definition. Rare class fields/methods explicitly
 use `public`, `internal`, or `private`; `protected` is excluded from the initial
 language to avoid inheritance-centered API design.

@@ -79,6 +79,19 @@ Flow analysis narrows optionals after checks. Mutation, aliasing, closure
 capture, calls with relevant effects, and suspension points invalidate facts
 that are no longer provable.
 
+An equality comparison with `nil` creates complementary facts for a stable
+versioned place. Optional pattern binding in `if local`/`while local` accepts
+only `T?`, tests presence rather than truthiness, and introduces an immutable
+`T` binding only in the successful body.
+
+For `left ?? right`, `left` must be `T?`, `right` must be assignable to `T`,
+and the result is `T`. The right side is lazy. For postfix `operand?`, the
+operand must be `T?` and the enclosing function must have one optional result
+`U?`; no relation between `T` and `U` is required because the absent edge
+returns only `nil`. The continuing expression is `T`. These are closed
+compiler-known optional operations, not overloads or carrier reflection. See
+ADR 0051.
+
 The exact initialization rules for class fields must ensure no read observes an
 uninitialized non-optional value.
 
@@ -98,6 +111,10 @@ Narrowing sources can include:
 
 A narrowing fact is tied to a place/version, not merely a variable name, so a
 write cannot leave stale facts alive.
+
+Short-circuit control propagates a fact only along the edge where its predicate
+is proven. A fact does not escape a join unless every predecessor proves the
+same place version and remaining type.
 
 The first `match` statement accepts one tagged-union scrutinee and one arm for
 each resolved `UnionCaseId`. Payload bindings receive the declared case types.
@@ -146,6 +163,14 @@ without the clause is rejected.
 
 Downcasts are explicit and return a typed optional/result. There is no universal
 object type offering reflection or string member access.
+
+The reserved `Result<T, TError>` type has exact `Ok(T)` and `Error(TError)`
+cases. Prefix `try` requires an enclosing single-result function of type
+`Result<U, TError>` with the same resolved error type; neither the success type
+nor the error is inferred dynamically. Closed `error` declarations have
+distinct nominal identities and cases. Registered cleanup scopes do not change
+expression types, but every typed exit records the scopes it crosses. See ADR
+0052.
 
 ## Functions, methods, and type packs
 

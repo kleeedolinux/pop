@@ -42,7 +42,72 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::BooleanConstant(value) => {
             format!("{result} = xor i1 0, {}", u8::from(*value))
         }
-        MirInstructionKind::NilConstant => format!("{result} = add i64 0, 0"),
+        MirInstructionKind::NilConstant => {
+            if let Some(inner) = optional_inner_type(types, instruction.result_type()) {
+                let inner = llvm_type(inner, types)?;
+                format!("{result} = insertvalue {{ i1, {inner} }} zeroinitializer, i1 false, 0")
+            } else {
+                format!("{result} = add i64 0, 0")
+            }
+        }
+        MirInstructionKind::OptionalIsPresent { optional } => {
+            let optional_type = value_types
+                .get(optional)
+                .copied()
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let inner = optional_inner_type(types, optional_type)
+                .ok_or(LlvmLoweringError::InvalidType(optional_type))?;
+            let inner = llvm_type(inner, types)?;
+            format!(
+                "{result} = extractvalue {{ i1, {inner} }} %v{}, 0",
+                optional.raw()
+            )
+        }
+        MirInstructionKind::OptionalGet { optional } => {
+            let optional_type = value_types
+                .get(optional)
+                .copied()
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let inner = optional_inner_type(types, optional_type)
+                .ok_or(LlvmLoweringError::InvalidType(optional_type))?;
+            let inner = llvm_type(inner, types)?;
+            format!(
+                "{result} = extractvalue {{ i1, {inner} }} %v{}, 1",
+                optional.raw()
+            )
+        }
+        MirInstructionKind::ResultMake {
+            case, arguments, ..
+        } => lower_union_make(
+            &result,
+            pop_foundation::UnionCaseId::from_raw(case.raw()),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ErrorMake {
+            case, arguments, ..
+        } => lower_union_make(
+            &result,
+            pop_foundation::UnionCaseId::from_raw(case.raw()),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ResultIsOk { result: value, .. } => format!(
+            "{result}_tag = call i64 @{}(i64 %v{}, i64 1)\n{result} = icmp eq i64 {result}_tag, 0",
+            native_runtime_symbol(RuntimeOperation::FieldGet),
+            value.raw()
+        ),
+        MirInstructionKind::ResultGetOk { result: value, .. }
+        | MirInstructionKind::ResultGetError { result: value, .. } => lower_runtime_slot_load_from(
+            instruction.result(),
+            instruction.result_type(),
+            &format!("%v{}", value.raw()),
+            2,
+            types,
+        )?
+        .join("\n"),
         MirInstructionKind::EnumConstant { discriminant, .. } => {
             format!("{result} = add i32 0, {discriminant}")
         }
@@ -353,9 +418,14 @@ pub(crate) fn lower_instruction(
             key_map,
             value_map,
         } => lower_table_make(&result, entries, *key_map, *value_map, value_types, types)?,
-        MirInstructionKind::TableGet { table, key } => {
-            lower_table_get(&result, *table, *key, value_types, types)?
-        }
+        MirInstructionKind::TableGet { table, key } => lower_table_get(
+            &result,
+            *table,
+            *key,
+            instruction.result_type(),
+            value_types,
+            types,
+        )?,
         MirInstructionKind::TableSet {
             table,
             key,
@@ -450,11 +520,11 @@ pub(crate) fn lower_instruction(
             types,
         )?
         .join("\n"),
-        MirInstructionKind::ArrayGet { array, index } => runtime_call(
+        MirInstructionKind::ArrayGet { array, index } => lower_optional_array_get(
             &result,
-            result_type,
-            RuntimeOperation::ArrayGet,
-            &[*array, *index],
+            *array,
+            *index,
+            instruction.result_type(),
             value_types,
             types,
         )?,
@@ -717,7 +787,9 @@ pub(crate) fn lower_terminator(
             "call void @{}()\n  unreachable",
             native_runtime_symbol(RuntimeOperation::Trap)
         ),
-        MirTerminator::Panic(_) | MirTerminator::ContinueUnwind(_) => format!(
+        MirTerminator::Panic(_)
+        | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind => format!(
             "call void @{}()\n  unreachable",
             native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
@@ -726,6 +798,27 @@ pub(crate) fn lower_terminator(
             scrutinee, arms, ..
         } => {
             let tag = format!("%v{}_union_tag", scrutinee.raw());
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "    i64 {}, label %b{}",
+                        arm.case().raw(),
+                        arm.target().raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{tag} = call i64 @{}(i64 %v{}, i64 1)\n  switch i64 {tag}, label %pop_invalid_union [\n{cases}\n  ]",
+                native_runtime_symbol(RuntimeOperation::FieldGet),
+                scrutinee.raw()
+            )
+        }
+        MirTerminator::ErrorSwitch {
+            scrutinee, arms, ..
+        } => {
+            let tag = format!("%v{}_error_tag", scrutinee.raw());
             let cases = arms
                 .iter()
                 .map(|arm| {
@@ -1222,30 +1315,6 @@ pub(crate) fn call_line(
     ))
 }
 
-pub(crate) fn runtime_call(
-    result: &str,
-    result_type: Option<TypeId>,
-    operation: RuntimeOperation,
-    arguments: &[ValueId],
-    values: &BTreeMap<ValueId, TypeId>,
-    types: &TypeArena,
-) -> Result<String, LlvmLoweringError> {
-    let args = arguments
-        .iter()
-        .map(|value| {
-            llvm_value_type(values, *value, types).map(|ty| format!("{ty} %v{}", value.raw()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let return_type =
-        result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
-    let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
-    Ok(format!(
-        "{assignment}call {return_type} @{}({})",
-        native_runtime_symbol(operation),
-        args.join(", ")
-    ))
-}
-
 pub(crate) fn lower_array_create(
     result: &str,
     length: ValueId,
@@ -1538,6 +1607,44 @@ pub(crate) fn lower_array_output_call(
         &output,
         types,
     )?);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_optional_array_get(
+    result: &str,
+    array: ValueId,
+    index: ValueId,
+    result_type: TypeId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let inner = optional_inner_type(types, result_type)
+        .ok_or(LlvmLoweringError::InvalidType(result_type))?;
+    let inner_type = llvm_type(inner, types)?;
+    let output = format!("{result}_output");
+    let status = format!("{result}_status");
+    let present = format!("{result}_present");
+    let payload = format!("{result}_payload");
+    let partial = format!("{result}_partial");
+    let array_type = llvm_value_type(values, array, types)?;
+    let index_type = llvm_value_type(values, index, types)?;
+    let mut lines = vec![
+        format!("store i64 0, ptr {output}"),
+        format!(
+            "{status} = call i8 @{}({array_type} %v{}, {index_type} %v{}, ptr {output})",
+            native_runtime_symbol(RuntimeOperation::ArrayGetChecked),
+            array.raw(),
+            index.raw(),
+        ),
+        format!("{present} = icmp ne i8 {status}, 0"),
+    ];
+    lines.extend(lower_array_output_load(&payload, inner, &output, types)?);
+    lines.extend([
+        format!("{partial} = insertvalue {{ i1, {inner_type} }} zeroinitializer, i1 {present}, 0"),
+        format!(
+            "{result} = insertvalue {{ i1, {inner_type} }} {partial}, {inner_type} {payload}, 1"
+        ),
+    ]);
     Ok(lines.join("\n"))
 }
 
@@ -2331,20 +2438,40 @@ pub(crate) fn lower_table_get(
     result: &str,
     table: ValueId,
     key: ValueId,
+    result_type: TypeId,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
 ) -> Result<String, LlvmLoweringError> {
+    let inner = optional_inner_type(types, result_type)
+        .ok_or(LlvmLoweringError::InvalidType(result_type))?;
+    let inner_type = llvm_type(inner, types)?;
     let key_type = *values
         .get(&key)
         .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
     let (mut lines, stored_key) =
         lower_runtime_slot_store(key, key_type, &llvm_type(key_type, types)?)?;
-    lines.push(format!(
-        "{result} = call i64 @{}(i64 %v{}, i64 {stored_key}, i1 {})",
-        native_runtime_symbol(RuntimeOperation::TableGet),
-        table.raw(),
-        u8::from(is_managed_type(key_type, types)),
-    ));
+    let output = format!("{result}_output");
+    let status = format!("{result}_status");
+    let present = format!("{result}_present");
+    let payload = format!("{result}_payload");
+    let partial = format!("{result}_partial");
+    lines.extend([
+        format!("store i64 0, ptr {output}"),
+        format!(
+            "{status} = call i8 @{}(i64 %v{}, i64 {stored_key}, i1 {}, ptr {output})",
+            pop_runtime_native_abi::TABLE_GET_CHECKED_SYMBOL,
+            table.raw(),
+            u8::from(is_managed_type(key_type, types)),
+        ),
+        format!("{present} = icmp ne i8 {status}, 0"),
+    ]);
+    lines.extend(lower_array_output_load(&payload, inner, &output, types)?);
+    lines.extend([
+        format!("{partial} = insertvalue {{ i1, {inner_type} }} zeroinitializer, i1 {present}, 0"),
+        format!(
+            "{result} = insertvalue {{ i1, {inner_type} }} {partial}, {inner_type} {payload}, 1"
+        ),
+    ]);
     Ok(lines.join("\n"))
 }
 
@@ -2425,6 +2552,9 @@ pub(crate) fn llvm_value_type(
 }
 
 pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, LlvmLoweringError> {
+    if let Some(inner) = optional_inner_type(types, type_id) {
+        return Ok(format!("{{ i1, {} }}", llvm_type(inner, types)?));
+    }
     match types
         .get(type_id)
         .ok_or(LlvmLoweringError::InvalidType(type_id))?
@@ -2438,6 +2568,26 @@ pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, Ll
         SemanticType::Primitive(PrimitiveType::Never) => Ok("void".to_owned()),
         SemanticType::Enum { .. } => Ok("i32".to_owned()),
         _ => Ok("i64".to_owned()),
+    }
+}
+
+fn optional_inner_type(types: &TypeArena, optional: TypeId) -> Option<TypeId> {
+    let nil = types.source_type("nil")?;
+    let SemanticType::Union(members) = types.get(optional)? else {
+        return None;
+    };
+    if !members.contains(&nil) {
+        return None;
+    }
+    let present = members
+        .iter()
+        .copied()
+        .filter(|member| *member != nil)
+        .collect::<Vec<_>>();
+    match present.as_slice() {
+        [inner] => Some(*inner),
+        [] => None,
+        _ => types.find(&SemanticType::Union(present)),
     }
 }
 

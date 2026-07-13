@@ -1,0 +1,7 @@
+namespace Hello
+
+function main()
+    local release = "0.1.0-rc.3"
+    print(`🫧 Hello from Pop {release}!`)
+    print("Strong types. Native code. Small syntax.")
+end

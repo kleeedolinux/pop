@@ -390,6 +390,12 @@ fn restricted_lowering_rejects_state_loops_mutation_and_non_direct_dispatch() {
          end\n\
          public function indirect(callback: function(value: Int): Int): Int\n\
              return callback(1)\n\
+         end\n\
+         public function optionalFlow(value: Int?): Int\n\
+             if local present = value then\n\
+                 return present\n\
+             end\n\
+             return value ?? 0\n\
          end\n",
     );
 
@@ -399,6 +405,10 @@ fn restricted_lowering_rejects_state_loops_mutation_and_non_direct_dispatch() {
         ("mutation", UnsupportedCompileTimeConstruct::Mutation),
         ("method", UnsupportedCompileTimeConstruct::MethodCall),
         ("indirect", UnsupportedCompileTimeConstruct::IndirectCall),
+        (
+            "optionalFlow",
+            UnsupportedCompileTimeConstruct::OptionalFlow,
+        ),
     ] {
         assert!(
             matches!(

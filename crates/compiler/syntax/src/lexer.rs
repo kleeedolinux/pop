@@ -46,6 +46,8 @@ pub enum TokenKind {
     Match,
     When,
     With,
+    Try,
+    Defer,
     Nil,
     True,
     False,
@@ -71,6 +73,7 @@ pub enum TokenKind {
     GreaterThan,
     GreaterThanEqual,
     At,
+    QuestionQuestion,
     Question,
     Pipe,
     Plus,
@@ -280,6 +283,10 @@ impl Lexer<'_> {
                 self.cursor += 2;
                 TokenKind::GreaterThanEqual
             }
+            b'?' if remaining.starts_with("??") => {
+                self.cursor += 2;
+                TokenKind::QuestionQuestion
+            }
             _ => {
                 self.cursor += char::from(byte).len_utf8();
                 punctuation(byte).unwrap_or_else(|| {
@@ -432,6 +439,8 @@ fn keyword(text: &str) -> TokenKind {
         "match" => TokenKind::Match,
         "when" => TokenKind::When,
         "with" => TokenKind::With,
+        "try" => TokenKind::Try,
+        "defer" => TokenKind::Defer,
         "nil" => TokenKind::Nil,
         "true" => TokenKind::True,
         "false" => TokenKind::False,

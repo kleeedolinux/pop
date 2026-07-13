@@ -467,11 +467,27 @@ fn call_effects_are_exact_and_cleanup_edges_are_verified_cfg_edges() {
         "  b0():\n",
         "    do v0 callDirect s0 () effects[MayUnwind] unwind cleanup:b1\n",
         "    return ()\n",
-        "  b1():\n",
+        "  b1() cleanup scope#0 reason unwind:\n",
         "    return ()\n",
     ))
     .expect("cleanup MIR");
     assert!(verify_mir_bubble(&valid, &types).is_ok());
+
+    let resume_without_cleanup = parse_mir_dump(concat!(
+        "mir bubble b0 namespace n0\n",
+        "dependencies\n",
+        "function s0 f0() -> () effects[MayUnwind]\n",
+        "  b0():\n",
+        "    resumeCurrentUnwind\n",
+    ))
+    .expect("structural unwind resume MIR");
+    assert!(matches!(
+        verify_mir_bubble(&resume_without_cleanup, &types),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::ResumeOutsideCleanup { .. }
+        ))
+    ));
 
     let underdeclared = parse_mir_dump(&valid.dump().replacen(
         "callDirect s0 () effects[MayUnwind]",

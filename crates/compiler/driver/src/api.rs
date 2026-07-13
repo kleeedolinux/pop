@@ -90,6 +90,8 @@ impl FrontEndBubbleInput {
 #[derive(Clone, Debug)]
 pub struct FrontEndResult {
     pub(crate) hir: Option<HirBubble>,
+    pub(crate) hir_bubble_error: Option<pop_hir::HirBubbleError>,
+    pub(crate) hir_build_errors: Vec<pop_hir::HirBuildError>,
     pub(crate) types: TypeArena,
     pub(crate) attribute_queries: AttributeQueryIndex,
     pub(crate) compile_time_evaluations: Vec<FrontEndCompileTimeEvaluation>,
@@ -399,6 +401,16 @@ impl FrontEndResult {
     #[must_use]
     pub const fn hir(&self) -> Option<&HirBubble> {
         self.hir.as_ref()
+    }
+
+    #[must_use]
+    pub const fn hir_bubble_error(&self) -> Option<pop_hir::HirBubbleError> {
+        self.hir_bubble_error
+    }
+
+    #[must_use]
+    pub fn hir_build_errors(&self) -> &[pop_hir::HirBuildError] {
+        &self.hir_build_errors
     }
 
     #[must_use]

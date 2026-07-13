@@ -40,6 +40,7 @@ pub enum AttributeTarget {
     Attribute,
     Record,
     Union,
+    Error,
     Class,
     Interface,
     Enum,
@@ -49,7 +50,7 @@ pub enum AttributeTarget {
 }
 
 impl AttributeTarget {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Namespace,
         Self::Function,
         Self::Constant,
@@ -57,6 +58,7 @@ impl AttributeTarget {
         Self::Attribute,
         Self::Record,
         Self::Union,
+        Self::Error,
         Self::Class,
         Self::Interface,
         Self::Enum,

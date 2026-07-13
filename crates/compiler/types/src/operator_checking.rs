@@ -78,9 +78,35 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         expected: Option<ExpectedExpressionType>,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
+        if operator == SyntaxBinaryOperator::OptionalDefault {
+            let optional = self.check_expression(left)?;
+            let Some(inner_type) = self.optional_inner(optional.type_id()) else {
+                self.invalid_operator(span, "??", &[optional.type_id()]);
+                return None;
+            };
+            let fallback = self.check_expression_expected(
+                right,
+                Some(ExpectedExpressionType::plain(inner_type)),
+            )?;
+            self.require_same_type(
+                inner_type,
+                fallback.type_id(),
+                fallback.span(),
+                right.span(),
+            );
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::OptionalDefault {
+                    optional: Box::new(optional),
+                    fallback: Box::new(fallback),
+                },
+                type_id: inner_type,
+                span,
+            });
+        }
         let (left, right) = self.check_binary_operands(operator, left, right, expected)?;
         let operands_match = left.type_id() == right.type_id();
         let valid = match operator {
+            SyntaxBinaryOperator::OptionalDefault => unreachable!("handled above"),
             SyntaxBinaryOperator::Or | SyntaxBinaryOperator::And => {
                 operands_match && self.is_primitive(left.type_id(), PrimitiveType::Boolean)
             }
@@ -266,7 +292,23 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     }
 
     pub(crate) fn equality_comparable(&self, left: TypeId, right: TypeId) -> bool {
-        left == right && self.supports_default_equality(left)
+        if left == right {
+            return self.supports_default_equality(left);
+        }
+        let Some(nil) = self.resolver.arena().source_type("nil") else {
+            return false;
+        };
+        let optional = if left == nil {
+            right
+        } else if right == nil {
+            left
+        } else {
+            return false;
+        };
+        matches!(
+            self.resolver.arena().get(optional),
+            Some(SemanticType::Union(members)) if members.contains(&nil)
+        )
     }
 
     pub(crate) fn supports_default_equality(&self, type_id: TypeId) -> bool {

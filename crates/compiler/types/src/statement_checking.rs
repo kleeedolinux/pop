@@ -15,8 +15,9 @@ use pop_syntax::{
 };
 
 use crate::body_checking::{
-    ActiveFunction, Binding, BindingKind, BodyChecker, CheckedInvocation, ExpectedExpressionType,
-    ResolvedClosureShape, UnionCaseLookup, missing_match_arms, statements_definitely_return,
+    ActiveFunction, Binding, BindingKind, BodyChecker, CheckedInvocation, ErrorCaseLookup,
+    ExpectedExpressionType, ResolvedClosureShape, UnionCaseLookup, missing_match_arms,
+    statements_definitely_return,
 };
 use crate::typed_body::*;
 use crate::{ResolvedFunctionSignature, SemanticType};
@@ -93,15 +94,41 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 then_body,
                 else_body,
             } => {
+                let narrowing = self.optional_narrowing(condition);
                 let condition = self.check_condition(condition)?;
-                let then_body = self.check_nested_statements(signature, then_body);
-                let else_body = self.check_nested_statements(signature, else_body);
+                let then_body = if let Some((binding, inner, true)) = narrowing {
+                    self.check_nested_statements_with_narrowing(
+                        signature, then_body, binding, inner,
+                    )
+                } else {
+                    self.check_nested_statements(signature, then_body)
+                };
+                let else_body = if let Some((binding, inner, false)) = narrowing {
+                    self.check_nested_statements_with_narrowing(
+                        signature, else_body, binding, inner,
+                    )
+                } else {
+                    self.check_nested_statements(signature, else_body)
+                };
                 TypedStatementKind::If {
                     condition,
                     then_body,
                     else_body,
                 }
             }
+            StatementSyntaxKind::OptionalIf {
+                name,
+                initializer,
+                then_body,
+                else_body,
+            } => self.check_optional_if(
+                signature,
+                name,
+                initializer,
+                then_body,
+                else_body,
+                statement.span(),
+            )?,
             StatementSyntaxKind::While { condition, body } => {
                 let condition = self.check_condition(condition)?;
                 self.loop_depth = self.loop_depth.saturating_add(1);
@@ -109,6 +136,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.loop_depth = self.loop_depth.saturating_sub(1);
                 TypedStatementKind::While { condition, body }
             }
+            StatementSyntaxKind::OptionalWhile {
+                name,
+                initializer,
+                body,
+            } => self.check_optional_while(signature, name, initializer, body, statement.span())?,
             StatementSyntaxKind::RepeatUntil { body, condition } => {
                 self.check_repeat_until(signature, body, condition)?
             }
@@ -135,6 +167,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             StatementSyntaxKind::Match { scrutinee, arms } => {
                 self.check_match(signature, scrutinee, arms, statement.span())?
+            }
+            StatementSyntaxKind::Defer { body } => {
+                if let Some((control, control_span)) = illegal_cleanup_control(body) {
+                    self.diagnostics
+                        .push(type_diagnostics::illegal_cleanup_control(
+                            control_span,
+                            control,
+                        ));
+                    return None;
+                }
+                TypedStatementKind::Defer {
+                    body: self.check_nested_statements(signature, body),
+                }
             }
             StatementSyntaxKind::Assignment {
                 target,
@@ -288,7 +333,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
         }?;
         let checked = match invocation {
-            CheckedInvocation::Call(checked) => checked,
+            CheckedInvocation::Call(checked) => {
+                self.invalidate_flow_narrowings();
+                checked
+            }
             CheckedInvocation::Value(value) => {
                 return Some(TypedStatementKind::Expression(value));
             }
@@ -763,7 +811,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
-            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+            if matches!(
+                binding.kind,
+                BindingKind::LoopLocal(_) | BindingKind::ImmutableLocal(_)
+            ) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
                     "multiple assignment",
@@ -781,6 +832,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 return None;
             }
             self.written_bindings.insert(binding.id);
+            self.invalidate_flow_binding(binding.id);
             return match target_kind {
                 TypedExpressionKind::Local(local) => Some(TypedAssignmentTarget::Local {
                     binding: binding.id,
@@ -859,7 +911,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
-            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+            if matches!(
+                binding.kind,
+                BindingKind::LoopLocal(_) | BindingKind::ImmutableLocal(_)
+            ) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
                     "assignment",
@@ -882,6 +937,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             )?;
             self.require_same_type(binding.type_id, value.type_id(), value.span(), span);
             self.written_bindings.insert(binding.id);
+            self.invalidate_flow_binding(binding.id);
             return match target_kind {
                 TypedExpressionKind::Local(local) => {
                     Some(TypedStatementKind::LocalSet { local, value })
@@ -973,7 +1029,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             && path.len() == 1
             && let Some(binding) = self.binding_by_name(&path[0])
         {
-            if matches!(binding.kind, BindingKind::LoopLocal(_)) {
+            if matches!(
+                binding.kind,
+                BindingKind::LoopLocal(_) | BindingKind::ImmutableLocal(_)
+            ) {
                 self.diagnostics.push(type_diagnostics::invalid_operator(
                     span,
                     "compound assignment",
@@ -1003,6 +1062,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.check_compound_operator(operator, binding.type_id, right.type_id(), span)?;
             let value = compound_expression(current, right, operator, span);
             self.written_bindings.insert(binding.id);
+            self.invalidate_flow_binding(binding.id);
             return match target_kind {
                 TypedExpressionKind::Local(local) => {
                     Some(TypedStatementKind::LocalSet { local, value })
@@ -1120,6 +1180,143 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         typed
     }
 
+    fn check_nested_statements_with_narrowing(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        statements: &[StatementSyntax],
+        binding: BindingId,
+        inner_type: pop_foundation::TypeId,
+    ) -> Vec<TypedStatement> {
+        self.flow_narrowings
+            .push(BTreeMap::from([(binding, inner_type)]));
+        let typed = self.check_nested_statements(signature, statements);
+        self.flow_narrowings
+            .pop()
+            .expect("flow narrowing was just pushed");
+        typed
+    }
+
+    fn optional_narrowing(
+        &mut self,
+        condition: &ExpressionSyntax,
+    ) -> Option<(BindingId, pop_foundation::TypeId, bool)> {
+        let ExpressionSyntaxKind::Binary {
+            operator,
+            left,
+            right,
+        } = condition.kind()
+        else {
+            return None;
+        };
+        let present_on_true = match operator {
+            SyntaxBinaryOperator::NotEqual => true,
+            SyntaxBinaryOperator::Equal => false,
+            _ => return None,
+        };
+        let name = match (left.kind(), right.kind()) {
+            (ExpressionSyntaxKind::Name(path), ExpressionSyntaxKind::Nil)
+            | (ExpressionSyntaxKind::Nil, ExpressionSyntaxKind::Name(path))
+                if path.len() == 1 =>
+            {
+                &path[0]
+            }
+            _ => return None,
+        };
+        let binding = self.binding_by_name(name)?;
+        let inner = self.optional_inner(binding.type_id)?;
+        Some((binding.id, inner, present_on_true))
+    }
+
+    fn check_optional_if(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        initializer: &ExpressionSyntax,
+        then_statements: &[StatementSyntax],
+        else_statements: &[StatementSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let initializer = self.check_expression(initializer)?;
+        let Some(inner_type) = self.optional_inner(initializer.type_id()) else {
+            self.invalid_operator(span, "if local", &[initializer.type_id()]);
+            return None;
+        };
+        let (binding, local, then_body) =
+            self.check_optional_binding_body(signature, name, inner_type, then_statements, false);
+        let else_body = self.check_nested_statements(signature, else_statements);
+        Some(TypedStatementKind::OptionalIf {
+            binding,
+            local,
+            name: name.to_owned(),
+            inner_type,
+            initializer,
+            then_body,
+            else_body,
+        })
+    }
+
+    fn check_optional_while(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        initializer: &ExpressionSyntax,
+        statements: &[StatementSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let initializer = self.check_expression(initializer)?;
+        let Some(inner_type) = self.optional_inner(initializer.type_id()) else {
+            self.invalid_operator(span, "while local", &[initializer.type_id()]);
+            return None;
+        };
+        let (binding, local, body) =
+            self.check_optional_binding_body(signature, name, inner_type, statements, true);
+        Some(TypedStatementKind::OptionalWhile {
+            binding,
+            local,
+            name: name.to_owned(),
+            inner_type,
+            initializer,
+            body,
+        })
+    }
+
+    fn check_optional_binding_body(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        name: &str,
+        inner_type: pop_foundation::TypeId,
+        statements: &[StatementSyntax],
+        is_loop: bool,
+    ) -> (BindingId, LocalId, Vec<TypedStatement>) {
+        let local = LocalId::from_raw(self.next_local);
+        self.next_local = self.next_local.saturating_add(1);
+        let binding = BindingId::from_raw(self.next_binding);
+        self.next_binding = self.next_binding.saturating_add(1);
+        self.scopes.push(BTreeMap::from([(
+            name.to_owned(),
+            Binding {
+                id: binding,
+                kind: BindingKind::ImmutableLocal(local),
+                type_id: inner_type,
+                function_depth: self.function_depth,
+            },
+        )]));
+        if is_loop {
+            self.loop_depth = self.loop_depth.saturating_add(1);
+        }
+        let body = statements
+            .iter()
+            .filter_map(|statement| self.check_statement(signature, statement))
+            .collect();
+        if is_loop {
+            self.loop_depth = self.loop_depth.saturating_sub(1);
+        }
+        self.scopes
+            .pop()
+            .expect("optional binding scope was just pushed");
+        (binding, local, body)
+    }
+
     pub(crate) fn check_repeat_until(
         &mut self,
         signature: &ResolvedFunctionSignature,
@@ -1164,6 +1361,18 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<TypedStatementKind> {
         let scrutinee = self.check_expression(scrutinee)?;
+        if let Some((success, error)) = self.resolver.result_parts(scrutinee.type_id()) {
+            return self.check_result_match(signature, scrutinee, success, error, arms, span);
+        }
+        if let Some(SemanticType::ErrorUnion { source, .. }) =
+            self.resolver.arena().get(scrutinee.type_id()).cloned()
+        {
+            let definition = self
+                .resolver
+                .error_definition_for_type(scrutinee.type_id())?
+                .clone();
+            return self.check_error_match(signature, scrutinee, &definition, source, arms, span);
+        }
         let definition_symbol = match self.resolver.arena().get(scrutinee.type_id()) {
             Some(SemanticType::TaggedUnion { .. }) => self
                 .resolver
@@ -1321,6 +1530,299 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             arms: typed_arms,
         })
     }
+
+    fn check_error_match(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        scrutinee: TypedExpression,
+        definition: &crate::ErrorDefinition,
+        source: pop_foundation::SymbolId,
+        arms: &[MatchArmSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let mut seen = BTreeMap::new();
+        let mut typed_arms = Vec::new();
+        for arm in arms {
+            let (_, source_case) = match self.lookup_error_case(arm.case_path(), arm.span()) {
+                ErrorCaseLookup::Found(definition, case) => (definition, case),
+                ErrorCaseLookup::Missing | ErrorCaseLookup::NotError => continue,
+            };
+            let Some(case) = definition
+                .cases()
+                .iter()
+                .find(|candidate| candidate.name() == source_case.name())
+                .cloned()
+            else {
+                self.diagnostics.push(type_diagnostics::foreign_match_case(
+                    arm.span(),
+                    arm.case_path().join("."),
+                ));
+                continue;
+            };
+            if let Some(original) = seen.insert(case.case(), arm.span()) {
+                self.diagnostics
+                    .push(type_diagnostics::duplicate_match_case(
+                        arm.span(),
+                        case.name(),
+                        original,
+                    ));
+                continue;
+            }
+            if case.parameters().len() != arm.bindings().len() {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    arm.span(),
+                    "error match case payload",
+                    case.parameters().len(),
+                    arm.bindings().len(),
+                ));
+                continue;
+            }
+            self.scopes.push(BTreeMap::new());
+            let mut names = BTreeMap::new();
+            let mut bindings = Vec::new();
+            for (name, (_, type_id, parameter_span)) in arm.bindings().iter().zip(case.parameters())
+            {
+                if name == "_" {
+                    bindings.push(TypedMatchBinding {
+                        binding: None,
+                        local: None,
+                        name: name.clone(),
+                        type_id: *type_id,
+                        span: arm.span(),
+                    });
+                    continue;
+                }
+                if let Some(original) = names.insert(name.clone(), arm.span()) {
+                    self.diagnostics.push(type_diagnostics::duplicate_binding(
+                        arm.span(),
+                        name,
+                        original,
+                    ));
+                    continue;
+                }
+                let local = LocalId::from_raw(self.next_local);
+                self.next_local = self.next_local.saturating_add(1);
+                let binding = BindingId::from_raw(self.next_binding);
+                self.next_binding = self.next_binding.saturating_add(1);
+                self.scopes
+                    .last_mut()
+                    .expect("error match scope was just pushed")
+                    .insert(
+                        name.clone(),
+                        Binding {
+                            id: binding,
+                            kind: BindingKind::Local(local),
+                            type_id: *type_id,
+                            function_depth: self.function_depth,
+                        },
+                    );
+                bindings.push(TypedMatchBinding {
+                    binding: Some(binding),
+                    local: Some(local),
+                    name: name.clone(),
+                    type_id: *type_id,
+                    span: *parameter_span,
+                });
+            }
+            let body = arm
+                .body()
+                .iter()
+                .filter_map(|statement| self.check_statement(signature, statement))
+                .collect();
+            self.scopes
+                .pop()
+                .expect("error match scope was just pushed");
+            typed_arms.push(TypedErrorMatchArm {
+                error: definition.error(),
+                case: case.case(),
+                bindings,
+                body,
+                span: arm.span(),
+            });
+        }
+        let missing: Vec<_> = definition
+            .cases()
+            .iter()
+            .filter(|case| !seen.contains_key(&case.case()))
+            .collect();
+        if !missing.is_empty() {
+            let declaration_name = self
+                .resolver
+                .database()
+                .index()
+                .declaration(source)
+                .map_or("Error", pop_resolve::Declaration::name);
+            let replacement = missing_error_match_arms(declaration_name, &missing);
+            let insert_offset = span.range().end().to_u32().saturating_sub(3);
+            let insertion = SourceSpan::new(
+                span.file(),
+                TextRange::empty(TextSize::from_u32(insert_offset)),
+            );
+            let missing_names: Vec<_> = missing.iter().map(|case| case.name()).collect();
+            self.diagnostics.push(type_diagnostics::missing_match_cases(
+                span,
+                &missing_names,
+                insertion,
+                replacement,
+            ));
+        }
+        Some(TypedStatementKind::ErrorMatch {
+            scrutinee,
+            error: definition.error(),
+            arms: typed_arms,
+        })
+    }
+
+    fn check_result_match(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        scrutinee: TypedExpression,
+        success_type: pop_foundation::TypeId,
+        error_type: pop_foundation::TypeId,
+        arms: &[MatchArmSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let result_type = scrutinee.type_id();
+        let mut seen = BTreeMap::new();
+        let mut typed_arms = Vec::new();
+        for arm in arms {
+            let (case, payload_type) = match arm.case_path() {
+                [result, case] if result == "Result" && case == "Ok" => {
+                    (pop_foundation::ResultCaseId::from_raw(0), success_type)
+                }
+                [result, case] if result == "Result" && case == "Error" => {
+                    (pop_foundation::ResultCaseId::from_raw(1), error_type)
+                }
+                _ => {
+                    self.diagnostics.push(type_diagnostics::foreign_match_case(
+                        arm.span(),
+                        arm.case_path().join("."),
+                    ));
+                    continue;
+                }
+            };
+            if let Some(original) = seen.insert(case, arm.span()) {
+                self.diagnostics
+                    .push(type_diagnostics::duplicate_match_case(
+                        arm.span(),
+                        arm.case_path().last().map_or("Result", String::as_str),
+                        original,
+                    ));
+                continue;
+            }
+            if arm.bindings().len() != 1 {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    arm.span(),
+                    "Result match case payload",
+                    1,
+                    arm.bindings().len(),
+                ));
+                continue;
+            }
+            self.scopes.push(BTreeMap::new());
+            let name = &arm.bindings()[0];
+            let binding = if name == "_" {
+                TypedMatchBinding {
+                    binding: None,
+                    local: None,
+                    name: name.clone(),
+                    type_id: payload_type,
+                    span: arm.span(),
+                }
+            } else {
+                let local = LocalId::from_raw(self.next_local);
+                self.next_local = self.next_local.saturating_add(1);
+                let binding = BindingId::from_raw(self.next_binding);
+                self.next_binding = self.next_binding.saturating_add(1);
+                self.scopes
+                    .last_mut()
+                    .expect("result match scope was just pushed")
+                    .insert(
+                        name.clone(),
+                        Binding {
+                            id: binding,
+                            kind: BindingKind::Local(local),
+                            type_id: payload_type,
+                            function_depth: self.function_depth,
+                        },
+                    );
+                TypedMatchBinding {
+                    binding: Some(binding),
+                    local: Some(local),
+                    name: name.clone(),
+                    type_id: payload_type,
+                    span: arm.span(),
+                }
+            };
+            let body = arm
+                .body()
+                .iter()
+                .filter_map(|statement| self.check_statement(signature, statement))
+                .collect();
+            self.scopes
+                .pop()
+                .expect("result match scope was just pushed");
+            typed_arms.push(TypedResultMatchArm {
+                case,
+                bindings: vec![binding],
+                body,
+                span: arm.span(),
+            });
+        }
+        let missing = [
+            (pop_foundation::ResultCaseId::from_raw(0), "Ok", "value"),
+            (pop_foundation::ResultCaseId::from_raw(1), "Error", "error"),
+        ]
+        .into_iter()
+        .filter(|(case, _, _)| !seen.contains_key(case))
+        .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let replacement = missing
+                .iter()
+                .map(|(_, case, binding)| format!("when Result.{case}({binding}) then\n"))
+                .collect::<String>();
+            let insert_offset = span.range().end().to_u32().saturating_sub(3);
+            let insertion = SourceSpan::new(
+                span.file(),
+                TextRange::empty(TextSize::from_u32(insert_offset)),
+            );
+            let missing_names = missing.iter().map(|(_, case, _)| *case).collect::<Vec<_>>();
+            self.diagnostics.push(type_diagnostics::missing_match_cases(
+                span,
+                &missing_names,
+                insertion,
+                replacement,
+            ));
+        }
+        Some(TypedStatementKind::ResultMatch {
+            scrutinee,
+            result: self.resolver.result_definition()?,
+            result_type,
+            arms: typed_arms,
+        })
+    }
+}
+
+fn missing_error_match_arms(error_name: &str, cases: &[&crate::ErrorCaseDefinition]) -> String {
+    let mut replacement = String::new();
+    for case in cases {
+        replacement.push_str("when ");
+        replacement.push_str(error_name);
+        replacement.push('.');
+        replacement.push_str(case.name());
+        if !case.parameters().is_empty() {
+            replacement.push('(');
+            for (index, (name, _, _)) in case.parameters().iter().enumerate() {
+                if index != 0 {
+                    replacement.push_str(", ");
+                }
+                replacement.push_str(name);
+            }
+            replacement.push(')');
+        }
+        replacement.push_str(" then\n");
+    }
+    replacement
 }
 
 fn compound_expression(
@@ -1374,6 +1876,11 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
             then_body,
             else_body,
             ..
+        }
+        | StatementSyntaxKind::OptionalIf {
+            then_body,
+            else_body,
+            ..
         } => {
             contains_continue_for_current_loop(then_body)
                 || contains_continue_for_current_loop(else_body)
@@ -1382,8 +1889,10 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
         StatementSyntaxKind::While { .. }
+        | StatementSyntaxKind::OptionalWhile { .. }
         | StatementSyntaxKind::RepeatUntil { .. }
         | StatementSyntaxKind::NumericFor { .. }
+        | StatementSyntaxKind::Defer { .. }
         | StatementSyntaxKind::Local { .. }
         | StatementSyntaxKind::MultipleLocal { .. }
         | StatementSyntaxKind::LocalFunction { .. }
@@ -1393,4 +1902,192 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
         | StatementSyntaxKind::MultipleAssignment { .. }
         | StatementSyntaxKind::Expression(_) => false,
     })
+}
+
+fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static str, SourceSpan)> {
+    for statement in statements {
+        match statement.kind() {
+            StatementSyntaxKind::Return { .. } => return Some(("return", statement.span())),
+            StatementSyntaxKind::Break => return Some(("break", statement.span())),
+            StatementSyntaxKind::Continue => return Some(("continue", statement.span())),
+            StatementSyntaxKind::Defer { .. } => return Some(("defer", statement.span())),
+            StatementSyntaxKind::Local { initializer, .. } => {
+                if expression_contains_result_propagation(initializer) {
+                    return Some(("try", initializer.span()));
+                }
+            }
+            StatementSyntaxKind::MultipleLocal { values, .. } => {
+                if let Some(expression) = values
+                    .iter()
+                    .find(|value| expression_contains_result_propagation(value))
+                {
+                    return Some(("try", expression.span()));
+                }
+            }
+            StatementSyntaxKind::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if expression_contains_result_propagation(condition) {
+                    return Some(("try", condition.span()));
+                }
+                if let Some(found) = illegal_cleanup_control(then_body) {
+                    return Some(found);
+                }
+                if let Some(found) = illegal_cleanup_control(else_body) {
+                    return Some(found);
+                }
+            }
+            StatementSyntaxKind::OptionalIf {
+                initializer,
+                then_body,
+                else_body,
+                ..
+            } => {
+                if expression_contains_result_propagation(initializer) {
+                    return Some(("try", initializer.span()));
+                }
+                if let Some(found) = illegal_cleanup_control(then_body) {
+                    return Some(found);
+                }
+                if let Some(found) = illegal_cleanup_control(else_body) {
+                    return Some(found);
+                }
+            }
+            StatementSyntaxKind::While { condition, body }
+            | StatementSyntaxKind::RepeatUntil { condition, body } => {
+                if expression_contains_result_propagation(condition) {
+                    return Some(("try", condition.span()));
+                }
+                if let Some(found) = illegal_cleanup_control(body) {
+                    return Some(found);
+                }
+            }
+            StatementSyntaxKind::OptionalWhile {
+                initializer, body, ..
+            } => {
+                if expression_contains_result_propagation(initializer) {
+                    return Some(("try", initializer.span()));
+                }
+                if let Some(found) = illegal_cleanup_control(body) {
+                    return Some(found);
+                }
+            }
+            StatementSyntaxKind::NumericFor {
+                first,
+                last,
+                step,
+                body,
+                ..
+            } => {
+                if [Some(first), Some(last), step.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(expression_contains_result_propagation)
+                {
+                    return Some(("try", statement.span()));
+                }
+                if let Some(found) = illegal_cleanup_control(body) {
+                    return Some(found);
+                }
+            }
+            StatementSyntaxKind::Match { scrutinee, arms } => {
+                if expression_contains_result_propagation(scrutinee) {
+                    return Some(("try", scrutinee.span()));
+                }
+                for arm in arms {
+                    if let Some(found) = illegal_cleanup_control(arm.body()) {
+                        return Some(found);
+                    }
+                }
+            }
+            StatementSyntaxKind::Assignment { target, value, .. } => {
+                if expression_contains_result_propagation(target)
+                    || expression_contains_result_propagation(value)
+                {
+                    return Some(("try", statement.span()));
+                }
+            }
+            StatementSyntaxKind::MultipleAssignment { targets, values } => {
+                if targets
+                    .iter()
+                    .chain(values)
+                    .any(expression_contains_result_propagation)
+                {
+                    return Some(("try", statement.span()));
+                }
+            }
+            StatementSyntaxKind::Expression(expression) => {
+                if expression_contains_result_propagation(expression) {
+                    return Some(("try", expression.span()));
+                }
+            }
+            StatementSyntaxKind::LocalFunction { .. } => {}
+        }
+    }
+    None
+}
+
+fn expression_contains_result_propagation(expression: &ExpressionSyntax) -> bool {
+    match expression.kind() {
+        ExpressionSyntaxKind::ResultPropagate { .. } => true,
+        ExpressionSyntaxKind::Call { callee, arguments }
+        | ExpressionSyntaxKind::GenericCall {
+            callee, arguments, ..
+        } => {
+            expression_contains_result_propagation(callee)
+                || arguments.iter().any(expression_contains_result_propagation)
+        }
+        ExpressionSyntaxKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            expression_contains_result_propagation(receiver)
+                || arguments.iter().any(expression_contains_result_propagation)
+        }
+        ExpressionSyntaxKind::Index { base, index } => {
+            expression_contains_result_propagation(base)
+                || expression_contains_result_propagation(index)
+        }
+        ExpressionSyntaxKind::Construct { fields, .. }
+        | ExpressionSyntaxKind::Aggregate { fields } => fields
+            .iter()
+            .any(|field| expression_contains_result_propagation(field.value())),
+        ExpressionSyntaxKind::Array(elements) | ExpressionSyntaxKind::Tuple(elements) => {
+            elements.iter().any(expression_contains_result_propagation)
+        }
+        ExpressionSyntaxKind::Unary { operand, .. }
+        | ExpressionSyntaxKind::OptionalPropagate { operand } => {
+            expression_contains_result_propagation(operand)
+        }
+        ExpressionSyntaxKind::Binary { left, right, .. } => {
+            expression_contains_result_propagation(left)
+                || expression_contains_result_propagation(right)
+        }
+        ExpressionSyntaxKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expression_contains_result_propagation(condition)
+                || expression_contains_result_propagation(when_true)
+                || expression_contains_result_propagation(when_false)
+        }
+        ExpressionSyntaxKind::With { base, fields } => {
+            expression_contains_result_propagation(base)
+                || fields
+                    .iter()
+                    .any(|field| expression_contains_result_propagation(field.value()))
+        }
+        ExpressionSyntaxKind::Function(_)
+        | ExpressionSyntaxKind::Integer(_)
+        | ExpressionSyntaxKind::Float(_)
+        | ExpressionSyntaxKind::String(_)
+        | ExpressionSyntaxKind::InterpolatedString(_)
+        | ExpressionSyntaxKind::Boolean(_)
+        | ExpressionSyntaxKind::Nil
+        | ExpressionSyntaxKind::Name(_) => false,
+    }
 }

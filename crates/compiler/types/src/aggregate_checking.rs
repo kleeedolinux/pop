@@ -13,11 +13,87 @@ use pop_syntax::{ExpressionSyntax, ExpressionSyntaxKind, FieldInitializerSyntax}
 
 use crate::SemanticType;
 use crate::body_checking::{
-    BodyChecker, ExpectedExpressionType, UnionCaseLookup, typed_field_default,
+    BodyChecker, ErrorCaseLookup, ExpectedExpressionType, UnionCaseLookup, typed_field_default,
 };
 use crate::typed_body::*;
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
+    pub(crate) fn lookup_error_case(
+        &mut self,
+        path: &[String],
+        span: SourceSpan,
+    ) -> ErrorCaseLookup {
+        if path.len() < 2 {
+            return ErrorCaseLookup::NotError;
+        }
+        let type_name = path[..path.len() - 1].join(".");
+        let resolution =
+            self.resolver
+                .database()
+                .resolve(self.module, &type_name, SymbolSpace::Type, span);
+        let Some(symbol) = resolution.symbol() else {
+            return ErrorCaseLookup::NotError;
+        };
+        let Some(definition) = self.resolver.error_definition(symbol).cloned() else {
+            return ErrorCaseLookup::NotError;
+        };
+        let case_name = &path[path.len() - 1];
+        let Some(case) = definition
+            .cases()
+            .iter()
+            .find(|case| case.name() == case_name)
+            .cloned()
+        else {
+            self.diagnostics
+                .push(resolution_diagnostics::unknown_name(span, path.join(".")));
+            return ErrorCaseLookup::Missing;
+        };
+        ErrorCaseLookup::Found(definition, case)
+    }
+
+    pub(crate) fn check_error_case_call(
+        &mut self,
+        definition: &crate::ErrorDefinition,
+        case: &crate::ErrorCaseDefinition,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if case.parameters().len() != arguments.len() {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "error case",
+                case.parameters().len(),
+                arguments.len(),
+            ));
+            return None;
+        }
+        let mut typed_arguments = Vec::new();
+        for (argument, (_, parameter_type, parameter_span)) in
+            arguments.iter().zip(case.parameters())
+        {
+            let typed = self.check_expression_expected(
+                argument,
+                Some(ExpectedExpressionType::plain(*parameter_type)),
+            )?;
+            self.require_same_type(
+                *parameter_type,
+                typed.type_id(),
+                typed.span(),
+                *parameter_span,
+            );
+            typed_arguments.push(typed);
+        }
+        Some(TypedExpression {
+            kind: TypedExpressionKind::ErrorCase {
+                error: definition.error(),
+                case: case.case(),
+                arguments: typed_arguments,
+            },
+            type_id: definition.type_id(),
+            span,
+        })
+    }
+
     pub(crate) fn lookup_union_case(
         &mut self,
         path: &[String],

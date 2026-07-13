@@ -1157,7 +1157,11 @@ fn assert_example_contract(root: &Path) {
     let examples_path = root.join("architecture/22.5-standard-library-api-examples.md");
     let examples = fs::read_to_string(&examples_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", examples_path.display()));
-    assert!(examples.contains("There is no `?`, `await`, `defer`,"));
+    assert!(
+        examples
+            .contains("closures, `Result`, exhaustive `match`, prefix `try`, and lexical `defer`")
+    );
+    assert!(examples.contains("Postfix `?` remains optional-only."));
     assert!(examples.contains("Proposed syntax only."));
     for stale in ["Data.Json", "Text.Pattern", "Async.run", "Io.open"] {
         assert!(

@@ -202,6 +202,7 @@ fn omitted_usage_is_namespace_only_and_non_repeatable() {
             AttributeTarget::Attribute,
             AttributeTarget::Record,
             AttributeTarget::Union,
+            AttributeTarget::Error,
             AttributeTarget::Class,
             AttributeTarget::Interface,
             AttributeTarget::Enum,
