@@ -68,7 +68,7 @@ to popularity or ownership.
 
 ## Local checks
 
-Use the accepted Rust toolchain (Rust 1.85 or newer):
+Use the repository-pinned Rust 1.96 toolchain:
 
 ```sh
 cargo fmt --all -- --check

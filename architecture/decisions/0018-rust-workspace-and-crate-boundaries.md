@@ -17,9 +17,9 @@ component responsible for a behavior.
 
 The initial Pop Lang compiler, runtime, and first-party tools are implemented in
 Rust using edition 2024 and a virtual Cargo workspace with resolver version 3.
-The workspace's minimum supported Rust version starts at 1.85, the first stable
-release supporting edition 2024, and may be raised deliberately with toolchain
-and CI updates.
+The workspace's minimum supported Rust version is 1.96 and is pinned in
+`rust-toolchain.toml`. It may be raised deliberately with matching workspace,
+toolchain, contributor-documentation, and CI updates.
 
 Each ownership boundary in the compiler component architecture has a focused
 Cargo crate. Packages use the `pop-` prefix, and directories mirror the
