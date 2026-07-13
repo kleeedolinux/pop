@@ -1,4 +1,9 @@
 //! Declaration indexing, scopes, visibility, and static name resolution.
+//!
+//! `index` extracts declarations and `using` directives from lossless syntax,
+//! `model` owns immutable indexed identities and visibility data, and `resolution`
+//! performs deterministic typed-symbol lookup. Keep these phases separate: name
+//! resolution must not become string-based runtime lookup or widen visibility.
 
 mod index;
 mod model;

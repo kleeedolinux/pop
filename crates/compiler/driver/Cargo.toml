@@ -9,6 +9,10 @@ license.workspace = true
 name = "pop"
 path = "src/main.rs"
 
+[[bench]]
+name = "compilation"
+harness = false
+
 [dependencies]
 pop-backend-c.workspace = true
 pop-backend-llvm.workspace = true

@@ -7,17 +7,23 @@ use pop_foundation::{
     AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId,
 };
 
+mod aggregate_checking;
 mod arena;
 mod attributes;
 mod body_checking;
 mod bootstrap;
+mod call_checking;
+mod capture_analysis;
 mod classes;
 mod field_defaults;
 mod inference;
 mod interfaces;
 mod numeric;
+mod operator_checking;
 mod required_constants;
 mod signature_resolution;
+mod statement_checking;
+mod typed_body;
 
 pub use arena::{TypeArena, TypeArenaError};
 pub use attributes::{
@@ -28,12 +34,7 @@ pub use attributes::{
     AttributeUsage, AttributeValidator, ResolvedAttribute, ResolvedAttributeArgument,
     ResolvedAttributeResult,
 };
-pub use body_checking::{
-    BodyChecker, CaptureMode, CaptureSource, TypedBinaryOperator, TypedBody, TypedBodyResult,
-    TypedCall, TypedCallDispatch, TypedCapture, TypedClosure, TypedClosureParameter,
-    TypedExpression, TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm,
-    TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
-};
+pub use body_checking::BodyChecker;
 pub use bootstrap::{
     AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
     BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError, BootstrapStandardFunctionEntry,
@@ -59,6 +60,12 @@ pub use signature_resolution::{
     ResolvedFunctionSignature, ResolvedSignatureResult, ResolvedType, ResolvedTypeKind,
     ResolvedTypeParameter, SignatureResolver, UnionCaseDefinition, UnionDefinition,
     UnionDefinitionResult,
+};
+pub use typed_body::{
+    CaptureMode, CaptureSource, TypedBinaryOperator, TypedBody, TypedBodyResult, TypedCall,
+    TypedCallDispatch, TypedCapture, TypedClosure, TypedClosureParameter, TypedExpression,
+    TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm, TypedMatchBinding,
+    TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
 };
 
 pub type ClassFieldDefault = FieldDefault;

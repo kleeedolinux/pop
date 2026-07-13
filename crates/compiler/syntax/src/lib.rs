@@ -1,8 +1,10 @@
 //! Lossless Pop Lang tokenization and syntax parsing.
 //!
-//! The Milestone 0 parser recognizes the architecture-authorized file header
-//! and namespace function boundary. Expression and declaration grammar grows in
-//! later tests; unimplemented grammar is never assigned semantic meaning here.
+//! Ownership follows the grammar rather than file size: `lexer` preserves every
+//! token; `body` owns blocks and statements; `expression` owns precedence and
+//! postfix forms; declaration modules own their corresponding surface syntax.
+//! The root parser only discovers file-scoped declarations. Unimplemented grammar
+//! is never assigned semantic meaning here.
 
 use pop_diagnostics::syntax as syntax_diagnostics;
 use pop_foundation::{Diagnostic, SourceSpan, TextRange, TextSize};
@@ -13,6 +15,7 @@ mod body;
 mod class;
 mod constant;
 mod data;
+mod expression;
 mod interface;
 mod lexer;
 mod signature;
