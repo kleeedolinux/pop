@@ -53,6 +53,35 @@ struct TaskRecord {
     cancellation_requested: bool,
     frame_roots: Option<TaskFrameRootId>,
     ready_since_work: u64,
+    ready_migration: ReadyMigration,
+}
+
+struct ReadyMigration {
+    available: bool,
+}
+
+impl Default for ReadyMigration {
+    fn default() -> Self {
+        Self { available: true }
+    }
+}
+
+impl ReadyMigration {
+    const fn available(&self) -> bool {
+        self.available
+    }
+
+    fn accept(&mut self) -> bool {
+        if !self.available {
+            return false;
+        }
+        self.available = false;
+        true
+    }
+
+    fn publish(&mut self) {
+        self.available = true;
+    }
 }
 
 struct TaskCell {
@@ -1111,6 +1140,7 @@ impl SharedScheduler {
                     cancellation_requested: false,
                     frame_roots: Some(frame_roots),
                     ready_since_work,
+                    ready_migration: ReadyMigration::default(),
                 }),
             }),
         );
@@ -1160,6 +1190,7 @@ impl SharedScheduler {
                     cancellation_requested: false,
                     frame_roots: Some(frame_roots),
                     ready_since_work,
+                    ready_migration: ReadyMigration::default(),
                 }),
             }),
         );
@@ -1239,6 +1270,7 @@ impl SharedScheduler {
                         cancellation_requested: false,
                         frame_roots: Some(frame_roots),
                         ready_since_work,
+                        ready_migration: ReadyMigration::default(),
                     }),
                 }),
             );
@@ -1304,6 +1336,7 @@ impl SharedScheduler {
                     scheduler,
                 })?;
                 record.ready_since_work = self.advance_observation_work();
+                record.ready_migration.publish();
                 record.state = InternalTaskState::Ready;
                 queue.push_back(id);
                 self.record_local_enqueued(1);
@@ -1367,6 +1400,7 @@ impl SharedScheduler {
                     scheduler,
                 })?;
                 record.ready_since_work = self.advance_observation_work();
+                record.ready_migration.publish();
                 record.state = InternalTaskState::Ready;
                 queue.push_back(id);
                 self.record_local_enqueued(1);
@@ -1673,6 +1707,9 @@ impl SharedScheduler {
         if record.scheduler == destination {
             return true;
         }
+        if !record.ready_migration.available() {
+            return false;
+        }
         if !self.migration_allowed(id, record.scheduler, destination) {
             return false;
         }
@@ -1687,6 +1724,8 @@ impl SharedScheduler {
                 telemetry.telemetry.gc_delayed_migrations.saturating_add(1);
             return false;
         }
+        let accepted = record.ready_migration.accept();
+        debug_assert!(accepted);
         record.scheduler = destination;
         let mut telemetry = lock(&self.telemetry);
         telemetry.telemetry.scheduler_migrations =
@@ -1982,6 +2021,7 @@ impl SharedScheduler {
             Ok(false)
         } else {
             record.ready_since_work = self.advance_observation_work();
+            record.ready_migration.publish();
             record.state = InternalTaskState::Ready;
             Ok(true)
         }
@@ -2434,7 +2474,18 @@ fn steal_victims(thief: usize, scheduler_count: usize, round: u64) -> StealVicti
 
 #[cfg(test)]
 mod steal_victim_tests {
-    use super::steal_victims;
+    use super::{ReadyMigration, steal_victims};
+
+    #[test]
+    fn one_ready_publication_accepts_at_most_one_migration() {
+        let mut migration = ReadyMigration::default();
+
+        assert!(migration.accept());
+        assert!(!migration.accept());
+        migration.publish();
+        assert!(migration.accept());
+        assert!(!migration.accept());
+    }
 
     #[test]
     fn victim_order_is_a_deterministic_complete_peer_permutation() {

@@ -304,6 +304,9 @@ Post-baseline library work has begun without widening the release foundation:
     - [x] Remove fixed-neighbor steal bias with deterministic per-worker search
       rounds that vary the first victim while covering every eligible peer
       exactly once and preserving bounded simultaneous search admission.
+    - [x] Prevent repeated migration of one task within the same ready
+      publication, and make the optimized steal-storm benchmark reject
+      migration amplification, duplicate/lost work, or repeated peer scans.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.

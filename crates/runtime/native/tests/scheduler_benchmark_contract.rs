@@ -78,6 +78,28 @@ fn specialized_scheduler_profiles_preserve_their_typed_work() {
 }
 
 #[test]
+fn steal_storm_bounds_migration_to_one_per_ready_publication() {
+    let configuration = SchedulerBenchmarkConfiguration {
+        workers: 8,
+        tasks: 256,
+        polls_per_task: 1,
+    };
+    let counters = run_scheduler_workload(SchedulerWorkload::StealStorm, configuration)
+        .expect("steal-storm profile");
+
+    assert_eq!(counters.completions, counters.tasks);
+    assert_eq!(counters.polls, counters.operations);
+    assert!(counters.tasks_stolen <= counters.operations);
+    assert_eq!(counters.scheduler_migrations, counters.tasks_stolen);
+    assert!(
+        counters.steal_victims_examined
+            <= counters
+                .steal_searches
+                .saturating_mul(u64::try_from(configuration.workers - 1).unwrap())
+    );
+}
+
+#[test]
 fn ready_poll_benchmark_preserves_exact_logical_work_and_checksum() {
     let counters = run_scheduler_workload(
         SchedulerWorkload::ReadyPolls,

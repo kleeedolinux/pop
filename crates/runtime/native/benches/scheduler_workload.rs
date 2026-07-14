@@ -601,7 +601,15 @@ pub fn run_scheduler_workload(
     } else {
         telemetry.polls() == operations
     };
+    let steal_storm_valid = !matches!(workload, SchedulerWorkload::StealStorm)
+        || (telemetry.tasks_stolen() <= operations
+            && telemetry.scheduler_migrations() == telemetry.tasks_stolen()
+            && telemetry.steal_victims_examined()
+                <= telemetry
+                    .steal_searches()
+                    .saturating_mul(u64::try_from(configuration.workers - 1).unwrap_or(u64::MAX)));
     if !poll_count_valid
+        || !steal_storm_valid
         || telemetry.completions() != u64::try_from(configuration.tasks).unwrap_or(u64::MAX)
         || checksum != expected_checksum
         || telemetry.stale_ready_entries() != 0
