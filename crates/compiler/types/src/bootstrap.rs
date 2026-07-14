@@ -937,8 +937,6 @@ fn validate_standard_functions(
             &["Boolean"][..],
             &["AmbientIo"][..],
         ),
-        (9, "print", &["UInt64"][..], &[][..], &["AmbientIo"][..]),
-        (10, "print", &["Boolean"][..], &[][..], &["AmbientIo"][..]),
     ];
     if entries.len() != expected.len() {
         return Err(error(

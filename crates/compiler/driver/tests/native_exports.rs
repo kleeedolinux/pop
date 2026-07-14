@@ -24,7 +24,7 @@ fn mismatched_or_duplicate_adapter_descriptors_fail_closed() {
     assert!(matches!(
         validate_standard_native_exports(&schema, &[wrong]),
         Err(NativeExportValidationError::ExportCount {
-            expected: 11,
+            expected: 9,
             actual: 1
         })
     ));

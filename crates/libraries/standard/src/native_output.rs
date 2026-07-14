@@ -18,31 +18,6 @@ pub extern "C" fn pop_std_print_int(value: i64) {
     let _ = writeln!(std::io::stdout().lock(), "{value}");
 }
 
-#[poplib(
-    bubble = Standard,
-    namespace = "Pop",
-    name = "print",
-    parameters(UInt64),
-    results(),
-    effects(AmbientIo),
-)]
-pub extern "C" fn pop_std_print_uint64(value: u64) {
-    let _ = writeln!(std::io::stdout().lock(), "{value}");
-}
-
-#[poplib(
-    bubble = Standard,
-    namespace = "Pop",
-    name = "print",
-    parameters(Boolean),
-    results(),
-    effects(AmbientIo),
-)]
-pub extern "C" fn pop_std_print_boolean(value: bool) {
-    let text = if value { "true" } else { "false" };
-    let _ = writeln!(std::io::stdout().lock(), "{text}");
-}
-
 /// Prints one already validated Pop `String` followed by a newline.
 pub fn print_string(value: &str) {
     let mut output = std::io::stdout().lock();

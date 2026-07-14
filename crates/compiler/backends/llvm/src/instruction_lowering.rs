@@ -377,18 +377,6 @@ pub(crate) fn lower_instruction(
                 "{result} = call i1 @pop_std_net_tcp_close(i64 %v{})",
                 arguments[0].raw()
             ),
-            9 if arguments.len() == 1 => {
-                format!(
-                    "call void @pop_std_print_uint64(i64 %v{})",
-                    arguments[0].raw()
-                )
-            }
-            10 if arguments.len() == 1 => {
-                format!(
-                    "call void @pop_std_print_boolean(i1 %v{})",
-                    arguments[0].raw()
-                )
-            }
             _ => {
                 return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
