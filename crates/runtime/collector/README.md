@@ -10,10 +10,14 @@ promotes deterministically, and maintains remembered cards.
 `GenerationalRuntime` composes that moving nursery with a modular incremental
 mature-heap conformance slice. Its `generational` modules separate PLRI
 adaptation, SATB/publication barriers, cycle state, bounded mark/sweep work,
-page/TLAB allocation, and memory control. It preserves snapshot edges, shades
-roots, pins, and new mature objects, and defers nursery relocation while a
-major snapshot still contains physical tokens. The implementation deliberately
-continues to report `RelocationConformance`: mature tracing is cooperative and
+page/TLAB allocation, memory control, and typed epoch coordination. The bounded
+coordinator registers managed and foreign execution states, collects exact
+once-only root/TLAB/barrier publications, and completes protocol epochs without
+heap tracing in the handshake. It preserves snapshot edges, shades roots, pins,
+and new mature objects, and defers nursery relocation while a major snapshot
+still contains physical tokens. The implementation deliberately continues to
+report `RelocationConformance`: the coordinator is not yet integrated with
+scheduler/runtime transitions, and mature tracing is cooperative and
 incremental rather than worker-concurrent, so
 `ProductionConcurrentGenerational` cannot yet be selected.
 
@@ -44,6 +48,13 @@ The allocation and memory submodules each separate public typed descriptors
 from mutable state.
 These are static Rust partitions behind the same PLRI dependency, not runtime
 plugins or dynamic dispatch.
+
+The `generational::coordination` partition separates typed epoch/publication
+vocabulary from its deterministic state machine. Detached and handle-only
+mutators acknowledge automatically; managed mutators publish precise state;
+bounded foreign transitions remain pending until they enter a safe state. This
+is protocol infrastructure, not a claim that background collection or native
+scheduler handshakes are complete.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and

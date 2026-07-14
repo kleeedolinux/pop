@@ -3,6 +3,7 @@
 mod adapter;
 mod allocation;
 mod barrier;
+mod coordination;
 mod heap;
 mod major;
 mod memory;
@@ -10,6 +11,11 @@ mod memory;
 pub use allocation::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
     AllocationPlacement, HeapDomain, PageDescriptor, PageId, RegionId,
+};
+pub use coordination::{
+    CollectorEpoch, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
+    EpochCoordinatorConfigError, EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress,
+    MutatorExecutionState, MutatorId, MutatorPublication,
 };
 pub use heap::{GenerationalRuntime, MajorCollectorConfig, MajorCyclePhase};
 pub use memory::{
