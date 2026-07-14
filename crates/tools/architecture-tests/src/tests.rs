@@ -597,7 +597,9 @@ fn assert_collector_boundary(runtime: &Path) {
     assert!(!collector_manifest.contains("pop-runtime-native-abi.workspace = true"));
     assert!(!collector_manifest.contains("pop-runtime-native.workspace = true"));
     assert!(collector_source.contains("impl RuntimeAdapter for BootstrapRuntime"));
-    assert!(collector_source.contains("pub use pop_runtime_interface::SchedulerId"));
+    assert!(
+        collector_source.contains("pub use pop_runtime_interface::{SchedulerId, TaskFrameRootId}")
+    );
     assert!(
         !read_required(runtime.join("collector/src/ownership.rs"))
             .contains("pub struct SchedulerId"),

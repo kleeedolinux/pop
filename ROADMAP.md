@@ -278,7 +278,7 @@ Post-baseline library work has begun without widening the release foundation:
       writable-root transition before claiming production GC integration.
       ADR 0061 requires the stronger ready-and-suspended task-frame root
       lifecycle rather than rooting only explicit suspension.
-      - [ ] Move canonical `SchedulerId` ownership into PLRI and add typed,
+      - [x] Move canonical `SchedulerId` ownership into PLRI and add typed,
         bounded retained task-root container identities.
       - [ ] Retain exact initial/nonterminal frame roots before queue
         publication and restore relocated `RootSlot` values before dispatch.

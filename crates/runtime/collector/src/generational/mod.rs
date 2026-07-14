@@ -13,6 +13,7 @@ mod memory;
 mod ownership;
 mod pinning;
 mod stable;
+mod task_roots;
 mod workers;
 
 pub use allocation::{
@@ -38,6 +39,9 @@ pub use memory::{
 };
 pub use pinning::{PinningConfig, PinningTelemetry};
 pub use stable::StableGenerationalRuntime;
+pub use task_roots::{
+    TaskFrameRootConfig, TaskFrameRootConfigError, TaskFrameRootError, TaskFrameRootTelemetry,
+};
 pub use workers::{
     BackgroundWorkerConfig, BackgroundWorkerConfigError, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,

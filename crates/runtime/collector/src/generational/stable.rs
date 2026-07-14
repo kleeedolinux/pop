@@ -3,10 +3,12 @@
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, GarbageCollectorContract, ManagedReference,
     ObjectAllocationRequest, ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter,
-    RuntimeFailure, RuntimeTypeId, SafePointOutcome, TableAllocationRequest, WriteBarrier,
+    RuntimeFailure, RuntimeTypeId, SafePointOutcome, SchedulerId, StackMap, TableAllocationRequest,
+    TaskFrameRootId, WriteBarrier,
 };
 
 use super::heap::GenerationalRuntime;
+use super::task_roots::{TaskFrameRootConfig, TaskFrameRootError, TaskFrameRootTelemetry};
 
 pub struct StableGenerationalRuntime {
     inner: GenerationalRuntime,
@@ -18,6 +20,74 @@ impl StableGenerationalRuntime {
         Self {
             inner: GenerationalRuntime::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_task_frame_root_config(config: TaskFrameRootConfig) -> Self {
+        Self {
+            inner: GenerationalRuntime::with_task_frame_root_config(config),
+        }
+    }
+
+    /// Retains the exact roots of one native ready or suspended task frame.
+    ///
+    /// # Errors
+    ///
+    /// Forwards bounded collector admission and root-validation failures.
+    pub fn retain_task_frame_roots(
+        &mut self,
+        scheduler: SchedulerId,
+        publication: &RootPublication,
+    ) -> Result<TaskFrameRootId, TaskFrameRootError> {
+        self.inner.retain_task_frame_roots(scheduler, publication)
+    }
+
+    /// Restores possibly relocated roots into an exact native frame shape.
+    ///
+    /// # Errors
+    ///
+    /// Forwards identity, owner, shape, and private-root failures without
+    /// discarding the retained container.
+    pub fn restore_task_frame_roots(
+        &mut self,
+        identity: TaskFrameRootId,
+        scheduler: SchedulerId,
+        expected: &StackMap,
+    ) -> Result<RootPublication, TaskFrameRootError> {
+        self.inner
+            .restore_task_frame_roots(identity, scheduler, expected)
+    }
+
+    /// Releases roots for a terminal or abandoned native task frame.
+    ///
+    /// # Errors
+    ///
+    /// Forwards stale identity and scheduler-owner failures.
+    pub fn release_task_frame_roots(
+        &mut self,
+        identity: TaskFrameRootId,
+        scheduler: SchedulerId,
+    ) -> Result<(), TaskFrameRootError> {
+        self.inner.release_task_frame_roots(identity, scheduler)
+    }
+
+    /// Transfers a retained rootless or shared-root frame between schedulers.
+    ///
+    /// # Errors
+    ///
+    /// Refuses stale source ownership and scheduler-local frame roots.
+    pub fn transfer_task_frame_roots(
+        &mut self,
+        identity: TaskFrameRootId,
+        from: SchedulerId,
+        to: SchedulerId,
+    ) -> Result<(), TaskFrameRootError> {
+        self.inner.transfer_task_frame_roots(identity, from, to)
+    }
+
+    #[must_use]
+    pub const fn task_frame_root_telemetry(&self) -> TaskFrameRootTelemetry {
+        self.inner.task_frame_root_telemetry()
     }
 
     pub fn request_collection(&mut self) {
