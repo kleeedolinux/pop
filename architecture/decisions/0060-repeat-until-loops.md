@@ -1,7 +1,8 @@
-# ADR 0032: Luau-Shaped Repeat-Until Loops
+# ADR 0060: Luau-Shaped Repeat-Until Loops
 
 - Status: accepted
 - Date: 2026-07-12
+- Traceability: originally merged with the duplicate identity ADR 0032
 - Supersedes: none
 
 ## Context
@@ -40,7 +41,7 @@ backedge safe-point verification applies.
 - The condition cannot use truthiness, dynamic values, or implicit conversion.
 - LLVM and the MIR interpreter execute the same verified MIR control flow. The
   runtime-free experimental C backend diagnoses the required backedge safe
-  point as an unsupported runtime operation under ADR 0031; it must not insert
+  point as an unsupported runtime operation under ADR 0059; it must not insert
   a no-op PLRI fallback.
 - Generalized `for` iteration, `break`, and `continue` remain separate designs.
 

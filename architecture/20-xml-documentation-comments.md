@@ -19,9 +19,18 @@ hyphens:
 --- <summary>
 --- Loads a player from the given path.
 --- </summary>
---- <param name="path">The save file to read.</param>
---- <returns>The decoded player.</returns>
---- <error type="Io.Error">The file cannot be read or decoded.</error>
+---
+--- <param name="path">
+--- The save file to read.
+--- </param>
+---
+--- <returns>
+--- The decoded player.
+--- </returns>
+---
+--- <error type="Io.Error">
+--- The file cannot be read or decoded.
+--- </error>
 public function loadPlayer(path: Io.Path): Result<Player, Io.Error>
 end
 ```
@@ -43,7 +52,9 @@ Rules:
   the parsed documentation tree.
 
 ```luau
---- <summary>Represents a serializable player snapshot.</summary>
+--- <summary>
+--- Represents a serializable player snapshot.
+--- </summary>
 @Serializable(version = 1)
 public record PlayerSave
     playerId: Guid
@@ -103,8 +114,13 @@ performance claims require linked reproducible benchmark baselines.
 ### Typed errors
 
 ```luau
---- <error type="Io.Error.Missing">No file exists at the path.</error>
---- <error type="Io.Error.Denied">The process lacks permission.</error>
+--- <error type="Io.Error.Missing">
+--- No file exists at the path.
+--- </error>
+---
+--- <error type="Io.Error.Denied">
+--- The process lacks permission.
+--- </error>
 ```
 
 The `type` value resolves statically. On a function returning
@@ -118,7 +134,9 @@ reflection is emitted. See ADR 0052.
 ### Panic conditions
 
 ```luau
---- <panic condition="index &lt; 0">The index is negative.</panic>
+--- <panic condition="index &lt; 0">
+--- The index is negative.
+--- </panic>
 ```
 
 `<panic>` documents invariant failure, not ordinary recovery. The condition is
@@ -128,8 +146,13 @@ never evaluated as source or a string mixin.
 ### Effects
 
 ```luau
---- <effect kind="Blocks">Waits for operating-system file I/O.</effect>
---- <effect kind="Allocates">Allocates a buffer proportional to input size.</effect>
+--- <effect kind="Blocks">
+--- Waits for operating-system file I/O.
+--- </effect>
+---
+--- <effect kind="Allocates">
+--- Allocates a buffer proportional to input size.
+--- </effect>
 ```
 
 Recognized kinds are PascalCase effect identities such as `Allocates`, `Blocks`,
@@ -141,8 +164,14 @@ effect that the public contract requires.
 
 ```luau
 --- <complexity time="O(n log n)" space="O(log n)"/>
---- <allocation>Does not allocate when the destination has capacity.</allocation>
---- <threadSafety>Safe for concurrent readers; writes require synchronization.</threadSafety>
+---
+--- <allocation>
+--- Does not allocate when the destination has capacity.
+--- </allocation>
+---
+--- <threadSafety>
+--- Safe for concurrent readers; writes require synchronization.
+--- </threadSafety>
 ```
 
 The compiler validates shape/target. Library analyzers can compare declared
@@ -157,12 +186,31 @@ namespace Saves
 --- <summary>
 --- Loads and decodes a player snapshot.
 --- </summary>
---- <param name="path">The file containing the snapshot.</param>
---- <returns>A decoded <see cref="PlayerSave"/>.</returns>
---- <error type="LoadError.Io">The file cannot be opened or read.</error>
---- <error type="LoadError.Json">The contents are not a valid snapshot.</error>
---- <effect kind="Blocks">Reads from the filesystem.</effect>
---- <allocation>Allocates storage for the decoded snapshot.</allocation>
+---
+--- <param name="path">
+--- The file containing the snapshot.
+--- </param>
+---
+--- <returns>
+--- A decoded <see cref="PlayerSave"/>.
+--- </returns>
+---
+--- <error type="LoadError.Io">
+--- The file cannot be opened or read.
+--- </error>
+---
+--- <error type="LoadError.Json">
+--- The contents are not a valid snapshot.
+--- </error>
+---
+--- <effect kind="Blocks">
+--- Reads from the filesystem.
+--- </effect>
+---
+--- <allocation>
+--- Allocates storage for the decoded snapshot.
+--- </allocation>
+---
 --- <example>
 --- <code language="pop">
 --- local result = load(path)
@@ -373,12 +421,36 @@ The canonical formatter:
 
 - preserves `---` on every documentation line;
 - formats indentation/nesting without changing text/code semantics;
-- keeps short `<summary>` on one line when readable;
+- places every non-empty XML element's opening tag, body, and closing tag on
+  separate `---` lines;
+- separates sibling top-level contract elements with one empty `---` line;
+- permits a self-closing form only for a genuinely empty element such as
+  `<inheritdoc/>`;
 - preserves `<code>` whitespace;
 - orders signature contract tags as summary, type parameters, parameters,
   returns, errors, panic/effects, complexity/allocation/thread safety, remarks,
   examples, see-also;
 - never reformats an invalid fragment destructively before offering a preview.
+
+There is no short-element or line-length exception. For example:
+
+```luau
+--- <summary>
+--- Finds a player by identifier.
+--- </summary>
+---
+--- <param name="id">
+--- The player identifier.
+--- </param>
+---
+--- <returns>
+--- The player, or `nil` when absent.
+--- </returns>
+public function findPlayer(id: PlayerId): Player?
+end
+```
+
+See [ADR 0057](./decisions/0057-multiline-xml-documentation-format.md).
 
 ## Architecture boundaries
 

@@ -126,6 +126,9 @@ transplanted into a Luau-shaped file.
   types and Bubble identity across dependency boundaries.
 - Lua-shaped `---` XML documentation comments are parsed, signature-checked,
   emitted with library metadata, and available to editors/doc tools.
+- Non-empty XML documentation elements always use separate opening, body, and
+  closing `---` lines; the formatter enforces the deterministic
+  [ADR 0057](./decisions/0057-multiline-xml-documentation-format.md) form.
 - Accepted architecture is a binding baseline. Undocumented semantic expansion
   or implementation divergence is a bug until an ADR changes the baseline.
 - Reintroducing Lua's dynamic/table-centered architecture is a release-blocking

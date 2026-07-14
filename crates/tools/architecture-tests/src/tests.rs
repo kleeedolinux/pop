@@ -205,6 +205,123 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn collect_text_contract_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read repository entry").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    for path in entries {
+        if path.is_dir() {
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            collect_text_contract_files(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|extension| matches!(extension.to_str(), Some("md" | "pop" | "rs")))
+        {
+            files.push(path);
+        }
+    }
+}
+
+fn inline_documentation_element(line: &str) -> Option<&str> {
+    let mut remainder = line;
+    while let Some(start) = remainder.find("--- <") {
+        let candidate = &remainder[start + 5..];
+        let name_end = candidate
+            .find(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '>' | '/')
+            })
+            .unwrap_or(candidate.len());
+        let name = &candidate[..name_end];
+        let valid_name = name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            && name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')
+            });
+        if valid_name {
+            let opening_end = candidate.find('>')?;
+            if !candidate[..opening_end].ends_with('/')
+                && let Some(closing_start) = candidate[opening_end + 1..].find("</")
+            {
+                let body = &candidate[opening_end + 1..opening_end + 1 + closing_start];
+                if !body.contains("\\n") {
+                    let closing_end = candidate[opening_end + 1 + closing_start..]
+                        .find('>')
+                        .map_or(candidate.len(), |end| {
+                            opening_end + 1 + closing_start + end + 1
+                        });
+                    let end = start + 5 + closing_end;
+                    return Some(&remainder[start..end]);
+                }
+            }
+        }
+        remainder = &candidate[1.min(candidate.len())..];
+    }
+    None
+}
+
+#[test]
+fn xml_documentation_body_is_never_inline() {
+    let root = repository_root();
+    let mut files = Vec::new();
+    collect_text_contract_files(&root, &mut files);
+
+    let mut violations = Vec::new();
+    for path in files {
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        for (index, line) in contents.lines().enumerate() {
+            if let Some(element) = inline_documentation_element(line) {
+                violations.push(format!(
+                    "{}:{}: {element}",
+                    path.strip_prefix(&root).unwrap_or(&path).display(),
+                    index + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "ADR 0057 forbids inline XML documentation bodies:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn accepted_adrs_have_unique_numeric_identities() {
+    let decisions = repository_root().join("architecture/decisions");
+    let mut paths = fs::read_dir(&decisions)
+        .expect("read architecture decisions")
+        .map(|entry| entry.expect("read decision entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    let mut identities = BTreeMap::new();
+    for path in paths {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("decision file name is UTF-8");
+        let Some((identity, _)) = file_name.split_once('-') else {
+            continue;
+        };
+        if identity.len() != 4 || !identity.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if let Some(previous) = identities.insert(identity.to_owned(), file_name.to_owned()) {
+            panic!("duplicate ADR identity {identity}: {previous} and {file_name}");
+        }
+    }
+}
+
 fn quoted_values_in_array(manifest: &str, key: &str) -> BTreeSet<String> {
     let key_start = manifest
         .find(key)

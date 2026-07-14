@@ -1493,23 +1493,39 @@ fn typed_errors_result_propagation_and_cleanup_reach_verified_hir() {
         FileId::from_raw(0),
         "src/errors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError<T>\n\
-             --- <summary>No input exists.</summary>\n\
+             --- <summary>\n\
+             --- No input exists.\n\
+             --- </summary>\n\
              Missing(path: T)\n\
-             --- <summary>Access is denied.</summary>\n\
+             --- <summary>\n\
+             --- Access is denied.\n\
+             --- </summary>\n\
              Denied\n\
          end\n\
-         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
-         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- No input exists.\n\
+         --- </error>\n\
+         ---\n\
+         --- <error type=\"LoadError.Denied\">\n\
+         --- Access is denied.\n\
+         --- </error>\n\
          public function load(path: String): Result<Int, LoadError<String>>\n\
              defer\n\
                  print(path)\n\
              end\n\
              return Result.Error(LoadError.Missing<<String>>(path))\n\
          end\n\
-         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
-         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- No input exists.\n\
+         --- </error>\n\
+         ---\n\
+         --- <error type=\"LoadError.Denied\">\n\
+         --- Access is denied.\n\
+         --- </error>\n\
          public function forward(path: String): Result<String, LoadError<String>>\n\
              local value = try load(path)\n\
              return Result.Ok(String(value))\n\
@@ -1547,15 +1563,26 @@ fn public_result_documentation_is_checked_against_exact_error_cases() {
         FileId::from_raw(0),
         "src/documentedErrors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>No file exists.</summary>\n\
+             --- <summary>\n\
+             --- No file exists.\n\
+             --- </summary>\n\
              Missing(path: String)\n\
-             --- <summary>Access is denied.</summary>\n\
+             --- <summary>\n\
+             --- Access is denied.\n\
+             --- </summary>\n\
              Denied\n\
          end\n\
-         --- <summary>Loads a value.</summary>\n\
-         --- <error type=\"LoadError.Missing\">No file exists.</error>\n\
+         --- <summary>\n\
+         --- Loads a value.\n\
+         --- </summary>\n\
+         ---\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- No file exists.\n\
+         --- </error>\n\
          public function load(path: String): Result<Int, LoadError>\n\
              return Result.Error(LoadError.Missing(path))\n\
          end\n",
@@ -1588,9 +1615,13 @@ fn public_error_case_summaries_are_checked_by_the_front_end() {
         FileId::from_raw(0),
         "src/errorSummaries.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>No input exists.</summary>\n\
+             --- <summary>\n\
+             --- No input exists.\n\
+             --- </summary>\n\
              Missing\n\
              Denied\n\
          end\n",
@@ -1620,16 +1651,30 @@ fn typed_error_documentation_can_be_inherited_from_a_compatible_symbol() {
         FileId::from_raw(0),
         "src/inheritedErrors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>No input exists.</summary>\n\
+             --- <summary>\n\
+             --- No input exists.\n\
+             --- </summary>\n\
              Missing\n\
-             --- <summary>Access is denied.</summary>\n\
+             --- <summary>\n\
+             --- Access is denied.\n\
+             --- </summary>\n\
              Denied\n\
          end\n\
-         --- <summary>Defines the shared loading contract.</summary>\n\
-         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
-         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         --- <summary>\n\
+         --- Defines the shared loading contract.\n\
+         --- </summary>\n\
+         ---\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- No input exists.\n\
+         --- </error>\n\
+         ---\n\
+         --- <error type=\"LoadError.Denied\">\n\
+         --- Access is denied.\n\
+         --- </error>\n\
          private function loadContract(): Result<Int, LoadError>\n\
              return Result.Error(LoadError.Missing())\n\
          end\n\
@@ -1659,9 +1704,13 @@ fn typed_error_documentation_rejects_incompatible_inheritance() {
         FileId::from_raw(0),
         "src/incompatibleInheritedErrors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>Loading failed.</summary>\n\
+             --- <summary>\n\
+             --- Loading failed.\n\
+             --- </summary>\n\
              Failed\n\
          end\n\
          private function integerContract(): Int\n\
@@ -1696,9 +1745,13 @@ fn typed_error_documentation_rejects_inheritance_cycles() {
         FileId::from_raw(0),
         "src/cyclicInheritedErrors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>Loading failed.</summary>\n\
+             --- <summary>\n\
+             --- Loading failed.\n\
+             --- </summary>\n\
              Failed\n\
          end\n\
          --- <inheritdoc cref=\"second\"/>\n\

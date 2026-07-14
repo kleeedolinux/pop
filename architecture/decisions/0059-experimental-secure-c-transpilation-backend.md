@@ -1,7 +1,8 @@
-# ADR 0031: Experimental Secure C Transpilation Backend
+# ADR 0059: Experimental Secure C Transpilation Backend
 
 - Status: accepted
 - Date: 2026-07-12
+- Traceability: originally merged with the duplicate identity ADR 0031
 - Supersedes: none
 
 ## Context

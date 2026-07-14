@@ -755,7 +755,7 @@ fn parses_only_compound_assignments_with_owned_underlying_operators() {
 
 #[test]
 fn accepts_nested_luau_shaped_repeat_until_without_extra_end_markers() {
-    // ADR 0032: `until`, rather than `end`, closes a body-first loop.
+    // ADR 0060: `until`, rather than `end`, closes a body-first loop.
     let body = parse_body(
         "namespace Example\n\
          public function count(): Int\n\

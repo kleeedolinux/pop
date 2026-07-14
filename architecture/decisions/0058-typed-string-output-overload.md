@@ -1,7 +1,8 @@
-# ADR 0030: Typed String Output Overload
+# ADR 0058: Typed String Output Overload
 
 - Status: accepted
 - Date: 2026-07-12
+- Traceability: originally merged with the duplicate identity ADR 0030
 - Supersedes in part: ADR 0024 single bootstrap output binding
 
 ## Context

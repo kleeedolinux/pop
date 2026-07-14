@@ -8,7 +8,7 @@ fn source(text: &str) -> SourceFile {
 
 #[test]
 fn lexer_is_lossless_and_distinguishes_documentation_trivia() {
-    let text = "namespace Demo\n\n--- <summary>Greets.</summary>\n-- ordinary\npublic function greet()\nend\n";
+    let text = "namespace Demo\n\n--- <summary>\n--- Greets.\n--- </summary>\n-- ordinary\npublic function greet()\nend\n";
     let source = source(text);
     let result = lex(&source);
 

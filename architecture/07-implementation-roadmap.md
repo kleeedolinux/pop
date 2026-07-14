@@ -110,7 +110,7 @@ Exit criterion: representative multi-module programs produce native executables
 whose behavior matches the interpreter.
 
 Alongside this milestone,
-[ADR 0031](./decisions/0031-experimental-secure-c-transpilation-backend.md)
+[ADR 0059](./decisions/0059-experimental-secure-c-transpilation-backend.md)
 authorizes an isolated experimental C11 source backend. Its first runtime-free
 slice consumes optimized verified MIR, supports scalar control flow, direct
 calls, and typed integer/literal-string output, preserves checked numeric
