@@ -250,7 +250,9 @@ impl Parser<'_, '_> {
                     };
                     (index, declaration)
                 }
-                kind if self.declaration_node_kind(index).is_some() || kind == TokenKind::Open => {
+                kind if self.declaration_node_kind(index).is_some()
+                    || matches!(kind, TokenKind::Open | TokenKind::Async) =>
+                {
                     (index, index)
                 }
                 _ => {
@@ -266,6 +268,14 @@ impl Parser<'_, '_> {
                     break;
                 };
                 declaration = class;
+            }
+
+            if self.tokens[declaration].kind() == TokenKind::Async {
+                let Some(function) = self.next_significant(declaration + 1) else {
+                    children.push(self.error_line(start));
+                    break;
+                };
+                declaration = function;
             }
 
             let Some((node_kind, is_block)) = self.declaration_node_kind(declaration) else {
@@ -355,11 +365,22 @@ impl Parser<'_, '_> {
     }
 
     fn function_opens_block(&self, index: usize) -> bool {
-        self.tokens[..index]
+        let mut significant = self.tokens[..index]
             .iter()
             .rev()
-            .find(|token| !token.kind().is_trivia())
-            .is_none_or(|token| token.kind() != TokenKind::Colon)
+            .filter(|token| !token.kind().is_trivia());
+        let Some(previous) = significant.next() else {
+            return true;
+        };
+        if previous.kind() == TokenKind::Colon {
+            return false;
+        }
+        if previous.kind() == TokenKind::Async {
+            return significant
+                .next()
+                .is_none_or(|token| token.kind() != TokenKind::Colon);
+        }
+        true
     }
 
     fn if_opens_block(&self, index: usize) -> bool {

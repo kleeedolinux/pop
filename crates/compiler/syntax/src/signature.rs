@@ -6,6 +6,7 @@ use crate::{NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionSignatureSyntax {
     name: String,
+    is_async: bool,
     type_parameters: Vec<GenericParameterSyntax>,
     parameters: Vec<FunctionParameterSyntax>,
     results: Vec<TypeSyntax>,
@@ -16,6 +17,11 @@ impl FunctionSignatureSyntax {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -124,6 +130,7 @@ pub enum TypeSyntaxKind {
         value: Box<TypeSyntax>,
     },
     Function {
+        is_async: bool,
         parameters: Vec<TypeSyntax>,
         results: Vec<TypeSyntax>,
     },
@@ -230,10 +237,11 @@ impl SignatureParser<'_> {
         }
         while self
             .current_kind()
-            .is_some_and(|kind| kind != TokenKind::Function)
+            .is_some_and(|kind| !matches!(kind, TokenKind::Async | TokenKind::Function))
         {
             self.position += 1;
         }
+        let is_async = self.consume(TokenKind::Async).is_some();
         let start = self
             .expect(TokenKind::Function, "`function`")?
             .range()
@@ -254,6 +262,7 @@ impl SignatureParser<'_> {
             .map_or(right.range().end(), |result| result.span().range().end());
         Ok(FunctionSignatureSyntax {
             name,
+            is_async,
             type_parameters,
             parameters,
             results,
@@ -343,7 +352,10 @@ impl SignatureParser<'_> {
             Some(TokenKind::Identifier | TokenKind::Nil) => self.parse_named_type(),
             Some(TokenKind::LeftBrace) => self.parse_collection_type(),
             Some(TokenKind::LeftParenthesis) => self.parse_tuple_or_grouped_type(),
-            Some(TokenKind::Function) => self.parse_function_type(),
+            Some(TokenKind::Function) => self.parse_function_type(false),
+            Some(TokenKind::Async) if self.peek_kind() == Some(TokenKind::Function) => {
+                self.parse_function_type(true)
+            }
             _ => Err(self.error("type")),
         }
     }
@@ -424,9 +436,19 @@ impl SignatureParser<'_> {
         Ok(self.type_node(TypeSyntaxKind::Tuple(elements), start, right.range().end()))
     }
 
-    fn parse_function_type(&mut self) -> Result<TypeSyntax, FunctionSignatureError> {
-        let function = self.expect(TokenKind::Function, "`function`")?;
-        let start = function.range().start();
+    fn parse_function_type(
+        &mut self,
+        is_async: bool,
+    ) -> Result<TypeSyntax, FunctionSignatureError> {
+        let start = if is_async {
+            let async_token = self.expect(TokenKind::Async, "`async`")?;
+            self.expect(TokenKind::Function, "`function` after `async`")?;
+            async_token.range().start()
+        } else {
+            self.expect(TokenKind::Function, "`function`")?
+                .range()
+                .start()
+        };
         self.expect(TokenKind::LeftParenthesis, "`(`")?;
         let mut parameters = Vec::new();
         while self.current_kind() != Some(TokenKind::RightParenthesis) {
@@ -448,6 +470,7 @@ impl SignatureParser<'_> {
         };
         Ok(self.type_node(
             TypeSyntaxKind::Function {
+                is_async,
                 parameters,
                 results,
             },
@@ -470,6 +493,12 @@ impl SignatureParser<'_> {
 
     fn current_kind(&self) -> Option<TokenKind> {
         self.tokens.get(self.position).map(|token| token.kind())
+    }
+
+    fn peek_kind(&self) -> Option<TokenKind> {
+        self.tokens
+            .get(self.position.saturating_add(1))
+            .map(|token| token.kind())
     }
 
     fn advance(&mut self) -> Option<Token> {

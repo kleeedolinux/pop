@@ -1934,16 +1934,27 @@ impl<'index> SignatureResolver<'index> {
                 ))
             }
             TypeSyntaxKind::Function {
+                is_async,
                 parameters,
                 results,
-            } => self.resolve_function_type(
-                module,
-                syntax,
-                parameters,
-                results,
-                generics,
-                diagnostics,
-            ),
+            } => {
+                if *is_async {
+                    diagnostics.push(type_diagnostics::invalid_operator(
+                        syntax.span(),
+                        "async function type",
+                        "async task support",
+                    ));
+                    return None;
+                }
+                self.resolve_function_type(
+                    module,
+                    syntax,
+                    parameters,
+                    results,
+                    generics,
+                    diagnostics,
+                )
+            }
         }
     }
 

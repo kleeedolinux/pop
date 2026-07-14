@@ -45,7 +45,7 @@ fn lexer_preserves_unicode_identifiers_without_an_ascii_only_policy() {
 
 #[test]
 fn lexer_reserves_typed_error_workflow_words() {
-    let source = source("error try defer\n");
+    let source = source("error try async await defer\n");
     let result = lex(&source);
 
     assert!(result.diagnostics().is_empty());
@@ -58,7 +58,13 @@ fn lexer_reserves_typed_error_workflow_words() {
         .collect::<Vec<_>>();
     assert_eq!(
         significant,
-        [TokenKind::Identifier, TokenKind::Try, TokenKind::Defer]
+        [
+            TokenKind::Identifier,
+            TokenKind::Try,
+            TokenKind::Async,
+            TokenKind::Await,
+            TokenKind::Defer,
+        ]
     );
 }
 
@@ -177,6 +183,31 @@ fn parser_builds_header_and_declaration_nodes_without_losing_source() {
         [
             NodeKind::NamespaceDeclaration,
             NodeKind::UsingDirective,
+            NodeKind::FunctionDeclaration
+        ]
+    );
+}
+
+#[test]
+fn parser_discovers_async_function_declarations() {
+    let text =
+        "namespace Demo\n\npublic async function load(): Task<String>\n    return fetch()\nend\n";
+    let source = source(text);
+    let tree = parse_file(&source);
+
+    assert!(
+        tree.diagnostics().is_empty(),
+        "{}",
+        tree.diagnostic_snapshot()
+    );
+    assert_eq!(
+        tree.root()
+            .children()
+            .iter()
+            .map(pop_syntax::SyntaxNode::kind)
+            .collect::<Vec<_>>(),
+        [
+            NodeKind::NamespaceDeclaration,
             NodeKind::FunctionDeclaration
         ]
     );

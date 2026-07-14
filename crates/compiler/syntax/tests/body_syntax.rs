@@ -144,6 +144,55 @@ fn parses_local_and_anonymous_functions_without_table_desugaring() {
     ));
 }
 
+#[test]
+fn parses_async_closures_await_and_async_cleanup_as_distinct_nodes() {
+    let body = parse_body(
+        "namespace Example\n\
+         public async function make(fetch: function(): Task<Int>): Task<Int>\n\
+             local async function load(): Int\n\
+                 return await fetch()\n\
+             end\n\
+             local callback = async function(): Int\n\
+                 return await load()\n\
+             end\n\
+             async defer\n\
+                 await cleanup()\n\
+             end\n\
+             return await callback()\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::LocalFunction { function, .. } = body.statements()[0].kind() else {
+        panic!("async local function");
+    };
+    assert!(function.is_async());
+    assert!(matches!(
+        function.body()[0].kind(),
+        StatementSyntaxKind::Return { values }
+            if matches!(values[0].kind(), ExpressionSyntaxKind::Await { .. })
+    ));
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[1].kind() else {
+        panic!("async closure local");
+    };
+    let ExpressionSyntaxKind::Function(function) = initializer.kind() else {
+        panic!("async function expression");
+    };
+    assert!(function.is_async());
+
+    assert!(matches!(
+        body.statements()[2].kind(),
+        StatementSyntaxKind::AsyncDefer { body }
+            if matches!(body[0].kind(), StatementSyntaxKind::Expression(expression)
+                if matches!(expression.kind(), ExpressionSyntaxKind::Await { .. }))
+    ));
+    assert!(matches!(
+        body.statements()[3].kind(),
+        StatementSyntaxKind::Return { values }
+            if matches!(values[0].kind(), ExpressionSyntaxKind::Await { .. })
+    ));
+}
+
 fn assert_function_signature(function: &CaptureFunctionSyntax) {
     assert_eq!(function.parameters().len(), 1);
     assert_eq!(function.parameters()[0].name(), "value");

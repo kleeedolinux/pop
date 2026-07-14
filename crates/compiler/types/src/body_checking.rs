@@ -472,6 +472,15 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 };
                 self.check_result_propagate(operand, span)
             }
+            ExpressionSyntaxKind::Await { operand } => {
+                let _ = self.check_expression(operand);
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "await",
+                    "async task",
+                ));
+                None
+            }
             ExpressionSyntaxKind::Binary {
                 operator,
                 left,

@@ -188,6 +188,23 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     body: self.check_nested_statements(signature, body),
                 }
             }
+            StatementSyntaxKind::AsyncDefer { body } => {
+                if let Some((control, control_span)) = illegal_cleanup_control(body) {
+                    self.diagnostics
+                        .push(type_diagnostics::illegal_cleanup_control(
+                            control_span,
+                            control,
+                        ));
+                    return None;
+                }
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    statement.span(),
+                    "async defer",
+                    "async function",
+                ));
+                let _ = self.check_nested_statements(signature, body);
+                return None;
+            }
             StatementSyntaxKind::Assignment {
                 target,
                 operator,
@@ -2180,6 +2197,7 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
         | StatementSyntaxKind::NumericFor { .. }
         | StatementSyntaxKind::GeneralizedFor { .. }
         | StatementSyntaxKind::Defer { .. }
+        | StatementSyntaxKind::AsyncDefer { .. }
         | StatementSyntaxKind::Local { .. }
         | StatementSyntaxKind::MultipleLocal { .. }
         | StatementSyntaxKind::LocalFunction { .. }
@@ -2198,6 +2216,9 @@ fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static s
             StatementSyntaxKind::Break => return Some(("break", statement.span())),
             StatementSyntaxKind::Continue => return Some(("continue", statement.span())),
             StatementSyntaxKind::Defer { .. } => return Some(("defer", statement.span())),
+            StatementSyntaxKind::AsyncDefer { .. } => {
+                return Some(("async defer", statement.span()));
+            }
             StatementSyntaxKind::Local { initializer, .. } => {
                 if expression_contains_result_propagation(initializer) {
                     return Some(("try", initializer.span()));
@@ -2354,7 +2375,8 @@ fn expression_contains_result_propagation(expression: &ExpressionSyntax) -> bool
             elements.iter().any(expression_contains_result_propagation)
         }
         ExpressionSyntaxKind::Unary { operand, .. }
-        | ExpressionSyntaxKind::OptionalPropagate { operand } => {
+        | ExpressionSyntaxKind::OptionalPropagate { operand }
+        | ExpressionSyntaxKind::Await { operand } => {
             expression_contains_result_propagation(operand)
         }
         ExpressionSyntaxKind::Binary { left, right, .. } => {
