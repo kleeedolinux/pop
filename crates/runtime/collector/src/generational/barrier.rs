@@ -7,6 +7,19 @@ use crate::relocation::CollectorGeneration;
 use super::heap::{GenerationalRuntime, MajorCyclePhase};
 
 impl GenerationalRuntime {
+    /// Loads one precise managed edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for an invalid owner or non-reference slot.
+    pub fn load_reference(
+        &self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+    ) -> Result<Option<ManagedReference>, RuntimeFailure> {
+        self.nursery.load_reference(owner, slot)
+    }
+
     /// Stores one precise managed edge through SATB and card barriers.
     ///
     /// # Errors

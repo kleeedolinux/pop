@@ -33,7 +33,7 @@ pub struct RelocationRuntime {
     pub(crate) pins: BTreeMap<PinHandle, ManagedReference>,
     pub(crate) dirty_cards: BTreeSet<ManagedReference>,
     pub(crate) refined_cards: Option<BTreeMap<ManagedReference, Vec<ManagedReference>>>,
-    pub(super) next_reference: u64,
+    pub(crate) next_reference: u64,
     pub(super) next_identity: u64,
     pub(super) next_root: u64,
     pub(super) next_pin: u64,

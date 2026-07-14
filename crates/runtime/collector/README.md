@@ -49,9 +49,16 @@ allocating/marking/sweeping states. Deterministic evacuation selection excludes
 pinned and large regions, rejects non-positive estimated benefit, counts
 already selected regions against its bound, and admits live-copy cost only when
 it fits the protected evacuation reserve. Selected regions leave allocation
-pools until evacuation or explicit cancellation; forwarding, reference update,
-quarantine, and physical relocation remain the next implementation slice. A
-separate memory controller
+pools until evacuation or explicit cancellation. The implemented
+stopped-mutator evacuation slice validates every precise reference before
+mutation, assigns private forwarding tokens, copies selected objects into
+compact monomorphic shared pages, rewrites object fields, stack roots, strong
+handles, and card metadata, invalidates old tokens, and passes retired regions
+through quarantine before removing their pages. Placement and heap state are
+staged together, so stale roots, malformed metadata, or peak evacuation-reserve
+exhaustion cannot expose a partial relocation. Phase-specific reference
+resolution and worker-driven concurrent evacuation remain unfinished
+production work. A separate memory controller
 enforces a byte hard limit before heap mutation, protects emergency and
 evacuation reserves, accounts
 typed stack/code/metadata/native/arena/isolated usage, adapts the collection

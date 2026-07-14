@@ -204,6 +204,12 @@ Package for the first release.
     live/committed/fragmentation/pin/reference telemetry, drive shared-region
     mark/sweep states, and select only bounded positive-benefit evacuation sets
     that fit the protected reserve while excluding pinned and large regions.
+  - [x] Evacuate selected shared regions through a failure-atomic stopped-mutator
+    slice that copies objects into compact monomorphic pages, rewrites precise
+    fields, stack roots, strong handles, and card metadata, invalidates old
+    tokens, quarantines retired regions before removal, and accounts peak use of
+    the protected evacuation reserve. Phase-specific concurrent resolution and
+    worker-driven evacuation remain production work.
   - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
     adaptive worker sizing/work stealing, concurrent card refinement and page
     reclamation, stack watermarks, race/stress proof, and latency measurements.

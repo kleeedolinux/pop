@@ -4,8 +4,8 @@ use pop_runtime_collector::{
     MajorCyclePhase, RegionState, SchedulerId,
 };
 use pop_runtime_interface::{
-    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, RootPublication,
-    RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
+    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
+    RootPublication, RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
 };
 
 fn object(type_id: u32, class: AllocationClass, slots: u32) -> ObjectAllocationRequest {
@@ -13,6 +13,14 @@ fn object(type_id: u32, class: AllocationClass, slots: u32) -> ObjectAllocationR
         RuntimeTypeId::new(type_id),
         class,
         ObjectMap::new(slots, Vec::new()).expect("object map"),
+    )
+}
+
+fn reference_object(type_id: u32, class: AllocationClass) -> ObjectAllocationRequest {
+    ObjectAllocationRequest::new(
+        RuntimeTypeId::new(type_id),
+        class,
+        ObjectMap::new(1, vec![ObjectSlot::new(0)]).expect("object map"),
     )
 }
 
@@ -40,6 +48,20 @@ fn region_for(runtime: &GenerationalRuntime, reference: ManagedReference) -> u64
         .expect("page descriptor")
         .region()
         .raw()
+}
+
+fn finish_major(runtime: &mut GenerationalRuntime, roots: &mut RootPublication) {
+    for _ in 0..64 {
+        if runtime
+            .safe_point(roots)
+            .expect("major slice")
+            .collection()
+            .is_some()
+        {
+            return;
+        }
+    }
+    panic!("major collection must complete within its work bound");
 }
 
 #[test]
@@ -253,5 +275,127 @@ fn shared_region_states_follow_major_mark_and_sweep_transitions() {
     assert_eq!(
         runtime.region_telemetry()[0].state(),
         RegionState::SharedAllocating
+    );
+}
+
+#[test]
+fn selected_shared_regions_copy_objects_and_rewrite_every_reference_kind() {
+    let mut runtime = runtime(512);
+    let request = reference_object(60, AllocationClass::Mature);
+    let mut shared = Vec::new();
+    for _ in 0..5 {
+        let reference = runtime.allocate_object(&request).expect("mature object");
+        runtime.publish_shared(reference).expect("publish object");
+        shared.push(reference);
+    }
+    let selected_region = region_for(&runtime, shared[0]);
+    assert!(
+        shared[..4]
+            .iter()
+            .all(|reference| region_for(&runtime, *reference) == selected_region)
+    );
+    assert_ne!(region_for(&runtime, shared[4]), selected_region);
+
+    runtime
+        .store_reference(shared[0], ObjectSlot::new(0), Some(shared[1]))
+        .expect("selected-to-selected edge");
+    runtime
+        .store_reference(shared[4], ObjectSlot::new(0), Some(shared[0]))
+        .expect("outside-to-selected edge");
+    let child_root = runtime.retain_root(shared[1]).expect("strong child root");
+    let mut roots = RootPublication::new(
+        StackMap::new(
+            SafePointId::new(60),
+            vec![RootSlot::new(0), RootSlot::new(1)],
+        )
+        .expect("stack map"),
+        vec![Some(shared[0]), Some(shared[4])],
+    )
+    .expect("root publication");
+
+    runtime
+        .select_evacuation_candidates(
+            EvacuationSelectionConfig::new(1, 50).expect("selection config"),
+        )
+        .expect("select candidate");
+    let statistics = runtime
+        .evacuate_selected_regions(&mut roots)
+        .expect("evacuate selected region");
+
+    assert_eq!(statistics.regions_evacuated(), 1);
+    assert_eq!(statistics.objects_evacuated(), 4);
+    assert_eq!(statistics.bytes_copied(), 32);
+    assert_eq!(statistics.stack_roots_updated(), 1);
+    assert_eq!(statistics.strong_handles_updated(), 1);
+    assert_eq!(statistics.object_fields_updated(), 2);
+    assert!(statistics.committed_bytes_reclaimed() > 0);
+    assert!(statistics.peak_committed_bytes() >= 320);
+    let mut updated_roots = roots.managed_references();
+    let relocated_parent = updated_roots.next().expect("relocated parent root");
+    assert_eq!(updated_roots.next(), Some(shared[4]));
+    let relocated_child = runtime
+        .load_reference(relocated_parent, ObjectSlot::new(0))
+        .expect("relocated child slot")
+        .expect("relocated child");
+    assert_ne!(relocated_parent, shared[0]);
+    assert_ne!(relocated_child, shared[1]);
+    assert_eq!(
+        runtime
+            .load_reference(shared[4], ObjectSlot::new(0))
+            .expect("outside edge"),
+        Some(relocated_parent)
+    );
+    assert!(
+        shared[..4]
+            .iter()
+            .all(|reference| !runtime.contains(*reference))
+    );
+    assert!(runtime.contains(shared[4]));
+    assert_ne!(region_for(&runtime, relocated_parent), selected_region);
+    assert!(
+        runtime
+            .region_telemetry()
+            .iter()
+            .all(|region| region.id().raw() != selected_region)
+    );
+
+    let mut no_roots = RootPublication::new(
+        StackMap::new(SafePointId::new(61), Vec::new()).expect("empty stack map"),
+        Vec::new(),
+    )
+    .expect("empty roots");
+    runtime.request_major_collection();
+    finish_major(&mut runtime, &mut no_roots);
+    assert!(runtime.contains(relocated_child));
+    runtime
+        .release_root(child_root)
+        .expect("release relocated root");
+}
+
+#[test]
+fn evacuation_rejects_stale_publications_without_partial_relocation() {
+    let mut runtime = runtime(256);
+    let original = runtime
+        .allocate_object(&object(70, AllocationClass::Mature, 1))
+        .expect("mature object");
+    runtime.publish_shared(original).expect("publish object");
+    let selected_region = region_for(&runtime, original);
+    runtime
+        .select_evacuation_candidates(
+            EvacuationSelectionConfig::new(1, 50).expect("selection config"),
+        )
+        .expect("select candidate");
+    let mut stale_roots = one_root(70, ManagedReference::new(u64::MAX));
+
+    assert!(runtime.evacuate_selected_regions(&mut stale_roots).is_err());
+    assert!(runtime.contains(original));
+    assert_eq!(runtime.object_count(), 1);
+    assert_eq!(region_for(&runtime, original), selected_region);
+    assert!(runtime.region_telemetry().iter().any(|region| {
+        region.id().raw() == selected_region && region.state() == RegionState::EvacuationCandidate
+    }));
+    assert_eq!(
+        stale_roots.managed_references().next(),
+        Some(ManagedReference::new(u64::MAX))
     );
 }

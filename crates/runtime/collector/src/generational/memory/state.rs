@@ -62,6 +62,20 @@ impl MemoryController {
         committed_after <= self.ordinary_limit_bytes()
     }
 
+    pub(crate) fn admits_evacuation(&self, committed_after: usize) -> bool {
+        self.non_heap
+            .total_bytes()
+            .checked_add(self.arena_bytes)
+            .and_then(|total| total.checked_add(committed_after))
+            .is_some_and(|total| {
+                total
+                    <= self
+                        .config
+                        .hard_limit_bytes
+                        .saturating_sub(self.config.emergency_reserve_bytes)
+            })
+    }
+
     pub(crate) fn admits_arena_bytes(&self, arena_after: usize, heap_committed: usize) -> bool {
         self.non_heap
             .total_bytes()

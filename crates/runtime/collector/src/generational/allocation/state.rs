@@ -220,6 +220,12 @@ impl AllocationInfrastructure {
         self.placements.get(&reference).copied()
     }
 
+    pub(crate) fn region(&self, reference: ManagedReference) -> Option<RegionId> {
+        self.placement(reference)
+            .and_then(|placement| self.pages.get(&placement.page))
+            .map(|page| page.region)
+    }
+
     pub(crate) fn page(&self, page: PageId) -> Option<&PageDescriptor> {
         self.pages.get(&page)
     }
@@ -402,6 +408,120 @@ impl AllocationInfrastructure {
         self.tlabs.remove(&scheduler);
         self.reclaim_empty_pages();
         Ok(())
+    }
+
+    pub(crate) fn reconcile_after_evacuation(
+        &mut self,
+        relocations: &BTreeMap<ManagedReference, ManagedReference>,
+        objects: &BTreeMap<ManagedReference, RelocationAllocation>,
+    ) -> Result<usize, RuntimeFailure> {
+        let selected_regions = relocations
+            .keys()
+            .map(|reference| {
+                self.region(*reference)
+                    .ok_or_else(RuntimeFailure::runtime_invariant)
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if selected_regions.is_empty()
+            || selected_regions.iter().any(|region| {
+                !self.regions.get(region).is_some_and(|record| {
+                    record.key.domain == HeapDomain::Shared
+                        && record.state == RegionState::EvacuationCandidate
+                })
+            })
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        for region in &selected_regions {
+            self.regions
+                .get_mut(region)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?
+                .state = RegionState::Evacuating;
+        }
+        self.rebuild_active_regions();
+
+        for (old, new) in relocations {
+            let old_placement = self
+                .placement(*old)
+                .filter(|placement| placement.domain == HeapDomain::Shared)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            let old_region = self
+                .pages
+                .get(&old_placement.page)
+                .map(|page| page.region)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            if !selected_regions.contains(&old_region) {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+            let object = objects
+                .get(new)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            let layout = layout(object.allocation.type_id, &object.allocation.object_map);
+            let size = object_size(layout.slot_count)?;
+            let placement = self.place_compacted_shared(&layout, size)?;
+            self.placements.insert(*new, placement);
+        }
+        let peak_committed_bytes = self.committed_bytes();
+
+        for old in relocations.keys() {
+            self.placements.remove(old);
+        }
+        for region in &selected_regions {
+            self.regions
+                .get_mut(region)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?
+                .state = RegionState::Quarantined;
+        }
+        self.reclaim_empty_pages();
+        Ok(peak_committed_bytes)
+    }
+
+    fn place_compacted_shared(
+        &mut self,
+        layout: &LayoutKey,
+        size: usize,
+    ) -> Result<AllocationPlacement, RuntimeFailure> {
+        let reusable = self.pages.values().find_map(|page| {
+            let region = self.regions.get(&page.region)?;
+            if page.domain != HeapDomain::Shared
+                || !region.state.accepts_allocation()
+                || page.type_id != layout.type_id
+                || page.slot_count != layout.slot_count
+                || page.reference_slots != layout.reference_slots
+            {
+                return None;
+            }
+            let cursor = self
+                .placements
+                .values()
+                .filter(|placement| placement.page == page.id)
+                .map(|placement| placement.offset_bytes.saturating_add(placement.size_bytes))
+                .max()
+                .unwrap_or(0);
+            cursor
+                .checked_add(size)
+                .filter(|end| *end <= page.capacity_bytes)
+                .map(|_| (page.id, cursor))
+        });
+        let (page, offset_bytes) = if let Some(reusable) = reusable {
+            reusable
+        } else {
+            (
+                self.create_page(
+                    layout,
+                    HeapDomain::Shared,
+                    self.config.page_bytes.max(size),
+                    None,
+                )?,
+                0,
+            )
+        };
+        Ok(AllocationPlacement {
+            page,
+            offset_bytes,
+            size_bytes: size,
+            domain: HeapDomain::Shared,
+        })
     }
 
     fn record_bytes(&mut self, size: usize) {

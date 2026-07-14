@@ -25,6 +25,7 @@ pub use coordination::{
 };
 pub use evacuation::{
     EvacuationCandidate, EvacuationSelectionConfig, EvacuationSelectionConfigError,
+    EvacuationStatistics,
 };
 pub use heap::{
     GenerationalRuntime, MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase,
