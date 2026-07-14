@@ -579,6 +579,8 @@ fn assert_plri_boundary(runtime: &Path) {
         "roots: &mut RootPublication",
         "RelocationConformance",
         "relocation_conformance_stage2",
+        "pub struct SchedulerId",
+        "pub struct TaskFrameRootId",
     ] {
         assert!(
             interface_source.contains(required),
@@ -595,6 +597,12 @@ fn assert_collector_boundary(runtime: &Path) {
     assert!(!collector_manifest.contains("pop-runtime-native-abi.workspace = true"));
     assert!(!collector_manifest.contains("pop-runtime-native.workspace = true"));
     assert!(collector_source.contains("impl RuntimeAdapter for BootstrapRuntime"));
+    assert!(collector_source.contains("pub use pop_runtime_interface::SchedulerId"));
+    assert!(
+        !read_required(runtime.join("collector/src/ownership.rs"))
+            .contains("pub struct SchedulerId"),
+        "collector must re-export the canonical PLRI SchedulerId instead of defining another identity"
+    );
     assert!(relocation_source.contains("impl RuntimeAdapter for RelocationRuntime"));
     for forbidden in ["pop_rt_", "extern \"C\"", "OnceLock", "std::ffi"] {
         assert!(

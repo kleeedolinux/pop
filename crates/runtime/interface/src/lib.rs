@@ -7,6 +7,7 @@ mod failure;
 mod maps;
 mod operation;
 mod reference;
+mod scheduler;
 
 pub use adapter::*;
 pub use allocation::*;
@@ -15,3 +16,4 @@ pub use failure::*;
 pub use maps::*;
 pub use operation::*;
 pub use reference::*;
+pub use scheduler::*;

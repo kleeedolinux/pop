@@ -1,5 +1,7 @@
 //! Portable collector implementations of the PLRI garbage-collection contract.
 
+pub use pop_runtime_interface::SchedulerId;
+
 mod access;
 mod adapter;
 mod arena;
@@ -30,6 +32,6 @@ pub use generational::{
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use ownership::{
     IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
-    PublicationStatistics, SchedulerId,
+    PublicationStatistics,
 };
 pub use relocation::{CollectorGeneration, CollectorObjectId, RelocationRuntime};

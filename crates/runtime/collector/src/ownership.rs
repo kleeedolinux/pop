@@ -1,19 +1,6 @@
 //! Typed object ownership metadata kept distinct from placement and generation.
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct SchedulerId(u32);
-
-impl SchedulerId {
-    #[must_use]
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    #[must_use]
-    pub const fn raw(self) -> u32 {
-        self.0
-    }
-}
+use pop_runtime_interface::SchedulerId;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct IsolatedRegionId(u64);
