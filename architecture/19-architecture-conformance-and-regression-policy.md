@@ -227,8 +227,11 @@ Minimum traceability matrix:
 | Nominal scalar enums | syntax, type checker, HIR/MIR, backends | identity/order, exact equality, invalid operators, text, differential, and fail-closed C tests |
 | Optional flow and propagation | syntax, type checker, HIR/MIR, backends | versioned narrowing, scoped binding, lazy default, dominated unwrap, early return, and differential tests |
 | Typed results, errors, and cleanup | syntax, resolver, type checker, docs, HIR/MIR, runtime, backends | stable Result/error identities, exact propagation, exhaustive boundaries, checked error docs, LIFO cleanup, verifier negatives, and differential tests |
+| Nominal iteration and growable lists | syntax, type checker, HIR/MIR, standard library, runtime, backends | exact protocol/step identities, tuple binding, deterministic collection order, list growth/barriers, lazy adapter calls, no implicit disposal/dynamic lookup, and differential tests |
+| Inferred portable generics | syntax, type checker, metadata, HIR/MIR, standard library, backends | exact bounds, unique inference, generic class witnesses, capsule identity/visibility, full-specialization baseline, no erased/dynamic fallback, and differential tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
+| Lock and `.poplib` encoding | project resolver, artifact emitter/loader, reference metadata, linker | canonical-byte, SHA-256, malformed-input, source-free round-trip tests |
 | Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |
 | Default internal visibility | parser, resolver, HIR, metadata | default/access/public-surface tests |
 | Complete public names | formatter, analyzers, libraries | naming baseline and truncation diagnostics |

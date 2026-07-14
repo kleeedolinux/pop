@@ -119,9 +119,10 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 
 ## Milestone 5 — Language depth
 
-- typed generic code sharing, portable generic reference metadata, and
-  specialization policy beyond the accepted bootstrap full-specialization
-  subset;
+- inferred nominally constrained generics, generic classes/interfaces, and
+  portable generic reference metadata under the accepted full-specialization
+  correctness path; typed code sharing remains an optional verified
+  optimization;
 - reserved `Result`, nominal error declarations, exact `try` propagation,
   exhaustive recovery boundaries, and deterministic lexical cleanup;
 - coroutines/async model;

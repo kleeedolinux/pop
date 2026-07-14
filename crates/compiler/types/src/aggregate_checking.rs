@@ -344,6 +344,33 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     span,
                 })
             }
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if self
+                .resolver
+                .schema()
+                .iteration_protocol()
+                .is_some_and(|protocol| definition == protocol.list())
+                && arguments.len() == 1 =>
+            {
+                let element_type = arguments[0];
+                let index_type = self.resolver.arena().source_type("Int")?;
+                let typed_index = self.check_expression_expected(
+                    index,
+                    Some(ExpectedExpressionType::plain(index_type)),
+                )?;
+                self.require_same_type(index_type, typed_index.type_id(), typed_index.span(), span);
+                let result_type = self.resolver.arena_mut().optional(element_type).ok()?;
+                self.diagnostics.is_empty().then_some(TypedExpression {
+                    kind: TypedExpressionKind::ListGet {
+                        list: Box::new(base),
+                        index: Box::new(typed_index),
+                    },
+                    type_id: result_type,
+                    span,
+                })
+            }
             Some(SemanticType::Tuple(elements)) => {
                 let ExpressionSyntaxKind::Integer(spelling) = index.kind() else {
                     self.diagnostics.push(type_diagnostics::invalid_operator(

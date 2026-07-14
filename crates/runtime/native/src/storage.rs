@@ -17,9 +17,7 @@ fn table_value(reference: u64, key: u64, managed_key: u8) -> Option<u64> {
     let Ok(tables) = abi_tables().lock() else {
         return None;
     };
-    let Some(table) = tables.get(&reference) else {
-        return None;
-    };
+    let table = tables.get(&reference)?;
     if u8::from(table.key_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
         != u8::from(managed_key != 0)
     {

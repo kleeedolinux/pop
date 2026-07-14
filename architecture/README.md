@@ -94,6 +94,8 @@ transplanted into a Luau-shaped file.
   resolution and a `target/` cache without sharing visibility.
 - Library Bubbles emit self-describing `.poplib` artifacts resolved by
   `BubbleIdentity` and the locked dependency graph.
+- `bubble.lock` and `.poplib` control files use bounded canonical JSON; artifact
+  integrity uses normalized SHA-256 file inventories under ADR 0055.
 - Pop GC uses precise roots, a moving nursery, and concurrent mature marking.
 - Collecting safe points update typed `RootSlot` publications in place; object
   identity survives relocation while stale physical reference tokens do not.
@@ -116,6 +118,12 @@ transplanted into a Luau-shaped file.
 - Expected failures use the reserved typed `Result` union, nominal error
   declarations, exact prefix propagation, exhaustive recovery, and lexical
   last-in, first-out cleanup.
+- Generalized iteration uses the reserved nominal `Iterable<T>`, `Iterator<T>`,
+  and `Iteration<T>` contracts; arrays remain fixed and `List<T>` owns
+  sequential growth.
+- Generic calls infer one complete canonical argument list or fail statically;
+  nominal bounds and verified portable specialization capsules preserve exact
+  types and Bubble identity across dependency boundaries.
 - Lua-shaped `---` XML documentation comments are parsed, signature-checked,
   emitted with library metadata, and available to editors/doc tools.
 - Accepted architecture is a binding baseline. Undocumented semantic expansion

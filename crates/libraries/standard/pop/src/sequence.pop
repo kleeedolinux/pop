@@ -1,0 +1,95 @@
+namespace Pop.Sequence
+
+private class MappingIterator<T, U> implements Iterator<U>
+    private source: Iterator<T>
+    private transform: function(value: T): U
+
+    public function MappingIterator.new(source: Iterator<T>, transform: function(value: T): U): MappingIterator<T, U>
+        return MappingIterator { source = source, transform = transform }
+    end
+
+    public function MappingIterator:iterator(): Iterator<U>
+        return self
+    end
+
+    public function MappingIterator:next(): Iteration<U>
+        for value in self.source do
+            return Iteration.Item(self.transform(value))
+        end
+        return Iteration.End
+    end
+end
+
+private class FilteringIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private predicate: function(value: T): Boolean
+
+    public function FilteringIterator.new(source: Iterator<T>, predicate: function(value: T): Boolean): FilteringIterator<T>
+        return FilteringIterator { source = source, predicate = predicate }
+    end
+
+    public function FilteringIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function FilteringIterator:next(): Iteration<T>
+        for value in self.source do
+            if self.predicate(value) then
+                return Iteration.Item(value)
+            end
+        end
+        return Iteration.End
+    end
+end
+
+--- <summary>Creates a lazy single-pass iterator that transforms source items.</summary>
+--- <param name="source">The statically iterable source.</param>
+--- <param name="transform">The function called once for each requested item.</param>
+--- <returns>A newly allocated lazy iterator adapter.</returns>
+public function map<T, TSource: Iterable<T>, U>(
+    source: TSource,
+    transform: function(value: T): U
+): Iterator<U>
+    local iterator = MappingIterator.new(source:iterator(), transform)
+    return iterator
+end
+
+--- <summary>Creates a lazy single-pass iterator that retains matching items.</summary>
+--- <param name="source">The statically iterable source.</param>
+--- <param name="predicate">The function called at most once per examined item.</param>
+--- <returns>A newly allocated lazy iterator adapter.</returns>
+public function filter<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Iterator<T>
+    local iterator = FilteringIterator.new(source:iterator(), predicate)
+    return iterator
+end
+
+--- <summary>Consumes a sequence from left to right into one state value.</summary>
+--- <param name="source">The statically iterable source.</param>
+--- <param name="initial">The initial state.</param>
+--- <param name="combine">The function called once for each item in order.</param>
+--- <returns>The final state.</returns>
+public function fold<T, TSource: Iterable<T>, TState>(
+    source: TSource,
+    initial: TState,
+    combine: function(state: TState, value: T): TState
+): TState
+    local state = initial
+    for value in source do
+        state = combine(state, value)
+    end
+    return state
+end
+
+--- <summary>Consumes a sequence into a new growable list in source order.</summary>
+--- <param name="source">The statically iterable source.</param>
+--- <returns>A newly allocated list containing every source item.</returns>
+public function collect<T, TSource: Iterable<T>>(source: TSource): List<T>
+    local values = List.create<<T>>()
+    for value in source do
+        List.add(values, value)
+    end
+    return values
+end

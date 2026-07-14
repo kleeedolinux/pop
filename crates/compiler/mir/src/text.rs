@@ -3,9 +3,10 @@ use std::fmt;
 
 use pop_foundation::{
     BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId, EnumCaseId,
-    ErrorCaseId, ErrorId, FieldId, FileId, FunctionId, InterfaceId, InterfaceMethodId, MethodId,
-    NamespaceId, NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    ErrorCaseId, ErrorId, FieldId, FileId, FunctionId, InterfaceId, InterfaceMethodId,
+    IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId, NestedFunctionId,
+    NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
+    TextRange, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -14,7 +15,8 @@ use pop_runtime_interface::{
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
-    MirBlock, MirBlockArgument, MirBubble, MirCapture, MirCaptureMode, MirClassDeclaration,
+    MirBlock, MirBlockArgument, MirBubble, MirBuiltinInterfaceImplementation,
+    MirBuiltinInterfaceMethodImplementation, MirCapture, MirCaptureMode, MirClassDeclaration,
     MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration, MirDeclarationKind,
     MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
     MirErrorDeclaration, MirErrorSwitchArm, MirField, MirFunction, MirFunctionReference,
@@ -189,6 +191,8 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             methods,
             "implements",
             implementations,
+            "implementsBuiltin",
+            builtin_implementations,
         ] => Ok(MirDeclaration {
             symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
             kind: MirDeclarationKind::Class(MirClassDeclaration {
@@ -197,6 +201,32 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
                 fields: parse_declared_fields(fields, number)?,
                 methods: parse_method_ids(methods, number)?,
                 interfaces: parse_interface_implementations(implementations, number)?,
+                builtin_interfaces: parse_builtin_interface_implementations(
+                    builtin_implementations,
+                    number,
+                )?,
+            }),
+        }),
+        [
+            "type.class",
+            symbol,
+            class,
+            type_id,
+            "fields",
+            fields,
+            "methods",
+            methods,
+            "implements",
+            implementations,
+        ] => Ok(MirDeclaration {
+            symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
+            kind: MirDeclarationKind::Class(MirClassDeclaration {
+                class: ClassId::from_raw(parse_prefixed(class, 'c', number)?),
+                type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                fields: parse_declared_fields(fields, number)?,
+                methods: parse_method_ids(methods, number)?,
+                interfaces: parse_interface_implementations(implementations, number)?,
+                builtin_interfaces: Vec::new(),
             }),
         }),
         [
@@ -295,6 +325,57 @@ fn parse_interface_implementations(
             };
             Ok(MirInterfaceImplementation {
                 interface: InterfaceId::from_raw(parse_prefixed(interface, 'i', line)?),
+                interface_type: TypeId::from_raw(parse_prefixed(type_id, 't', line)?),
+                methods,
+            })
+        })
+        .collect()
+}
+
+fn parse_builtin_interface_implementations(
+    text: &str,
+    line: usize,
+) -> Result<Vec<MirBuiltinInterfaceImplementation>, MirParseError> {
+    if text == "-" {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|implementation| {
+            let (head, methods) = implementation
+                .split_once('[')
+                .ok_or_else(|| error(line, "built-in interface implementation"))?;
+            let methods = methods
+                .strip_suffix(']')
+                .ok_or_else(|| error(line, "built-in interface implementation"))?;
+            let (interface, type_id) = head
+                .split_once(':')
+                .ok_or_else(|| error(line, "built-in interface implementation type"))?;
+            let methods = if methods.is_empty() {
+                Vec::new()
+            } else {
+                methods
+                    .split(';')
+                    .map(|mapping| {
+                        let (protocol_method, class_method) = mapping
+                            .split_once('=')
+                            .ok_or_else(|| error(line, "built-in interface method mapping"))?;
+                        Ok(MirBuiltinInterfaceMethodImplementation {
+                            protocol_method: IterationProtocolMethodId::from_raw(parse_hash(
+                                protocol_method,
+                                "iterationMethod#",
+                                line,
+                            )?),
+                            class_method: MethodId::from_raw(parse_prefixed(
+                                class_method,
+                                'm',
+                                line,
+                            )?),
+                        })
+                    })
+                    .collect::<Result<_, _>>()?
+            };
+            Ok(MirBuiltinInterfaceImplementation {
+                interface: BuiltinTypeId::from_raw(parse_prefixed(interface, 'b', line)?),
                 interface_type: TypeId::from_raw(parse_prefixed(type_id, 't', line)?),
                 methods,
             })
@@ -711,6 +792,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::CallReferenced { .. }
                 | MirInstructionKind::CallDirectMethod { .. }
                 | MirInstructionKind::CallInterface { .. }
+                | MirInstructionKind::CallBuiltinInterface { .. }
                 | MirInstructionKind::CallIndirect { .. }
                 | MirInstructionKind::GcSafePoint { .. }
                 | MirInstructionKind::RetainRoot { .. }
@@ -903,6 +985,56 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             element_map: parse_array_element_map(element_map, line)?,
         });
     }
+    if let Some(rest) = text.strip_prefix("listCreate ") {
+        let (element_map, capacity) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "list creation element map"))?;
+        let capacity = if capacity == "none" {
+            None
+        } else {
+            Some(ValueId::from_raw(parse_prefixed(capacity, 'v', line)?))
+        };
+        return Ok(MirInstructionKind::ListCreate {
+            capacity,
+            element_map: parse_array_element_map(element_map, line)?,
+        });
+    }
+    if let Some(list) = text.strip_prefix("listLength ") {
+        return Ok(MirInstructionKind::ListLength {
+            list: ValueId::from_raw(parse_prefixed(list, 'v', line)?),
+        });
+    }
+    if let Some(operands) = text.strip_prefix("listGet ") {
+        let (list, index) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::ListGet { list, index });
+    }
+    if let Some(operands) = text.strip_prefix("listGetChecked ") {
+        let (list, index) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::ListGetChecked { list, index });
+    }
+    if let Some(operands) = text.strip_prefix("listSet ") {
+        let (element_map, operands) = operands
+            .split_once(' ')
+            .ok_or_else(|| error(line, "list set element map"))?;
+        let (list, index, value) = parse_three_values(operands, line)?;
+        return Ok(MirInstructionKind::ListSet {
+            list,
+            index,
+            value,
+            element_map: parse_array_element_map(element_map, line)?,
+        });
+    }
+    if let Some(operands) = text.strip_prefix("listAdd ") {
+        let (element_map, operands) = operands
+            .split_once(' ')
+            .ok_or_else(|| error(line, "list append element map"))?;
+        let (list, value) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::ListAdd {
+            list,
+            value,
+            element_map: parse_array_element_map(element_map, line)?,
+        });
+    }
     if let Some(optional) = text.strip_prefix("optionalIsPresent ") {
         return Ok(MirInstructionKind::OptionalIsPresent {
             optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),
@@ -921,6 +1053,17 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         return Ok(MirInstructionKind::ResultMake {
             result: parse_builtin_type_id(parts[0], line)?,
             case: ResultCaseId::from_raw(parse_hash(parts[1], "resultCase#", line)?),
+            arguments: parse_values(parts[2], line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("iterationMake ") {
+        let parts: Vec<_> = rest.splitn(3, ' ').collect();
+        if parts.len() != 3 {
+            return Err(error(line, "malformed Iteration construction"));
+        }
+        return Ok(MirInstructionKind::IterationMake {
+            iteration: parse_builtin_type_id(parts[0], line)?,
+            case: IterationCaseId::from_raw(parse_hash(parts[1], "iterationCase#", line)?),
             arguments: parse_values(parts[2], line)?,
         });
     }
@@ -989,19 +1132,48 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         || text.starts_with("callReference")
         || text.starts_with("callIndirect")
         || text.starts_with("call.interface")
+        || text.starts_with("call.builtinInterface")
     {
         return parse_call_operation(text, line);
     }
+    if let Some(rest) = text.strip_prefix("iteration.isItem definition#") {
+        let mut parts = rest.split_whitespace();
+        let definition = required(&mut parts, line)?;
+        let item_case = required(&mut parts, line)?;
+        let end_case = required(&mut parts, line)?;
+        let iteration = required(&mut parts, line)?;
+        return Ok(MirInstructionKind::IterationIsItem {
+            iteration: ValueId::from_raw(parse_prefixed(iteration, 'v', line)?),
+            definition: BuiltinTypeId::from_raw(parse_u32(definition, line)?),
+            item_case: IterationCaseId::from_raw(parse_hash(item_case, "case#", line)?),
+            end_case: IterationCaseId::from_raw(parse_hash(end_case, "endCase#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("iteration.getItem definition#") {
+        let mut parts = rest.split_whitespace();
+        let definition = required(&mut parts, line)?;
+        let item_case = required(&mut parts, line)?;
+        let iteration = required(&mut parts, line)?;
+        return Ok(MirInstructionKind::IterationGetItem {
+            iteration: ValueId::from_raw(parse_prefixed(iteration, 'v', line)?),
+            definition: BuiltinTypeId::from_raw(parse_u32(definition, line)?),
+            item_case: IterationCaseId::from_raw(parse_hash(item_case, "case#", line)?),
+        });
+    }
     if let Some(rest) = text.strip_prefix("interface.upcast ") {
         let mut parts = rest.split_whitespace();
-        return Ok(MirInstructionKind::InterfaceUpcast {
-            value: ValueId::from_raw(parse_prefixed(required(&mut parts, line)?, 'v', line)?),
-            interface: InterfaceId::from_raw(parse_prefixed(
-                required(&mut parts, line)?,
-                'i',
-                line,
-            )?),
-        });
+        let value = ValueId::from_raw(parse_prefixed(required(&mut parts, line)?, 'v', line)?);
+        let interface = required(&mut parts, line)?;
+        let interface = match interface.chars().next() {
+            Some('i') => NominalInterfaceId::User(InterfaceId::from_raw(parse_prefixed(
+                interface, 'i', line,
+            )?)),
+            Some('b') => NominalInterfaceId::Builtin(BuiltinTypeId::from_raw(parse_prefixed(
+                interface, 'b', line,
+            )?)),
+            _ => return Err(error(line, "interface identity")),
+        };
+        return Ok(MirInstructionKind::InterfaceUpcast { value, interface });
     }
     if let Some(rest) = text.strip_prefix("gcSafePoint ") {
         let (safe_point, roots) = rest
@@ -1322,6 +1494,21 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
             unwind,
         });
     }
+    if let Some(rest) = text.strip_prefix("call.builtinInterface interface#") {
+        let (interface, rest) = rest
+            .split_once(" method#")
+            .ok_or_else(|| error(line, "built-in interface identity"))?;
+        let (method, values) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "built-in interface arguments"))?;
+        return Ok(MirInstructionKind::CallBuiltinInterface {
+            interface: BuiltinTypeId::from_raw(parse_u32(interface, line)?),
+            method: IterationProtocolMethodId::from_raw(parse_u32(method, line)?),
+            arguments: parse_values(values, line)?,
+            declared_effects,
+            unwind,
+        });
+    }
     let rest = text
         .strip_prefix("callDirectMethod m")
         .ok_or_else(|| error(line, "malformed direct method call"))?;
@@ -1579,6 +1766,7 @@ fn parse_trap_kind(text: &str, line: usize) -> Result<TrapKind, MirParseError> {
         "NumericConversion" => Ok(TrapKind::NumericConversion),
         "InvalidRangeStep" => Ok(TrapKind::InvalidRangeStep),
         "BoundsViolation" => Ok(TrapKind::BoundsViolation),
+        "ConcurrentModification" => Ok(TrapKind::ConcurrentModification),
         "ImpossibleState" => Ok(TrapKind::ImpossibleState),
         _ => Err(error(line, "trap kind")),
     }

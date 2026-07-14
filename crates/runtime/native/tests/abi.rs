@@ -4,9 +4,11 @@ use pop_runtime_native::{
     pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_object,
     pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
     pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
-    pop_rt_pin, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_table_get, pop_rt_table_get_checked,
-    pop_rt_table_set, pop_rt_unpin, request_abi_collection,
+    pop_rt_list_add, pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked,
+    pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_release_root, pop_rt_retain_root,
+    pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read,
+    pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set, pop_rt_unpin,
+    request_abi_collection,
 };
 use pop_runtime_native_abi::StringFormatTag;
 use std::ffi::CString;
@@ -23,7 +25,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 7);
+    assert_eq!(pop_rt_abi_minor(), 9);
     assert_eq!(pop_rt_gc_stage(), 1);
 }
 
@@ -160,7 +162,10 @@ fn bootstrap_string_composition_is_typed_utf8_and_locale_independent() {
     let joined = pop_rt_string_concat(left, right);
     assert_eq!(read_string(joined), "Pop 🫧");
 
-    let signed = pop_rt_string_format(StringFormatTag::Int8 as u32, u64::from((-12_i8) as u8));
+    let signed = pop_rt_string_format(
+        StringFormatTag::Int8 as u32,
+        u64::from((-12_i8).cast_unsigned()),
+    );
     let negative_zero = pop_rt_string_format(StringFormatTag::Float64 as u32, (-0.0_f64).to_bits());
     let boolean = pop_rt_string_format(StringFormatTag::Boolean as u32, 1);
     assert_eq!(read_string(signed), "-12");
@@ -306,6 +311,37 @@ fn typed_table_abi_replaces_and_grows_without_changing_identity() {
     assert!(request_abi_collection());
     assert_eq!(abi_safe_point(33, &[managed_values]), 1);
     assert_eq!(abi_safe_point(34, &[child]), 1);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn growable_list_abi_preserves_identity_order_bounds_and_zero_values() {
+    let _guard = abi_test_lock();
+    let list = pop_rt_list_create(1, 0);
+    assert_ne!(list, 0);
+    assert_eq!(pop_rt_list_add(list, 0, 0), 1);
+    assert_eq!(pop_rt_list_add(list, 42, 0), 1);
+
+    let mut length = u64::MAX;
+    let mut first = u64::MAX;
+    let mut second = u64::MAX;
+    // SAFETY: Every output pointer addresses one live writable `u64`.
+    unsafe {
+        assert_eq!(pop_rt_list_length(list, &raw mut length), 1);
+        assert_eq!(pop_rt_list_get(list, 1, &raw mut first), 1);
+        assert_eq!(pop_rt_list_get_checked(list, 2, &raw mut second), 1);
+        assert_eq!(pop_rt_list_get(list, 3, &raw mut second), 0);
+    }
+    assert_eq!(length, 2);
+    assert_eq!(first, 0);
+    assert_eq!(second, 42);
+    assert_eq!(pop_rt_list_set(list, 2, 7, 0), 1);
+    assert_eq!(pop_rt_list_set(list, 3, 9, 0), 0);
+    // SAFETY: `second` remains live and writable.
+    unsafe {
+        assert_eq!(pop_rt_list_get_checked(list, 2, &raw mut second), 1);
+    }
+    assert_eq!(second, 7);
 }
 
 #[test]

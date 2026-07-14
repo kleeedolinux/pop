@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
-    BubbleId, ClassId, Diagnostic, InterfaceId, InterfaceMethodId, MethodId, ModuleId, SourceSpan,
-    SymbolId, TypeId,
+    BubbleId, BuiltinTypeId, ClassId, Diagnostic, InterfaceId, InterfaceMethodId,
+    IterationProtocolMethodId, MethodId, ModuleId, ParameterId, SourceSpan, SymbolId, TypeId,
 };
 use pop_resolve::Visibility;
 use pop_syntax::{ClassDeclarationSyntax, InterfaceDeclarationSyntax, TypeSyntax, TypeSyntaxKind};
 
 use crate::{
-    ClassMethodDefinition, ClassMethodDispatch, ResolvedTypeKind, SemanticType, SignatureResolver,
+    ClassMethodDefinition, ClassMethodDispatch, ResolvedTypeKind, ResolvedTypeParameter,
+    SemanticType, SignatureResolver,
 };
 
 /// One source-declared nominal interface and its canonical dispatch surface.
@@ -20,6 +21,7 @@ pub struct InterfaceDefinition {
     bubble: BubbleId,
     interface: InterfaceId,
     type_id: TypeId,
+    type_parameters: Vec<ResolvedTypeParameter>,
     methods: Vec<InterfaceMethodDefinition>,
     span: SourceSpan,
 }
@@ -48,6 +50,11 @@ impl InterfaceDefinition {
     #[must_use]
     pub const fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[ResolvedTypeParameter] {
+        &self.type_parameters
     }
 
     #[must_use]
@@ -152,6 +159,97 @@ impl ClassInterfaceImplementation {
     pub fn methods(&self) -> &[InterfaceMethodImplementation] {
         &self.methods
     }
+
+    pub(crate) fn specialize(
+        &self,
+        interface: &InterfaceDefinition,
+        method_ids: &BTreeMap<MethodId, MethodId>,
+    ) -> Option<Self> {
+        Some(Self {
+            interface: interface.interface(),
+            interface_type: interface.type_id(),
+            methods: self
+                .methods
+                .iter()
+                .map(|method| {
+                    let specialized = interface
+                        .methods()
+                        .iter()
+                        .find(|candidate| candidate.slot() == method.slot)?;
+                    Some(InterfaceMethodImplementation {
+                        interface_method: specialized.method(),
+                        slot: method.slot,
+                        class_method: *method_ids.get(&method.class_method)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+}
+
+/// One exact implementation of a reserved built-in nominal interface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassBuiltinInterfaceImplementation {
+    interface: BuiltinTypeId,
+    interface_type: TypeId,
+    methods: Vec<BuiltinInterfaceMethodImplementation>,
+}
+
+impl ClassBuiltinInterfaceImplementation {
+    #[must_use]
+    pub const fn interface(&self) -> BuiltinTypeId {
+        self.interface
+    }
+
+    #[must_use]
+    pub const fn interface_type(&self) -> TypeId {
+        self.interface_type
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[BuiltinInterfaceMethodImplementation] {
+        &self.methods
+    }
+
+    pub(crate) fn specialize(
+        &self,
+        interface_type: TypeId,
+        method_ids: &BTreeMap<MethodId, MethodId>,
+    ) -> Option<Self> {
+        Some(Self {
+            interface: self.interface,
+            interface_type,
+            methods: self
+                .methods
+                .iter()
+                .map(|method| {
+                    Some(BuiltinInterfaceMethodImplementation {
+                        protocol_method: method.protocol_method,
+                        class_method: *method_ids.get(&method.class_method)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+}
+
+/// A verified reserved protocol slot mapped to one native class method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinInterfaceMethodImplementation {
+    protocol_method: IterationProtocolMethodId,
+    class_method: MethodId,
+}
+
+impl BuiltinInterfaceMethodImplementation {
+    #[must_use]
+    pub const fn protocol_method(&self) -> IterationProtocolMethodId {
+        self.protocol_method
+    }
+
+    #[must_use]
+    pub const fn class_method(&self) -> MethodId {
+        self.class_method
+    }
 }
 
 /// A statically verified mapping from an interface slot to a receiver method.
@@ -206,25 +304,31 @@ impl SignatureResolver<'_> {
         symbol: SymbolId,
         syntax: &InterfaceDeclarationSyntax,
     ) -> InterfaceDefinitionResult {
+        let mut diagnostics = Vec::new();
+        let (type_parameters, generics) =
+            self.resolve_generic_parameters(module, syntax.type_parameters(), &mut diagnostics);
         let interface = InterfaceId::from_raw(self.next_interface);
         self.next_interface = self.next_interface.saturating_add(1);
         let type_id = self
             .arena
             .intern(SemanticType::Interface {
                 interface,
-                arguments: Vec::new(),
+                arguments: type_parameters
+                    .iter()
+                    .map(ResolvedTypeParameter::type_id)
+                    .collect(),
             })
-            .expect("interface identity has no type dependencies");
+            .expect("interface identity has verified type dependencies");
         self.interface_types.insert(symbol, type_id);
+        self.interface_sources_by_id.insert(interface, symbol);
 
-        let mut diagnostics = Vec::new();
         if syntax.methods().is_empty() {
             diagnostics.push(type_diagnostics::empty_interface(
                 syntax.span(),
                 syntax.name(),
             ));
         }
-        let methods = self.resolve_interface_methods(module, syntax, &mut diagnostics);
+        let methods = self.resolve_interface_methods(module, syntax, &generics, &mut diagnostics);
         diagnostics.sort_by_key(|diagnostic| {
             let span = diagnostic.primary_span();
             (
@@ -245,15 +349,19 @@ impl SignatureResolver<'_> {
                 }),
             interface,
             type_id,
+            type_parameters: type_parameters.clone(),
             methods,
             span: syntax.span(),
         });
         if let Some(definition) = &definition {
+            self.interface_type_parameters
+                .insert(symbol, type_parameters);
             self.interfaces_by_type.insert(type_id, symbol);
             self.interface_definitions
                 .insert(symbol, definition.clone());
         } else {
             self.interface_types.remove(&symbol);
+            self.interface_sources_by_id.remove(&interface);
         }
         InterfaceDefinitionResult {
             definition,
@@ -265,6 +373,7 @@ impl SignatureResolver<'_> {
         &mut self,
         module: ModuleId,
         syntax: &InterfaceDeclarationSyntax,
+        generics: &BTreeMap<String, (ParameterId, TypeId)>,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Vec<InterfaceMethodDefinition> {
         let mut methods = Vec::new();
@@ -285,7 +394,7 @@ impl SignatureResolver<'_> {
                     let resolved = self.resolve_type(
                         module,
                         parameter.parameter_type(),
-                        &BTreeMap::new(),
+                        generics,
                         diagnostics,
                     )?;
                     Some((
@@ -299,7 +408,7 @@ impl SignatureResolver<'_> {
                 .results()
                 .iter()
                 .filter_map(|result| {
-                    self.resolve_type(module, result, &BTreeMap::new(), diagnostics)?
+                    self.resolve_type(module, result, generics, diagnostics)?
                         .type_id()
                 })
                 .collect();
@@ -321,21 +430,177 @@ impl SignatureResolver<'_> {
         methods
     }
 
+    pub(crate) fn instantiate_interface(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+    ) -> Option<InterfaceDefinition> {
+        let key = (definition, arguments.to_vec());
+        if let Some(symbol) = self.interface_instances.get(&key) {
+            return self.interface_definitions.get(symbol).cloned();
+        }
+        let parameters = self.interface_type_parameters.get(&definition)?.clone();
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        if parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .eq(arguments.iter().copied())
+        {
+            return self.interface_definitions.get(&definition).cloned();
+        }
+        let substitutions = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        let template = self.interface_definitions.get(&definition)?.clone();
+        let symbol = SymbolId::from_raw(self.next_instance_symbol);
+        self.next_instance_symbol = self.next_instance_symbol.saturating_add(1);
+        let interface = InterfaceId::from_raw(self.next_interface);
+        self.next_interface = self.next_interface.saturating_add(1);
+        let type_id = self
+            .arena
+            .intern(SemanticType::Interface {
+                interface,
+                arguments: arguments.to_vec(),
+            })
+            .ok()?;
+        let mut methods = template.methods.clone();
+        for method in &mut methods {
+            method.method = InterfaceMethodId::from_raw(self.next_interface_method);
+            self.next_interface_method = self.next_interface_method.saturating_add(1);
+            for (_, parameter_type, _) in &mut method.parameters {
+                *parameter_type =
+                    self.substitute_type_parameters(*parameter_type, &substitutions)?;
+            }
+            for result in &mut method.results {
+                *result = self.substitute_type_parameters(*result, &substitutions)?;
+            }
+        }
+        let instance = InterfaceDefinition {
+            symbol,
+            module: template.module,
+            bubble: template.bubble,
+            interface,
+            type_id,
+            type_parameters: Vec::new(),
+            methods,
+            span: template.span,
+        };
+        self.interface_instances.insert(key, symbol);
+        self.interface_instance_sources.insert(symbol, definition);
+        self.interface_sources_by_id.insert(interface, definition);
+        self.interfaces_by_type.insert(type_id, symbol);
+        self.interface_definitions.insert(symbol, instance.clone());
+        Some(instance)
+    }
+
+    pub(crate) fn validate_interface_arguments(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+        span: SourceSpan,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let Some(parameters) = self.interface_type_parameters.get(&definition).cloned() else {
+            return arguments.is_empty();
+        };
+        let substitutions: BTreeMap<_, _> = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            let Some(bound) = parameter.bound() else {
+                continue;
+            };
+            let Some(bound) = self.substitute_type_parameters(bound, &substitutions) else {
+                diagnostics.push(type_diagnostics::generic_inference_failure(
+                    span,
+                    parameter.name(),
+                    "nominal interface bound cannot be specialized",
+                ));
+                return false;
+            };
+            if !self.type_satisfies_nominal_bound(*argument, bound) {
+                diagnostics.push(type_diagnostics::generic_inference_failure(
+                    span,
+                    parameter.name(),
+                    "nominal interface bound is not satisfied",
+                ));
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn interface_instances(
+        &self,
+        definition: SymbolId,
+    ) -> impl Iterator<Item = &InterfaceDefinition> {
+        self.interface_instances
+            .iter()
+            .filter(move |((source, _), _)| *source == definition)
+            .filter_map(|(_, symbol)| self.interface_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub fn interface_is_generic(&self, definition: SymbolId) -> bool {
+        self.interface_type_parameters
+            .get(&definition)
+            .is_some_and(|parameters| !parameters.is_empty())
+    }
+
+    #[must_use]
+    pub(crate) fn interface_source_identity(&self, interface: InterfaceId) -> Option<SymbolId> {
+        self.interface_sources_by_id.get(&interface).copied()
+    }
+
     pub(crate) fn resolve_class_interfaces(
         &mut self,
         module: ModuleId,
         syntax: &ClassDeclarationSyntax,
+        generics: &BTreeMap<String, (ParameterId, TypeId)>,
         class_methods: &[ClassMethodDefinition],
         diagnostics: &mut Vec<Diagnostic>,
-    ) -> Vec<ClassInterfaceImplementation> {
+    ) -> (
+        Vec<ClassInterfaceImplementation>,
+        Vec<ClassBuiltinInterfaceImplementation>,
+    ) {
         let mut resolved_interfaces = Vec::new();
+        let mut resolved_builtin_interfaces = Vec::new();
         let mut seen = BTreeMap::new();
+        let mut seen_builtin = BTreeMap::new();
         for implemented in syntax.interfaces() {
-            let Some(resolved) =
-                self.resolve_type(module, implemented, &BTreeMap::new(), diagnostics)
+            let Some(resolved) = self.resolve_type(module, implemented, generics, diagnostics)
             else {
                 continue;
             };
+            if let ResolvedTypeKind::Builtin {
+                definition,
+                arguments,
+            } = resolved.kind()
+            {
+                let Some(interface_type) = resolved.type_id() else {
+                    continue;
+                };
+                let Some(implementation) = self.resolve_builtin_class_interface(
+                    syntax,
+                    implemented,
+                    *definition,
+                    arguments,
+                    interface_type,
+                    class_methods,
+                    &mut seen_builtin,
+                    diagnostics,
+                ) else {
+                    continue;
+                };
+                resolved_builtin_interfaces.push(implementation);
+                continue;
+            }
             let ResolvedTypeKind::Declaration { symbol, .. } = resolved.kind() else {
                 diagnostics.push(type_diagnostics::invalid_interface_implementation(
                     implemented.span(),
@@ -405,7 +670,119 @@ impl SignatureResolver<'_> {
             });
         }
         resolved_interfaces.sort_by_key(ClassInterfaceImplementation::interface);
-        resolved_interfaces
+        resolved_builtin_interfaces.sort_by_key(ClassBuiltinInterfaceImplementation::interface);
+        (resolved_interfaces, resolved_builtin_interfaces)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_builtin_class_interface(
+        &mut self,
+        syntax: &ClassDeclarationSyntax,
+        implemented: &TypeSyntax,
+        definition: BuiltinTypeId,
+        arguments: &[crate::ResolvedType],
+        interface_type: TypeId,
+        class_methods: &[ClassMethodDefinition],
+        seen: &mut BTreeMap<BuiltinTypeId, SourceSpan>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Option<ClassBuiltinInterfaceImplementation> {
+        let protocol = self.schema().iteration_protocol()?;
+        if arguments.len() != 1
+            || (definition != protocol.iterable() && definition != protocol.iterator())
+        {
+            diagnostics.push(type_diagnostics::invalid_interface_implementation(
+                implemented.span(),
+                source_type_name(implemented),
+            ));
+            return None;
+        }
+        if seen.insert(definition, implemented.span()).is_some() {
+            diagnostics.push(type_diagnostics::invalid_interface_implementation(
+                implemented.span(),
+                source_type_name(implemented),
+            ));
+            return None;
+        }
+        let item_type = arguments[0].type_id()?;
+        let iterator_type = self
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.iterator(),
+                arguments: vec![item_type],
+            })
+            .ok()?;
+        let iteration_type = self
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.iteration(),
+                arguments: vec![item_type],
+            })
+            .ok()?;
+        let mut requirements = vec![(protocol.iterator_method(), "iterator", iterator_type)];
+        if definition == protocol.iterator() {
+            requirements.push((protocol.next_method(), "next", iteration_type));
+        }
+        let interface_name = if definition == protocol.iterator() {
+            "Iterator"
+        } else {
+            "Iterable"
+        };
+        let mut mappings = Vec::new();
+        for (protocol_method, name, result_type) in requirements {
+            let candidates: Vec<_> = class_methods
+                .iter()
+                .filter(|method| method.name() == name)
+                .collect();
+            if let Some(method) = candidates.iter().copied().find(|method| {
+                method.dispatch() == ClassMethodDispatch::Receiver
+                    && method.visibility() == Visibility::Public
+                    && method.parameters().is_empty()
+                    && method.results() == [result_type]
+            }) {
+                mappings.push(BuiltinInterfaceMethodImplementation {
+                    protocol_method,
+                    class_method: method.method(),
+                });
+                continue;
+            }
+            if candidates.is_empty() {
+                diagnostics.push(type_diagnostics::missing_interface_method(
+                    syntax.span(),
+                    syntax.name(),
+                    interface_name,
+                    name,
+                ));
+            } else {
+                let reason = if candidates.iter().any(|method| {
+                    method.dispatch() == ClassMethodDispatch::Receiver
+                        && method.visibility() != Visibility::Public
+                        && method.parameters().is_empty()
+                        && method.results() == [result_type]
+                }) {
+                    "InaccessibleReceiverMethod"
+                } else if candidates
+                    .iter()
+                    .all(|method| method.dispatch() == ClassMethodDispatch::Static)
+                {
+                    "StaticMethod"
+                } else {
+                    "SignatureMismatch"
+                };
+                diagnostics.push(type_diagnostics::incompatible_interface_method(
+                    candidates[0].span(),
+                    syntax.name(),
+                    interface_name,
+                    name,
+                    reason,
+                ));
+            }
+        }
+        mappings.sort_by_key(BuiltinInterfaceMethodImplementation::protocol_method);
+        Some(ClassBuiltinInterfaceImplementation {
+            interface: definition,
+            interface_type,
+            methods: mappings,
+        })
     }
 
     #[must_use]

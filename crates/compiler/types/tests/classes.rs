@@ -307,3 +307,183 @@ fn method_bodies_type_check_with_implicit_self_only_for_receiver_methods() {
         }
     }
 }
+
+#[test]
+fn generic_class_instances_specialize_fields_static_construction_and_receiver_methods() {
+    let module = ModuleId::from_raw(0);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/box.pop",
+        "namespace Example\n\
+         private class Box<T>\n\
+             private value: T\n\
+             public function Box.new(value: T): Box<T>\n\
+                 return Box { value = value }\n\
+             end\n\
+             public function Box:get(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         public function read(value: Int): Int\n\
+             local box: Box<Int> = Box.new(value)\n\
+             return box:get()\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let class_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::ClassDeclaration)
+        .expect("class");
+    let function_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+        .expect("function");
+    let class_syntax = parse_class_declaration(&source, &syntax, class_node).expect("class syntax");
+    let function_syntax =
+        parse_function_signature(&source, &syntax, function_node).expect("signature");
+    let body =
+        parse_function_body(&source, &syntax, function_node, &function_syntax).expect("body");
+    let indexed = build_declaration_index(&[ModuleInput::new(
+        module,
+        BubbleId::from_raw(0),
+        &source,
+        &syntax,
+    )]);
+    let class_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.Box", SymbolSpace::Type)[0]
+        .symbol();
+    let function_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.read", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let template = resolver
+        .define_class(module, class_symbol, &class_syntax)
+        .definition()
+        .expect("generic class template")
+        .clone();
+    let signature = resolver
+        .resolve(module, function_symbol, &function_syntax)
+        .signature()
+        .expect("signature")
+        .clone();
+    let signatures = std::collections::BTreeMap::from([(function_symbol, signature.clone())]);
+    let result = BodyChecker::new(module, &mut resolver, &signatures).check(&signature, &body);
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let typed = result.body().expect("typed body");
+    let TypedStatementKind::Local { initializer, .. } = typed.statements()[0].kind() else {
+        panic!("local");
+    };
+    let TypedExpressionKind::DirectMethodCall { method, .. } = initializer.kind() else {
+        panic!("static construction");
+    };
+    let TypedStatementKind::Return { values } = typed.statements()[1].kind() else {
+        panic!("return");
+    };
+    let TypedExpressionKind::DirectMethodCall {
+        method: receiver_method,
+        receiver: Some(receiver),
+        ..
+    } = values[0].kind()
+    else {
+        panic!("receiver method");
+    };
+    let instance = resolver
+        .class_definition_for_type(receiver.type_id())
+        .expect("concrete class instance");
+    assert_ne!(instance.class(), template.class());
+    assert_ne!(*method, template.methods()[0].method());
+    assert_ne!(*receiver_method, template.methods()[1].method());
+    assert_eq!(*method, instance.methods()[0].method());
+    assert_eq!(*receiver_method, instance.methods()[1].method());
+    assert_eq!(instance.fields()[0].field_type(), values[0].type_id());
+}
+
+#[test]
+fn generic_class_arguments_require_exact_arity_and_satisfy_bounds() {
+    for (annotation, expected_code) in [
+        ("Box<Int, String>", "POP2001"),
+        ("IterableBox<Int, Int>", "POP2028"),
+    ] {
+        let module = ModuleId::from_raw(0);
+        let source = SourceFile::new(
+            FileId::from_raw(0),
+            "src/box.pop",
+            format!(
+                "namespace Example\n\
+                 private class Box<T>\n\
+                     private value: T\n\
+                 end\n\
+                 private class IterableBox<T, TSource: Iterable<T>>\n\
+                     private value: TSource\n\
+                 end\n\
+                 public function reject(value: {annotation}): Int\n\
+                     return 0\n\
+                 end\n"
+            ),
+        )
+        .expect("source");
+        let syntax = parse_file(&source);
+        let indexed = build_declaration_index(&[ModuleInput::new(
+            module,
+            BubbleId::from_raw(0),
+            &source,
+            &syntax,
+        )]);
+        let database = ResolutionDatabase::new(indexed.into_index());
+        let mut resolver =
+            SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+        for class_node in syntax
+            .root()
+            .children()
+            .iter()
+            .filter(|node| node.kind() == NodeKind::ClassDeclaration)
+        {
+            let class_syntax =
+                parse_class_declaration(&source, &syntax, class_node).expect("class syntax");
+            let symbol = database.index().declaration_by_qualified_name(
+                &format!("Example.{}", class_syntax.name()),
+                SymbolSpace::Type,
+            )[0]
+            .symbol();
+            let result = resolver.define_class(module, symbol, &class_syntax);
+            assert!(
+                result.diagnostics().is_empty(),
+                "{}",
+                result.diagnostic_snapshot()
+            );
+        }
+        let function_node = syntax
+            .root()
+            .children()
+            .iter()
+            .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+            .expect("function");
+        let function_syntax =
+            parse_function_signature(&source, &syntax, function_node).expect("signature");
+        let function_symbol = database
+            .index()
+            .declaration_by_qualified_name("Example.reject", SymbolSpace::Value)[0]
+            .symbol();
+        let result = resolver.resolve(module, function_symbol, &function_syntax);
+        assert!(result.signature().is_none());
+        assert!(
+            result.diagnostic_snapshot().contains(expected_code),
+            "{}",
+            result.diagnostic_snapshot()
+        );
+    }
+}

@@ -13,3 +13,4 @@ typeId	sourceName	ownerBubble	arity	role	prelude
 110	Hash	Pop.Standard	1	Interface	true
 111	Close	Pop.Standard	0	Interface	true
 112	AsyncClose	Pop.Standard	0	Interface	true
+113	Iteration	Pop.Standard	1	Nominal	true

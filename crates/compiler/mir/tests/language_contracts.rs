@@ -1,6 +1,8 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{MirEffect, lower_hir_bubble, parse_mir_dump, verify_mir_bubble};
+use pop_mir::{
+    MirEffect, MirVerificationError, lower_hir_bubble, parse_mir_dump, verify_mir_bubble,
+};
 use pop_source::SourceFile;
 
 fn lower(source: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
@@ -158,6 +160,53 @@ fn numeric_for_and_loop_control_lower_to_verified_portable_cfg() {
     assert!(!dump.contains("break"), "{dump}");
     assert!(!dump.contains("continue"), "{dump}");
     assert_verified_round_trip(&mir, &types);
+}
+
+#[test]
+fn generalized_for_lowers_to_static_iteration_calls_and_verified_cfg() {
+    // ADR 0053 retains the reserved protocol identities through HIR, then
+    // lowers them to statically identified calls and discriminant operations.
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function sum(values: {Int}): Int\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total = total + value\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+
+    let dump = mir.dump();
+    assert!(dump.contains("call.builtinInterface"), "{dump}");
+    assert!(dump.contains("interface#106 method#0"), "{dump}");
+    assert!(dump.contains("interface#107 method#1"), "{dump}");
+    assert!(
+        dump.contains("iteration.isItem definition#113 case#0"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("iteration.getItem definition#113 case#0"),
+        "{dump}"
+    );
+    assert!(dump.contains("gcSafePoint"), "{dump}");
+    assert!(!dump.contains("generalizedFor"), "{dump}");
+    assert!(!dump.to_ascii_lowercase().contains("dynamic"), "{dump}");
+    assert_verified_round_trip(&mir, &types);
+
+    for malformed in [
+        dump.replacen("interface#107 method#1", "interface#107 method#9", 1),
+        dump.replacen("definition#113 case#0", "definition#113 case#9", 1),
+    ] {
+        let malformed = parse_mir_dump(&malformed).expect("structurally valid iteration MIR");
+        assert!(matches!(
+            verify_mir_bubble(&malformed, &types),
+            Err(errors) if errors.iter().any(|error| matches!(
+                error,
+                MirVerificationError::InvalidIterationOperation { .. }
+            ))
+        ));
+    }
 }
 
 #[test]

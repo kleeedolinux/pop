@@ -2,19 +2,22 @@ use std::collections::BTreeMap;
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
-    BubbleId, ClassId, Diagnostic, FieldId, MethodId, ModuleId, SourceSpan, SymbolId, TypeId,
+    BubbleId, ClassId, Diagnostic, FieldId, MethodId, ModuleId, ParameterId, SourceSpan, SymbolId,
+    TypeId,
 };
 use pop_resolve::Visibility;
 use pop_syntax::{ClassDeclarationSyntax, ClassMethodDispatchSyntax, VisibilitySyntax};
+use serde::{Deserialize, Serialize};
 
 use crate::field_defaults::resolve_field_default;
 use crate::required_constants::field_default_matches_type;
 use crate::{
-    ClassInterfaceImplementation, FieldDefault, PendingConstantExpression, RequiredConstantError,
-    RequiredConstantTarget, ResolvedFunctionSignature, SemanticType, SignatureResolver,
+    ClassBuiltinInterfaceImplementation, ClassInterfaceImplementation, FieldDefault,
+    PendingConstantExpression, RequiredConstantError, RequiredConstantTarget,
+    ResolvedFunctionSignature, SemanticType, SignatureResolver,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ClassMethodDispatch {
     Static,
     Receiver,
@@ -27,8 +30,10 @@ pub struct ClassDefinition {
     bubble: BubbleId,
     class: ClassId,
     type_id: TypeId,
+    type_parameters: Vec<crate::ResolvedTypeParameter>,
     is_open: bool,
     interfaces: Vec<ClassInterfaceImplementation>,
+    builtin_interfaces: Vec<ClassBuiltinInterfaceImplementation>,
     fields: Vec<ClassFieldDefinition>,
     methods: Vec<ClassMethodDefinition>,
     span: SourceSpan,
@@ -61,6 +66,11 @@ impl ClassDefinition {
     }
 
     #[must_use]
+    pub fn type_parameters(&self) -> &[crate::ResolvedTypeParameter] {
+        &self.type_parameters
+    }
+
+    #[must_use]
     pub const fn is_open(&self) -> bool {
         self.is_open
     }
@@ -68,6 +78,11 @@ impl ClassDefinition {
     #[must_use]
     pub fn interfaces(&self) -> &[ClassInterfaceImplementation] {
         &self.interfaces
+    }
+
+    #[must_use]
+    pub fn builtin_interfaces(&self) -> &[ClassBuiltinInterfaceImplementation] {
+        &self.builtin_interfaces
     }
 
     #[must_use]
@@ -233,6 +248,347 @@ impl SignatureResolver<'_> {
             .and_then(|symbol| self.class_definitions.get(symbol))
     }
 
+    pub fn class_definitions(&self) -> impl Iterator<Item = &ClassDefinition> {
+        self.class_definitions.values()
+    }
+
+    pub fn class_instances(&self, definition: SymbolId) -> impl Iterator<Item = &ClassDefinition> {
+        self.class_instances
+            .iter()
+            .filter(move |((source, _), _)| *source == definition)
+            .filter_map(|(_, symbol)| self.class_definitions.get(symbol))
+    }
+
+    #[must_use]
+    pub fn class_is_generic(&self, definition: SymbolId) -> bool {
+        self.class_type_parameters
+            .get(&definition)
+            .is_some_and(|parameters| !parameters.is_empty())
+    }
+
+    #[must_use]
+    pub fn class_instance_source(&self, instance: SymbolId) -> Option<SymbolId> {
+        self.class_instance_sources.get(&instance).copied()
+    }
+
+    #[must_use]
+    pub(crate) fn class_source_identity(&self, class: ClassId) -> Option<SymbolId> {
+        let symbol = self
+            .class_definitions
+            .values()
+            .find(|definition| definition.class() == class)?
+            .symbol();
+        Some(
+            self.class_instance_sources
+                .get(&symbol)
+                .copied()
+                .unwrap_or(symbol),
+        )
+    }
+
+    pub(crate) fn validate_class_arguments(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+        span: SourceSpan,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let Some(parameters) = self.class_type_parameters.get(&definition).cloned() else {
+            return arguments.is_empty();
+        };
+        if parameters.len() != arguments.len() {
+            return false;
+        }
+        let substitutions: BTreeMap<_, _> = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            let Some(bound) = parameter.bound() else {
+                continue;
+            };
+            let Some(bound) = self.substitute_type_parameters(bound, &substitutions) else {
+                diagnostics.push(type_diagnostics::generic_inference_failure(
+                    span,
+                    parameter.name(),
+                    "nominal interface bound cannot be specialized",
+                ));
+                return false;
+            };
+            if !self.type_satisfies_nominal_bound(*argument, bound) {
+                diagnostics.push(type_diagnostics::generic_inference_failure(
+                    span,
+                    parameter.name(),
+                    "nominal interface bound is not satisfied",
+                ));
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn type_satisfies_nominal_bound(&self, actual: TypeId, bound: TypeId) -> bool {
+        if actual == bound {
+            return true;
+        }
+        match (self.arena().get(actual), self.arena().get(bound)) {
+            (Some(SemanticType::Class { .. }), Some(SemanticType::Interface { .. })) => self
+                .class_definition_for_type(actual)
+                .is_some_and(|definition| {
+                    definition
+                        .interfaces()
+                        .iter()
+                        .any(|implementation| implementation.interface_type() == bound)
+                }),
+            (
+                Some(SemanticType::Class { .. }),
+                Some(SemanticType::Builtin {
+                    definition,
+                    arguments,
+                }),
+            ) => self.class_definition_for_type(actual).is_some_and(|class| {
+                class.builtin_interfaces().iter().any(|implementation| {
+                    implementation.interface_type() == bound
+                        || self.schema().iteration_protocol().is_some_and(|protocol| {
+                            *definition == protocol.iterable()
+                                && implementation.interface() == protocol.iterator()
+                                && matches!(
+                                    self.arena().get(implementation.interface_type()),
+                                    Some(SemanticType::Builtin {
+                                        arguments: implemented_arguments,
+                                        ..
+                                    }) if implemented_arguments == arguments
+                                )
+                        })
+                })
+            }),
+            (
+                Some(SemanticType::Array(element)),
+                Some(SemanticType::Builtin {
+                    definition,
+                    arguments,
+                }),
+            ) => self.schema().iteration_protocol().is_some_and(|protocol| {
+                *definition == protocol.iterable() && arguments.as_slice() == [*element]
+            }),
+            (
+                Some(SemanticType::Builtin {
+                    definition: actual_definition,
+                    arguments: actual_arguments,
+                }),
+                Some(SemanticType::Builtin {
+                    definition: bound_definition,
+                    arguments: bound_arguments,
+                }),
+            ) => self.schema().iteration_protocol().is_some_and(|protocol| {
+                actual_arguments == bound_arguments
+                    && ((*bound_definition == protocol.iterable()
+                        && matches!(
+                            *actual_definition,
+                            definition
+                                if definition == protocol.list()
+                                    || definition == protocol.iterable()
+                                    || definition == protocol.iterator()
+                        ))
+                        || (*bound_definition == protocol.iterator()
+                            && *actual_definition == protocol.iterator()))
+            }),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_class_to_builtin_interface_upcast(&self, source: TypeId, target: TypeId) -> bool {
+        matches!(
+            (self.arena().get(source), self.arena().get(target)),
+            (
+                Some(SemanticType::Class { .. }),
+                Some(SemanticType::Builtin { .. })
+            )
+        ) && self.type_satisfies_nominal_bound(source, target)
+    }
+
+    pub(crate) fn instantiate_class(
+        &mut self,
+        definition: SymbolId,
+        arguments: &[TypeId],
+    ) -> Option<ClassDefinition> {
+        let key = (definition, arguments.to_vec());
+        if let Some(symbol) = self.class_instances.get(&key) {
+            return self.class_definitions.get(symbol).cloned();
+        }
+        let parameters = self.class_type_parameters.get(&definition)?.clone();
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        if parameters
+            .iter()
+            .map(crate::ResolvedTypeParameter::type_id)
+            .eq(arguments.iter().copied())
+        {
+            return self.class_definitions.get(&definition).cloned();
+        }
+        let substitutions: BTreeMap<_, _> = parameters
+            .iter()
+            .zip(arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        let template = self.class_definitions.get(&definition)?.clone();
+        let symbol = SymbolId::from_raw(self.next_instance_symbol);
+        self.next_instance_symbol = self.next_instance_symbol.saturating_add(1);
+        let class = ClassId::from_raw(self.next_class);
+        self.next_class = self.next_class.saturating_add(1);
+        let type_id = self
+            .arena
+            .intern(SemanticType::Class {
+                class,
+                arguments: arguments.to_vec(),
+            })
+            .ok()?;
+        self.arena
+            .register_class_specialization(template.class, arguments.to_vec(), type_id)
+            .ok()?;
+
+        let active_key = (template.class, arguments.to_vec());
+        self.active_class_specializations
+            .insert(active_key.clone(), type_id);
+        let specialized = (|| {
+            let mut fields = template.fields.clone();
+            for field in &mut fields {
+                field.field_type =
+                    self.substitute_type_parameters(field.field_type, &substitutions)?;
+                if let Some(pending) = field.pending_default.take() {
+                    field.pending_default = Some(PendingConstantExpression::new(
+                        pending.expression().clone(),
+                        field.field_type,
+                    ));
+                }
+                field.field = FieldId::from_raw(self.next_field);
+                self.next_field = self.next_field.saturating_add(1);
+            }
+
+            let mut method_ids = BTreeMap::new();
+            let mut methods = template.methods.clone();
+            for method in &mut methods {
+                let specialized = MethodId::from_raw(self.next_method);
+                self.next_method = self.next_method.saturating_add(1);
+                method_ids.insert(method.method, specialized);
+                method.method = specialized;
+                for (_, parameter_type, _) in &mut method.parameters {
+                    *parameter_type =
+                        self.substitute_type_parameters(*parameter_type, &substitutions)?;
+                }
+                for result in &mut method.results {
+                    *result = self.substitute_type_parameters(*result, &substitutions)?;
+                }
+            }
+            let interfaces = template
+                .interfaces
+                .iter()
+                .map(|implementation| {
+                    let interface_type = self.substitute_type_parameters(
+                        implementation.interface_type(),
+                        &substitutions,
+                    )?;
+                    let interface = self.interface_definition_for_type(interface_type)?.clone();
+                    implementation.specialize(&interface, &method_ids)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let builtin_interfaces = template
+                .builtin_interfaces
+                .iter()
+                .map(|implementation| {
+                    let interface_type = self.substitute_type_parameters(
+                        implementation.interface_type(),
+                        &substitutions,
+                    )?;
+                    implementation.specialize(interface_type, &method_ids)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((fields, methods, interfaces, builtin_interfaces))
+        })();
+        self.active_class_specializations.remove(&active_key);
+        let (fields, methods, interfaces, builtin_interfaces) = specialized?;
+        let instance = ClassDefinition {
+            symbol,
+            module: template.module,
+            bubble: template.bubble,
+            class,
+            type_id,
+            type_parameters: Vec::new(),
+            is_open: template.is_open,
+            interfaces,
+            builtin_interfaces,
+            fields,
+            methods,
+            span: template.span,
+        };
+        self.class_instances.insert(key, symbol);
+        self.class_instance_sources.insert(symbol, definition);
+        self.class_types.insert(symbol, type_id);
+        self.classes_by_type.insert(type_id, symbol);
+        self.class_definitions.insert(symbol, instance.clone());
+        if arguments
+            .iter()
+            .any(|argument| self.arena.contains_type_parameter(*argument))
+        {
+            for substitutions in self.generic_call_substitutions.clone() {
+                let Some(concrete_arguments) = arguments
+                    .iter()
+                    .map(|argument| self.substitute_type_parameters(*argument, &substitutions))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                if concrete_arguments != arguments
+                    && concrete_arguments
+                        .iter()
+                        .all(|argument| !self.arena.contains_type_parameter(*argument))
+                {
+                    self.instantiate_class(definition, &concrete_arguments)?;
+                }
+            }
+        }
+        Some(instance)
+    }
+
+    pub(crate) fn materialize_class_instances_for_substitutions(
+        &mut self,
+        substitutions: &BTreeMap<pop_foundation::ParameterId, TypeId>,
+    ) -> Option<()> {
+        if !self.generic_call_substitutions.contains(substitutions) {
+            self.generic_call_substitutions.push(substitutions.clone());
+        }
+        let symbolic_instances = self
+            .class_instances
+            .keys()
+            .filter(|(_, arguments)| {
+                arguments
+                    .iter()
+                    .any(|argument| self.arena.contains_type_parameter(*argument))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for (source, arguments) in symbolic_instances {
+            let Some(concrete_arguments) = arguments
+                .iter()
+                .map(|argument| self.substitute_type_parameters(*argument, substitutions))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if concrete_arguments != arguments
+                && concrete_arguments
+                    .iter()
+                    .all(|argument| !self.arena.contains_type_parameter(*argument))
+            {
+                self.instantiate_class(source, &concrete_arguments)?;
+            }
+        }
+        Some(())
+    }
+
     #[must_use]
     pub fn method_signature(
         &self,
@@ -249,9 +605,10 @@ impl SignatureResolver<'_> {
         } else {
             '.'
         };
-        ResolvedFunctionSignature::canonical(
+        ResolvedFunctionSignature::canonical_generic(
             definition.symbol(),
             format!("{}{separator}{}", definition.class().raw(), method.name()),
+            definition.type_parameters().to_vec(),
             parameters,
             method
                 .results()
@@ -294,20 +651,29 @@ impl SignatureResolver<'_> {
         syntax: &ClassDeclarationSyntax,
         defer_defaults: bool,
     ) -> ClassDefinitionResult {
+        let mut diagnostics = Vec::new();
+        let (type_parameters, generics) =
+            self.resolve_generic_parameters(module, syntax.type_parameters(), &mut diagnostics);
         let class = ClassId::from_raw(self.next_class);
         self.next_class = self.next_class.saturating_add(1);
         let type_id = self
             .arena
             .intern(SemanticType::Class {
                 class,
-                arguments: Vec::new(),
+                arguments: type_parameters
+                    .iter()
+                    .map(crate::ResolvedTypeParameter::type_id)
+                    .collect(),
             })
-            .expect("class identity has no type dependencies");
+            .expect("class template arguments are canonical type parameters");
         self.class_types.insert(symbol, type_id);
-        let mut diagnostics = Vec::new();
-        let fields = self.resolve_class_fields(module, syntax, defer_defaults, &mut diagnostics);
-        let methods = self.resolve_class_methods(module, syntax, &mut diagnostics);
-        let interfaces = self.resolve_class_interfaces(module, syntax, &methods, &mut diagnostics);
+        self.class_type_parameters
+            .insert(symbol, type_parameters.clone());
+        let fields =
+            self.resolve_class_fields(module, syntax, &generics, defer_defaults, &mut diagnostics);
+        let methods = self.resolve_class_methods(module, syntax, &generics, &mut diagnostics);
+        let (interfaces, builtin_interfaces) =
+            self.resolve_class_interfaces(module, syntax, &generics, &methods, &mut diagnostics);
         diagnostics.sort_by_key(|diagnostic| {
             let span = diagnostic.primary_span();
             (
@@ -328,8 +694,10 @@ impl SignatureResolver<'_> {
                 }),
             class,
             type_id,
+            type_parameters,
             is_open: syntax.is_open(),
             interfaces,
+            builtin_interfaces,
             fields,
             methods,
             span: syntax.span(),
@@ -339,6 +707,7 @@ impl SignatureResolver<'_> {
             self.class_definitions.insert(symbol, definition.clone());
         } else {
             self.class_types.remove(&symbol);
+            self.class_type_parameters.remove(&symbol);
         }
         ClassDefinitionResult {
             definition,
@@ -350,6 +719,7 @@ impl SignatureResolver<'_> {
         &mut self,
         module: ModuleId,
         syntax: &ClassDeclarationSyntax,
+        generics: &BTreeMap<String, (ParameterId, TypeId)>,
         defer_defaults: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Vec<ClassFieldDefinition> {
@@ -365,7 +735,7 @@ impl SignatureResolver<'_> {
                 continue;
             }
             let Some(resolved) =
-                self.resolve_type(module, field.field_type(), &BTreeMap::new(), diagnostics)
+                self.resolve_type(module, field.field_type(), generics, diagnostics)
             else {
                 continue;
             };
@@ -442,6 +812,7 @@ impl SignatureResolver<'_> {
         &mut self,
         module: ModuleId,
         syntax: &ClassDeclarationSyntax,
+        generics: &BTreeMap<String, (ParameterId, TypeId)>,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Vec<ClassMethodDefinition> {
         let mut methods = Vec::new();
@@ -471,7 +842,7 @@ impl SignatureResolver<'_> {
                     let resolved = self.resolve_type(
                         module,
                         parameter.parameter_type(),
-                        &BTreeMap::new(),
+                        generics,
                         diagnostics,
                     )?;
                     Some((
@@ -485,7 +856,7 @@ impl SignatureResolver<'_> {
                 .results()
                 .iter()
                 .filter_map(|result| {
-                    self.resolve_type(module, result, &BTreeMap::new(), diagnostics)?
+                    self.resolve_type(module, result, generics, diagnostics)?
                         .type_id()
                 })
                 .collect();

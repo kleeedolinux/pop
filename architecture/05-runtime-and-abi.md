@@ -103,6 +103,24 @@ table lookup adapters return a presence status separately from an out payload,
 so a present scalar zero or `false` cannot collide with absence. LLVM's private
 typed optional pair is not a MIR or PLRI value representation.
 
+ADR 0053 advances the bootstrap native ABI to version 1.8 with statically
+selected iteration-session acquisition and step operations. The acquisition
+operation receives a compiler-proven closed collection-kind tag. The step
+operation returns a closed item/end status plus one typed raw payload; tuple
+items remain ordinary typed tuple objects. Iterator state roots its source,
+checks the source length or key-set size before every step, and never performs
+member lookup from a string.
+
+The growable-list portion of ADR 0053 advances the bootstrap native ABI to
+version 1.9. `ListCreate` receives a nonnegative reserved capacity and the
+compiler-proven homogeneous element-reference map, returning a stable managed
+handle or the closed allocation-failure sentinel. `ListLength`, optional and
+checked `ListGet`, checked `ListSet`, and `ListAdd` use status-plus-out-payload
+adapters where a scalar zero is a valid element. The native facade keeps length
+and capacity private, grows storage without changing the list handle, and
+applies precise barriers for managed elements. MIR retains distinct typed list
+operations; no backend may reinterpret them as array or table operations.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry

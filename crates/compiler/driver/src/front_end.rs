@@ -14,9 +14,10 @@ use pop_foundation::{
     BubbleId, Diagnostic, DiagnosticSeverity, MethodId, ModuleId, SourceSpan, SymbolId,
 };
 use pop_hir::{
-    HirBubble, HirDeclaration, HirDeclarationKind, HirFunction, HirFunctionContext,
-    HirKnownCallables, HirMethod, build_hir_function_with_known_callables_and_attributes,
-    build_hir_method,
+    HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirFunction,
+    HirFunctionContext, HirKnownCallables, HirMethod,
+    build_hir_function_with_known_callables_and_attributes, build_hir_method,
+    specialize_hir_method,
 };
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
 use pop_syntax::{
@@ -27,8 +28,8 @@ use pop_syntax::{
     parse_type_alias_declaration, parse_union_declaration,
 };
 use pop_types::{
-    AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SignatureResolver,
-    embedded_bootstrap_schema,
+    AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SemanticType,
+    SignatureResolver, embedded_bootstrap_schema,
 };
 
 use crate::api::*;
@@ -37,7 +38,10 @@ use crate::compile_time::{
     build_compile_time_context, check_compile_time_function_bodies,
     compile_time_attribute_constant, evaluate_declaration_defaults, evaluate_source_constants,
 };
-use crate::reference::{emit_reference_metadata, hir_function_references, reference_signatures};
+use crate::reference::{
+    emit_reference_metadata, hir_function_references, invalid_reference_capsule,
+    reference_signatures,
+};
 use crate::work::*;
 
 /// Runs the architecture-ordered front end through verified backend-neutral HIR.
@@ -50,6 +54,7 @@ use crate::work::*;
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
+    let invalid_capsule = invalid_reference_capsule(&input.reference_metadata);
     let parsed = parse_modules(input.modules);
     let module_inputs: Vec<_> = parsed
         .iter()
@@ -114,14 +119,20 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
-    let mut signatures =
-        reference_signatures(&input.reference_metadata, &database, resolver.arena());
+    let mut signatures = reference_signatures(&input.reference_metadata, &database, &mut resolver);
     signatures.extend(
         functions
             .iter()
             .map(|function| (function.signature.symbol(), function.signature.clone())),
     );
-    validate_documentation(&parsed, &functions, &database, &resolver, &mut diagnostics);
+    let checked_documentation = validate_documentation(
+        input.bubble,
+        &parsed,
+        &functions,
+        &database,
+        &resolver,
+        &mut diagnostics,
+    );
     let preliminary_bodies = check_compile_time_function_bodies(
         &functions,
         &signatures,
@@ -186,8 +197,16 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut diagnostics,
     );
     declarations = refresh_declarations(declarations, &resolver);
+    let referenced_call_instances = hir_functions
+        .iter()
+        .flat_map(pop_hir::hir_referenced_call_instances)
+        .collect::<Vec<_>>();
     sort_diagnostics(&mut diagnostics);
-    let hir_result = if diagnostics
+    let hir_result = if let Some(identity) = invalid_capsule {
+        Err(pop_hir::HirBubbleError::InvalidSpecializationCapsule(
+            identity,
+        ))
+    } else if diagnostics
         .iter()
         .all(|diagnostic| diagnostic.severity() != DiagnosticSeverity::Error)
         && hir_build_errors.is_empty()
@@ -203,7 +222,11 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         .and_then(|bubble| {
             bubble.with_function_references(hir_function_references(
                 &input.reference_metadata,
-                resolver.arena(),
+                &database,
+                &signatures,
+                input.bubble,
+                &mut resolver,
+                &referenced_call_instances,
             ))
         })
         .map(Some)
@@ -229,16 +252,18 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         constants,
         diagnostics,
         reference_metadata,
+        checked_documentation,
     }
 }
 
 fn validate_documentation(
+    bubble: BubbleId,
     modules: &[ParsedModule],
     functions: &[FunctionWork],
     database: &ResolutionDatabase,
     resolver: &SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+) -> Vec<CheckedDocumentation> {
     let mut analyses: BTreeMap<_, _> = modules
         .iter()
         .map(|module| {
@@ -365,6 +390,26 @@ fn validate_documentation(
         analysis.validate_typed_returns(&returns);
         diagnostics.extend(analysis.diagnostics().iter().cloned());
     }
+
+    let mut checked = functions
+        .iter()
+        .filter(|function| function.visibility == pop_resolve::Visibility::Public)
+        .filter_map(|function| {
+            analyses
+                .get(&function.module)?
+                .xml_for_target(function.documentation_target)
+                .cloned()
+                .map(|fragment| CheckedDocumentation {
+                    identity: pop_foundation::SymbolIdentity::new(
+                        bubble,
+                        function.signature.symbol(),
+                    ),
+                    fragment,
+                })
+        })
+        .collect::<Vec<_>>();
+    checked.sort_by_key(CheckedDocumentation::identity);
+    checked
 }
 
 fn effective_error_documentation(
@@ -610,12 +655,10 @@ fn build_runtime_hir(
         .filter(|function| !function.is_compile_time)
         .map(|function| function.signature.symbol())
         .collect();
-    let known_methods: BTreeSet<MethodId> =
-        methods.iter().map(|work| work.method.method()).collect();
     let interfaces: Vec<_> = resolver.interface_definitions().cloned().collect();
-    let mut hir_functions = Vec::new();
     let mut hir_build_errors = Vec::new();
-    for function in functions {
+    let mut typed_functions = Vec::new();
+    for (index, function) in functions.iter().enumerate() {
         if function.is_compile_time {
             continue;
         }
@@ -626,10 +669,20 @@ fn build_runtime_hir(
         let Some(body) = typed.body() else {
             continue;
         };
+        typed_functions.push((index, body.clone()));
+    }
+    let known_methods: BTreeSet<MethodId> = resolver
+        .class_definitions()
+        .flat_map(|definition| definition.methods().iter())
+        .map(pop_types::ClassMethodDefinition::method)
+        .collect();
+    let mut hir_functions = Vec::new();
+    for (index, body) in typed_functions {
+        let function = &functions[index];
         match build_hir_function_with_known_callables_and_attributes(
             HirFunctionContext::new(function.module, bubble, function.visibility),
             &function.signature,
-            body,
+            &body,
             resolver.arena(),
             HirKnownCallables::new(&known_functions, &known_methods).with_interfaces(&interfaces),
             &function.attributes,
@@ -663,6 +716,91 @@ fn build_runtime_hir(
             Err(errors) => hir_build_errors.extend(errors),
         }
     }
+    let template_methods = hir_methods.clone();
+    for method in methods {
+        if method.definition.type_parameters().is_empty() {
+            continue;
+        }
+        let Some(template) = template_methods
+            .iter()
+            .find(|candidate| candidate.method() == method.method.method())
+        else {
+            continue;
+        };
+        let instances = resolver
+            .class_instances(method.definition.symbol())
+            .filter(|definition| {
+                !resolver
+                    .arena()
+                    .contains_type_parameter(definition.type_id())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for instance in instances {
+            let Some(SemanticType::Class { arguments, .. }) =
+                resolver.arena().get(instance.type_id())
+            else {
+                continue;
+            };
+            let Some(concrete_method) = instance.methods().iter().find(|candidate| {
+                candidate.name() == method.method.name()
+                    && candidate.dispatch() == method.method.dispatch()
+            }) else {
+                continue;
+            };
+            let fields = method
+                .definition
+                .fields()
+                .iter()
+                .filter_map(|template_field| {
+                    instance
+                        .fields()
+                        .iter()
+                        .find(|field| field.name() == template_field.name())
+                        .map(|field| ((instance.type_id(), template_field.field()), field.field()))
+                })
+                .collect();
+            let methods = method
+                .definition
+                .methods()
+                .iter()
+                .filter_map(|template_method| {
+                    instance
+                        .methods()
+                        .iter()
+                        .find(|candidate| {
+                            candidate.name() == template_method.name()
+                                && candidate.dispatch() == template_method.dispatch()
+                        })
+                        .map(|candidate| {
+                            (
+                                (instance.type_id(), template_method.method()),
+                                candidate.method(),
+                            )
+                        })
+                })
+                .collect();
+            let data = HirDataSpecialization::new(BTreeMap::new(), fields).with_classes(
+                BTreeMap::from([(instance.type_id(), (instance.symbol(), instance.class()))]),
+                methods,
+            );
+            match specialize_hir_method(
+                template,
+                &instance,
+                concrete_method,
+                arguments,
+                &data,
+                resolver.arena(),
+            ) {
+                Some(specialized) => hir_methods.push(specialized),
+                None => hir_build_errors.push(pop_hir::HirVerificationError::InvalidType {
+                    type_id: instance.type_id(),
+                    span: instance.span(),
+                }),
+            }
+        }
+    }
+    hir_methods.sort_by_key(HirMethod::method);
     (hir_functions, hir_methods, hir_build_errors)
 }
 
@@ -1422,8 +1560,72 @@ fn refresh_declarations(
                 }
             }
             if matches!(declaration.kind(), HirDeclarationKind::Class(_)) {
+                if resolver.class_is_generic(declaration.symbol()) {
+                    let mut refreshed = resolver
+                        .class_instances(declaration.symbol())
+                        .filter(|definition| {
+                            !resolver
+                                .arena()
+                                .contains_type_parameter(definition.type_id())
+                        })
+                        .map(|definition| {
+                            HirDeclaration::class(
+                                declaration.module(),
+                                declaration.bubble(),
+                                declaration.visibility(),
+                                declaration.name(),
+                                definition,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(template) = resolver.class_definition(declaration.symbol()) {
+                        refreshed.push(HirDeclaration::class(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            template,
+                        ));
+                    }
+                    return refreshed;
+                }
                 if let Some(definition) = resolver.class_definition(declaration.symbol()) {
                     return vec![HirDeclaration::class(
+                        declaration.module(),
+                        declaration.bubble(),
+                        declaration.visibility(),
+                        declaration.name(),
+                        definition,
+                    )];
+                }
+            }
+            if matches!(declaration.kind(), HirDeclarationKind::Interface(_)) {
+                if resolver.interface_is_generic(declaration.symbol()) {
+                    let mut refreshed = resolver
+                        .interface_instances(declaration.symbol())
+                        .map(|definition| {
+                            HirDeclaration::interface(
+                                declaration.module(),
+                                declaration.bubble(),
+                                declaration.visibility(),
+                                declaration.name(),
+                                definition,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(template) = resolver.interface_definition(declaration.symbol()) {
+                        refreshed.push(HirDeclaration::interface(
+                            declaration.module(),
+                            declaration.bubble(),
+                            declaration.visibility(),
+                            declaration.name(),
+                            template,
+                        ));
+                    }
+                    return refreshed;
+                }
+                if let Some(definition) = resolver.interface_definition(declaration.symbol()) {
+                    return vec![HirDeclaration::interface(
                         declaration.module(),
                         declaration.bubble(),
                         declaration.visibility(),

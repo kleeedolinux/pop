@@ -2,9 +2,11 @@ use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::IntegerKind;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum NumericConversionKind {
     IntegerToInteger {
         source: IntegerKind,
@@ -61,7 +63,7 @@ impl Error for NumericError {}
 /// One canonical fixed-width integer value.
 ///
 /// `bits` stores the exact two's-complement/unsigned bit pattern for `kind`.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct IntegerValue {
     kind: IntegerKind,
     bits: u64,
@@ -368,13 +370,13 @@ const fn bit_mask(width: u16) -> u64 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum FloatKind {
     Float32,
     Float64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum FloatValue {
     Float32(u32),
     Float64(u64),

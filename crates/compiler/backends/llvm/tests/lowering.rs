@@ -686,6 +686,93 @@ end\n",
 }
 
 #[test]
+fn emitted_llvm_executes_static_generalized_iteration() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local values: {Int} = { 10, 20, 12 }\n\
+    local total = 0\n\
+    for value in values do\n\
+        total = total + value\n\
+    end\n\
+    return total\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "generalized-iteration");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted generalized iteration: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_growable_list_core_and_iteration() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local values = List.withCapacity<<Int>>(1)\n\
+    List.add(values, 0)\n\
+    List.add(values, 40)\n\
+    values[1] = 2\n\
+    local total = 0\n\
+    for value in values do\n\
+        total += value\n\
+    end\n\
+    return total + List.length(values) - List.get(values, 2)\n\
+end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("call i64 @pop_rt_list_create"), "{text}");
+    assert!(text.contains("call i8 @pop_rt_list_add"), "{text}");
+    assert!(text.contains("call i8 @pop_rt_list_set"), "{text}");
+    let result = link_with_runtime_and_run(&module, "growable-list");
+    assert_eq!(
+        result.status.code(),
+        Some(4),
+        "native executable misexecuted growable List: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_lazy_ordinary_pop_sequence_adapters() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local values: {Int} = {1, 2, 3}\n\
+                 local mapped = map(values, function(value: Int): Int\n\
+                     return value * 2\n\
+                 end)\n\
+                 local filtered = filter(mapped, function(value: Int): Boolean\n\
+                     return value > 2\n\
+                 end)\n\
+                 local collected = collect(filtered)\n\
+                 return List.get(collected, 1) + List.get(collected, 2)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "ordinary-pop-sequence");
+    assert_eq!(
+        result.status.code(),
+        Some(10),
+        "native executable misexecuted Sequence adapters: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn loop_safe_points_lower_to_an_llvm_promotable_function_local_poll() {
     let module = native_module(
         "namespace Main\n\
@@ -1338,22 +1425,195 @@ end\n",
     );
 }
 
+#[test]
+fn emitted_llvm_executes_generic_nominal_iterator_witnesses() {
+    let module = native_module(
+        "namespace Main\n\
+         private class ArrayIterator<T> implements Iterator<T>\n\
+             private values: {T}\n\
+             private index: Int\n\
+             public function ArrayIterator.new(values: {T}): ArrayIterator<T>\n\
+                 return ArrayIterator { values = values, index = 1 }\n\
+             end\n\
+             public function ArrayIterator:iterator(): Iterator<T>\n\
+                 return self\n\
+             end\n\
+             public function ArrayIterator:next(): Iteration<T>\n\
+                 if self.index > Array.length(self.values) then\n\
+                     return Iteration.End\n\
+                 end\n\
+                 local value = Array.get(self.values, self.index)\n\
+                 self.index += 1\n\
+                 return Iteration.Item(value)\n\
+             end\n\
+         end\n\
+         private function main(): Int\n\
+             local values: {Int} = {1, 2, 3}\n\
+             local iterator: ArrayIterator<Int> = ArrayIterator.new(values)\n\
+             local total = 0\n\
+             for value in iterator do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "generic_nominal_iterator");
+    assert_eq!(
+        result.status.code(),
+        Some(6),
+        "native iterator execution failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_generic_user_interface_bound_dispatch() {
+    let module = native_module(
+        "namespace Main\n\
+         private interface Reader<T>\n\
+             function read(): T\n\
+         end\n\
+         private class Box<T> implements Reader<T>\n\
+             private value: T\n\
+             public function Box.new(value: T): Box<T>\n\
+                 return Box { value = value }\n\
+             end\n\
+             public function Box:read(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         private function readBound<T, TReader: Reader<T>>(reader: TReader): T\n\
+             return reader:read()\n\
+         end\n\
+         private function main(): Int\n\
+             local box: Box<Int> = Box.new(42)\n\
+             return readBound(box)\n\
+         end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "generic_user_interface");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native generic interface execution failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_portable_cross_bubble_generic_capsules() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library_source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Pop.Sequence\n\
+         private function privateIdentity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         public function portableIdentity<T>(value: T): T\n\
+             return privateIdentity(value)\n\
+         end\n",
+    )
+    .expect("library source");
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), library_source)],
+    ));
+    assert!(library.diagnostics().is_empty());
+    let metadata = library
+        .reference_metadata()
+        .expect("portable metadata")
+        .clone();
+    let application_source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\n\
+         using Pop.Sequence\n\
+         private function main(): Int\n\
+             return portableIdentity(42)\n\
+         end\n",
+    )
+    .expect("application source");
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![FrontEndModule::new(
+                ModuleId::from_raw(1),
+                application_source,
+            )],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let hir = application.hir().expect("consumer HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, application.types()).expect("specialized MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        application.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("LLVM lowering");
+    let result = link_with_runtime_and_run(&module, "portable_generic_capsule");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native portable generic execution failed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
 fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
-    let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+    native_modules(&[("src/main.pop", source_text)])
+}
+
+fn native_modules(sources: &[(&str, &str)]) -> pop_backend_llvm::LlvmModule {
+    let modules = sources
+        .iter()
+        .enumerate()
+        .map(|(index, (path, text))| {
+            let raw = u32::try_from(index).expect("test Module count");
+            FrontEndModule::new(
+                ModuleId::from_raw(raw),
+                SourceFile::new(FileId::from_raw(raw), *path, *text).expect("source"),
+            )
+        })
+        .collect();
     let front_end = analyze_bubble(FrontEndBubbleInput::new(
         BubbleId::from_raw(0),
         NamespaceId::from_raw(0),
         Vec::new(),
-        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        modules,
     ));
     assert!(
         front_end.diagnostics().is_empty(),
         "{}",
         front_end.diagnostic_snapshot()
     );
-    let mir =
-        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
-    let entry = mir.functions().last().expect("entry").symbol();
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main" && function.type_parameters().is_empty())
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
     lower_mir_to_llvm_ir(
         &mir,
         front_end.types(),

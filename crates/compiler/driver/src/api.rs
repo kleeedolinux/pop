@@ -6,13 +6,15 @@
 use std::collections::BTreeSet;
 
 use pop_compile_time::{CompileTimeValue, EvaluationFailure, EvaluationResult};
+use pop_documentation::XmlFragment;
 use pop_foundation::{
     BubbleId, Diagnostic, ModuleId, NamespaceId, SourceSpan, SymbolId, SymbolIdentity, TypeId,
 };
-use pop_hir::HirBubble;
+use pop_hir::{HirBubble, HirDeclaration, HirFunction, HirMethod};
 use pop_library_bridge::{FoundationBubble, NativeEffect, NativeExport, PopAbiType};
 use pop_source::SourceFile;
 use pop_types::{AttributeQueryIndex, BootstrapSchema, PrimitiveType, TypeArena};
+use serde::{Deserialize, Serialize};
 
 use crate::front_end::diagnostic_snapshot;
 
@@ -98,14 +100,69 @@ pub struct FrontEndResult {
     pub(crate) constants: Vec<FrontEndConstant>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) reference_metadata: Result<ReferenceMetadata, ReferenceMetadataError>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ReferenceType {
-    Primitive(PrimitiveType),
+    pub(crate) checked_documentation: Vec<CheckedDocumentation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedDocumentation {
+    pub(crate) identity: SymbolIdentity,
+    pub(crate) fragment: XmlFragment,
+}
+
+impl CheckedDocumentation {
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub const fn fragment(&self) -> &XmlFragment {
+        &self.fragment
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ReferenceType {
+    Primitive(PrimitiveType),
+    TypeParameter(u16),
+    Tuple(Vec<ReferenceType>),
+    Function {
+        parameters: Vec<ReferenceType>,
+        results: Vec<ReferenceType>,
+        effects: pop_types::EffectSummary,
+    },
+    Array(Box<ReferenceType>),
+    Table {
+        key: Box<ReferenceType>,
+        value: Box<ReferenceType>,
+    },
+    Optional(Box<ReferenceType>),
+    Builtin {
+        definition: pop_foundation::BuiltinTypeId,
+        arguments: Vec<ReferenceType>,
+    },
+    Union(Vec<ReferenceType>),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceTypeParameter {
+    pub(crate) name: String,
+    pub(crate) bound: Option<ReferenceType>,
+}
+
+impl ReferenceTypeParameter {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn bound(&self) -> Option<&ReferenceType> {
+        self.bound.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReferenceFunctionParameter {
     pub(crate) name: String,
     pub(crate) parameter_type: ReferenceType,
@@ -118,21 +175,23 @@ impl ReferenceFunctionParameter {
     }
 
     #[must_use]
-    pub const fn parameter_type(&self) -> ReferenceType {
-        self.parameter_type
+    pub const fn parameter_type(&self) -> &ReferenceType {
+        &self.parameter_type
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReferenceFunction {
     pub(crate) identity: SymbolIdentity,
     pub(crate) module: ModuleId,
     pub(crate) namespace: String,
     pub(crate) name: String,
+    pub(crate) type_parameters: Vec<ReferenceTypeParameter>,
     pub(crate) parameters: Vec<ReferenceFunctionParameter>,
     pub(crate) results: Vec<ReferenceType>,
     pub(crate) effects: pop_types::EffectSummary,
     pub(crate) span: SourceSpan,
+    pub(crate) specialization_capsule: Option<ReferenceSpecializationCapsule>,
 }
 
 impl ReferenceFunction {
@@ -157,6 +216,11 @@ impl ReferenceFunction {
     }
 
     #[must_use]
+    pub fn type_parameters(&self) -> &[ReferenceTypeParameter] {
+        &self.type_parameters
+    }
+
+    #[must_use]
     pub fn parameters(&self) -> &[ReferenceFunctionParameter] {
         &self.parameters
     }
@@ -175,9 +239,62 @@ impl ReferenceFunction {
     pub const fn span(&self) -> SourceSpan {
         self.span
     }
+
+    #[must_use]
+    pub const fn specialization_capsule(&self) -> Option<&ReferenceSpecializationCapsule> {
+        self.specialization_capsule.as_ref()
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceSpecializationCapsule {
+    pub(crate) schema_version: u16,
+    pub(crate) content_sha256: String,
+    pub(crate) root: SymbolIdentity,
+    pub(crate) declarations: Vec<HirDeclaration>,
+    pub(crate) functions: Vec<HirFunction>,
+    pub(crate) methods: Vec<HirMethod>,
+    pub(crate) source_types: TypeArena,
+}
+
+impl ReferenceSpecializationCapsule {
+    #[must_use]
+    pub const fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    #[must_use]
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    #[must_use]
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+
+    pub(crate) fn functions(&self) -> &[HirFunction] {
+        &self.functions
+    }
+
+    pub(crate) fn declarations(&self) -> &[HirDeclaration] {
+        &self.declarations
+    }
+
+    pub(crate) fn methods(&self) -> &[HirMethod] {
+        &self.methods
+    }
+
+    pub(crate) const fn source_types(&self) -> &TypeArena {
+        &self.source_types
+    }
+
+    pub(crate) const fn root(&self) -> SymbolIdentity {
+        self.root
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReferenceMetadata {
     pub(crate) bubble: BubbleId,
     pub(crate) functions: Vec<ReferenceFunction>,
@@ -454,5 +571,10 @@ impl FrontEndResult {
             Ok(metadata) => Ok(metadata),
             Err(error) => Err(*error),
         }
+    }
+
+    #[must_use]
+    pub fn checked_documentation(&self) -> &[CheckedDocumentation] {
+        &self.checked_documentation
     }
 }

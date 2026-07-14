@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 pop-foundation.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

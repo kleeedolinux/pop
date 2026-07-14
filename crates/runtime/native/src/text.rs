@@ -250,18 +250,32 @@ pub extern "C" fn pop_rt_string_format(tag: u32, bits: u64) -> u64 {
     let formatted = match tag {
         StringFormatTag::Boolean if bits <= 1 => (bits != 0).to_string(),
         StringFormatTag::Boolean => return 0,
-        StringFormatTag::Int8 => i8::from_ne_bytes([bits as u8]).to_string(),
-        StringFormatTag::Int16 => i16::from_ne_bytes((bits as u16).to_ne_bytes()).to_string(),
-        StringFormatTag::Int32 => i32::from_ne_bytes((bits as u32).to_ne_bytes()).to_string(),
+        StringFormatTag::Int8 => i8::from_le_bytes([low_u8(bits)]).to_string(),
+        StringFormatTag::Int16 => i16::from_le_bytes(low_u16(bits).to_le_bytes()).to_string(),
+        StringFormatTag::Int32 => i32::from_le_bytes(low_u32(bits).to_le_bytes()).to_string(),
         StringFormatTag::Int64 => i64::from_ne_bytes(bits.to_ne_bytes()).to_string(),
-        StringFormatTag::UInt8 => (bits as u8).to_string(),
-        StringFormatTag::UInt16 => (bits as u16).to_string(),
-        StringFormatTag::UInt32 => (bits as u32).to_string(),
+        StringFormatTag::UInt8 => low_u8(bits).to_string(),
+        StringFormatTag::UInt16 => low_u16(bits).to_string(),
+        StringFormatTag::UInt32 => low_u32(bits).to_string(),
         StringFormatTag::UInt64 => bits.to_string(),
-        StringFormatTag::Float32 => format_float32(f32::from_bits(bits as u32)),
+        StringFormatTag::Float32 => format_float32(f32::from_bits(low_u32(bits))),
         StringFormatTag::Float64 => format_float64(f64::from_bits(bits)),
     };
     allocate_utf8_string_literal(formatted.as_bytes())
+}
+
+fn low_u8(bits: u64) -> u8 {
+    bits.to_le_bytes()[0]
+}
+
+fn low_u16(bits: u64) -> u16 {
+    let bytes = bits.to_le_bytes();
+    u16::from_le_bytes([bytes[0], bytes[1]])
+}
+
+fn low_u32(bits: u64) -> u32 {
+    let bytes = bits.to_le_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 fn format_float32(value: f32) -> String {

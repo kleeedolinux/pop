@@ -2,15 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use pop_foundation::TypeId;
+use pop_foundation::{ClassId, TypeId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{PrimitiveType, SemanticType};
 use pop_foundation::ParameterId;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypeArena {
     types: Vec<SemanticType>,
     interned: BTreeMap<SemanticType, TypeId>,
+    class_specializations: BTreeMap<(ClassId, Vec<TypeId>), TypeId>,
     source_names: BTreeMap<&'static str, TypeId>,
     nil: TypeId,
     never: TypeId,
@@ -22,6 +24,7 @@ impl TypeArena {
         let mut arena = Self {
             types: Vec::new(),
             interned: BTreeMap::new(),
+            class_specializations: BTreeMap::new(),
             source_names: BTreeMap::new(),
             nil: TypeId::from_raw(0),
             never: TypeId::from_raw(0),
@@ -81,11 +84,41 @@ impl TypeArena {
         type_id: TypeId,
         substitutions: &BTreeMap<ParameterId, TypeId>,
     ) -> Option<TypeId> {
+        self.substitute_existing_with_classes(type_id, substitutions, &self.class_specializations)
+    }
+
+    /// Records the concrete nominal type selected for one generic class
+    /// template and canonical argument list.
+    pub fn register_class_specialization(
+        &mut self,
+        source: ClassId,
+        arguments: Vec<TypeId>,
+        concrete: TypeId,
+    ) -> Result<(), TypeArenaError> {
+        self.validate_ids(arguments.iter().copied().chain([concrete]))?;
+        self.class_specializations
+            .insert((source, arguments), concrete);
+        Ok(())
+    }
+
+    pub fn class_specializations(&self) -> impl Iterator<Item = (ClassId, &[TypeId], TypeId)> {
+        self.class_specializations
+            .iter()
+            .map(|((class, arguments), concrete)| (*class, arguments.as_slice(), *concrete))
+    }
+
+    #[must_use]
+    pub fn substitute_existing_with_classes(
+        &self,
+        type_id: TypeId,
+        substitutions: &BTreeMap<ParameterId, TypeId>,
+        class_types: &BTreeMap<(ClassId, Vec<TypeId>), TypeId>,
+    ) -> Option<TypeId> {
         let semantic = self.get(type_id)?.clone();
         if let SemanticType::TypeParameter(parameter) = semantic {
             return substitutions.get(&parameter).copied();
         }
-        let map = |id| self.substitute_existing(id, substitutions);
+        let map = |id| self.substitute_existing_with_classes(id, substitutions, class_types);
         let substituted = match semantic {
             SemanticType::Primitive(_)
             | SemanticType::Enum { .. }
@@ -154,10 +187,20 @@ impl TypeArena {
                 results: results.into_iter().map(map).collect::<Option<_>>()?,
                 effects,
             },
-            SemanticType::Class { class, arguments } => SemanticType::Class {
-                class,
-                arguments: arguments.into_iter().map(map).collect::<Option<_>>()?,
-            },
+            SemanticType::Class { class, arguments } => {
+                let arguments = arguments.into_iter().map(map).collect::<Option<Vec<_>>>()?;
+                if let Some(concrete) = class_types.get(&(class, arguments.clone())) {
+                    return Some(*concrete);
+                }
+                if let Some(source) = class_types
+                    .iter()
+                    .find_map(|((source, _), instance)| (*instance == type_id).then_some(*source))
+                    && let Some(concrete) = class_types.get(&(source, arguments.clone()))
+                {
+                    return Some(*concrete);
+                }
+                SemanticType::Class { class, arguments }
+            }
             SemanticType::Interface {
                 interface,
                 arguments,
@@ -315,6 +358,63 @@ impl TypeArena {
 impl Default for TypeArena {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TypeArenaSnapshot {
+    types: Vec<SemanticType>,
+    class_specializations: Vec<(ClassId, Vec<TypeId>, TypeId)>,
+}
+
+impl Serialize for TypeArena {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        TypeArenaSnapshot {
+            types: self.types.clone(),
+            class_specializations: self
+                .class_specializations()
+                .map(|(class, arguments, concrete)| (class, arguments.to_vec(), concrete))
+                .collect(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeArena {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let snapshot = TypeArenaSnapshot::deserialize(deserializer)?;
+        let mut arena = Self::new();
+        if snapshot.types.len() < arena.types.len()
+            || snapshot.types[..arena.types.len()] != arena.types
+        {
+            return Err(de::Error::custom("invalid primitive type prefix"));
+        }
+        for (raw, semantic) in snapshot
+            .types
+            .into_iter()
+            .enumerate()
+            .skip(arena.types.len())
+        {
+            let id = arena
+                .intern(semantic)
+                .map_err(|_| de::Error::custom("invalid type dependency"))?;
+            if id.raw() as usize != raw {
+                return Err(de::Error::custom("noncanonical type arena"));
+            }
+        }
+        for (class, arguments, concrete) in snapshot.class_specializations {
+            arena
+                .register_class_specialization(class, arguments, concrete)
+                .map_err(|_| de::Error::custom("invalid class specialization"))?;
+        }
+        Ok(arena)
     }
 }
 

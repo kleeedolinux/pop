@@ -148,8 +148,19 @@ fn conventionally_discovered_foundation_contributions_reach_verified_mir() {
         Contribution {
             path: "src/contributionProbe.pop",
             source: "namespace Pop.Math\n\
+                     using Pop.Sequence\n\
                      public function contributorIdentity(value: Int): Int\n\
                          return value\n\
+                     end\n\
+                     public function sequenceProbe(): List<Int>\n\
+                         local values: {Int} = {1, 2, 3}\n\
+                         local mapped = map(values, function(value: Int): Int\n\
+                             return value * 2\n\
+                         end)\n\
+                         local filtered = filter(mapped, function(value: Int): Boolean\n\
+                             return value > 2\n\
+                         end)\n\
+                         return collect(filtered)\n\
                      end\n",
         },
     );
@@ -170,8 +181,73 @@ fn conventionally_discovered_foundation_contributions_reach_verified_mir() {
             .public_symbols()
             .contains(&contribution.symbol())
     );
+    for algorithm in ["map", "filter", "fold", "collect"] {
+        let function = standard_hir
+            .functions()
+            .iter()
+            .find(|function| function.name() == algorithm)
+            .unwrap_or_else(|| panic!("ordinary Pop Sequence.{algorithm} implementation"));
+        assert!(standard_hir.public_symbols().contains(&function.symbol()));
+        assert!(!function.type_parameters().is_empty());
+    }
+    assert!(
+        standard_hir
+            .functions()
+            .iter()
+            .any(|function| function.name() == "sequenceProbe")
+    );
     pop_mir::lower_hir_bubble(standard_hir, standard.types())
         .expect("verified Pop.Standard canonical MIR");
+
+    let metadata = standard
+        .reference_metadata()
+        .expect("portable Pop.Standard metadata")
+        .clone();
+    let consumer_source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/main.pop",
+        "namespace Application\n\
+         using Pop.Sequence\n\
+         public function run(): Int\n\
+             local values: {Int} = {1, 2, 3}\n\
+             local total = fold(values, 0, function(state: Int, value: Int): Int\n\
+                 return state + value\n\
+             end)\n\
+             local mapped = map(values, function(value: Int): Int\n\
+                 return value * 2\n\
+             end)\n\
+             local filtered = filter(mapped, function(value: Int): Boolean\n\
+                 return value > 2\n\
+             end)\n\
+             local collected = collect(filtered)\n\
+             local labels = map(values, function(value: Int): String\n\
+                 return \"item\"\n\
+             end)\n\
+             local collectedLabels = collect(labels)\n\
+             return total + List.length(collected) + List.length(collectedLabels)\n\
+         end\n",
+    )
+    .expect("consumer source");
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![STANDARD_BUBBLE],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), consumer_source)],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(
+        consumer.hir().expect("Sequence consumer HIR"),
+        consumer.types(),
+    )
+    .expect("portable Sequence algorithms specialize into consumer MIR");
+    assert!(!mir.dump().contains("callReference b2:"));
 }
 
 #[test]

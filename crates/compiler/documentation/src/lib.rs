@@ -478,6 +478,12 @@ impl DocumentationAnalysis {
             .map(inheritance_references)
             .unwrap_or_default()
     }
+
+    #[must_use]
+    pub fn xml_for_target(&self, target: TextRange) -> Option<&XmlFragment> {
+        self.block_attached_to_range(target)
+            .and_then(DocumentationBlock::xml)
+    }
 }
 
 fn summary_count(xml: &XmlFragment) -> usize {
@@ -625,7 +631,13 @@ pub struct XmlFragment {
 }
 
 impl XmlFragment {
-    fn parse(text: &str) -> Result<Self, XmlParseError> {
+    /// Parses one safe, entity-limited XML fragment for documentation tools.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed XML and every DTD, processing-instruction, or other
+    /// unsafe construct excluded by ADR 0014.
+    pub fn parse(text: &str) -> Result<Self, XmlParseError> {
         let mut parser = XmlParser { text, cursor: 0 };
         let children = parser.parse_children(None)?;
         Ok(Self { children })
@@ -666,10 +678,21 @@ impl XmlAttribute {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum XmlParseError {
+pub enum XmlParseError {
     UnsafeConstruct,
     Malformed,
 }
+
+impl std::fmt::Display for XmlParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsafeConstruct => formatter.write_str("unsafe XML documentation construct"),
+            Self::Malformed => formatter.write_str("malformed XML documentation fragment"),
+        }
+    }
+}
+
+impl std::error::Error for XmlParseError {}
 
 struct XmlParser<'text> {
     text: &'text str,

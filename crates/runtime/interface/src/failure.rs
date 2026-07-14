@@ -67,6 +67,7 @@ pub enum TrapKind {
     NumericConversion,
     InvalidRangeStep,
     BoundsViolation,
+    ConcurrentModification,
     ImpossibleState,
 }
 

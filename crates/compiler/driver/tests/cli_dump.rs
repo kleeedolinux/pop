@@ -413,6 +413,7 @@ fn package_run_compiles_an_internal_library_without_main() {
          end\n",
         "namespace Studio.Entry.Application\n\
          function main()\n\
+             Studio.Entry.Library.announce()\n\
              print(42)\n\
          end\n",
     );
@@ -428,7 +429,331 @@ fn package_run_compiles_an_internal_library_without_main() {
         "Package run failed: {}",
         output_text(&run.stderr)
     );
-    assert_eq!(output_text(&run.stdout), "42\n");
+    assert_eq!(output_text(&run.stdout), "41\n42\n");
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_check_and_build_use_manifest_selected_bubbles() {
+    let package = temporary_package(
+        "check-build",
+        "namespace Studio.Entry.Library\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+        "namespace Studio.Entry.Application\n\
+         function main(): Int\n\
+             return Studio.Entry.Library.answer()\n\
+         end\n",
+    );
+    let manifest = package.join("bubble.toml");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop check resolves a Package");
+    assert!(
+        check.status.success(),
+        "Package check failed: {}",
+        output_text(&check.stderr)
+    );
+    assert!(check.stdout.is_empty());
+    assert!(
+        !package.join("target").exists(),
+        "check must not emit artifacts"
+    );
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop build resolves a Package");
+    assert!(
+        build.status.success(),
+        "Package build failed: {}",
+        output_text(&build.stderr)
+    );
+    let executable = package.join("target/debug/Studio.Entry");
+    assert!(executable.is_file());
+    let status = Command::new(executable)
+        .status()
+        .expect("manifest-built executable runs");
+    assert_eq!(status.code(), Some(42));
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_run_resolves_and_links_exact_local_path_dependencies() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-local-dependencies-{}", std::process::id()));
+    let data = workspace.join("data");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(data.join("src")).expect("create dependency Package");
+    std::fs::create_dir_all(application.join("src")).expect("create application Package");
+    std::fs::write(
+        data.join("bubble.toml"),
+        "[package]\nname = \"Studio.Data\"\nversion = \"2.1.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write dependency manifest");
+    std::fs::write(
+        data.join("src/lib.pop"),
+        "namespace Studio.Data\n\
+         public function identity<T>(value: T): T\n\
+             return value\n\
+         end\n",
+    )
+    .expect("write dependency library");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\n\
+         name = \"Studio.Application\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [dependencies]\n\
+         StudioData = { path = \"../data\", version = \"2.1.0\", bubble = \"Studio.Data\" }\n",
+    )
+    .expect("write application manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main()\n\
+             print(Studio.Data.identity(41))\n\
+             print(42)\n\
+         end\n",
+    )
+    .expect("write application binary");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(application.join("bubble.toml"))
+        .output()
+        .expect("pop run resolves local Package dependency");
+    assert!(
+        run.status.success(),
+        "local dependency run failed: {}",
+        output_text(&run.stderr)
+    );
+    assert_eq!(output_text(&run.stdout), "41\n42\n");
+
+    std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn package_check_rejects_local_dependency_cycles_before_analysis() {
+    let workspace = std::env::temp_dir().join(format!("pop-local-cycle-{}", std::process::id()));
+    for (directory, name, dependency, namespace) in [
+        ("first", "Studio.First", "../second", "Studio.First"),
+        ("second", "Studio.Second", "../first", "Studio.Second"),
+    ] {
+        let package = workspace.join(directory);
+        std::fs::create_dir_all(package.join("src")).expect("create cyclic Package");
+        std::fs::write(
+            package.join("bubble.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nedition = \"2026\"\n\
+                 [dependencies]\nOther = {{ path = \"{dependency}\", version = \"1.0.0\" }}\n"
+            ),
+        )
+        .expect("write cyclic manifest");
+        std::fs::write(
+            package.join("src/lib.pop"),
+            format!("namespace {namespace}\npublic function value(): Int\n    return 1\nend\n"),
+        )
+        .expect("write cyclic library");
+    }
+
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(workspace.join("first/bubble.toml"))
+        .output()
+        .expect("pop check detects dependency cycle");
+    assert!(!check.status.success());
+    assert!(
+        output_text(&check.stderr).contains("Package dependency cycle"),
+        "cycle error was not precise: {}",
+        output_text(&check.stderr)
+    );
+    assert!(!workspace.join("first/target").exists());
+
+    std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn virtual_workspace_uses_default_members_and_one_shared_target_root() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-virtual-workspace-{}", std::process::id()));
+    let application = workspace.join("packages/application");
+    let ignored = workspace.join("packages/ignored");
+    std::fs::create_dir_all(application.join("src")).expect("create default member");
+    std::fs::create_dir_all(ignored.join("src")).expect("create non-default member");
+    std::fs::write(
+        workspace.join("bubble.toml"),
+        "[workspace]\n\
+         members = [\"packages/*\"]\n\
+         defaultMembers = [\"packages/application\"]\n\
+         resolver = \"1\"\n",
+    )
+    .expect("write Workspace manifest");
+    for (root, name, value) in [
+        (&application, "Studio.Application", 42),
+        (&ignored, "Studio.Ignored", 99),
+    ] {
+        std::fs::write(
+            root.join("bubble.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n"),
+        )
+        .expect("write member manifest");
+        std::fs::write(
+            root.join("src/main.pop"),
+            format!("namespace {name}\nfunction main(): Int\n    return {value}\nend\n"),
+        )
+        .expect("write member binary");
+    }
+
+    let manifest = workspace.join("bubble.toml");
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop check selects Workspace defaults");
+    assert!(
+        check.status.success(),
+        "Workspace check failed: {}",
+        output_text(&check.stderr)
+    );
+    assert!(!workspace.join("target").exists());
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop build selects Workspace defaults");
+    assert!(
+        build.status.success(),
+        "Workspace build failed: {}",
+        output_text(&build.stderr)
+    );
+    let executable = workspace.join("target/debug/Studio.Application");
+    assert!(executable.is_file());
+    assert!(!workspace.join("target/debug/Studio.Ignored").exists());
+    assert!(!application.join("target").exists());
+    assert_eq!(
+        Command::new(executable)
+            .status()
+            .expect("Workspace executable runs")
+            .code(),
+        Some(42)
+    );
+
+    std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn package_documentation_emits_checked_public_xml_separately() {
+    let package = temporary_package(
+        "documentation",
+        "namespace Studio.Entry.Library\n\
+         --- <summary>Returns the answer.</summary>\n\
+         --- <returns>The stable answer.</returns>\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+        "namespace Studio.Entry.Application\n\
+         function main(): Int\n\
+             return Studio.Entry.Library.answer()\n\
+         end\n",
+    );
+    let documentation = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["documentation", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop documentation resolves a Package");
+    assert!(
+        documentation.status.success(),
+        "documentation failed: {}",
+        output_text(&documentation.stderr)
+    );
+    let output = package.join("target/documentation/Studio.Entry/documentation.xml");
+    let xml = std::fs::read_to_string(output).expect("documentation.xml");
+    assert!(xml.contains("schemaVersion=\"1\" bubble=\"Studio.Entry\""));
+    assert!(xml.contains("id=\"function:Studio.Entry.Library.answer()\""));
+    assert!(xml.contains("<summary>Returns the answer.</summary>"));
+    assert!(
+        !xml.contains("main"),
+        "private binary docs must not be emitted"
+    );
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn manifest_commands_write_one_deterministic_lock_and_enforce_locked_modes() {
+    let package = temporary_package(
+        "lock-policy",
+        "namespace Studio.Entry.Library\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+        "namespace Studio.Entry.Application\n\
+         function main(): Int\n\
+             return Studio.Entry.Library.answer()\n\
+         end\n",
+    );
+    let manifest = package.join("bubble.toml");
+    let first = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("initial lock generation");
+    assert!(first.status.success(), "{}", output_text(&first.stderr));
+    let lock_path = package.join("bubble.lock");
+    let first_bytes = std::fs::read(&lock_path).expect("generated bubble.lock");
+    let second = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("repeat lock generation");
+    assert!(second.status.success(), "{}", output_text(&second.stderr));
+    assert_eq!(std::fs::read(&lock_path).expect("stable lock"), first_bytes);
+
+    let locked = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--locked")
+        .output()
+        .expect("locked check");
+    assert!(locked.status.success(), "{}", output_text(&locked.stderr));
+
+    std::fs::write(
+        package.join("src/lib.pop"),
+        "namespace Studio.Entry.Library\npublic function answer(): Int\n    return 43\nend\n",
+    )
+    .expect("change locked input");
+    let changed = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--locked")
+        .output()
+        .expect("locked change rejection");
+    assert!(!changed.status.success());
+    assert!(output_text(&changed.stderr).contains("LockedChange"));
+    assert_eq!(
+        std::fs::read(&lock_path).expect("unchanged lock"),
+        first_bytes
+    );
+
+    std::fs::remove_file(&lock_path).expect("remove lock for frozen test");
+    let frozen = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--frozen")
+        .output()
+        .expect("frozen missing-lock rejection");
+    assert!(!frozen.status.success());
+    assert!(output_text(&frozen.stderr).contains("MissingLock"));
+
     std::fs::remove_dir_all(package).expect("remove temporary Package");
 }
 

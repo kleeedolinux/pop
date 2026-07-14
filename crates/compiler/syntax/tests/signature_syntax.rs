@@ -45,6 +45,27 @@ fn generic_array_and_optional_signature_is_structured() {
 }
 
 #[test]
+fn generic_function_parameters_preserve_nominal_bounds() {
+    let signature = signature(
+        "namespace Values\n\
+         private function consume<T, TSource: Iterable<T>>(source: TSource)\n\
+         end\n",
+    );
+
+    assert!(signature.type_parameters()[0].bound().is_none());
+    assert!(matches!(
+        signature.type_parameters()[1]
+            .bound()
+            .map(pop_syntax::TypeSyntax::kind),
+        Some(TypeSyntaxKind::Named { path, arguments })
+            if path == &["Iterable"]
+                && matches!(arguments.as_slice(), [argument]
+                    if matches!(argument.kind(), TypeSyntaxKind::Named { path, arguments }
+                        if path == &["T"] && arguments.is_empty()))
+    ));
+}
+
+#[test]
 fn qualified_generic_table_and_tuple_results_are_structured() {
     let signature = signature(
         "namespace Values\n\

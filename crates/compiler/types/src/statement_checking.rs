@@ -159,6 +159,13 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 body,
                 statement.span(),
             )?,
+            StatementSyntaxKind::GeneralizedFor {
+                bindings,
+                iterable,
+                body,
+            } => {
+                self.check_generalized_for(signature, bindings, iterable, body, statement.span())?
+            }
             StatementSyntaxKind::Break => {
                 self.check_loop_control("break", true, statement.span())?
             }
@@ -311,13 +318,260 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         })
     }
 
+    fn check_generalized_for(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        binding_names: &[String],
+        iterable: &ExpressionSyntax,
+        body: &[StatementSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let iterable = self.check_expression(iterable)?;
+        let active_collection = match iterable.kind() {
+            TypedExpressionKind::Local(local) => Some(
+                crate::body_checking::ActiveCollectionIteration::Local(*local),
+            ),
+            TypedExpressionKind::Parameter(parameter) => Some(
+                crate::body_checking::ActiveCollectionIteration::Parameter(*parameter),
+            ),
+            TypedExpressionKind::Capture(capture) => Some(
+                crate::body_checking::ActiveCollectionIteration::Capture(*capture),
+            ),
+            _ => None,
+        };
+        let iterable_type = iterable.type_id();
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        let semantic = self.resolver.arena().get(iterable_type)?.clone();
+        let (source, item_type) = match semantic {
+            SemanticType::Array(element) => (TypedIterationSource::Array, element),
+            SemanticType::Table { key, value } => {
+                let item = self
+                    .resolver
+                    .arena_mut()
+                    .intern(SemanticType::Tuple(vec![key, value]))
+                    .ok()?;
+                (TypedIterationSource::Table, item)
+            }
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if arguments.len() == 1 => {
+                if definition == protocol.list() {
+                    (TypedIterationSource::List, arguments[0])
+                } else if definition == protocol.iterable() {
+                    (TypedIterationSource::Iterable, arguments[0])
+                } else if definition == protocol.iterator() {
+                    (TypedIterationSource::Iterator, arguments[0])
+                } else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "for in",
+                        self.type_name(iterable_type),
+                    ));
+                    return None;
+                }
+            }
+            SemanticType::Class { .. } => {
+                let Some(class) = self
+                    .resolver
+                    .class_definition_for_type(iterable_type)
+                    .cloned()
+                else {
+                    return None;
+                };
+                let Some(implementation) =
+                    class.builtin_interfaces().iter().find(|implementation| {
+                        implementation.interface() == protocol.iterable()
+                            || implementation.interface() == protocol.iterator()
+                    })
+                else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "for in",
+                        self.type_name(iterable_type),
+                    ));
+                    return None;
+                };
+                let Some(SemanticType::Builtin { arguments, .. }) =
+                    self.resolver.arena().get(implementation.interface_type())
+                else {
+                    return None;
+                };
+                let [item_type] = arguments.as_slice() else {
+                    return None;
+                };
+                let iterator_method = implementation
+                    .methods()
+                    .iter()
+                    .find(|method| method.protocol_method() == protocol.iterator_method())?
+                    .class_method();
+                if implementation.interface() == protocol.iterator() {
+                    let next_method = implementation
+                        .methods()
+                        .iter()
+                        .find(|method| method.protocol_method() == protocol.next_method())?
+                        .class_method();
+                    (
+                        TypedIterationSource::ClassIterator {
+                            iterator_method,
+                            next_method,
+                        },
+                        *item_type,
+                    )
+                } else {
+                    (
+                        TypedIterationSource::ClassIterable { iterator_method },
+                        *item_type,
+                    )
+                }
+            }
+            SemanticType::TypeParameter(_) => {
+                let bound = signature
+                    .type_parameters()
+                    .iter()
+                    .find(|parameter| parameter.type_id() == iterable_type)
+                    .and_then(crate::ResolvedTypeParameter::bound);
+                match bound.and_then(|bound| self.resolver.arena().get(bound)) {
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if arguments.len() == 1 && *definition == protocol.iterable() => {
+                        (TypedIterationSource::BoundIterable, arguments[0])
+                    }
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if arguments.len() == 1 && *definition == protocol.iterator() => {
+                        (TypedIterationSource::BoundIterator, arguments[0])
+                    }
+                    _ => {
+                        self.diagnostics.push(type_diagnostics::invalid_operator(
+                            span,
+                            "for in",
+                            self.type_name(iterable_type),
+                        ));
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "for in",
+                    self.type_name(iterable_type),
+                ));
+                return None;
+            }
+        };
+
+        let binding_types = if binding_names.len() == 1 {
+            vec![item_type]
+        } else if let Some(SemanticType::Tuple(elements)) =
+            self.resolver.arena().get(item_type).cloned()
+        {
+            if elements.len() != binding_names.len() {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    span,
+                    "generalized for bindings",
+                    elements.len(),
+                    binding_names.len(),
+                ));
+                return None;
+            }
+            elements
+        } else {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "generalized for bindings",
+                1,
+                binding_names.len(),
+            ));
+            return None;
+        };
+        let iterator_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.iterator(),
+                arguments: vec![item_type],
+            })
+            .ok()?;
+        let iteration_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.iteration(),
+                arguments: vec![item_type],
+            })
+            .ok()?;
+
+        let mut names = BTreeMap::new();
+        for name in binding_names {
+            if names.insert(name, span).is_some() {
+                self.diagnostics
+                    .push(type_diagnostics::duplicate_binding(span, name, span));
+                return None;
+            }
+        }
+        self.scopes.push(BTreeMap::new());
+        let mut bindings = Vec::with_capacity(binding_names.len());
+        for (name, local_type) in binding_names.iter().zip(binding_types) {
+            let local = LocalId::from_raw(self.next_local);
+            self.next_local = self.next_local.saturating_add(1);
+            let binding = BindingId::from_raw(self.next_binding);
+            self.next_binding = self.next_binding.saturating_add(1);
+            self.scopes
+                .last_mut()
+                .expect("generalized for scope was just pushed")
+                .insert(
+                    name.clone(),
+                    Binding {
+                        id: binding,
+                        kind: BindingKind::LoopLocal(local),
+                        type_id: local_type,
+                        function_depth: self.function_depth,
+                    },
+                );
+            bindings.push(TypedLocalBinding {
+                binding,
+                local,
+                name: name.clone(),
+                local_type,
+                span,
+            });
+        }
+        self.loop_depth = self.loop_depth.saturating_add(1);
+        self.active_collection_iterations.extend(active_collection);
+        let body = body
+            .iter()
+            .filter_map(|statement| self.check_statement(signature, statement))
+            .collect();
+        if active_collection.is_some() {
+            self.active_collection_iterations.pop();
+        }
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.scopes
+            .pop()
+            .expect("generalized for scope was just pushed");
+        Some(TypedStatementKind::GeneralizedFor {
+            protocol,
+            source,
+            item_type,
+            iterator_type,
+            iteration_type,
+            bindings,
+            iterable,
+            body,
+        })
+    }
+
     pub(crate) fn check_expression_statement(
         &mut self,
         expression: &ExpressionSyntax,
     ) -> Option<TypedStatementKind> {
         let invocation = match expression.kind() {
             ExpressionSyntaxKind::Call { callee, arguments } => {
-                self.check_call_invocation(callee, arguments, expression.span())
+                self.check_call_invocation(callee, arguments, None, expression.span())
             }
             ExpressionSyntaxKind::MethodCall {
                 receiver,
@@ -862,6 +1116,18 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 element_type,
             });
         }
+        if let TypedExpressionKind::ListGet { list, index } = target.kind {
+            let Some(SemanticType::Builtin { arguments, .. }) =
+                self.resolver.arena().get(list.type_id()).cloned()
+            else {
+                return None;
+            };
+            return Some(TypedAssignmentTarget::List {
+                list: *list,
+                index: *index,
+                element_type: *arguments.first()?,
+            });
+        }
         if let TypedExpressionKind::TableGet { table, key } = target.kind {
             let Some(SemanticType::Table { value, .. }) =
                 self.resolver.arena().get(table.type_id()).cloned()
@@ -966,6 +1232,24 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             self.require_same_type(element_type, value.type_id(), value.span(), span);
             return Some(TypedStatementKind::ArraySet {
                 array: *array,
+                index: *index,
+                value,
+            });
+        }
+        if let TypedExpressionKind::ListGet { list, index } = target.kind {
+            let Some(SemanticType::Builtin { arguments, .. }) =
+                self.resolver.arena().get(list.type_id()).cloned()
+            else {
+                return None;
+            };
+            let element_type = *arguments.first()?;
+            let value = self.check_expression_expected(
+                value,
+                Some(ExpectedExpressionType::plain(element_type)),
+            )?;
+            self.require_same_type(element_type, value.type_id(), value.span(), span);
+            return Some(TypedStatementKind::ListSet {
+                list: *list,
                 index: *index,
                 value,
             });
@@ -1892,6 +2176,7 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
         | StatementSyntaxKind::OptionalWhile { .. }
         | StatementSyntaxKind::RepeatUntil { .. }
         | StatementSyntaxKind::NumericFor { .. }
+        | StatementSyntaxKind::GeneralizedFor { .. }
         | StatementSyntaxKind::Defer { .. }
         | StatementSyntaxKind::Local { .. }
         | StatementSyntaxKind::MultipleLocal { .. }
@@ -1987,6 +2272,14 @@ fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static s
                     .any(expression_contains_result_propagation)
                 {
                     return Some(("try", statement.span()));
+                }
+                if let Some(found) = illegal_cleanup_control(body) {
+                    return Some(found);
+                }
+            }
+            StatementSyntaxKind::GeneralizedFor { iterable, body, .. } => {
+                if expression_contains_result_propagation(iterable) {
+                    return Some(("try", iterable.span()));
                 }
                 if let Some(found) = illegal_cleanup_control(body) {
                     return Some(found);

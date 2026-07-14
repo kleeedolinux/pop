@@ -1,12 +1,13 @@
 use pop_foundation::{FileId, SourceSpan, TextRange};
 use pop_source::SourceFile;
 
-use crate::signature::parse_type_prefix;
+use crate::signature::{GenericParameterSyntax, parse_type_prefix};
 use crate::{NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind, TypeSyntax};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterfaceDeclarationSyntax {
     name: String,
+    type_parameters: Vec<GenericParameterSyntax>,
     methods: Vec<InterfaceMethodSyntax>,
     span: SourceSpan,
 }
@@ -15,6 +16,11 @@ impl InterfaceDeclarationSyntax {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[GenericParameterSyntax] {
+        &self.type_parameters
     }
 
     #[must_use]
@@ -156,6 +162,7 @@ impl InterfaceParser<'_> {
         self.expect(TokenKind::Interface, "`interface`")?;
         let name = self.expect(TokenKind::Identifier, "interface name")?;
         let name = name.text(self.source).to_owned();
+        let type_parameters = self.parse_type_parameters()?;
         self.expect(TokenKind::Newline, "line break after interface declaration")?;
 
         let mut methods = Vec::new();
@@ -170,9 +177,37 @@ impl InterfaceParser<'_> {
         }
         Ok(InterfaceDeclarationSyntax {
             name,
+            type_parameters,
             methods,
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
+    }
+
+    fn parse_type_parameters(
+        &mut self,
+    ) -> Result<Vec<GenericParameterSyntax>, InterfaceDeclarationError> {
+        if self.consume(TokenKind::LessThan).is_none() {
+            return Ok(Vec::new());
+        }
+        let mut parameters = Vec::new();
+        loop {
+            let token = self.expect(TokenKind::Identifier, "type parameter")?;
+            let bound = if self.consume(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            parameters.push(GenericParameterSyntax::new(
+                token.text(self.source).to_owned(),
+                bound,
+                SourceSpan::new(self.file, token.range()),
+            ));
+            if self.consume(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::GreaterThan, "`>`")?;
+        Ok(parameters)
     }
 
     fn parse_method(&mut self) -> Result<InterfaceMethodSyntax, InterfaceDeclarationError> {

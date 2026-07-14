@@ -369,6 +369,22 @@ end
 local name = first<<String>>(names)
 ```
 
+Normal direct calls may infer the complete type-argument list when one unique
+static solution follows from the expected result, arguments, and bounds. A type
+parameter carries at most one nominal interface bound after a Luau-shaped colon:
+
+```luau
+private function consume<T, TSource: Iterable<T>>(source: TSource)
+end
+
+private class MappingIterator<T, U> implements Iterator<U>
+end
+```
+
+Bounds may mention earlier parameters only. There are no partial explicit type
+arguments, `where` clauses, structural bounds, or runtime generic lookup. See
+ADR 0054.
+
 Records and tagged unions use the same declaration direction. Generic record
 literals receive their concrete type from expected context; generic union cases
 use explicit call arguments:
@@ -483,6 +499,23 @@ fixed integer type and the loop binding is immutable. `break` and `continue`
 are standalone statements targeting the innermost loop; they do not take
 labels. `continue` reaches the natural condition or advancement point of the
 loop form. See ADR 0032 and ADR 0042.
+
+Generalized iteration keeps the same Luau-shaped clause with one statically
+typed source expression:
+
+```luau
+for value in values do
+    process(value)
+end
+
+for key, value in entries do
+    process(key, value)
+end
+```
+
+The second form destructures one fixed tuple item. It is not Lua's dynamic
+iterator-triple convention. Protocol calls resolve the nominal ADR 0053
+identities and formatting never inserts an implicit close/disposal construct.
 
 ### Tagged-union matching
 

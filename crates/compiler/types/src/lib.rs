@@ -6,6 +6,7 @@
 use pop_foundation::{
     AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId,
 };
+use serde::{Deserialize, Serialize};
 
 mod aggregate_checking;
 mod arena;
@@ -37,9 +38,9 @@ pub use attributes::{
 pub use body_checking::{BodyChecker, RuntimeConstant};
 pub use bootstrap::{
     AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
-    BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError, BootstrapStandardFunctionEntry,
-    BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId, CompilerAttributeRole,
-    CompilerAttributeTarget, embedded_bootstrap_schema,
+    BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
+    BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
+    CompilerAttributeRole, CompilerAttributeTarget, embedded_bootstrap_schema,
 };
 pub use classes::{
     ClassDefinition, ClassDefinitionResult, ClassFieldDefinition, ClassMethodDefinition,
@@ -48,6 +49,7 @@ pub use classes::{
 pub use field_defaults::FieldDefault;
 pub use inference::{InferenceContext, InferenceError, InferenceType, InferenceVariableId};
 pub use interfaces::{
+    BuiltinInterfaceMethodImplementation, ClassBuiltinInterfaceImplementation,
     ClassInterfaceImplementation, InterfaceDefinition, InterfaceDefinitionResult,
     InterfaceMethodDefinition, InterfaceMethodImplementation,
 };
@@ -66,14 +68,15 @@ pub use typed_body::{
     CaptureMode, CaptureSource, StringFormatKind, TypedAssignmentTarget, TypedBinaryOperator,
     TypedBody, TypedBodyResult, TypedCall, TypedCallDispatch, TypedCapture, TypedClosure,
     TypedClosureParameter, TypedCompoundOperator, TypedErrorMatchArm, TypedExpression,
-    TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedMatchArm, TypedMatchBinding,
-    TypedResultMatchArm, TypedStatement, TypedStatementKind, TypedTableEntry, TypedUnaryOperator,
+    TypedExpressionKind, TypedExpressionResult, TypedFieldValue, TypedIterationSource,
+    TypedMatchArm, TypedMatchBinding, TypedResultMatchArm, TypedStatement, TypedStatementKind,
+    TypedTableEntry, TypedUnaryOperator,
 };
 
 pub type ClassFieldDefault = FieldDefault;
 pub type RecordFieldDefault = FieldDefault;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum IntegerKind {
     Int8,
     Int16,
@@ -108,13 +111,13 @@ impl IntegerKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum IntegerOverflow {
     Trap,
     WrapExplicitly,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum PrimitiveType {
     Nil,
     Boolean,
@@ -213,7 +216,7 @@ const fn primitive(
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum SemanticType {
     Primitive(PrimitiveType),
     Tuple(Vec<TypeId>),
@@ -265,10 +268,12 @@ pub enum SemanticType {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct EffectSummary(u16);
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum Effect {
     Allocates,
     WritesManagedReference,

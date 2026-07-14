@@ -83,6 +83,8 @@ pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration
             dump_method_ids(output, &class.methods);
             output.push_str(" implements ");
             dump_interface_implementations(output, &class.interfaces);
+            output.push_str(" implementsBuiltin ");
+            dump_builtin_interface_implementations(output, &class.builtin_interfaces);
         }
         MirDeclarationKind::Interface(interface) => {
             let _ = write!(
@@ -142,6 +144,39 @@ fn dump_interface_implementations(
                 "im{}@{}=m{}",
                 method.interface_method.raw(),
                 method.slot,
+                method.class_method.raw()
+            );
+        }
+        output.push(']');
+    }
+}
+
+fn dump_builtin_interface_implementations(
+    output: &mut String,
+    implementations: &[MirBuiltinInterfaceImplementation],
+) {
+    if implementations.is_empty() {
+        output.push('-');
+        return;
+    }
+    for (index, implementation) in implementations.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        let _ = write!(
+            output,
+            "b{}:t{}[",
+            implementation.interface.raw(),
+            implementation.interface_type.raw()
+        );
+        for (method_index, method) in implementation.methods.iter().enumerate() {
+            if method_index > 0 {
+                output.push(';');
+            }
+            let _ = write!(
+                output,
+                "iterationMethod#{}=m{}",
+                method.protocol_method.raw(),
                 method.class_method.raw()
             );
         }
@@ -386,6 +421,19 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             );
             dump_value_list(output, arguments);
         }
+        MirInstructionKind::IterationMake {
+            iteration,
+            case,
+            arguments,
+        } => {
+            let _ = write!(
+                output,
+                "iterationMake bt{} iterationCase#{} ",
+                iteration.raw(),
+                case.raw()
+            );
+            dump_value_list(output, arguments);
+        }
         MirInstructionKind::ErrorMake {
             error,
             case,
@@ -525,6 +573,47 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         } => {
             let map = array_element_map_name(*element_map);
             let _ = write!(output, "arrayFill {map} v{} v{}", array.raw(), value.raw());
+        }
+        MirInstructionKind::ListCreate {
+            capacity,
+            element_map,
+        } => {
+            let map = array_element_map_name(*element_map);
+            let capacity =
+                capacity.map_or_else(|| "none".to_owned(), |value| format!("v{}", value.raw()));
+            let _ = write!(output, "listCreate {map} {capacity}");
+        }
+        MirInstructionKind::ListLength { list } => {
+            let _ = write!(output, "listLength v{}", list.raw());
+        }
+        MirInstructionKind::ListGet { list, index } => {
+            dump_binary(output, "listGet", *list, *index);
+        }
+        MirInstructionKind::ListGetChecked { list, index } => {
+            dump_binary(output, "listGetChecked", *list, *index);
+        }
+        MirInstructionKind::ListSet {
+            list,
+            index,
+            value,
+            element_map,
+        } => {
+            let map = array_element_map_name(*element_map);
+            let _ = write!(
+                output,
+                "listSet {map} v{} v{} v{}",
+                list.raw(),
+                index.raw(),
+                value.raw()
+            );
+        }
+        MirInstructionKind::ListAdd {
+            list,
+            value,
+            element_map,
+        } => {
+            let map = array_element_map_name(*element_map);
+            let _ = write!(output, "listAdd {map} v{} v{}", list.raw(), value.raw());
         }
         binary @ (MirInstructionKind::BooleanAnd { .. }
         | MirInstructionKind::BooleanOr { .. }
@@ -816,6 +905,22 @@ fn dump_callable_or_schema_instruction(
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }
+        MirInstructionKind::CallBuiltinInterface {
+            interface,
+            method,
+            arguments,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(
+                output,
+                "call.builtinInterface interface#{} method#{} ",
+                interface.raw(),
+                method.raw()
+            );
+            dump_value_list(output, arguments);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
         MirInstructionKind::CallIndirect {
             callee,
             arguments,
@@ -864,13 +969,40 @@ fn dump_callable_or_schema_instruction(
             let _ = write!(output, "unionMake s{} case#{} ", union.raw(), case.raw());
             dump_value_list(output, arguments);
         }
-        MirInstructionKind::InterfaceUpcast { value, interface } => {
+        MirInstructionKind::IterationIsItem {
+            iteration,
+            definition,
+            item_case,
+            end_case,
+        } => {
             let _ = write!(
                 output,
-                "interface.upcast v{} i{}",
-                value.raw(),
-                interface.raw()
+                "iteration.isItem definition#{} case#{} endCase#{} v{}",
+                definition.raw(),
+                item_case.raw(),
+                end_case.raw(),
+                iteration.raw()
             );
+        }
+        MirInstructionKind::IterationGetItem {
+            iteration,
+            definition,
+            item_case,
+        } => {
+            let _ = write!(
+                output,
+                "iteration.getItem definition#{} case#{} v{}",
+                definition.raw(),
+                item_case.raw(),
+                iteration.raw()
+            );
+        }
+        MirInstructionKind::InterfaceUpcast { value, interface } => {
+            let (prefix, raw) = match interface {
+                pop_foundation::NominalInterfaceId::User(interface) => ('i', interface.raw()),
+                pop_foundation::NominalInterfaceId::Builtin(interface) => ('b', interface.raw()),
+            };
+            let _ = write!(output, "interface.upcast v{} {prefix}{raw}", value.raw());
         }
         MirInstructionKind::CaptureCellAllocate {
             binding,
@@ -1216,6 +1348,7 @@ const fn trap_kind_text(kind: pop_runtime_interface::TrapKind) -> &'static str {
         pop_runtime_interface::TrapKind::NumericConversion => "NumericConversion",
         pop_runtime_interface::TrapKind::InvalidRangeStep => "InvalidRangeStep",
         pop_runtime_interface::TrapKind::BoundsViolation => "BoundsViolation",
+        pop_runtime_interface::TrapKind::ConcurrentModification => "ConcurrentModification",
         pop_runtime_interface::TrapKind::ImpossibleState => "ImpossibleState",
     }
 }

@@ -7,15 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BlockId, ClassId, ErrorId, FieldId, InterfaceId, MethodId, SymbolId, SymbolIdentity, TypeId,
-    UnionCaseId, ValueId,
+    BlockId, ClassId, ErrorId, FieldId, InterfaceId, MethodId, NominalInterfaceId, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
-use pop_runtime_interface::{ObjectMap, ObjectSlot};
-use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena};
+use pop_runtime_interface::{ArrayElementMap, ObjectMap, ObjectSlot};
+use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena, embedded_bootstrap_schema};
 
 use crate::ir::*;
 use crate::lowering::{
-    array_element_map, expected_safe_point_roots, is_managed_reference_type_id,
+    array_element_map, expected_safe_point_roots, is_managed_reference_type_id, list_element_map,
     local_instruction_effects, table_element_maps, terminator_effects,
 };
 use crate::render::{float_kind_text, integer_kind_text};
@@ -79,7 +79,7 @@ pub fn verify_mir_bubble(
             ));
         }
     }
-    let schema = MirSchema::collect(bubble, arena, &mut errors);
+    let schema = MirSchema::collect(bubble, arena, &method_signatures, &mut errors);
     for function in &bubble.functions {
         verify_function(
             function,
@@ -130,6 +130,7 @@ impl<'mir> MirSchema<'mir> {
     fn collect(
         bubble: &'mir MirBubble,
         arena: &TypeArena,
+        method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
         errors: &mut Vec<MirVerificationError>,
     ) -> Self {
         let mut schema = Self {
@@ -215,12 +216,14 @@ impl<'mir> MirSchema<'mir> {
                     schema.enums.insert(declaration.symbol, enumeration);
                 }
                 MirDeclarationKind::Class(class) => {
-                    if arena.get(class.type_id)
-                        != Some(&SemanticType::Class {
-                            class: class.class,
-                            arguments: Vec::new(),
-                        })
-                    {
+                    if !matches!(
+                        arena.get(class.type_id),
+                        Some(SemanticType::Class { class: identity, arguments })
+                            if *identity == class.class
+                                && arguments
+                                    .iter()
+                                    .all(|argument| !arena.contains_type_parameter(*argument))
+                    ) {
                         errors.push(MirVerificationError::InvalidDeclarationType {
                             symbol: declaration.symbol,
                             type_id: class.type_id,
@@ -229,15 +232,23 @@ impl<'mir> MirSchema<'mir> {
                     if schema.classes.insert(class.class, class).is_some() {
                         errors.push(MirVerificationError::DuplicateClass(class.class));
                     }
+                    verify_builtin_interface_implementations(
+                        class,
+                        arena,
+                        method_signatures,
+                        errors,
+                    );
                     schema.collect_fields(class.type_id, &class.fields, true, errors);
                 }
                 MirDeclarationKind::Interface(interface) => {
-                    if arena.get(interface.type_id)
-                        != Some(&SemanticType::Interface {
-                            interface: interface.interface,
-                            arguments: Vec::new(),
-                        })
-                    {
+                    if !matches!(
+                        arena.get(interface.type_id),
+                        Some(SemanticType::Interface { interface: identity, arguments })
+                            if *identity == interface.interface
+                                && arguments
+                                    .iter()
+                                    .all(|argument| !arena.contains_type_parameter(*argument))
+                    ) {
                         errors.push(MirVerificationError::InvalidDeclarationType {
                             symbol: declaration.symbol,
                             type_id: interface.type_id,
@@ -247,7 +258,60 @@ impl<'mir> MirSchema<'mir> {
                 }
             }
         }
+        schema.verify_interface_implementations(method_signatures, errors);
         schema
+    }
+
+    fn verify_interface_implementations(
+        &self,
+        method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+        errors: &mut Vec<MirVerificationError>,
+    ) {
+        for class in self.classes.values() {
+            let mut interfaces = BTreeSet::new();
+            for implementation in class.interfaces() {
+                let Some(interface) = self.interfaces.get(&implementation.interface()) else {
+                    errors.push(MirVerificationError::InvalidInterfaceImplementation {
+                        class: class.class(),
+                        interface: implementation.interface(),
+                    });
+                    continue;
+                };
+                let mut methods = BTreeSet::new();
+                let valid = interfaces.insert(implementation.interface())
+                    && implementation.interface_type() == interface.type_id()
+                    && implementation.methods().len() == interface.methods().len()
+                    && implementation.methods().iter().all(|mapping| {
+                        let Some(required) = interface
+                            .methods()
+                            .iter()
+                            .find(|method| method.method() == mapping.interface_method())
+                        else {
+                            return false;
+                        };
+                        methods.insert(mapping.interface_method())
+                            && mapping.slot() == required.slot()
+                            && class.methods().contains(&mapping.class_method())
+                            && method_signatures.get(&mapping.class_method()).is_some_and(
+                                |(parameters, results, _)| {
+                                    parameters.first() == Some(&class.type_id())
+                                        && parameters[1..] == required.parameters()[..]
+                                        && results == required.results()
+                                },
+                            )
+                    })
+                    && interface
+                        .methods()
+                        .iter()
+                        .all(|required| methods.contains(&required.method()));
+                if !valid {
+                    errors.push(MirVerificationError::InvalidInterfaceImplementation {
+                        class: class.class(),
+                        interface: implementation.interface(),
+                    });
+                }
+            }
+        }
     }
 
     fn collect_fields(
@@ -272,6 +336,90 @@ impl<'mir> MirSchema<'mir> {
                     owner_types: BTreeSet::from([owner_type]),
                     field_type: field.field_type,
                     mutable,
+                },
+            );
+        }
+    }
+}
+
+fn verify_builtin_interface_implementations(
+    class: &MirClassDeclaration,
+    arena: &TypeArena,
+    method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let Some(protocol) = embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.iteration_protocol())
+    else {
+        return;
+    };
+    let mut interfaces = BTreeSet::new();
+    for implementation in class.builtin_interfaces() {
+        let item_type = match arena.get(implementation.interface_type()) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == implementation.interface() && arguments.len() == 1 => arguments[0],
+            _ => {
+                errors.push(
+                    MirVerificationError::InvalidBuiltinInterfaceImplementation {
+                        class: class.class(),
+                        interface: implementation.interface(),
+                    },
+                );
+                continue;
+            }
+        };
+        let expected_protocol_methods = if implementation.interface() == protocol.iterable() {
+            vec![protocol.iterator_method()]
+        } else if implementation.interface() == protocol.iterator() {
+            vec![protocol.iterator_method(), protocol.next_method()]
+        } else {
+            Vec::new()
+        };
+        let iterator_type = arena.find(&SemanticType::Builtin {
+            definition: protocol.iterator(),
+            arguments: vec![item_type],
+        });
+        let iteration_type = arena.find(&SemanticType::Builtin {
+            definition: protocol.iteration(),
+            arguments: vec![item_type],
+        });
+        let mut protocol_methods = BTreeSet::new();
+        let valid = interfaces.insert(implementation.interface())
+            && !expected_protocol_methods.is_empty()
+            && implementation.methods().len() == expected_protocol_methods.len()
+            && implementation.methods().iter().all(|mapping| {
+                let expected_result = if mapping.protocol_method() == protocol.iterator_method() {
+                    iterator_type
+                } else if mapping.protocol_method() == protocol.next_method()
+                    && implementation.interface() == protocol.iterator()
+                {
+                    iteration_type
+                } else {
+                    None
+                };
+                protocol_methods.insert(mapping.protocol_method())
+                    && expected_protocol_methods.contains(&mapping.protocol_method())
+                    && class.methods().contains(&mapping.class_method())
+                    && expected_result.is_some_and(|expected_result| {
+                        method_signatures.get(&mapping.class_method()).is_some_and(
+                            |(parameters, results, _)| {
+                                parameters.as_slice() == [class.type_id()]
+                                    && results.as_slice() == [expected_result]
+                            },
+                        )
+                    })
+            })
+            && expected_protocol_methods
+                .iter()
+                .all(|method| protocol_methods.contains(method));
+        if !valid {
+            errors.push(
+                MirVerificationError::InvalidBuiltinInterfaceImplementation {
+                    class: class.class(),
+                    interface: implementation.interface(),
                 },
             );
         }
@@ -1406,12 +1554,16 @@ fn verify_instruction_types(
     if verify_numeric_instruction(instruction, arena, values, errors) {
         return;
     }
+    if verify_iteration_instruction(instruction, arena, values, errors) {
+        return;
+    }
     if verify_schema_instruction(instruction, arena, schema, values, errors) {
         return;
     }
     if verify_callable_instruction(
         instruction,
         arena,
+        schema,
         values,
         signatures.functions,
         signatures.references,
@@ -1466,6 +1618,29 @@ fn verify_instruction_types(
                 && expected.is_some_and(|expected| values.get(&arguments[0]) == Some(&expected));
             if !valid {
                 errors.push(MirVerificationError::InvalidResultOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::IterationMake {
+            iteration,
+            case,
+            arguments,
+        } => {
+            let expected_item = match arena.get(instruction.result_type()) {
+                Some(SemanticType::Builtin {
+                    definition,
+                    arguments: types,
+                }) if definition == iteration && types.len() == 1 => Some(types[0]),
+                _ => None,
+            };
+            let valid = (case.raw() == 0
+                && arguments.len() == 1
+                && expected_item
+                    .is_some_and(|expected| values.get(&arguments[0]) == Some(&expected)))
+                || (case.raw() == 1 && arguments.is_empty() && expected_item.is_some());
+            if !valid {
+                errors.push(MirVerificationError::InvalidIterationOperation {
                     instruction: instruction.result(),
                 });
             }
@@ -1814,7 +1989,282 @@ fn verify_instruction_types(
                 });
             }
         }
+        MirInstructionKind::ListCreate {
+            capacity,
+            element_map,
+        } => {
+            let Some(_) = list_element_type(arena, instruction.result_type()) else {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+                return;
+            };
+            if let (Some(capacity), Some(integer)) = (capacity, arena.source_type("Int")) {
+                verify_operand_type(instruction.result(), *capacity, integer, values, errors);
+            }
+            if *element_map != list_element_map(arena, instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ListLength { list } => {
+            let Some(list_type) = values.get(list).copied() else {
+                return;
+            };
+            if list_element_type(arena, list_type).is_none() {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *list,
+                    found: list_type,
+                });
+            }
+            if arena.source_type("Int") != Some(instruction.result_type()) {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ListGet { list, index }
+        | MirInstructionKind::ListGetChecked { list, index } => {
+            let Some(list_type) = values.get(list).copied() else {
+                return;
+            };
+            let Some(element_type) = list_element_type(arena, list_type) else {
+                errors.push(MirVerificationError::InvalidCollectionOperand {
+                    instruction: instruction.result(),
+                    operand: *list,
+                    found: list_type,
+                });
+                return;
+            };
+            if let Some(integer) = arena.source_type("Int") {
+                verify_operand_type(instruction.result(), *index, integer, values, errors);
+            }
+            let valid = if matches!(instruction.kind(), MirInstructionKind::ListGet { .. }) {
+                is_optional_of(arena, instruction.result_type(), element_type)
+            } else {
+                instruction.result_type() == element_type
+            };
+            if !valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
+        MirInstructionKind::ListSet {
+            list,
+            index,
+            value,
+            element_map,
+        } => {
+            verify_list_mutation(
+                instruction,
+                *list,
+                Some(*index),
+                *value,
+                *element_map,
+                arena,
+                values,
+                errors,
+            );
+        }
+        MirInstructionKind::ListAdd {
+            list,
+            value,
+            element_map,
+        } => {
+            verify_list_mutation(
+                instruction,
+                *list,
+                None,
+                *value,
+                *element_map,
+                arena,
+                values,
+                errors,
+            );
+        }
         _ => {}
+    }
+}
+
+fn list_element_type(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    let list = embedded_bootstrap_schema()
+        .ok()?
+        .iteration_protocol()?
+        .list();
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == list && arguments.len() == 1 => Some(arguments[0]),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_list_mutation(
+    instruction: &MirInstruction,
+    list: ValueId,
+    index: Option<ValueId>,
+    value: ValueId,
+    element_map: ArrayElementMap,
+    arena: &TypeArena,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let Some(list_type) = values.get(&list).copied() else {
+        return;
+    };
+    let Some(element_type) = list_element_type(arena, list_type) else {
+        errors.push(MirVerificationError::InvalidCollectionOperand {
+            instruction: instruction.result(),
+            operand: list,
+            found: list_type,
+        });
+        return;
+    };
+    if let (Some(index), Some(integer)) = (index, arena.source_type("Int")) {
+        verify_operand_type(instruction.result(), index, integer, values, errors);
+    }
+    verify_operand_type(instruction.result(), value, element_type, values, errors);
+    if element_map != list_element_map(arena, list_type)
+        || arena.source_type("nil") != Some(instruction.result_type())
+    {
+        errors.push(MirVerificationError::InvalidInstructionType {
+            instruction: instruction.result(),
+            result_type: instruction.result_type(),
+        });
+    }
+}
+
+fn verify_iteration_instruction(
+    instruction: &MirInstruction,
+    arena: &TypeArena,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) -> bool {
+    let kind = instruction.kind();
+    if !matches!(
+        kind,
+        MirInstructionKind::CallBuiltinInterface { .. }
+            | MirInstructionKind::IterationIsItem { .. }
+            | MirInstructionKind::IterationGetItem { .. }
+    ) {
+        return false;
+    }
+    let protocol = embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.iteration_protocol());
+    let valid = protocol.is_some_and(|protocol| match kind {
+        MirInstructionKind::CallBuiltinInterface {
+            interface,
+            method,
+            arguments,
+            ..
+        } if arguments.len() == 1 && *method == protocol.iterator_method() => {
+            let result_item =
+                builtin_argument(arena, instruction.result_type(), protocol.iterator());
+            let source_type = values.get(&arguments[0]).copied();
+            result_item.is_some_and(|item| {
+                (*interface == protocol.iterable()
+                    && source_type
+                        .and_then(|source| iteration_source_item(arena, source, protocol))
+                        == Some(item))
+                    || (*interface == protocol.iterator()
+                        && source_type.and_then(|source| {
+                            builtin_argument(arena, source, protocol.iterator())
+                        }) == Some(item))
+            })
+        }
+        MirInstructionKind::CallBuiltinInterface {
+            interface,
+            method,
+            arguments,
+            ..
+        } if arguments.len() == 1 && *method == protocol.next_method() => {
+            let source_item = values
+                .get(&arguments[0])
+                .and_then(|source| builtin_argument(arena, *source, protocol.iterator()));
+            let result_item =
+                builtin_argument(arena, instruction.result_type(), protocol.iteration());
+            *interface == protocol.iterator() && source_item.is_some() && source_item == result_item
+        }
+        MirInstructionKind::IterationIsItem {
+            iteration,
+            definition,
+            item_case,
+            end_case,
+        } => {
+            values.get(iteration).is_some_and(|type_id| {
+                builtin_argument(arena, *type_id, protocol.iteration()).is_some()
+            }) && *definition == protocol.iteration()
+                && *item_case == protocol.item_case()
+                && *end_case == protocol.end_case()
+                && arena.source_type("Boolean") == Some(instruction.result_type())
+        }
+        MirInstructionKind::IterationGetItem {
+            iteration,
+            definition,
+            item_case,
+        } => {
+            let expected = values
+                .get(iteration)
+                .and_then(|type_id| builtin_argument(arena, *type_id, protocol.iteration()));
+            *definition == protocol.iteration()
+                && *item_case == protocol.item_case()
+                && expected == Some(instruction.result_type())
+        }
+        _ => false,
+    });
+    if !valid {
+        errors.push(MirVerificationError::InvalidIterationOperation {
+            instruction: instruction.result(),
+        });
+    }
+    true
+}
+
+fn builtin_argument(
+    arena: &TypeArena,
+    type_id: TypeId,
+    definition: pop_foundation::BuiltinTypeId,
+) -> Option<TypeId> {
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin {
+            definition: actual,
+            arguments,
+        }) if *actual == definition && arguments.len() == 1 => arguments.first().copied(),
+        _ => None,
+    }
+}
+
+fn iteration_source_item(
+    arena: &TypeArena,
+    type_id: TypeId,
+    protocol: pop_types::BootstrapIterationProtocol,
+) -> Option<TypeId> {
+    match arena.get(type_id) {
+        Some(SemanticType::Array(item)) => Some(*item),
+        Some(SemanticType::Table { key, value }) => {
+            arena.find(&SemanticType::Tuple(vec![*key, *value]))
+        }
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) if arguments.len() == 1
+            && (*definition == protocol.list()
+                || *definition == protocol.iterable()
+                || *definition == protocol.iterator()) =>
+        {
+            arguments.first().copied()
+        }
+        _ => None,
     }
 }
 
@@ -2268,9 +2718,59 @@ fn verify_schema_instruction(
                 });
             }
         }
+        MirInstructionKind::InterfaceUpcast { value, interface } => {
+            verify_interface_upcast(
+                instruction,
+                *value,
+                *interface,
+                arena,
+                schema,
+                values,
+                errors,
+            );
+        }
         _ => return false,
     }
     true
+}
+
+fn verify_interface_upcast(
+    instruction: &MirInstruction,
+    value: ValueId,
+    interface: NominalInterfaceId,
+    arena: &TypeArena,
+    schema: &MirSchema<'_>,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let Some(source) = values.get(&value).copied() else {
+        return;
+    };
+    let target = instruction.result_type();
+    let class = match arena.get(source) {
+        Some(SemanticType::Class { class, .. }) => schema.classes.get(class),
+        _ => None,
+    };
+    let valid = match interface {
+        NominalInterfaceId::User(interface) => class.is_some_and(|class| {
+            class.interfaces().iter().any(|implementation| {
+                implementation.interface() == interface && implementation.interface_type() == target
+            })
+        }),
+        NominalInterfaceId::Builtin(interface) => class.is_some_and(|class| {
+            class.builtin_interfaces().iter().any(|implementation| {
+                implementation.interface() == interface && implementation.interface_type() == target
+            })
+        }),
+    };
+    if !valid {
+        errors.push(MirVerificationError::InvalidInterfaceUpcast {
+            instruction: instruction.result(),
+            interface,
+            source,
+            target,
+        });
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2464,6 +2964,7 @@ fn verify_union_make(
 fn verify_callable_instruction(
     instruction: &MirInstruction,
     arena: &TypeArena,
+    schema: &MirSchema<'_>,
     values: &BTreeMap<ValueId, TypeId>,
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
@@ -2527,6 +3028,72 @@ fn verify_callable_instruction(
             if let Some((parameters, results, _)) = method_signatures.get(method) {
                 verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
+        }
+        MirInstructionKind::CallInterface {
+            interface,
+            method,
+            slot,
+            arguments,
+            ..
+        } => {
+            let Some(declaration) = schema.interfaces.get(interface) else {
+                errors.push(MirVerificationError::InvalidCallSignature {
+                    instruction: instruction.result(),
+                    expected_arguments: 0,
+                    found_arguments: arguments.len(),
+                    expected_results: 0,
+                    found_results: usize::from(instruction.has_result()),
+                });
+                return true;
+            };
+            let Some(required) = declaration
+                .methods()
+                .iter()
+                .find(|candidate| candidate.method() == *method && candidate.slot() == *slot)
+            else {
+                errors.push(MirVerificationError::InvalidCallSignature {
+                    instruction: instruction.result(),
+                    expected_arguments: declaration.methods().len(),
+                    found_arguments: arguments.len(),
+                    expected_results: 0,
+                    found_results: usize::from(instruction.has_result()),
+                });
+                return true;
+            };
+            let receiver_type = arguments
+                .first()
+                .and_then(|receiver| values.get(receiver))
+                .copied();
+            let receiver_valid = receiver_type.is_some_and(|receiver_type| {
+                receiver_type == declaration.type_id()
+                    || schema.classes.values().any(|class| {
+                        class.type_id() == receiver_type
+                            && class.interfaces().iter().any(|implementation| {
+                                implementation.interface() == *interface
+                                    && implementation.interface_type() == declaration.type_id()
+                            })
+                    })
+            });
+            if !receiver_valid {
+                errors.push(MirVerificationError::InvalidCallSignature {
+                    instruction: instruction.result(),
+                    expected_arguments: required.parameters().len() + 1,
+                    found_arguments: arguments.len(),
+                    expected_results: required.results().len(),
+                    found_results: usize::from(instruction.has_result()),
+                });
+                return true;
+            }
+            let mut parameters = vec![receiver_type.expect("validated receiver type")];
+            parameters.extend_from_slice(required.parameters());
+            verify_call_signature(
+                instruction,
+                arguments,
+                &parameters,
+                required.results(),
+                values,
+                errors,
+            );
         }
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
@@ -2924,21 +3491,30 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CallInterface {
             arguments: values, ..
         }
+        | MirInstructionKind::CallBuiltinInterface {
+            arguments: values, ..
+        }
         | MirInstructionKind::UnionMake {
             arguments: values, ..
         }
         | MirInstructionKind::ResultMake {
             arguments: values, ..
         }
+        | MirInstructionKind::IterationMake {
+            arguments: values, ..
+        }
         | MirInstructionKind::ErrorMake {
             arguments: values, ..
         } => values.clone(),
         MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
+        MirInstructionKind::IterationIsItem { iteration, .. }
+        | MirInstructionKind::IterationGetItem { iteration, .. } => vec![*iteration],
         MirInstructionKind::ArrayCreate {
             length,
             initial_value,
             ..
         } => vec![*length, *initial_value],
+        MirInstructionKind::ListCreate { capacity, .. } => capacity.iter().copied().collect(),
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
         } => std::iter::once(*callee)
@@ -2980,8 +3556,11 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::ResultGetOk { result, .. }
         | MirInstructionKind::ResultGetError { result, .. } => vec![*result],
         MirInstructionKind::ArrayGet { array, index } => vec![*array, *index],
+        MirInstructionKind::ListGet { list, index }
+        | MirInstructionKind::ListGetChecked { list, index } => vec![*list, *index],
         MirInstructionKind::TableGet { table, key } => vec![*table, *key],
         MirInstructionKind::ArrayLength { array } => vec![*array],
+        MirInstructionKind::ListLength { list } => vec![*list],
         MirInstructionKind::ArrayGetChecked { array, index } => vec![*array, *index],
         MirInstructionKind::ArraySet {
             array,
@@ -2990,6 +3569,10 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             ..
         } => vec![*array, *index, *value],
         MirInstructionKind::ArrayFill { array, value, .. } => vec![*array, *value],
+        MirInstructionKind::ListSet {
+            list, index, value, ..
+        } => vec![*list, *index, *value],
+        MirInstructionKind::ListAdd { list, value, .. } => vec![*list, *value],
         MirInstructionKind::TableSet {
             table, key, value, ..
         } => vec![*table, *key, *value],

@@ -5,8 +5,8 @@
 //! execution is active; it must never leak into canonical MIR.
 use crate::interpreter::ExecutionError;
 use pop_foundation::{
-    BuiltinTypeId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, ResultCaseId, SymbolId,
-    UnionCaseId,
+    BuiltinTypeId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, IterationCaseId,
+    ResultCaseId, SymbolId, UnionCaseId,
 };
 use pop_runtime_interface::{ManagedReference, RuntimeFailure};
 use pop_types::{FloatValue, IntegerValue};
@@ -22,6 +22,7 @@ pub enum MirValue {
     String(String),
     Tuple(Vec<Self>),
     Array(Vec<Self>),
+    List(Vec<Self>),
     Table(Vec<(Self, Self)>),
     Function(SymbolId),
     Enum {
@@ -42,6 +43,11 @@ pub enum MirValue {
     Result {
         definition: BuiltinTypeId,
         case: ResultCaseId,
+        arguments: Vec<Self>,
+    },
+    Iteration {
+        definition: BuiltinTypeId,
+        case: IterationCaseId,
         arguments: Vec<Self>,
     },
     Error {

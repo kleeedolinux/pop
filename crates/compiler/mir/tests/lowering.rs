@@ -456,6 +456,12 @@ fn collections_lower_to_typed_portable_operations_and_round_trip() {
              Array.fill(numbers, 7)\n\
              local count = Array.length(numbers)\n\
              local first = Array.get(numbers, 1)\n\
+             local values = List.withCapacity<<Int>>(4)\n\
+             List.add(values, first)\n\
+             local maybeValue = values[1]\n\
+             local value = List.get(values, 1)\n\
+             values[1] = value\n\
+             local listCount = List.length(values)\n\
              return (names, scores)\n\
          end\n",
     )
@@ -507,6 +513,12 @@ fn collections_lower_to_typed_portable_operations_and_round_trip() {
     assert!(dump.contains("arrayFill scalar"));
     assert!(dump.contains("arrayLength"));
     assert!(dump.contains("arrayGetChecked"));
+    assert!(dump.contains("listCreate scalar"));
+    assert!(dump.contains("listAdd scalar"));
+    assert!(dump.contains("listGet"));
+    assert!(dump.contains("listGetChecked"));
+    assert!(dump.contains("listSet scalar"));
+    assert!(dump.contains("listLength"));
     let reparsed = parse_mir_dump(&dump).expect("collection MIR parses");
     assert_eq!(reparsed.dump(), dump);
     assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());

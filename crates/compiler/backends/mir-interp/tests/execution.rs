@@ -25,6 +25,33 @@ fn executable_source(text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     (mir, front_end.types().clone())
 }
 
+fn executable_modules(texts: &[(&str, &str)]) -> (pop_mir::MirBubble, pop_types::TypeArena) {
+    let modules = texts
+        .iter()
+        .enumerate()
+        .map(|(index, (path, text))| {
+            let raw = u32::try_from(index).expect("test Module count");
+            FrontEndModule::new(
+                ModuleId::from_raw(raw),
+                SourceFile::new(FileId::from_raw(raw), *path, *text).expect("source"),
+            )
+        })
+        .collect();
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        modules,
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    (mir, front_end.types().clone())
+}
+
 fn trap(kind: TrapKind) -> ExecutionError {
     ExecutionError::Runtime(RuntimeFailure::Trap(Trap::new(kind)))
 }
@@ -63,6 +90,204 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .call(choose, &[int(5), int(3)])
             .expect("else branch"),
         vec![int(3)]
+    );
+}
+
+#[test]
+fn portable_cross_bubble_generic_capsules_execute_private_helpers() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library_source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/generics.pop",
+        "namespace Pop.Sequence\n\
+         private function privateIdentity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         public function portableIdentity<T>(value: T): T\n\
+             return privateIdentity(value)\n\
+         end\n",
+    )
+    .expect("library source");
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), library_source)],
+    ));
+    assert!(library.diagnostics().is_empty());
+    let metadata = library
+        .reference_metadata()
+        .expect("portable metadata")
+        .clone();
+
+    let application_source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\n\
+         using Pop.Sequence\n\
+         public function run(): Int\n\
+             return portableIdentity(42)\n\
+         end\n",
+    )
+    .expect("application source");
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![FrontEndModule::new(
+                ModuleId::from_raw(1),
+                application_source,
+            )],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let hir = application.hir().expect("consumer HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, application.types()).expect("specialized MIR");
+    let interpreter = MirInterpreter::new(&mir, application.types()).expect("verified MIR");
+    assert_eq!(
+        interpreter.call(entry, &[]).expect("capsule call"),
+        vec![int(42)]
+    );
+}
+
+#[test]
+fn generalized_iteration_executes_arrays_and_table_tuple_bindings_in_order() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function sum(values: {Int}): Int\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total = total + value\n\
+             end\n\
+             return total\n\
+         end\n\
+         public function sumTable(entries: {[String]: Int}): Int\n\
+             local total = 0\n\
+             for key, value in entries do\n\
+                 if key == \"first\" then\n\
+                     total = total + value\n\
+                 else\n\
+                     total = total + value\n\
+                 end\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified iteration MIR");
+
+    assert_eq!(
+        interpreter
+            .call(
+                mir.functions()[0].symbol(),
+                &[MirValue::Array(vec![int(2), int(3), int(5)])],
+            )
+            .expect("array iteration"),
+        vec![int(10)]
+    );
+    assert_eq!(
+        interpreter
+            .call(
+                mir.functions()[1].symbol(),
+                &[MirValue::Table(vec![
+                    (MirValue::String("first".to_owned()), int(7)),
+                    (MirValue::String("second".to_owned()), int(11)),
+                ])],
+            )
+            .expect("table iteration"),
+        vec![int(18)]
+    );
+}
+
+#[test]
+fn generalized_iteration_observes_replacement_and_traps_structural_mutation() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function replaceDuringIteration(): Int\n\
+             local entries: {[String]: Int} = { first = 1, second = 2 }\n\
+             local total = 0\n\
+             for key, value in entries do\n\
+                 if key == \"first\" then\n\
+                     entries[\"second\"] = 9\n\
+                 end\n\
+                 total = total + value\n\
+             end\n\
+             return total\n\
+         end\n\
+         public function growDuringIteration(): Int\n\
+             local entries: {[String]: Int} = { first = 1 }\n\
+             for key, value in entries do\n\
+                 if key == \"first\" then\n\
+                     entries[\"second\"] = value\n\
+                 end\n\
+             end\n\
+             return 0\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified mutation MIR");
+
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[])
+            .expect("replacement remains visible"),
+        vec![int(10)]
+    );
+    assert_eq!(
+        interpreter.call(mir.functions()[1].symbol(), &[]),
+        Err(trap(TrapKind::ConcurrentModification))
+    );
+}
+
+#[test]
+fn ordinary_pop_sequence_adapters_are_lazy_ordered_and_materialize_on_demand() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function sequenceResult(): Int\n\
+                 local calls = 0\n\
+                 local values: {Int} = {1, 2, 3}\n\
+                 local mapped = map(values, function(value: Int): Int\n\
+                     calls += 1\n\
+                     return value * 2\n\
+                 end)\n\
+                 if calls ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 local filtered = filter(mapped, function(value: Int): Boolean\n\
+                     return value > 2\n\
+                 end)\n\
+                 local collected = collect(filtered)\n\
+                 return calls * 10 + List.get(collected, 1) + List.get(collected, 2)\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("sequenceResult")
+        .symbol();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified Sequence MIR");
+    assert_eq!(
+        interpreter.call(function, &[]).expect("Sequence execution"),
+        vec![int(40)]
     );
 }
 
@@ -683,6 +908,64 @@ fn fixed_array_negative_lengths_and_checked_bounds_trap() {
     for source in [
         "namespace Main\npublic function fail(): Int\nlocal values = Array.create<<Int>>(-1, 0)\nreturn 0\nend\n",
         "namespace Main\npublic function fail(): Int\nlocal values = Array.create<<Int>>(1, 0)\nreturn Array.get(values, 2)\nend\n",
+    ] {
+        let (mir, types) = executable_source(source);
+        let function = mir.functions()[0].symbol();
+        assert!(matches!(
+            MirInterpreter::new(&mir, &types)
+                .expect("verified MIR")
+                .call(function, &[]),
+            Err(ExecutionError::Runtime(RuntimeFailure::Trap(trap)))
+                if trap.kind() == TrapKind::BoundsViolation
+        ));
+    }
+}
+
+#[test]
+fn growable_lists_execute_with_stable_order_and_generalized_iteration() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function lists(): (Int, Int, Int?, Int)\n\
+             local values = List.withCapacity<<Int>>(1)\n\
+             List.add(values, 0)\n\
+             List.add(values, 42)\n\
+             values[1] = 3\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total += value\n\
+             end\n\
+             return (List.length(values), List.get(values, 1), values[3], total)\n\
+         end\n",
+    );
+    let function = mir.functions()[0].symbol();
+    let expected = vec![MirValue::Tuple(vec![
+        int(2),
+        int(3),
+        MirValue::Nil,
+        int(45),
+    ])];
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified MIR")
+            .call(function, &[])
+            .expect("list core operations"),
+        expected
+    );
+    let optimized = optimize_mir(mir, &types).expect("optimized MIR");
+    assert_eq!(
+        MirInterpreter::new(&optimized, &types)
+            .expect("verified optimized MIR")
+            .call(function, &[])
+            .expect("optimized list core operations"),
+        expected
+    );
+}
+
+#[test]
+fn growable_list_negative_capacity_and_checked_bounds_trap() {
+    for source in [
+        "namespace Main\npublic function fail(): Int\nlocal values = List.withCapacity<<Int>>(-1)\nreturn 0\nend\n",
+        "namespace Main\npublic function fail(): Int\nlocal values = List.create<<Int>>()\nreturn List.get(values, 1)\nend\n",
     ] {
         let (mir, types) = executable_source(source);
         let function = mir.functions()[0].symbol();

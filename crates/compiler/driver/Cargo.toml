@@ -19,6 +19,7 @@ pop-backend-llvm.workspace = true
 pop-compile-time.workspace = true
 pop-diagnostics.workspace = true
 pop-documentation.workspace = true
+pop-documentation-generator.workspace = true
 pop-foundation.workspace = true
 pop-hir.workspace = true
 pop-library-bridge.workspace = true
@@ -32,6 +33,9 @@ pop-resolve.workspace = true
 pop-source.workspace = true
 pop-syntax.workspace = true
 pop-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

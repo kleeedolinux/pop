@@ -817,12 +817,49 @@ fn parses_numeric_for_ranges_and_loop_control_without_dynamic_iteration() {
         panic!("stepped numeric for");
     };
     assert!(matches!(
-        step.as_ref().map(|expression| expression.kind()),
+        step.as_ref().map(pop_syntax::ExpressionSyntax::kind),
         Some(ExpressionSyntaxKind::Unary {
             operator: UnaryOperator::Negate,
             ..
         })
     ));
+}
+
+#[test]
+fn parses_nominal_generalized_for_with_single_and_tuple_bindings() {
+    // ADR 0053: one typed source expression, never Lua iterator triples.
+    let body = parse_body(
+        "namespace Example\n\
+         public function visit(values: List<Int>, entries: Table<String, Int>)\n\
+             for value in values do\n\
+                 process(value)\n\
+             end\n\
+             for key, value in entries do\n\
+                 processEntry(key, value)\n\
+             end\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::GeneralizedFor {
+        bindings,
+        iterable,
+        body: loop_body,
+    } = body.statements()[0].kind()
+    else {
+        panic!("generalized for");
+    };
+    assert_eq!(bindings, &["value"]);
+    assert!(matches!(iterable.kind(), ExpressionSyntaxKind::Name(path) if path == &["values"]));
+    assert_eq!(loop_body.len(), 1);
+
+    let StatementSyntaxKind::GeneralizedFor {
+        bindings, iterable, ..
+    } = body.statements()[1].kind()
+    else {
+        panic!("tuple generalized for");
+    };
+    assert_eq!(bindings, &["key", "value"]);
+    assert!(matches!(iterable.kind(), ExpressionSyntaxKind::Name(path) if path == &["entries"]));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! Unified `pop` command and build orchestration.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
@@ -9,10 +9,19 @@ use std::process::{Command, ExitCode};
 
 use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
-use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
+use pop_documentation_generator::{DocumentationMember, render_xml};
+use pop_driver::{
+    CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, ReferenceFunction,
+    ReferenceMetadata, ReferenceType, analyze_bubble,
+};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{lower_hir_bubble, optimize_mir};
-use pop_projects::{BubbleKind, discover_conventional_bubbles, parse_package_manifest};
+use pop_projects::{
+    BubbleKind, BubbleLock, DependencySource, LockMode, LockedBubble, LockedBubbleIdentity,
+    LockedPackage, LockedSource, WorkspaceManifest, apply_lock_policy,
+    discover_conventional_bubbles, discover_workspace_members, encode_lock, parse_package_manifest,
+    parse_workspace_manifest, sha256_hex,
+};
 use pop_resolve::Visibility;
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
@@ -21,7 +30,10 @@ use pop_types::SemanticType;
 const USAGE: &str = "\
 Usage:
     pop check <source.pop> [--dump <hir|mir|ll>]...
+    pop check --manifestPath <bubble.toml>
     pop build <source.pop> --output <executable>
+    pop build --manifestPath <bubble.toml>
+    pop documentation --manifestPath <bubble.toml>
     pop transpile <source.pop> --to c
     pop run <source.pop> [-- <arguments>...]
     pop run --manifestPath <bubble.toml> [-- <arguments>...]
@@ -45,9 +57,21 @@ enum CommandLine {
         source_path: PathBuf,
         dumps: Vec<DumpKind>,
     },
+    PackageCheck {
+        manifest_path: PathBuf,
+        lock_mode: LockMode,
+    },
     Build {
         source_path: PathBuf,
         output_path: PathBuf,
+    },
+    PackageBuild {
+        manifest_path: PathBuf,
+        lock_mode: LockMode,
+    },
+    Documentation {
+        manifest_path: PathBuf,
+        lock_mode: LockMode,
     },
     TranspileToC {
         source_path: PathBuf,
@@ -58,6 +82,7 @@ enum CommandLine {
     },
     PackageRun {
         manifest_path: PathBuf,
+        lock_mode: LockMode,
         arguments: Vec<OsString>,
     },
 }
@@ -66,10 +91,23 @@ fn main() -> ExitCode {
     match parse_arguments(std::env::args_os().skip(1)) {
         Ok(CommandLine::Help) => write_help(),
         Ok(CommandLine::Check { source_path, dumps }) => check_source(&source_path, &dumps),
+        Ok(CommandLine::PackageCheck {
+            manifest_path,
+            lock_mode,
+        }) => check_manifest(&manifest_path, lock_mode),
         Ok(CommandLine::Build {
             source_path,
             output_path,
         }) => build_source(&source_path, &output_path),
+        Ok(CommandLine::PackageBuild {
+            manifest_path,
+            lock_mode,
+        }) => build_manifest(&manifest_path, lock_mode)
+            .map_or(ExitCode::FAILURE, |_| ExitCode::SUCCESS),
+        Ok(CommandLine::Documentation {
+            manifest_path,
+            lock_mode,
+        }) => document_manifest(&manifest_path, lock_mode),
         Ok(CommandLine::TranspileToC { source_path }) => transpile_source_to_c(&source_path),
         Ok(CommandLine::Run {
             source_path,
@@ -77,8 +115,9 @@ fn main() -> ExitCode {
         }) => run_source(&source_path, &arguments),
         Ok(CommandLine::PackageRun {
             manifest_path,
+            lock_mode,
             arguments,
-        }) => run_package(&manifest_path, &arguments),
+        }) => run_manifest(&manifest_path, lock_mode, &arguments),
         Err(error) => {
             eprintln!("pop: {error}\n\n{USAGE}");
             ExitCode::from(2)
@@ -100,6 +139,9 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Comm
     if command == "transpile" {
         return parse_transpile_arguments(arguments);
     }
+    if command == "documentation" {
+        return parse_documentation_arguments(arguments);
+    }
     if command == "run" {
         return parse_run_arguments(arguments);
     }
@@ -110,7 +152,45 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Comm
         ));
     }
 
-    let mut source_path = None;
+    parse_check_arguments(arguments)
+}
+
+fn parse_documentation_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, String> {
+    let Some(option) = arguments.next() else {
+        return Err("`pop documentation` requires `--manifestPath <bubble.toml>`".to_owned());
+    };
+    if option != "--manifestPath" {
+        return Err(format!(
+            "unsupported option `{}`; expected --manifestPath",
+            option.to_string_lossy()
+        ));
+    }
+    let manifest_path = required_manifest_path(arguments.next(), "documentation")?;
+    let lock_mode = parse_lock_controls(arguments)?;
+    Ok(CommandLine::Documentation {
+        manifest_path,
+        lock_mode,
+    })
+}
+
+fn parse_check_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, String> {
+    let Some(first) = arguments.next() else {
+        return Err("`pop check` requires a .pop source path or `--manifestPath`".to_owned());
+    };
+    if first == "--manifestPath" {
+        let manifest_path = required_manifest_path(arguments.next(), "check")?;
+        let lock_mode = parse_lock_controls(arguments)?;
+        return Ok(CommandLine::PackageCheck {
+            manifest_path,
+            lock_mode,
+        });
+    }
+
+    let mut source_path = Some(required_source_path(Some(first), "check")?);
     let mut dumps = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--help" || argument == "-h" {
@@ -173,7 +253,16 @@ fn parse_transpile_arguments(
 fn parse_build_arguments(
     mut arguments: impl Iterator<Item = OsString>,
 ) -> Result<CommandLine, String> {
-    let source_path = required_source_path(arguments.next(), "build")?;
+    let first = arguments.next();
+    if first.as_deref() == Some(OsStr::new("--manifestPath")) {
+        let manifest_path = required_manifest_path(arguments.next(), "build")?;
+        let lock_mode = parse_lock_controls(arguments)?;
+        return Ok(CommandLine::PackageBuild {
+            manifest_path,
+            lock_mode,
+        });
+    }
+    let source_path = required_source_path(first, "build")?;
     let Some(option) = arguments.next() else {
         return Err("`pop build` requires `--output <executable>`".to_owned());
     };
@@ -193,6 +282,18 @@ fn parse_build_arguments(
     })
 }
 
+fn required_manifest_path(argument: Option<OsString>, command: &str) -> Result<PathBuf, String> {
+    let path = argument
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("`pop {command} --manifestPath` requires a bubble.toml path"))?;
+    if path.file_name() != Some(OsStr::new("bubble.toml")) {
+        return Err(format!(
+            "`pop {command} --manifestPath` requires a path named bubble.toml"
+        ));
+    }
+    Ok(path)
+}
+
 fn parse_run_arguments(
     mut arguments: impl Iterator<Item = OsString>,
 ) -> Result<CommandLine, String> {
@@ -200,13 +301,17 @@ fn parse_run_arguments(
         return Err("`pop run` requires a source path or `--manifestPath`".to_owned());
     };
     if first == "--manifestPath" {
-        let manifest_path = arguments
-            .next()
-            .map(PathBuf::from)
-            .ok_or_else(|| "`--manifestPath` requires a bubble.toml path".to_owned())?;
-        let program_arguments = parse_program_arguments(arguments)?;
+        let manifest_path = required_manifest_path(arguments.next(), "run")?;
+        let remaining = arguments.collect::<Vec<_>>();
+        let separator = remaining.iter().position(|argument| argument == "--");
+        let (controls, program_arguments) = separator.map_or_else(
+            || (remaining.as_slice(), Vec::new()),
+            |separator| (&remaining[..separator], remaining[separator + 1..].to_vec()),
+        );
+        let lock_mode = parse_lock_controls(controls.iter().cloned())?;
         return Ok(CommandLine::PackageRun {
             manifest_path,
+            lock_mode,
             arguments: program_arguments,
         });
     }
@@ -215,6 +320,33 @@ fn parse_run_arguments(
     Ok(CommandLine::Run {
         source_path,
         arguments: program_arguments,
+    })
+}
+
+fn parse_lock_controls(arguments: impl IntoIterator<Item = OsString>) -> Result<LockMode, String> {
+    let mut locked = false;
+    let mut offline = false;
+    for argument in arguments {
+        match argument.to_str() {
+            Some("--locked") => locked = true,
+            Some("--offline") => offline = true,
+            Some("--frozen") => {
+                locked = true;
+                offline = true;
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported manifest option `{}`; expected --locked, --offline, or --frozen",
+                    argument.to_string_lossy()
+                ));
+            }
+        }
+    }
+    Ok(match (locked, offline) {
+        (false, false) => LockMode::Normal,
+        (true, false) => LockMode::Locked,
+        (false, true) => LockMode::Offline,
+        (true, true) => LockMode::Frozen,
     })
 }
 
@@ -401,7 +533,9 @@ fn transpile_source_to_c(source_path: &Path) -> ExitCode {
     let Some(program) = lower_native_source(source_path) else {
         return ExitCode::FAILURE;
     };
-    let NativeProgram { mir, types, entry } = program;
+    let NativeProgram {
+        mir, types, entry, ..
+    } = program;
     let options = CLoweringOptions::default()
         .with_entry_point(entry.expect("standalone transpilation has a verified entry"));
     let translation = match lower_mir_to_c(&mir, &types, options) {
@@ -437,7 +571,67 @@ fn run_source(source_path: &Path, arguments: &[OsString]) -> ExitCode {
     }
 }
 
-fn build_package(manifest_path: &Path) -> Option<Vec<PathBuf>> {
+struct LoweredPackage {
+    root: PathBuf,
+    bubbles: Vec<LoweredPackageBubble>,
+}
+
+struct LoweredPackageBubble {
+    bubble: BubbleId,
+    name: String,
+    kind: BubbleKind,
+    root_package: bool,
+    program: NativeProgram,
+}
+
+fn lower_package(manifest_path: &Path) -> Option<LoweredPackage> {
+    let manifest_path = fs::canonicalize(manifest_path)
+        .map_err(|error| {
+            eprintln!(
+                "pop: could not resolve `{}`: {error}",
+                manifest_path.display()
+            );
+        })
+        .ok()?;
+    let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut state = PackageLoweringState::default();
+    lower_package_recursive(&manifest_path, true, &mut state)?;
+    Some(LoweredPackage {
+        root: package_root.to_path_buf(),
+        bubbles: state.bubbles,
+    })
+}
+
+#[derive(Clone)]
+struct ResolvedPackageLibrary {
+    name: String,
+    version: String,
+    metadata: ReferenceMetadata,
+}
+
+#[derive(Default)]
+struct PackageLoweringState {
+    next_bubble: u32,
+    visiting: BTreeSet<PathBuf>,
+    resolved: BTreeMap<PathBuf, Option<ResolvedPackageLibrary>>,
+    bubbles: Vec<LoweredPackageBubble>,
+}
+
+fn lower_package_recursive(
+    manifest_path: &Path,
+    root_package: bool,
+    state: &mut PackageLoweringState,
+) -> Option<Option<ResolvedPackageLibrary>> {
+    if let Some(resolved) = state.resolved.get(manifest_path) {
+        return Some(resolved.clone());
+    }
+    if !state.visiting.insert(manifest_path.to_path_buf()) {
+        eprintln!(
+            "pop: Package dependency cycle includes `{}`",
+            manifest_path.display()
+        );
+        return None;
+    }
     let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest_text = fs::read_to_string(manifest_path)
         .map_err(|error| {
@@ -447,10 +641,76 @@ fn build_package(manifest_path: &Path) -> Option<Vec<PathBuf>> {
     let manifest = parse_package_manifest(&manifest_text)
         .map_err(|error| eprintln!("pop: {error}"))
         .ok()?;
-    if !manifest.dependencies().is_empty() {
-        eprintln!("pop: Package dependency resolution is not available in this native slice");
-        return None;
+
+    let mut external_metadata = Vec::new();
+    for requirement in manifest.dependencies() {
+        let dependency_manifest = match requirement.source() {
+            DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
+            DependencySource::Registry => {
+                eprintln!(
+                    "pop: registry dependency `{}` requires a resolved bubble.lock",
+                    requirement.alias()
+                );
+                return None;
+            }
+            DependencySource::ExactGit { .. } => {
+                eprintln!(
+                    "pop: exact-Git dependency `{}` requires a resolved bubble.lock",
+                    requirement.alias()
+                );
+                return None;
+            }
+            DependencySource::Workspace => {
+                eprintln!(
+                    "pop: workspace-inherited dependency `{}` requires a Workspace root",
+                    requirement.alias()
+                );
+                return None;
+            }
+        };
+        let dependency_manifest = fs::canonicalize(&dependency_manifest)
+            .map_err(|error| {
+                eprintln!(
+                    "pop: could not resolve dependency `{}` at `{}`: {error}",
+                    requirement.alias(),
+                    dependency_manifest.display()
+                );
+            })
+            .ok()?;
+        let Some(library) = lower_package_recursive(&dependency_manifest, false, state)? else {
+            eprintln!(
+                "pop: dependency `{}` has no public library Bubble",
+                requirement.alias()
+            );
+            return None;
+        };
+        if requirement
+            .version_requirement()
+            .is_some_and(|required| required != library.version)
+        {
+            eprintln!(
+                "pop: dependency `{}` requires version {}, but {} was resolved",
+                requirement.alias(),
+                requirement.version_requirement().unwrap_or(""),
+                library.version
+            );
+            return None;
+        }
+        if requirement
+            .bubble()
+            .is_some_and(|selected| selected != library.name)
+        {
+            eprintln!(
+                "pop: dependency `{}` selects Bubble {}, but the Package publishes {}",
+                requirement.alias(),
+                requirement.bubble().unwrap_or(""),
+                library.name
+            );
+            return None;
+        }
+        external_metadata.push(library.metadata);
     }
+
     let source_paths = collect_package_sources(package_root).ok()?;
     let relative_paths: Vec<_> = source_paths.keys().map(String::as_str).collect();
     let bubbles = discover_conventional_bubbles(&manifest, &relative_paths)
@@ -458,16 +718,20 @@ fn build_package(manifest_path: &Path) -> Option<Vec<PathBuf>> {
         .ok()?;
     let selected: Vec<_> = bubbles
         .iter()
-        .filter(|bubble| matches!(bubble.kind(), BubbleKind::Library | BubbleKind::Binary))
+        .filter(|bubble| {
+            bubble.kind() == BubbleKind::Library
+                || root_package && bubble.kind() == BubbleKind::Binary
+        })
         .collect();
     if selected.is_empty() {
-        eprintln!("pop: Package has no library or binary Bubbles");
+        eprintln!("pop: Package has no selected library or binary Bubbles");
         return None;
     }
 
-    let mut lowered = Vec::new();
-    for (index, bubble) in selected.iter().enumerate() {
-        let bubble_id = u32::try_from(index).ok().map(BubbleId::from_raw)?;
+    let mut library_metadata = None;
+    for bubble in selected {
+        let bubble_id = BubbleId::from_raw(state.next_bubble);
+        state.next_bubble = state.next_bubble.checked_add(1)?;
         let modules = bubble
             .modules()
             .iter()
@@ -479,40 +743,280 @@ fn build_package(manifest_path: &Path) -> Option<Vec<PathBuf>> {
             })
             .collect::<Result<Vec<_>, ()>>()
             .ok()?;
-        let program =
-            lower_native_bubble(bubble_id, &modules, bubble.kind() == BubbleKind::Binary)?;
-        lowered.push((*bubble, program));
+        let mut dependency_metadata = external_metadata.clone();
+        if bubble.depends_on_library() {
+            dependency_metadata.push(
+                library_metadata
+                    .clone()
+                    .expect("sorted conventional discovery lowers the library first"),
+            );
+        }
+        let program = lower_native_bubble(
+            bubble_id,
+            &modules,
+            bubble.kind() == BubbleKind::Binary,
+            dependency_metadata,
+        )?;
+        if bubble.kind() == BubbleKind::Library {
+            library_metadata = Some(program.reference_metadata.clone());
+        }
+        state.bubbles.push(LoweredPackageBubble {
+            bubble: bubble_id,
+            name: bubble.name().to_owned(),
+            kind: bubble.kind(),
+            root_package,
+            program,
+        });
     }
 
-    let output_root = package_root.join("target/debug");
+    let library = library_metadata.map(|metadata| ResolvedPackageLibrary {
+        name: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        metadata,
+    });
+    state.visiting.remove(manifest_path);
+    state
+        .resolved
+        .insert(manifest_path.to_path_buf(), library.clone());
+    Some(library)
+}
+
+fn check_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
+    let Some(selection) = manifest_selection(manifest_path) else {
+        return ExitCode::FAILURE;
+    };
+    if prepare_lock(&selection, lock_mode).is_none() {
+        return ExitCode::FAILURE;
+    }
+    if selection
+        .packages
+        .iter()
+        .all(|manifest| lower_package(manifest).is_some())
+    {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn build_manifest(manifest_path: &Path, lock_mode: LockMode) -> Option<Vec<PathBuf>> {
+    let selection = manifest_selection(manifest_path)?;
+    prepare_lock(&selection, lock_mode)?;
+    let shared_output = selection
+        .workspace_root
+        .as_ref()
+        .map(|root| root.join("target/debug"));
+    let mut executables = Vec::new();
+    for manifest in selection.packages {
+        executables.extend(build_package_to(&manifest, shared_output.as_deref())?);
+    }
+    Some(executables)
+}
+
+fn document_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
+    let Some(selection) = manifest_selection(manifest_path) else {
+        return ExitCode::FAILURE;
+    };
+    if prepare_lock(&selection, lock_mode).is_none() {
+        return ExitCode::FAILURE;
+    }
+    let output_root = selection.workspace_root.clone().unwrap_or_else(|| {
+        selection.packages[0]
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    });
+    let output_root = output_root.join("target/documentation");
+    let mut emitted = 0usize;
+    for manifest in selection.packages {
+        let Some(package) = lower_package(&manifest) else {
+            return ExitCode::FAILURE;
+        };
+        for bubble in package
+            .bubbles
+            .iter()
+            .filter(|bubble| bubble.root_package && bubble.kind == BubbleKind::Library)
+        {
+            let members = documentation_members(&bubble.program);
+            let xml = match render_xml(&bubble.name, &members) {
+                Ok(xml) => xml,
+                Err(error) => {
+                    eprintln!("pop: documentation output failed: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let directory = output_root.join(&bubble.name);
+            if let Err(error) = fs::create_dir_all(&directory) {
+                eprintln!(
+                    "pop: could not create documentation output `{}`: {error}",
+                    directory.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            let output = directory.join("documentation.xml");
+            if let Err(error) = fs::write(&output, xml) {
+                eprintln!(
+                    "pop: could not write documentation output `{}`: {error}",
+                    output.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            emitted += 1;
+        }
+    }
+    if emitted == 0 {
+        eprintln!("pop: `pop documentation` requires a selected library Bubble");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn documentation_members(program: &NativeProgram) -> Vec<DocumentationMember> {
+    let documentation: BTreeMap<_, _> = program
+        .checked_documentation
+        .iter()
+        .map(|documentation| (documentation.identity(), documentation.fragment()))
+        .collect();
+    program
+        .reference_metadata
+        .functions()
+        .iter()
+        .filter_map(|function| {
+            documentation.get(&function.identity()).map(|fragment| {
+                DocumentationMember::new(documentation_member_id(function), (*fragment).clone())
+            })
+        })
+        .collect()
+}
+
+fn documentation_member_id(function: &ReferenceFunction) -> String {
+    let type_parameters = function
+        .type_parameters()
+        .iter()
+        .map(|parameter| parameter.name())
+        .collect::<Vec<_>>();
+    let parameters = function
+        .parameters()
+        .iter()
+        .map(|parameter| reference_type_text(parameter.parameter_type(), &type_parameters))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "function:{}.{}({parameters})",
+        function.namespace(),
+        function.name()
+    )
+}
+
+fn reference_type_text(reference: &ReferenceType, type_parameters: &[&str]) -> String {
+    match reference {
+        ReferenceType::Primitive(primitive) => pop_types::PrimitiveType::source_schema()
+            .iter()
+            .copied()
+            .find(|entry| entry.primitive() == *primitive && !entry.is_alias())
+            .map_or_else(
+                || format!("{primitive:?}"),
+                |entry| entry.canonical_name().to_owned(),
+            ),
+        ReferenceType::TypeParameter(index) => type_parameters
+            .get(usize::from(*index))
+            .map_or_else(|| format!("T{index}"), |name| (*name).to_owned()),
+        ReferenceType::Tuple(elements) => format!(
+            "({})",
+            elements
+                .iter()
+                .map(|element| reference_type_text(element, type_parameters))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        ReferenceType::Function {
+            parameters,
+            results,
+            ..
+        } => format!(
+            "function({})->({})",
+            parameters
+                .iter()
+                .map(|parameter| reference_type_text(parameter, type_parameters))
+                .collect::<Vec<_>>()
+                .join(","),
+            results
+                .iter()
+                .map(|result| reference_type_text(result, type_parameters))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        ReferenceType::Array(element) => {
+            format!("Array<{}>", reference_type_text(element, type_parameters))
+        }
+        ReferenceType::Table { key, value } => format!(
+            "Table<{},{}>",
+            reference_type_text(key, type_parameters),
+            reference_type_text(value, type_parameters)
+        ),
+        ReferenceType::Optional(element) => {
+            format!("{}?", reference_type_text(element, type_parameters))
+        }
+        ReferenceType::Builtin {
+            definition,
+            arguments,
+        } => {
+            let arguments = arguments
+                .iter()
+                .map(|argument| reference_type_text(argument, type_parameters))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("Builtin{}<{arguments}>", definition.raw())
+        }
+        ReferenceType::Union(elements) => elements
+            .iter()
+            .map(|element| reference_type_text(element, type_parameters))
+            .collect::<Vec<_>>()
+            .join("|"),
+    }
+}
+
+fn build_package_to(
+    manifest_path: &Path,
+    selected_output_root: Option<&Path>,
+) -> Option<Vec<PathBuf>> {
+    let package = lower_package(manifest_path)?;
+
+    let output_root = selected_output_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| package.root.join("target/debug"));
     let dependency_root = output_root.join("deps");
     fs::create_dir_all(&dependency_root)
         .map_err(|error| eprintln!("pop: could not create build output: {error}"))
         .ok()?;
     let mut library_objects = Vec::new();
     let mut binary_objects = Vec::new();
-    for (bubble, program) in &lowered {
-        let suffix = if bubble.kind() == BubbleKind::Library {
+    for bubble in &package.bubbles {
+        let suffix = if bubble.kind == BubbleKind::Library {
             "library"
         } else {
             "binary"
         };
-        let object = dependency_root.join(format!("{}.{}.o", bubble.name(), suffix));
-        emit_native_object(program, &object)?;
-        if bubble.kind() == BubbleKind::Library {
+        let object = dependency_root.join(format!(
+            "{}.b{}.{}.o",
+            bubble.name,
+            bubble.bubble.raw(),
+            suffix
+        ));
+        emit_native_object(&bubble.program, &object)?;
+        if bubble.kind == BubbleKind::Library {
             library_objects.push(object);
-        } else {
-            binary_objects.push((*bubble, object));
+        } else if bubble.root_package {
+            binary_objects.push((bubble, object));
         }
     }
 
     let mut executables = Vec::new();
     for (bubble, object) in binary_objects {
         let mut objects = vec![object];
-        if bubble.depends_on_library() {
-            objects.extend(library_objects.iter().cloned());
-        }
-        let executable = output_root.join(bubble.name());
+        objects.extend(library_objects.iter().cloned());
+        let executable = output_root.join(&bubble.name);
         if link_native_executable(&objects, &executable) != ExitCode::SUCCESS {
             return None;
         }
@@ -521,8 +1025,8 @@ fn build_package(manifest_path: &Path) -> Option<Vec<PathBuf>> {
     Some(executables)
 }
 
-fn run_package(manifest_path: &Path, arguments: &[OsString]) -> ExitCode {
-    let Some(executables) = build_package(manifest_path) else {
+fn run_manifest(manifest_path: &Path, lock_mode: LockMode, arguments: &[OsString]) -> ExitCode {
+    let Some(executables) = build_manifest(manifest_path, lock_mode) else {
         return ExitCode::FAILURE;
     };
     let [executable] = executables.as_slice() else {
@@ -530,6 +1034,331 @@ fn run_package(manifest_path: &Path, arguments: &[OsString]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     execute_native(executable, arguments)
+}
+
+struct ManifestSelection {
+    workspace_root: Option<PathBuf>,
+    packages: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct ResolvedLockPackage {
+    name: String,
+    version: String,
+    library: Option<LockedBubbleIdentity>,
+}
+
+struct LockResolutionState {
+    root: PathBuf,
+    selected_roots: BTreeSet<PathBuf>,
+    visiting: BTreeSet<PathBuf>,
+    resolved: BTreeMap<PathBuf, ResolvedLockPackage>,
+    packages: Vec<LockedPackage>,
+    bubbles: Vec<LockedBubble>,
+}
+
+fn prepare_lock(selection: &ManifestSelection, mode: LockMode) -> Option<()> {
+    let root = selection.workspace_root.clone().unwrap_or_else(|| {
+        selection.packages[0]
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    });
+    let lock = resolve_selection_lock(selection, &root)?;
+    let proposed = encode_lock(&lock)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+    let lock_path = root.join("bubble.lock");
+    let existing = match fs::read(&lock_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!("pop: could not read `{}`: {error}", lock_path.display());
+            return None;
+        }
+    };
+    let changed = apply_lock_policy(existing.as_deref(), &proposed, mode, false)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+    if changed {
+        write_lock_atomically(&lock_path, &proposed)?;
+    }
+    Some(())
+}
+
+fn resolve_selection_lock(selection: &ManifestSelection, root: &Path) -> Option<BubbleLock> {
+    let selected_roots = selection
+        .packages
+        .iter()
+        .map(|manifest| fs::canonicalize(manifest).ok())
+        .collect::<Option<BTreeSet<_>>>()?;
+    let mut state = LockResolutionState {
+        root: fs::canonicalize(root).ok()?,
+        selected_roots,
+        visiting: BTreeSet::new(),
+        resolved: BTreeMap::new(),
+        packages: Vec::new(),
+        bubbles: Vec::new(),
+    };
+    let roots = state.selected_roots.iter().cloned().collect::<Vec<_>>();
+    for manifest in roots {
+        resolve_lock_package(&manifest, &mut state)?;
+    }
+    BubbleLock::new("1", native_target().triple(), state.packages, state.bubbles)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()
+}
+
+fn resolve_lock_package(
+    manifest_path: &Path,
+    state: &mut LockResolutionState,
+) -> Option<ResolvedLockPackage> {
+    let manifest_path = fs::canonicalize(manifest_path).ok()?;
+    if let Some(resolved) = state.resolved.get(&manifest_path) {
+        return Some(resolved.clone());
+    }
+    if !state.visiting.insert(manifest_path.clone()) {
+        eprintln!(
+            "pop: Package dependency cycle includes `{}`",
+            manifest_path.display()
+        );
+        return None;
+    }
+    let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|error| eprintln!("pop: could not read `{}`: {error}", manifest_path.display()))
+        .ok()?;
+    let manifest = parse_package_manifest(&manifest_text)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+
+    let mut external_libraries = Vec::new();
+    for requirement in manifest.dependencies() {
+        let dependency_manifest = match requirement.source() {
+            DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
+            DependencySource::Registry => {
+                eprintln!(
+                    "pop: registry dependency `{}` is not available without registry resolution",
+                    requirement.alias()
+                );
+                return None;
+            }
+            DependencySource::ExactGit { .. } => {
+                eprintln!(
+                    "pop: exact-Git dependency `{}` is not available without Git resolution",
+                    requirement.alias()
+                );
+                return None;
+            }
+            DependencySource::Workspace => {
+                eprintln!(
+                    "pop: workspace dependency `{}` has no inherited resolution entry",
+                    requirement.alias()
+                );
+                return None;
+            }
+        };
+        let dependency = resolve_lock_package(&dependency_manifest, state)?;
+        if requirement
+            .version_requirement()
+            .is_some_and(|required| required != dependency.version)
+        {
+            eprintln!("pop: dependency version mismatch for `{}`", dependency.name);
+            return None;
+        }
+        let library = dependency.library.clone().or_else(|| {
+            eprintln!(
+                "pop: dependency `{}` has no library Bubble",
+                dependency.name
+            );
+            None
+        })?;
+        external_libraries.push(library);
+    }
+
+    let source_paths = collect_package_sources(package_root).ok()?;
+    let relative_paths = source_paths.keys().map(String::as_str).collect::<Vec<_>>();
+    let discovered = discover_conventional_bubbles(&manifest, &relative_paths)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+    let selected_root = state.selected_roots.contains(&manifest_path);
+    let mut library = None;
+    for bubble in discovered.iter().filter(|bubble| {
+        bubble.kind() == BubbleKind::Library || selected_root && bubble.kind() == BubbleKind::Binary
+    }) {
+        let identity = LockedBubbleIdentity::new(manifest.name(), bubble.name(), bubble.kind());
+        let mut dependencies = external_libraries.clone();
+        if bubble.depends_on_library() {
+            dependencies.push(
+                library
+                    .clone()
+                    .expect("conventional discovery sorts the library first"),
+            );
+        }
+        state.bubbles.push(
+            LockedBubble::new(manifest.name(), bubble.name(), bubble.kind(), dependencies)
+                .map_err(|error| eprintln!("pop: {error}"))
+                .ok()?,
+        );
+        if bubble.kind() == BubbleKind::Library {
+            library = Some(identity);
+        }
+    }
+
+    let source = relative_resolution_path(&state.root, package_root)?;
+    let content_hash = package_content_hash(&manifest_path, &source_paths)?;
+    state.packages.push(
+        LockedPackage::new(
+            manifest.name(),
+            manifest.version(),
+            LockedSource::LocalPath(source),
+            content_hash,
+            std::iter::empty::<String>(),
+        )
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?,
+    );
+    let resolved = ResolvedLockPackage {
+        name: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        library,
+    };
+    state.visiting.remove(&manifest_path);
+    state.resolved.insert(manifest_path, resolved.clone());
+    Some(resolved)
+}
+
+fn package_content_hash(
+    manifest_path: &Path,
+    sources: &BTreeMap<String, PathBuf>,
+) -> Option<String> {
+    let mut payload = Vec::new();
+    append_hash_input(&mut payload, "bubble.toml", &fs::read(manifest_path).ok()?);
+    for (relative, source) in sources {
+        append_hash_input(&mut payload, relative, &fs::read(source).ok()?);
+    }
+    Some(sha256_hex(&payload))
+}
+
+fn append_hash_input(payload: &mut Vec<u8>, path: &str, bytes: &[u8]) {
+    payload.extend_from_slice(&(path.len() as u64).to_le_bytes());
+    payload.extend_from_slice(path.as_bytes());
+    payload.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(bytes);
+}
+
+fn relative_resolution_path(root: &Path, package: &Path) -> Option<String> {
+    let root = fs::canonicalize(root).ok()?;
+    let package = fs::canonicalize(package).ok()?;
+    if root == package {
+        return Some(".".to_owned());
+    }
+    let root_components = root.components().collect::<Vec<_>>();
+    let package_components = package.components().collect::<Vec<_>>();
+    let common = root_components
+        .iter()
+        .zip(&package_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut components = vec!["..".to_owned(); root_components.len().saturating_sub(common)];
+    components.extend(
+        package_components[common..]
+            .iter()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned()),
+    );
+    Some(components.join("/"))
+}
+
+fn write_lock_atomically(path: &Path, bytes: &[u8]) -> Option<()> {
+    let temporary = path.with_extension(format!("lock.tmp-{}", std::process::id()));
+    fs::write(&temporary, bytes)
+        .map_err(|error| eprintln!("pop: could not write `{}`: {error}", temporary.display()))
+        .ok()?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        eprintln!(
+            "pop: could not publish `{}` atomically: {error}",
+            path.display()
+        );
+        return None;
+    }
+    Some(())
+}
+
+fn manifest_selection(manifest_path: &Path) -> Option<ManifestSelection> {
+    let manifest_path = fs::canonicalize(manifest_path)
+        .map_err(|error| {
+            eprintln!(
+                "pop: could not resolve `{}`: {error}",
+                manifest_path.display()
+            );
+        })
+        .ok()?;
+    let text = fs::read_to_string(&manifest_path)
+        .map_err(|error| eprintln!("pop: could not read `{}`: {error}", manifest_path.display()))
+        .ok()?;
+    if !text.lines().any(|line| line.trim() == "[workspace]") {
+        return Some(ManifestSelection {
+            workspace_root: None,
+            packages: vec![manifest_path],
+        });
+    }
+
+    let workspace = parse_workspace_manifest(&text)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    if text.lines().any(|line| line.trim() == "[package]") {
+        return Some(ManifestSelection {
+            workspace_root: Some(root.to_path_buf()),
+            packages: vec![manifest_path],
+        });
+    }
+    let candidates = workspace_candidates(root, &workspace)?;
+    let members = discover_workspace_members(&workspace, &candidates)
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+    let selected = if workspace.default_members().is_empty() {
+        members
+    } else {
+        workspace.default_members().to_vec()
+    };
+    Some(ManifestSelection {
+        workspace_root: Some(root.to_path_buf()),
+        packages: selected
+            .into_iter()
+            .map(|member| root.join(member).join("bubble.toml"))
+            .collect(),
+    })
+}
+
+fn workspace_candidates(root: &Path, workspace: &WorkspaceManifest) -> Option<Vec<String>> {
+    let mut candidates = BTreeSet::new();
+    for pattern in workspace.members() {
+        if let Some(prefix) = pattern.strip_suffix("/*") {
+            let directory = root.join(prefix);
+            let mut entries = fs::read_dir(&directory)
+                .map_err(|error| {
+                    eprintln!(
+                        "pop: could not inspect Workspace member root `{}`: {error}",
+                        directory.display()
+                    );
+                })
+                .ok()?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| eprintln!("pop: could not inspect Workspace members: {error}"))
+                .ok()?;
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                if entry.file_type().ok()?.is_dir() && entry.path().join("bubble.toml").is_file() {
+                    candidates.insert(format!("{prefix}/{}", entry.file_name().to_string_lossy()));
+                }
+            }
+        } else if root.join(pattern).join("bubble.toml").is_file() {
+            candidates.insert(pattern.clone());
+        }
+    }
+    Some(candidates.into_iter().collect())
 }
 
 fn execute_native(executable: &Path, arguments: &[OsString]) -> ExitCode {
@@ -608,6 +1437,8 @@ struct NativeProgram {
     mir: pop_mir::MirBubble,
     types: pop_types::TypeArena,
     entry: Option<SymbolId>,
+    reference_metadata: ReferenceMetadata,
+    checked_documentation: Vec<CheckedDocumentation>,
 }
 
 fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
@@ -615,6 +1446,7 @@ fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
         BubbleId::from_raw(0),
         &[(source_path.to_path_buf(), source_path.to_path_buf())],
         true,
+        Vec::new(),
     )
 }
 
@@ -622,6 +1454,7 @@ fn lower_native_bubble(
     bubble: BubbleId,
     modules: &[(PathBuf, PathBuf)],
     requires_entry: bool,
+    dependency_metadata: Vec<ReferenceMetadata>,
 ) -> Option<NativeProgram> {
     let modules = modules
         .iter()
@@ -645,12 +1478,17 @@ fn lower_native_bubble(
         })
         .collect::<Result<Vec<_>, ()>>()
         .ok()?;
+    let dependencies = dependency_metadata
+        .iter()
+        .map(ReferenceMetadata::bubble)
+        .collect();
     let input = FrontEndBubbleInput::new(
         bubble,
         NamespaceId::from_raw(bubble.raw()),
-        Vec::new(),
+        dependencies,
         modules,
-    );
+    )
+    .with_reference_metadata(dependency_metadata);
     let input = if requires_entry {
         input.with_implicit_main_entry(ModuleId::from_raw(0))
     } else {
@@ -681,10 +1519,18 @@ fn lower_native_bubble(
             );
         })
         .ok()?;
+    let reference_metadata = result
+        .reference_metadata()
+        .map_err(|error| eprintln!("pop: public reference metadata emission failed: {error:?}"))
+        .ok()?
+        .clone();
+    let checked_documentation = result.checked_documentation().to_vec();
     Some(NativeProgram {
         mir,
         types: result.types().clone(),
         entry,
+        reference_metadata,
+        checked_documentation,
     })
 }
 

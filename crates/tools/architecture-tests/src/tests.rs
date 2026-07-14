@@ -306,8 +306,14 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
             line.starts_with("pop-") && line.contains(" = { path = \"") && line.ends_with("\" }");
         let approved_inkwell = line
             == "inkwell = { version = \"0.9.0\", default-features = false, features = [\"llvm22-1-prefer-dynamic\", \"target-x86\"] }";
+        let approved_artifact_dependency = matches!(
+            line,
+            "serde = { version = \"1.0.228\", features = [\"derive\"] }"
+                | "serde_json = \"1.0.150\""
+                | "sha2 = \"0.11.0\""
+        );
         assert!(
-            local || approved_inkwell,
+            local || approved_inkwell || approved_artifact_dependency,
             "unapproved workspace dependency: {line}"
         );
     }
@@ -328,8 +334,33 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                     line.starts_with("pop-") && line.ends_with(".workspace = true");
                 let inherited_inkwell = *member == "crates/compiler/backends/llvm"
                     && line == "inkwell.workspace = true";
+                let serde_projection = matches!(
+                    *member,
+                    "crates/compiler/foundation"
+                        | "crates/compiler/resolve"
+                        | "crates/compiler/types"
+                        | "crates/compiler/hir"
+                ) && line == "serde.workspace = true";
+                let project_artifact_dependency = *member == "crates/compiler/projects"
+                    && matches!(
+                        line,
+                        "serde.workspace = true"
+                            | "serde_json.workspace = true"
+                            | "sha2.workspace = true"
+                    );
+                let driver_artifact_dependency = *member == "crates/compiler/driver"
+                    && matches!(
+                        line,
+                        "serde.workspace = true"
+                            | "serde_json.workspace = true"
+                            | "sha2.workspace = true"
+                    );
                 assert!(
-                    inherited_local || inherited_inkwell,
+                    inherited_local
+                        || inherited_inkwell
+                        || serde_projection
+                        || project_artifact_dependency
+                        || driver_artifact_dependency,
                     "{} {table} entry is not inherited from the workspace: {line}",
                     manifest_path.display(),
                 );

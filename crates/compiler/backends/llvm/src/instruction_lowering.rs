@@ -7,6 +7,7 @@
 use pop_foundation::{BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
 use pop_mir::{MirInstructionKind, MirTerminator};
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
+use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -77,6 +78,15 @@ pub(crate) fn lower_instruction(
             )
         }
         MirInstructionKind::ResultMake {
+            case, arguments, ..
+        } => lower_union_make(
+            &result,
+            pop_foundation::UnionCaseId::from_raw(case.raw()),
+            arguments,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::IterationMake {
             case, arguments, ..
         } => lower_union_make(
             &result,
@@ -490,6 +500,45 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::CallBuiltinInterface {
+            method, arguments, ..
+        } => {
+            let receiver_type = arguments
+                .first()
+                .and_then(|receiver| value_types.get(receiver))
+                .copied();
+            let protocol = pop_types::embedded_bootstrap_schema()
+                .ok()
+                .and_then(|schema| schema.iteration_protocol());
+            if receiver_type.is_some_and(|receiver| {
+                matches!(
+                    (types.get(receiver), protocol),
+                    (Some(SemanticType::Builtin { definition, .. }), Some(protocol))
+                        if *definition == protocol.iterator()
+                )
+            }) {
+                call_line(
+                    &result,
+                    result_type,
+                    &format!(
+                        "@{}",
+                        builtin_interface_name(bubble, receiver_type.expect("checked"), *method)
+                    ),
+                    arguments,
+                    value_types,
+                    types,
+                )?
+            } else {
+                lower_builtin_iteration_call(
+                    &result,
+                    instruction.result_type(),
+                    *method,
+                    arguments,
+                    value_types,
+                    types,
+                )?
+            }
+        }
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
         } => {
@@ -590,6 +639,64 @@ pub(crate) fn lower_instruction(
                 lower_array_fill(&result, *array, *value, value_types, types)?
             }
         }
+        MirInstructionKind::ListCreate {
+            capacity,
+            element_map,
+        } => lower_list_create(&result, *capacity, *element_map),
+        MirInstructionKind::ListLength { list } => lower_array_output_call(
+            &result,
+            instruction.result_type(),
+            RuntimeOperation::ListLength,
+            &[*list],
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ListGet { list, index } => lower_optional_collection_get(
+            &result,
+            *list,
+            *index,
+            instruction.result_type(),
+            RuntimeOperation::ListGet,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ListGetChecked { list, index } => lower_array_output_call(
+            &result,
+            instruction.result_type(),
+            RuntimeOperation::ListGetChecked,
+            &[*list, *index],
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ListSet {
+            list,
+            index,
+            value,
+            element_map,
+        } => lower_list_mutation(
+            &result,
+            RuntimeOperation::ListSet,
+            *list,
+            Some(*index),
+            *value,
+            *element_map,
+            value_types,
+            types,
+        )?,
+        MirInstructionKind::ListAdd {
+            list,
+            value,
+            element_map,
+        } => lower_list_mutation(
+            &result,
+            RuntimeOperation::ListAdd,
+            *list,
+            None,
+            *value,
+            *element_map,
+            value_types,
+            types,
+        )?,
         MirInstructionKind::RecordUpdate {
             record,
             base,
@@ -630,6 +737,19 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::UnionMake {
             case, arguments, ..
         } => lower_union_make(&result, *case, arguments, value_types, types)?,
+        MirInstructionKind::IterationIsItem { iteration, .. } => format!(
+            "{result}_tag = call i64 @{}(i64 %v{}, i64 1)\n{result} = icmp eq i64 {result}_tag, 0",
+            native_runtime_symbol(RuntimeOperation::FieldGet),
+            iteration.raw()
+        ),
+        MirInstructionKind::IterationGetItem { iteration, .. } => lower_runtime_slot_load_named(
+            &result,
+            instruction.result_type(),
+            &format!("%v{}", iteration.raw()),
+            2,
+            types,
+        )?
+        .join("\n"),
         MirInstructionKind::InterfaceUpcast { value, .. } => {
             format!("{result} = add i64 %v{}, 0", value.raw())
         }
@@ -685,6 +805,106 @@ pub(crate) fn lower_instruction(
         )?,
     };
     Ok(line)
+}
+
+pub(crate) fn lower_builtin_iteration_call(
+    result: &str,
+    result_type: TypeId,
+    method: pop_foundation::IterationProtocolMethodId,
+    arguments: &[ValueId],
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let [receiver] = arguments else {
+        return Err(LlvmLoweringError::InvalidType(result_type));
+    };
+    let receiver_type = *values
+        .get(receiver)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    if method.raw() == 0 {
+        let protocol = pop_types::embedded_bootstrap_schema()
+            .ok()
+            .and_then(|schema| schema.iteration_protocol())
+            .ok_or(LlvmLoweringError::InvalidType(receiver_type))?;
+        let kind = match types.get(receiver_type) {
+            Some(SemanticType::Array(_)) => IterationCollectionKind::Array,
+            Some(SemanticType::Table { .. }) => IterationCollectionKind::Table,
+            Some(SemanticType::Builtin { definition, .. }) if *definition == protocol.list() => {
+                IterationCollectionKind::List
+            }
+            Some(SemanticType::Builtin { definition, .. })
+                if *definition == protocol.iterator() =>
+            {
+                return Ok(format!("{result} = add i64 %v{}, 0", receiver.raw()));
+            }
+            _ => return Err(LlvmLoweringError::InvalidType(receiver_type)),
+        };
+        return Ok(format!(
+            "{result} = call i64 @{}(i64 %v{}, i8 {})",
+            native_runtime_symbol(RuntimeOperation::IterationAcquire),
+            receiver.raw(),
+            kind as u8
+        ));
+    }
+    if method.raw() != 1 {
+        return Err(LlvmLoweringError::InvalidType(result_type));
+    }
+    let item_type = match types.get(result_type) {
+        Some(SemanticType::Builtin { arguments, .. }) if arguments.len() == 1 => arguments[0],
+        _ => return Err(LlvmLoweringError::InvalidType(result_type)),
+    };
+    let output = format!("{result}_iteration_output");
+    let status = format!("{result}_iteration_status");
+    let item = format!("{result}_iteration_item");
+    let end = format!("{result}_iteration_end");
+    let valid = format!("{result}_iteration_valid");
+    let trap = format!("{}_iteration_trap", result.trim_start_matches('%'));
+    let continuation = format!("{}_iteration_continue", result.trim_start_matches('%'));
+    let mut lines = vec![
+        format!("{output} = alloca i64"),
+        format!(
+            "{status} = call i8 @{}(i64 %v{}, ptr {output})",
+            native_runtime_symbol(RuntimeOperation::IterationNext),
+            receiver.raw()
+        ),
+        format!(
+            "{item} = icmp eq i8 {status}, {}",
+            IterationStatus::Item as u8
+        ),
+        format!(
+            "{end} = icmp eq i8 {status}, {}",
+            IterationStatus::End as u8
+        ),
+        format!("{valid} = or i1 {item}, {end}"),
+        format!("br i1 {valid}, label %{continuation}, label %{trap}"),
+        format!("{trap}:"),
+        format!(
+            "call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "unreachable".to_owned(),
+        format!("{continuation}:"),
+    ];
+    let reference_slots = if is_managed_type(item_type, types) {
+        vec![1]
+    } else {
+        Vec::new()
+    };
+    lines.extend(lower_mapped_allocation(result, 2, &reference_slots));
+    lines.extend([
+        format!("{result}_iteration_tag_i8 = sub i8 {status}, 1"),
+        format!("{result}_iteration_tag = zext i8 {result}_iteration_tag_i8 to i64"),
+        format!("{result}_iteration_payload = load i64, ptr {output}"),
+        format!(
+            "call i8 @{}(i64 {result}, i64 1, i64 {result}_iteration_tag)",
+            native_runtime_symbol(RuntimeOperation::FieldSet)
+        ),
+        format!(
+            "call i8 @{}(i64 {result}, i64 2, i64 {result}_iteration_payload)",
+            native_runtime_symbol(RuntimeOperation::FieldSet)
+        ),
+    ]);
+    Ok(lines.join("\n"))
 }
 
 fn lower_string_format(
@@ -1648,6 +1868,128 @@ pub(crate) fn lower_optional_array_get(
     Ok(lines.join("\n"))
 }
 
+pub(crate) fn lower_optional_collection_get(
+    result: &str,
+    collection: ValueId,
+    index: ValueId,
+    result_type: TypeId,
+    operation: RuntimeOperation,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let inner = optional_inner_type(types, result_type)
+        .ok_or(LlvmLoweringError::InvalidType(result_type))?;
+    let inner_type = llvm_type(inner, types)?;
+    let output = format!("{result}_output");
+    let status = format!("{result}_status");
+    let present = format!("{result}_present");
+    let payload = format!("{result}_payload");
+    let partial = format!("{result}_partial");
+    let collection_type = llvm_value_type(values, collection, types)?;
+    let index_type = llvm_value_type(values, index, types)?;
+    let mut lines = vec![
+        format!("store i64 0, ptr {output}"),
+        format!(
+            "{status} = call i8 @{}({collection_type} %v{}, {index_type} %v{}, ptr {output})",
+            native_runtime_symbol(operation),
+            collection.raw(),
+            index.raw(),
+        ),
+        format!("{present} = icmp ne i8 {status}, 0"),
+    ];
+    lines.extend(lower_array_output_load(&payload, inner, &output, types)?);
+    lines.extend([
+        format!("{partial} = insertvalue {{ i1, {inner_type} }} zeroinitializer, i1 {present}, 0"),
+        format!(
+            "{result} = insertvalue {{ i1, {inner_type} }} {partial}, {inner_type} {payload}, 1"
+        ),
+    ]);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn lower_list_create(
+    result: &str,
+    capacity: Option<ValueId>,
+    element_map: ArrayElementMap,
+) -> String {
+    let label = result.trim_start_matches('%');
+    let capacity_value =
+        capacity.map_or_else(|| "0".to_owned(), |value| format!("%v{}", value.raw()));
+    let mut lines = Vec::new();
+    if capacity.is_some() {
+        lines.extend([
+            format!("{result}_nonnegative = icmp sge i64 {capacity_value}, 0"),
+            format!(
+                "{result}_nonnegative_expected = call i1 @llvm.expect.i1(i1 {result}_nonnegative, i1 true)"
+            ),
+            format!(
+                "br i1 {result}_nonnegative_expected, label %{label}_allocate, label %{label}_trap"
+            ),
+            format!("{label}_allocate:"),
+        ]);
+    }
+    lines.extend([
+        format!(
+            "{result} = call i64 @{}(i64 {capacity_value}, i1 {})",
+            native_runtime_symbol(RuntimeOperation::ListCreate),
+            u8::from(element_map == ArrayElementMap::ManagedReference)
+        ),
+        format!("{result}_allocated = icmp ne i64 {result}, 0"),
+        format!(
+            "{result}_allocated_expected = call i1 @llvm.expect.i1(i1 {result}_allocated, i1 true)"
+        ),
+        format!("br i1 {result}_allocated_expected, label %{label}_create, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_create:"),
+    ]);
+    lines.join("\n")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_list_mutation(
+    result: &str,
+    operation: RuntimeOperation,
+    list: ValueId,
+    index: Option<ValueId>,
+    value: ValueId,
+    element_map: ArrayElementMap,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let value_type = *values
+        .get(&value)
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let (mut lines, stored) =
+        lower_runtime_slot_store(value, value_type, &llvm_type(value_type, types)?)?;
+    let label = result.trim_start_matches('%');
+    let index = index.map_or_else(String::new, |index| format!(", i64 %v{}", index.raw()));
+    lines.extend([
+        format!(
+            "{result}_status = call i8 @{}(i64 %v{}{index}, i64 {stored}, i1 {})",
+            native_runtime_symbol(operation),
+            list.raw(),
+            u8::from(element_map == ArrayElementMap::ManagedReference)
+        ),
+        format!("{result}_success = icmp ne i8 {result}_status, 0"),
+        format!("{result}_expected = call i1 @llvm.expect.i1(i1 {result}_success, i1 true)"),
+        format!("br i1 {result}_expected, label %{label}_continue, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_continue:"),
+        format!("  {result} = add i64 0, 0"),
+    ]);
+    Ok(lines.join("\n"))
+}
+
 pub(crate) fn lower_array_output_load(
     result: &str,
     result_type: TypeId,
@@ -2012,8 +2354,16 @@ pub(crate) fn lower_class_make(
 ) -> Result<String, LlvmLoweringError> {
     let lowered = lower_object_make(result, fields, slot_count, values, types, field_layout)?;
     let mut lines = lowered.lines().map(str::to_owned).collect::<Vec<_>>();
+    let allocation = lines
+        .iter()
+        .position(|line| {
+            line.starts_with(&format!(
+                "{result} = call i64 @pop_rt_allocate_mapped_object("
+            ))
+        })
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
     lines.insert(
-        1,
+        allocation + 1,
         format!(
             "call i8 @{}(i64 {result}, i64 1, i64 {})",
             native_runtime_symbol(RuntimeOperation::FieldSet),

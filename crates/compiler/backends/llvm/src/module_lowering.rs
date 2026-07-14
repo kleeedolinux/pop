@@ -12,10 +12,12 @@ use pop_runtime_interface::RuntimeOperation;
 use pop_types::{SemanticType, TypeArena};
 
 use crate::api::LlvmLoweringError;
-use crate::instruction_lowering::{llvm_results, llvm_type, nested_function_tag};
+use crate::instruction_lowering::{
+    llvm_results, llvm_type, lower_builtin_iteration_call, nested_function_tag,
+};
 use crate::lowering::{
-    PrivateBlock, PrivateFunction, function_name, indirect_name, interface_name,
-    llvm_memory_none_instruction, method_name, native_runtime_symbol, nested_name,
+    PrivateBlock, PrivateFunction, builtin_interface_name, function_name, indirect_name,
+    interface_name, llvm_memory_none_instruction, method_name, native_runtime_symbol, nested_name,
 };
 
 pub(crate) fn direct_scalar_array_fill_function() -> PrivateFunction {
@@ -246,6 +248,38 @@ pub(crate) fn runtime_declarations() -> Vec<String> {
             native_runtime_symbol(RuntimeOperation::ArrayFill)
         ),
         format!(
+            "declare i64 @{}(i64, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::ListCreate)
+        ),
+        format!(
+            "declare i8 @{}(i64, ptr) nounwind",
+            native_runtime_symbol(RuntimeOperation::ListLength)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, ptr) nounwind",
+            native_runtime_symbol(RuntimeOperation::ListGet)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, ptr) nounwind",
+            native_runtime_symbol(RuntimeOperation::ListGetChecked)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::ListSet)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i1) nounwind",
+            native_runtime_symbol(RuntimeOperation::ListAdd)
+        ),
+        format!(
+            "declare i64 @{}(i64, i8) nounwind",
+            native_runtime_symbol(RuntimeOperation::IterationAcquire)
+        ),
+        format!(
+            "declare i8 @{}(i64, ptr) nounwind",
+            native_runtime_symbol(RuntimeOperation::IterationNext)
+        ),
+        format!(
             "declare i8 @{}(i64, i64, i64) nounwind",
             native_runtime_symbol(RuntimeOperation::FieldSet)
         ),
@@ -356,6 +390,131 @@ pub(crate) fn lower_interface_dispatchers(
         }
     }
     Ok(dispatchers)
+}
+
+pub(crate) fn lower_builtin_interface_dispatchers(
+    bubble: &MirBubble,
+    types: &TypeArena,
+) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
+    let protocol = pop_types::embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.iteration_protocol())
+        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let mut calls = BTreeSet::new();
+    for blocks in bubble
+        .functions()
+        .iter()
+        .map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .map(|method| method.function().blocks()),
+        )
+    {
+        let value_types = collect_block_value_types(blocks);
+        for instruction in blocks.iter().flat_map(pop_mir::MirBlock::instructions) {
+            let MirInstructionKind::CallBuiltinInterface {
+                method, arguments, ..
+            } = instruction.kind()
+            else {
+                continue;
+            };
+            let Some(receiver) = arguments.first().and_then(|value| value_types.get(value)) else {
+                continue;
+            };
+            if matches!(
+                types.get(*receiver),
+                Some(SemanticType::Builtin { definition, .. })
+                    if *definition == protocol.iterator()
+            ) {
+                calls.insert((*receiver, *method, instruction.result_type()));
+            }
+        }
+    }
+    calls
+        .into_iter()
+        .map(|(receiver, method, result)| {
+            lower_builtin_interface_dispatcher(bubble, receiver, method, result, types)
+        })
+        .collect()
+}
+
+fn lower_builtin_interface_dispatcher(
+    bubble: &MirBubble,
+    receiver: TypeId,
+    method: pop_foundation::IterationProtocolMethodId,
+    result: TypeId,
+    types: &TypeArena,
+) -> Result<PrivateFunction, LlvmLoweringError> {
+    let Some(SemanticType::Builtin { definition, .. }) = types.get(receiver) else {
+        return Err(LlvmLoweringError::InvalidType(receiver));
+    };
+    let implementations = bubble
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Class(class) => class
+                .builtin_interfaces()
+                .iter()
+                .find(|implementation| {
+                    implementation.interface() == *definition
+                        && implementation.interface_type() == receiver
+                })
+                .and_then(|implementation| {
+                    implementation
+                        .methods()
+                        .iter()
+                        .find(|implementation| implementation.protocol_method() == method)
+                })
+                .map(|implementation| (class.class(), implementation.class_method())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let cases = implementations
+        .iter()
+        .map(|(class, _)| format!("    i64 {}, label %class_{}", class.raw(), class.raw()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut blocks = vec![PrivateBlock {
+        label: "dispatch".to_owned(),
+        instructions: vec![format!(
+            "%dispatch_tag = call i64 @{}(i64 %v0, i64 1)",
+            native_runtime_symbol(RuntimeOperation::FieldGet)
+        )],
+        terminator: format!("switch i64 %dispatch_tag, label %native [\n{cases}\n  ]"),
+    }];
+    for (class, class_method) in implementations {
+        blocks.push(PrivateBlock {
+            label: format!("class_{}", class.raw()),
+            instructions: vec![format!(
+                "%class_result_{} = call i64 @{}(i64 %v0)",
+                class.raw(),
+                method_name(bubble.bubble(), class_method)
+            )],
+            terminator: format!("ret i64 %class_result_{}", class.raw()),
+        });
+    }
+    let values = BTreeMap::from([(ValueId::from_raw(0), receiver)]);
+    blocks.push(PrivateBlock {
+        label: "native".to_owned(),
+        instructions: vec![lower_builtin_iteration_call(
+            "%native_result",
+            result,
+            method,
+            &[ValueId::from_raw(0)],
+            &values,
+            types,
+        )?],
+        terminator: "ret i64 %native_result".to_owned(),
+    });
+    Ok(PrivateFunction {
+        name: builtin_interface_name(bubble.bubble(), receiver, method),
+        parameters: vec!["i64 %v0".to_owned()],
+        result: "i64".to_owned(),
+        blocks,
+        attributes: Vec::new(),
+    })
 }
 
 pub(crate) fn lower_interface_dispatcher(

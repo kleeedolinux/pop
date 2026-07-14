@@ -575,6 +575,90 @@ fn runtime_free_c_rejects_numeric_range_safe_points_without_a_fallback() {
 }
 
 #[test]
+fn runtime_free_c_rejects_nominal_iteration_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local values: {Int} = { 20, 22 }\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total = total + value\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        lower_mir_to_c(
+            &mir,
+            &types,
+            CLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+        ),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
+}
+
+#[test]
+fn runtime_free_c_rejects_specialized_nominal_iterator_witnesses() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private class Once<T> implements Iterator<T>\n\
+             private value: T\n\
+             private finished: Boolean\n\
+             public function Once.new(value: T): Once<T>\n\
+                 return Once { value = value, finished = false }\n\
+             end\n\
+             public function Once:iterator(): Iterator<T>\n\
+                 return self\n\
+             end\n\
+             public function Once:next(): Iteration<T>\n\
+                 if self.finished then\n\
+                     return Iteration.End\n\
+                 end\n\
+                 self.finished = true\n\
+                 return Iteration.Item(self.value)\n\
+             end\n\
+         end\n\
+         function main(): Int\n\
+             local iterator: Once<Int> = Once.new(42)\n\
+             for value in iterator do\n\
+                 return value\n\
+             end\n\
+             return 0\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        lower_mir_to_c(
+            &mir,
+            &types,
+            CLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+        ),
+        Err(CBackendError::UnsupportedDeclarations)
+    ));
+}
+
+#[test]
+fn runtime_free_c_rejects_growable_lists_without_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local values = List.create<<Int>>()\n\
+             List.add(values, 42)\n\
+             return List.get(values, 1)\n\
+         end\n",
+    );
+    assert!(matches!(
+        lower_mir_to_c(
+            &mir,
+            &types,
+            CLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+        ),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
+}
+
+#[test]
 fn runtime_free_c_rejects_fixed_packs_without_a_dynamic_fallback() {
     let (mir, types) = lower(
         "namespace Main\n\

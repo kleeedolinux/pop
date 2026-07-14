@@ -136,6 +136,254 @@ fn accepts_empty_collections_only_when_the_annotation_supplies_the_type() {
 }
 
 #[test]
+fn generalized_for_resolves_array_and_table_protocols_with_exact_bindings() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(values: {Int}, scores: {[String]: Int}): Int\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total += value\n\
+             end\n\
+             for key, value in scores do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let statements = fixture.result.body().expect("typed body").statements();
+    assert!(matches!(
+        statements[1].kind(),
+        TypedStatementKind::GeneralizedFor {
+            source: pop_types::TypedIterationSource::Array,
+            bindings,
+            ..
+        } if bindings.len() == 1
+            && bindings[0].local_type() == fixture.arena.source_type("Int").expect("Int")
+    ));
+    assert!(matches!(
+        statements[2].kind(),
+        TypedStatementKind::GeneralizedFor {
+            source: pop_types::TypedIterationSource::Table,
+            bindings,
+            ..
+        } if bindings.len() == 2
+            && bindings[0].local_type() == fixture.arena.source_type("String").expect("String")
+            && bindings[1].local_type() == fixture.arena.source_type("Int").expect("Int")
+    ));
+}
+
+#[test]
+fn generalized_for_accepts_exact_list_and_protocol_instances() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(\n\
+             values: List<Int>,\n\
+             iterable: Iterable<String>,\n\
+             iterator: Iterator<Int?>,\n\
+         ): Int\n\
+             local count = 0\n\
+             for value in values do\n\
+                 count += value\n\
+             end\n\
+             for text in iterable do\n\
+                 print(text)\n\
+             end\n\
+             for optional in iterator do\n\
+                 if local value = optional then\n\
+                     count += value\n\
+                 end\n\
+             end\n\
+             return count\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let statements = fixture.result.body().expect("typed body").statements();
+    for (statement, source) in [
+        (&statements[1], pop_types::TypedIterationSource::List),
+        (&statements[2], pop_types::TypedIterationSource::Iterable),
+        (&statements[3], pop_types::TypedIterationSource::Iterator),
+    ] {
+        assert!(matches!(
+            statement.kind(),
+            TypedStatementKind::GeneralizedFor { source: actual, .. } if *actual == source
+        ));
+    }
+    let TypedStatementKind::GeneralizedFor { bindings, .. } = statements[3].kind() else {
+        panic!("iterator loop");
+    };
+    assert!(matches!(
+        fixture.arena.get(bindings[0].local_type()),
+        Some(SemanticType::Union(members))
+            if members.contains(&fixture.arena.source_type("Int").expect("Int"))
+                && members.contains(&fixture.arena.source_type("nil").expect("nil"))
+    ));
+}
+
+#[test]
+fn generalized_for_rejects_nonprotocol_sources_and_invalid_bindings() {
+    for (source, code) in [
+        (
+            "namespace Example\n\
+             public function collections()\n\
+                 for value in 1 do\n\
+                     value\n\
+                 end\n\
+             end\n",
+            "POP2005",
+        ),
+        (
+            "namespace Example\n\
+             public function collections(values: {Int})\n\
+                 for left, right in values do\n\
+                     left\n\
+                 end\n\
+             end\n",
+            "POP2004",
+        ),
+        (
+            "namespace Example\n\
+             public function collections(entries: {[String]: Int})\n\
+                 for value, value in entries do\n\
+                     value\n\
+                 end\n\
+             end\n",
+            "POP2023",
+        ),
+        (
+            "namespace Example\n\
+             public function collections(values: {Int})\n\
+                 for value in values do\n\
+                     value = 2\n\
+                 end\n\
+             end\n",
+            "POP2005",
+        ),
+    ] {
+        let fixture = check_function(source);
+        assert!(fixture.result.body().is_none());
+        assert!(
+            fixture.result.diagnostic_snapshot().contains(code),
+            "{}",
+            fixture.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
+fn generalized_for_rejects_proven_list_growth_but_allows_replacement() {
+    let growth = check_function(
+        "namespace Example\n\
+         public function collections(values: List<Int>)\n\
+             for value in values do\n\
+                 List.add(values, value)\n\
+             end\n\
+         end\n",
+    );
+    assert_eq!(growth.result.diagnostic_snapshot(), "POP2029@88..111\n");
+
+    let replacement = check_function(
+        "namespace Example\n\
+         public function collections(values: List<Int>)\n\
+             for value in values do\n\
+                 values[1] = value\n\
+             end\n\
+         end\n",
+    );
+    assert!(
+        replacement.result.diagnostics().is_empty(),
+        "{}",
+        replacement.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn checks_the_closed_growable_list_surface_with_exact_element_types() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(index: Int): (List<Int>, Int?, Int, Int)\n\
+             local values = List.create<<Int>>()\n\
+             local reserved = List.withCapacity<<Int>>(8)\n\
+             List.add(values, 42)\n\
+             local optional = values[index]\n\
+             local value = List.get(values, index)\n\
+             values[index] = value\n\
+             return (reserved, optional, value, List.length(values))\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let statements = fixture.result.body().expect("typed body").statements();
+    assert!(matches!(
+        statements[0].kind(),
+        TypedStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), TypedExpressionKind::ListCreate { capacity: None })
+    ));
+    assert!(matches!(
+        statements[1].kind(),
+        TypedStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), TypedExpressionKind::ListCreate { capacity: Some(_) })
+    ));
+    assert!(matches!(
+        statements[2].kind(),
+        TypedStatementKind::Expression(expression)
+            if matches!(expression.kind(), TypedExpressionKind::ListAdd { .. })
+    ));
+    assert!(matches!(
+        statements[5].kind(),
+        TypedStatementKind::ListSet { .. }
+    ));
+}
+
+#[test]
+fn rejects_invalid_list_arity_and_non_list_operands_without_fallback() {
+    for source in [
+        "namespace Example\n\
+         public function collections()\n\
+             List.create()\n\
+         end\n",
+        "namespace Example\n\
+         public function collections()\n\
+             List.withCapacity<<Int>>(1, 2)\n\
+         end\n",
+        "namespace Example\n\
+         public function collections()\n\
+             local values = List.create<<Int>>()\n\
+             List.add(values, \"wrong\")\n\
+         end\n",
+        "namespace Example\n\
+         public function collections()\n\
+             List.length(1)\n\
+         end\n",
+        "namespace Example\n\
+         public function collections(values: List<Int>)\n\
+             values[\"wrong\"] = 1\n\
+         end\n",
+    ] {
+        let fixture = check_function(source);
+        assert!(fixture.result.body().is_none(), "{source}");
+        assert!(
+            !fixture.result.diagnostics().is_empty(),
+            "missing diagnostic for {source}"
+        );
+    }
+}
+
+#[test]
 fn rejects_untyped_or_incompatible_collection_literals_without_dynamic_fallback() {
     for (body, expected_code) in [
         ("local values = { 1 }\nreturn", "POP2007"),

@@ -93,16 +93,15 @@ impl ResolutionDatabase {
 fn expand_qualified_name(context: &crate::model::ModuleIndex, name: &str) -> (String, String) {
     let mut components: Vec<_> = name.split('.').collect();
     let simple_name = components.pop().unwrap_or_default().to_owned();
-    if let Some(first) = components.first_mut() {
-        if let Some(using) = context
+    if let Some(first) = components.first_mut()
+        && let Some(using) = context
             .usings()
             .iter()
             .find(|using| using.alias() == Some(*first))
-        {
-            let mut namespace: Vec<_> = using.namespace().split('.').collect();
-            namespace.extend(components.iter().skip(1).copied());
-            return (namespace.join("."), simple_name);
-        }
+    {
+        let mut namespace: Vec<_> = using.namespace().split('.').collect();
+        namespace.extend(components.iter().skip(1).copied());
+        return (namespace.join("."), simple_name);
     }
     (components.join("."), simple_name)
 }

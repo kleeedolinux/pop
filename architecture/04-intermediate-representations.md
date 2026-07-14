@@ -85,6 +85,9 @@ HIR invariants:
 - a numeric `for` retains its immutable binding, same-kind integer bounds,
   optional step, and body, while `break`/`continue` retain their resolved
   innermost-loop target until CFG lowering;
+- a generalized `for` retains its exact item/tuple binding shape, reserved
+  `Iterable`/`Iterator`/`Iteration` identities, resolved direct/interface
+  dispatch, and body until CFG lowering;
 - a conditional expression retains one `Boolean` condition and two same-typed
   lazy branches until MIR lowers them to CFG and a typed join argument;
 - compound assignment retains its resolved mutable target, typed operator, and
@@ -136,7 +139,9 @@ Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
                callInterface, callIndirect
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
 Collections:   arrayCreate, arrayLength, arrayGetOptional, arrayGetChecked,
-               arraySet, arrayFill, tableGet, tableSet
+               arraySet, arrayFill, listCreate, listWithCapacity, listLength,
+               listGetOptional, listGetChecked, listSet, listAdd,
+               tableGet, tableSet
 Optionals:     optionalIsPresent, optionalGet
 Results:       resultMake, resultIsOk, resultGetOk, resultGetError
 Errors:        errorMake, errorSwitch
@@ -169,11 +174,26 @@ never reverses that order. The final panic-cleanup block uses
 `resumeCurrentUnwind`; no backend reconstructs cleanup from source. See ADR
 0052.
 
-HIR generic calls retain their ordered semantic type arguments. The bootstrap
-MIR lowering fully specializes reachable concrete functions and generic data
-representations, deduplicates equivalent instances, and emits only concrete
-call signatures and layouts. Type parameters and runtime type-argument lookup
-do not reach canonical MIR. See ADR 0050.
+Generalized iteration remains a typed HIR construct until MIR lowers its
+resolved protocol acquisition/step calls to ordinary statically identified
+calls, `Iteration` discriminant tests, dominated item projection, branches,
+and block arguments. Reserved `Pop.Standard` interface calls carry the exact
+`BuiltinTypeId` and stable protocol method ID rather than collapsing that
+identity into a user-declared `InterfaceId`. Every backedge retains the ordinary
+safe-point contract. List growth is represented by distinct typed collection
+operations; neither a backend nor the runtime resolves iterator members from
+strings. See ADR 0053.
+
+HIR generic calls retain their complete ordered semantic type arguments whether
+they were explicit or inferred. Portable cross-Bubble specialization capsules
+retain verified backend-neutral HIR plus opaque source Bubble identities; they
+do not merge dependency declarations into consumer name resolution. MIR fully
+specializes reachable concrete functions, data, classes, methods, and witness
+mappings, deduplicates equivalent source-identity/argument pairs, and emits only
+concrete call signatures and layouts. Type parameters and runtime type-argument
+lookup do not reach canonical MIR. Verified typed sharing is an optional MIR
+optimization and cannot change this full-specialization reference behavior. See
+ADR 0050 and ADR 0054.
 
 Numeric conversion operations carry exact source and target integer/float
 kinds. Checked integer-target conversions name `NumericConversion`; float

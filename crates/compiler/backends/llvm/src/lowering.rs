@@ -23,8 +23,9 @@ use crate::instruction_lowering::{
 use crate::module_lowering::{
     analyze_memory_none_functions, checked_integer_declarations, collect_field_layout,
     collect_record_field_types, collect_record_fields, collect_self_capture_slots,
-    collect_string_literals, direct_scalar_array_fill_function, lower_indirect_dispatchers,
-    lower_interface_dispatchers, render_string_literals, runtime_declarations,
+    collect_string_literals, direct_scalar_array_fill_function,
+    lower_builtin_interface_dispatchers, lower_indirect_dispatchers, lower_interface_dispatchers,
+    render_string_literals, runtime_declarations,
 };
 
 pub(crate) const GC_POLL_INTERVAL: u32 = 16_384;
@@ -111,6 +112,7 @@ pub fn lower_mir_to_llvm_ir(
     }
     functions.push(direct_scalar_array_fill_function());
     functions.extend(lower_interface_dispatchers(bubble, types)?);
+    functions.extend(lower_builtin_interface_dispatchers(bubble, types)?);
     functions.extend(lower_indirect_dispatchers(bubble, types)?);
     let entry_point = options
         .entry_point
@@ -328,6 +330,19 @@ pub(crate) fn interface_name(
         "pop_b{}_interface_{}_{}",
         bubble.raw(),
         interface.raw(),
+        method.raw()
+    )
+}
+
+pub(crate) fn builtin_interface_name(
+    bubble: BubbleId,
+    receiver: TypeId,
+    method: pop_foundation::IterationProtocolMethodId,
+) -> String {
+    format!(
+        "pop_b{}_builtin_interface_t{}_{}",
+        bubble.raw(),
+        receiver.raw(),
         method.raw()
     )
 }
@@ -1035,9 +1050,15 @@ pub(crate) fn initialize_array_outputs(
                     | MirInstructionKind::TableGet { .. }
                     | MirInstructionKind::ArrayLength { .. }
                     | MirInstructionKind::ArrayGetChecked { .. }
+                    | MirInstructionKind::ListGet { .. }
+                    | MirInstructionKind::ListLength { .. }
+                    | MirInstructionKind::ListGetChecked { .. }
             ) && match instruction.kind() {
                 MirInstructionKind::ArrayGet { .. } => true,
                 MirInstructionKind::TableGet { .. } => true,
+                MirInstructionKind::ListGet { .. } => true,
+                MirInstructionKind::ListLength { .. }
+                | MirInstructionKind::ListGetChecked { .. } => true,
                 MirInstructionKind::ArrayLength { array }
                 | MirInstructionKind::ArrayGetChecked { array, .. } => {
                     direct_scalar_arrays.origin(*array).is_none()
@@ -1074,13 +1095,19 @@ pub(crate) fn llvm_block_exit_label(
                 | MirInstructionKind::ArraySet { .. }
                 | MirInstructionKind::TableSet { .. }
                 | MirInstructionKind::ArrayFill { .. } => "continue",
+                MirInstructionKind::ListSet { .. } | MirInstructionKind::ListAdd { .. } => {
+                    "continue"
+                }
                 MirInstructionKind::GcSafePoint { .. } => "poll_continue",
                 MirInstructionKind::ArrayCreate { .. } => "create",
+                MirInstructionKind::ListCreate { .. } => "create",
                 MirInstructionKind::ArrayLength { array }
                 | MirInstructionKind::ArrayGetChecked { array, .. } => {
                     let _ = direct_scalar_arrays.origin(*array);
                     "load"
                 }
+                MirInstructionKind::ListLength { .. }
+                | MirInstructionKind::ListGetChecked { .. } => "load",
                 _ => return None,
             };
             Some(format!("v{}_{suffix}", instruction.result().raw()))

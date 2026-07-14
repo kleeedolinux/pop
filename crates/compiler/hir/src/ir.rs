@@ -9,23 +9,26 @@ use std::fmt::Write;
 
 use pop_foundation::{
     AttributeId, BindingId, BubbleId, BuiltinTypeId, CaptureId, ClassId, EnumCaseId, ErrorCaseId,
-    ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, LocalId, MethodId, ModuleId,
-    NamespaceId, NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId,
+    IterationProtocolMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId,
+    NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
+    TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
-    ClassMethodDispatch, EnumDefinition, ErrorDefinition, FieldDefault, FloatValue, IntegerValue,
-    InterfaceDefinition, NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena,
-    TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator, UnionDefinition,
+    ClassMethodDefinition, ClassMethodDispatch, EnumDefinition, ErrorDefinition, FieldDefault,
+    FloatValue, IntegerValue, InterfaceDefinition, NumericConversionKind, RecordDefinition,
+    StringFormatKind, TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
+    UnionDefinition,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::lowering::lower_interface_implementation;
 use crate::text::{dump_declaration, dump_function, dump_method};
 use crate::verification::{HirVerificationError, verify_hir_bubble};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirBubble {
     pub(crate) bubble: BubbleId,
     pub(crate) namespace: NamespaceId,
@@ -269,7 +272,7 @@ impl HirBubble {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirBubbleError {
     WrongOwner {
         symbol: SymbolId,
@@ -281,35 +284,60 @@ pub enum HirBubbleError {
     DuplicateMethod(MethodId),
     DuplicateReference(SymbolIdentity),
     UnknownReferenceBubble(BubbleId),
+    InvalidSpecializationCapsule(SymbolIdentity),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirFunctionReference {
     pub(crate) identity: SymbolIdentity,
+    pub(crate) type_parameters: Vec<TypeId>,
+    pub(crate) type_parameter_bounds: Vec<Option<TypeId>>,
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: pop_types::EffectSummary,
+    pub(crate) specialization_capsule: Option<HirSpecializationCapsule>,
 }
 
 impl HirFunctionReference {
     #[must_use]
     pub fn new(
         identity: SymbolIdentity,
+        type_parameters: Vec<TypeId>,
+        type_parameter_bounds: Vec<Option<TypeId>>,
         parameters: Vec<TypeId>,
         results: Vec<TypeId>,
         effects: pop_types::EffectSummary,
     ) -> Self {
         Self {
             identity,
+            type_parameters,
+            type_parameter_bounds,
             parameters,
             results,
             effects,
+            specialization_capsule: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_specialization_capsule(mut self, capsule: HirSpecializationCapsule) -> Self {
+        self.specialization_capsule = Some(capsule);
+        self
     }
 
     #[must_use]
     pub const fn identity(&self) -> SymbolIdentity {
         self.identity
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[TypeId] {
+        &self.type_parameters
+    }
+
+    #[must_use]
+    pub fn type_parameter_bounds(&self) -> &[Option<TypeId>] {
+        &self.type_parameter_bounds
     }
 
     #[must_use]
@@ -326,9 +354,70 @@ impl HirFunctionReference {
     pub const fn effects(&self) -> pop_types::EffectSummary {
         self.effects
     }
+
+    #[must_use]
+    pub const fn specialization_capsule(&self) -> Option<&HirSpecializationCapsule> {
+        self.specialization_capsule.as_ref()
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirSpecializationCapsule {
+    root: SymbolIdentity,
+    root_symbol: SymbolId,
+    declarations: Vec<HirDeclaration>,
+    functions: Vec<HirFunction>,
+    methods: Vec<HirMethod>,
+}
+
+impl HirSpecializationCapsule {
+    #[must_use]
+    pub fn new(
+        root: SymbolIdentity,
+        root_symbol: SymbolId,
+        mut declarations: Vec<HirDeclaration>,
+        mut functions: Vec<HirFunction>,
+        mut methods: Vec<HirMethod>,
+    ) -> Self {
+        declarations.sort_by_key(HirDeclaration::symbol);
+        functions.sort_by_key(HirFunction::symbol);
+        methods.sort_by_key(HirMethod::method);
+        Self {
+            root,
+            root_symbol,
+            declarations,
+            functions,
+            methods,
+        }
+    }
+
+    #[must_use]
+    pub const fn root(&self) -> SymbolIdentity {
+        self.root
+    }
+
+    #[must_use]
+    pub const fn root_symbol(&self) -> SymbolId {
+        self.root_symbol
+    }
+
+    #[must_use]
+    pub fn functions(&self) -> &[HirFunction] {
+        &self.functions
+    }
+
+    #[must_use]
+    pub fn declarations(&self) -> &[HirDeclaration] {
+        &self.declarations
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[HirMethod] {
+        &self.methods
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirDeclaration {
     pub(crate) symbol: SymbolId,
     pub(crate) module: ModuleId,
@@ -505,6 +594,22 @@ impl HirDeclaration {
                     .iter()
                     .map(lower_interface_implementation)
                     .collect(),
+                builtin_interfaces: definition
+                    .builtin_interfaces()
+                    .iter()
+                    .map(|implementation| HirBuiltinInterfaceImplementation {
+                        interface: implementation.interface(),
+                        interface_type: implementation.interface_type(),
+                        methods: implementation
+                            .methods()
+                            .iter()
+                            .map(|method| HirBuiltinInterfaceMethodImplementation {
+                                protocol_method: method.protocol_method(),
+                                class_method: method.class_method(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
                 fields: definition
                     .fields()
                     .iter()
@@ -671,7 +776,7 @@ impl HirDeclaration {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirDeclarationKind {
     Record(HirRecordDeclaration),
     Union(HirUnionDeclaration),
@@ -682,7 +787,7 @@ pub enum HirDeclarationKind {
     Attribute(HirAttributeDeclaration),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirErrorDeclaration {
     pub(crate) error: ErrorId,
     pub(crate) type_id: TypeId,
@@ -704,7 +809,7 @@ impl HirErrorDeclaration {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirErrorCase {
     pub(crate) case: ErrorCaseId,
     pub(crate) name: String,
@@ -723,7 +828,7 @@ impl HirErrorCase {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirEnumDeclaration {
     pub(crate) type_id: TypeId,
     pub(crate) cases: Vec<HirEnumCase>,
@@ -741,7 +846,7 @@ impl HirEnumDeclaration {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirEnumCase {
     pub(crate) case: EnumCaseId,
     pub(crate) name: String,
@@ -771,13 +876,13 @@ impl HirEnumCase {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirRecordDeclaration {
     pub(crate) type_id: TypeId,
     pub(crate) fields: Vec<HirRecordField>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirRecordField {
     pub(crate) field: FieldId,
     pub(crate) name: String,
@@ -786,13 +891,13 @@ pub struct HirRecordField {
     pub(crate) span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirUnionDeclaration {
     pub(crate) type_id: TypeId,
     pub(crate) cases: Vec<HirUnionCase>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirUnionCase {
     pub(crate) case: UnionCaseId,
     pub(crate) name: String,
@@ -800,24 +905,25 @@ pub struct HirUnionCase {
     pub(crate) span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClassDeclaration {
     pub(crate) class: ClassId,
     pub(crate) type_id: TypeId,
     pub(crate) is_open: bool,
     pub(crate) interfaces: Vec<HirInterfaceImplementation>,
+    pub(crate) builtin_interfaces: Vec<HirBuiltinInterfaceImplementation>,
     pub(crate) fields: Vec<HirClassField>,
     pub(crate) methods: Vec<HirClassMethod>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirInterfaceDeclaration {
     pub(crate) interface: InterfaceId,
     pub(crate) type_id: TypeId,
     pub(crate) methods: Vec<HirInterfaceMethod>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirInterfaceMethod {
     pub(crate) method: InterfaceMethodId,
     pub(crate) slot: u32,
@@ -827,21 +933,63 @@ pub struct HirInterfaceMethod {
     pub(crate) span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirInterfaceImplementation {
     pub(crate) interface: InterfaceId,
     pub(crate) interface_type: TypeId,
     pub(crate) methods: Vec<HirInterfaceMethodImplementation>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirInterfaceMethodImplementation {
     pub(crate) interface_method: InterfaceMethodId,
     pub(crate) slot: u32,
     pub(crate) class_method: MethodId,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirBuiltinInterfaceImplementation {
+    pub(crate) interface: BuiltinTypeId,
+    pub(crate) interface_type: TypeId,
+    pub(crate) methods: Vec<HirBuiltinInterfaceMethodImplementation>,
+}
+
+impl HirBuiltinInterfaceImplementation {
+    #[must_use]
+    pub const fn interface(&self) -> BuiltinTypeId {
+        self.interface
+    }
+
+    #[must_use]
+    pub const fn interface_type(&self) -> TypeId {
+        self.interface_type
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[HirBuiltinInterfaceMethodImplementation] {
+        &self.methods
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirBuiltinInterfaceMethodImplementation {
+    pub(crate) protocol_method: IterationProtocolMethodId,
+    pub(crate) class_method: MethodId,
+}
+
+impl HirBuiltinInterfaceMethodImplementation {
+    #[must_use]
+    pub const fn protocol_method(&self) -> IterationProtocolMethodId {
+        self.protocol_method
+    }
+
+    #[must_use]
+    pub const fn class_method(&self) -> MethodId {
+        self.class_method
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClassField {
     pub(crate) field: FieldId,
     pub(crate) visibility: Visibility,
@@ -851,7 +999,7 @@ pub struct HirClassField {
     pub(crate) span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClassMethod {
     pub(crate) method: MethodId,
     pub(crate) visibility: Visibility,
@@ -862,13 +1010,13 @@ pub struct HirClassMethod {
     pub(crate) span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirAttributeDeclaration {
     pub(crate) attribute: AttributeId,
     pub(crate) parameters: Vec<HirAttributeParameter>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirAttributeParameter {
     pub(crate) name: String,
     pub(crate) parameter_type: TypeId,
@@ -876,7 +1024,7 @@ pub struct HirAttributeParameter {
     pub(crate) span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirNamedType {
     pub(crate) name: String,
     pub(crate) type_id: TypeId,
@@ -980,6 +1128,11 @@ impl HirClassDeclaration {
     #[must_use]
     pub fn interfaces(&self) -> &[HirInterfaceImplementation] {
         &self.interfaces
+    }
+
+    #[must_use]
+    pub fn builtin_interfaces(&self) -> &[HirBuiltinInterfaceImplementation] {
+        &self.builtin_interfaces
     }
 
     #[must_use]
@@ -1196,7 +1349,7 @@ impl HirNamedType {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirMethod {
     pub(crate) method: MethodId,
     pub(crate) class: ClassId,
@@ -1246,7 +1399,7 @@ impl HirMethod {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirFunction {
     pub(crate) function: FunctionId,
     pub(crate) symbol: SymbolId,
@@ -1255,6 +1408,8 @@ pub struct HirFunction {
     pub(crate) visibility: Visibility,
     pub(crate) name: String,
     pub(crate) type_parameters: Vec<TypeId>,
+    pub(crate) type_parameter_names: Vec<String>,
+    pub(crate) type_parameter_bounds: Vec<Option<TypeId>>,
     pub(crate) parameters: Vec<HirParameter>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) body: Vec<HirStatement>,
@@ -1299,6 +1454,16 @@ impl HirFunction {
     }
 
     #[must_use]
+    pub fn type_parameter_names(&self) -> &[String] {
+        &self.type_parameter_names
+    }
+
+    #[must_use]
+    pub fn type_parameter_bounds(&self) -> &[Option<TypeId>] {
+        &self.type_parameter_bounds
+    }
+
+    #[must_use]
     pub fn parameters(&self) -> &[HirParameter] {
         &self.parameters
     }
@@ -1331,6 +1496,16 @@ impl HirFunction {
 pub struct HirDataSpecialization {
     symbols: std::collections::BTreeMap<TypeId, SymbolId>,
     fields: std::collections::BTreeMap<(TypeId, FieldId), FieldId>,
+    classes: std::collections::BTreeMap<TypeId, (SymbolId, ClassId)>,
+    methods: std::collections::BTreeMap<(TypeId, MethodId), MethodId>,
+    interfaces: std::collections::BTreeMap<
+        (TypeId, InterfaceId, InterfaceMethodId),
+        (InterfaceId, InterfaceMethodId),
+    >,
+    functions: std::collections::BTreeMap<SymbolId, SymbolId>,
+    references: std::collections::BTreeMap<SymbolIdentity, SymbolId>,
+    types: std::collections::BTreeMap<TypeId, TypeId>,
+    parameters: std::collections::BTreeMap<ValueParameterId, TypeId>,
 }
 
 impl HirDataSpecialization {
@@ -1339,7 +1514,73 @@ impl HirDataSpecialization {
         symbols: std::collections::BTreeMap<TypeId, SymbolId>,
         fields: std::collections::BTreeMap<(TypeId, FieldId), FieldId>,
     ) -> Self {
-        Self { symbols, fields }
+        Self {
+            symbols,
+            fields,
+            classes: std::collections::BTreeMap::new(),
+            methods: std::collections::BTreeMap::new(),
+            interfaces: std::collections::BTreeMap::new(),
+            functions: std::collections::BTreeMap::new(),
+            references: std::collections::BTreeMap::new(),
+            types: std::collections::BTreeMap::new(),
+            parameters: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_classes(
+        mut self,
+        classes: std::collections::BTreeMap<TypeId, (SymbolId, ClassId)>,
+        methods: std::collections::BTreeMap<(TypeId, MethodId), MethodId>,
+    ) -> Self {
+        self.classes = classes;
+        self.methods = methods;
+        self
+    }
+
+    #[must_use]
+    pub fn with_interfaces(
+        mut self,
+        interfaces: std::collections::BTreeMap<
+            (TypeId, InterfaceId, InterfaceMethodId),
+            (InterfaceId, InterfaceMethodId),
+        >,
+    ) -> Self {
+        self.interfaces = interfaces;
+        self
+    }
+
+    #[must_use]
+    pub fn with_functions(
+        mut self,
+        functions: std::collections::BTreeMap<SymbolId, SymbolId>,
+    ) -> Self {
+        self.functions = functions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_references(
+        mut self,
+        references: std::collections::BTreeMap<SymbolIdentity, SymbolId>,
+    ) -> Self {
+        self.references = references;
+        self
+    }
+
+    #[must_use]
+    pub fn with_types(mut self, types: std::collections::BTreeMap<TypeId, TypeId>) -> Self {
+        self.types = types;
+        self
+    }
+
+    #[must_use]
+    pub fn with_parameter_types(
+        mut self,
+        parameters: std::collections::BTreeMap<ValueParameterId, TypeId>,
+    ) -> Self {
+        self.parameters = parameters;
+        self
     }
 
     fn symbol(&self, type_id: TypeId) -> Option<SymbolId> {
@@ -1349,6 +1590,282 @@ impl HirDataSpecialization {
     fn field(&self, type_id: TypeId, field: FieldId) -> FieldId {
         self.fields.get(&(type_id, field)).copied().unwrap_or(field)
     }
+
+    fn class(&self, type_id: TypeId) -> Option<(SymbolId, ClassId)> {
+        self.classes.get(&type_id).copied()
+    }
+
+    fn method(&self, type_id: TypeId, method: MethodId) -> Option<MethodId> {
+        self.methods.get(&(type_id, method)).copied()
+    }
+
+    fn unique_method(&self, method: MethodId) -> Option<MethodId> {
+        let mut matches = self
+            .methods
+            .iter()
+            .filter_map(|((_, template), concrete)| (*template == method).then_some(*concrete));
+        let first = matches.next()?;
+        matches.all(|candidate| candidate == first).then_some(first)
+    }
+
+    fn interface_method(
+        &self,
+        receiver: TypeId,
+        interface: InterfaceId,
+        method: InterfaceMethodId,
+    ) -> Option<(InterfaceId, InterfaceMethodId)> {
+        self.interfaces.get(&(receiver, interface, method)).copied()
+    }
+
+    fn function(&self, function: SymbolId) -> SymbolId {
+        self.functions.get(&function).copied().unwrap_or(function)
+    }
+
+    fn reference(&self, identity: SymbolIdentity) -> Option<SymbolId> {
+        self.references.get(&identity).copied()
+    }
+
+    fn type_id(&self, type_id: TypeId) -> TypeId {
+        self.types.get(&type_id).copied().unwrap_or(type_id)
+    }
+
+    fn parameter_type(&self, parameter: ValueParameterId) -> Option<TypeId> {
+        self.parameters.get(&parameter).copied()
+    }
+}
+
+/// Rebinds a verified portable generic template to consumer-session type and
+/// symbol identities without exposing the dependency declaration to lookup.
+#[must_use]
+pub fn rebind_hir_function_template(
+    function: &HirFunction,
+    symbol: SymbolId,
+    bubble: BubbleId,
+    type_parameters: &[TypeId],
+    types: &std::collections::BTreeMap<TypeId, TypeId>,
+    functions: &std::collections::BTreeMap<SymbolId, SymbolId>,
+    classes: &std::collections::BTreeMap<TypeId, (SymbolId, ClassId)>,
+    methods: &std::collections::BTreeMap<(TypeId, MethodId), MethodId>,
+) -> Option<HirFunction> {
+    let parameter_types = function
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.parameter,
+                types
+                    .get(&parameter.type_id)
+                    .copied()
+                    .unwrap_or(parameter.type_id),
+            )
+        })
+        .collect();
+    let data = HirDataSpecialization::new(
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )
+    .with_functions(functions.clone())
+    .with_classes(classes.clone(), methods.clone())
+    .with_types(types.clone())
+    .with_parameter_types(parameter_types);
+    let mut rebound = function.clone();
+    rebound.symbol = symbol;
+    rebound.function = FunctionId::from_raw(symbol.raw());
+    rebound.bubble = bubble;
+    rebound.visibility = Visibility::Private;
+    rebound.type_parameters = type_parameters.to_vec();
+    rebound.type_parameter_names = function.type_parameter_names.clone();
+    rebound.type_parameter_bounds = function
+        .type_parameter_bounds
+        .iter()
+        .map(|bound| bound.map(|bound| data.type_id(bound)))
+        .collect();
+    for parameter in &mut rebound.parameters {
+        parameter.type_id = data.type_id(parameter.type_id);
+    }
+    for result in &mut rebound.results {
+        *result = data.type_id(*result);
+    }
+    remap_aggregate_statements(&mut rebound.body, &data);
+    Some(rebound)
+}
+
+/// Rebinds one private class layout carried only for portable specialization.
+#[must_use]
+pub fn rebind_hir_class_declaration(
+    declaration: &HirDeclaration,
+    symbol: SymbolId,
+    bubble: BubbleId,
+    types: &std::collections::BTreeMap<TypeId, TypeId>,
+) -> Option<HirDeclaration> {
+    let mut rebound = declaration.clone();
+    let HirDeclarationKind::Class(class) = &mut rebound.kind else {
+        return None;
+    };
+    let map = |type_id: TypeId| types.get(&type_id).copied();
+    rebound.symbol = symbol;
+    rebound.bubble = bubble;
+    rebound.visibility = Visibility::Private;
+    class.type_id = map(class.type_id)?;
+    for implementation in &mut class.interfaces {
+        implementation.interface_type = map(implementation.interface_type)?;
+    }
+    for implementation in &mut class.builtin_interfaces {
+        implementation.interface_type = map(implementation.interface_type)?;
+    }
+    for field in &mut class.fields {
+        field.field_type = map(field.field_type)?;
+    }
+    for method in &mut class.methods {
+        for parameter in &mut method.parameters {
+            parameter.type_id = map(parameter.type_id)?;
+        }
+        for result in &mut method.results {
+            *result = map(*result)?;
+        }
+    }
+    Some(rebound)
+}
+
+/// Rebinds one private class method body carried only for specialization.
+#[must_use]
+pub fn rebind_hir_method_template(
+    method: &HirMethod,
+    definition: SymbolId,
+    bubble: BubbleId,
+    types: &std::collections::BTreeMap<TypeId, TypeId>,
+    functions: &std::collections::BTreeMap<SymbolId, SymbolId>,
+    classes: &std::collections::BTreeMap<TypeId, (SymbolId, ClassId)>,
+    methods: &std::collections::BTreeMap<(TypeId, MethodId), MethodId>,
+) -> Option<HirMethod> {
+    let type_parameters = method
+        .function()
+        .type_parameters()
+        .iter()
+        .map(|parameter| types.get(parameter).copied())
+        .collect::<Option<Vec<_>>>()?;
+    let function = rebind_hir_function_template(
+        method.function(),
+        definition,
+        bubble,
+        &type_parameters,
+        types,
+        functions,
+        classes,
+        methods,
+    )?;
+    Some(HirMethod {
+        method: method.method,
+        class: method.class,
+        definition,
+        function,
+    })
+}
+
+#[must_use]
+pub fn rebind_hir_class_specialization(
+    declaration: &HirDeclaration,
+    template_methods: &[HirMethod],
+    symbol: SymbolId,
+    bubble: BubbleId,
+    concrete_type: TypeId,
+    concrete_class: ClassId,
+    types: &std::collections::BTreeMap<TypeId, TypeId>,
+    fields: &std::collections::BTreeMap<FieldId, FieldId>,
+    methods: &std::collections::BTreeMap<MethodId, MethodId>,
+    functions: &std::collections::BTreeMap<SymbolId, SymbolId>,
+) -> Option<(HirDeclaration, Vec<HirMethod>)> {
+    let mut rebound = declaration.clone();
+    let HirDeclarationKind::Class(class) = &mut rebound.kind else {
+        return None;
+    };
+    let source_class = class.class;
+    rebound.symbol = symbol;
+    rebound.bubble = bubble;
+    rebound.visibility = Visibility::Private;
+    class.class = concrete_class;
+    class.type_id = concrete_type;
+    for implementation in &mut class.interfaces {
+        implementation.interface_type = *types.get(&implementation.interface_type)?;
+        for implementation in &mut implementation.methods {
+            implementation.class_method = methods[&implementation.class_method];
+        }
+    }
+    for implementation in &mut class.builtin_interfaces {
+        implementation.interface_type = *types.get(&implementation.interface_type)?;
+        for implementation in &mut implementation.methods {
+            implementation.class_method = methods[&implementation.class_method];
+        }
+    }
+    for field in &mut class.fields {
+        field.field_type = *types.get(&field.field_type)?;
+        field.field = fields[&field.field];
+    }
+    for method in &mut class.methods {
+        for parameter in &mut method.parameters {
+            parameter.type_id = *types.get(&parameter.type_id)?;
+        }
+        for result in &mut method.results {
+            *result = *types.get(result)?;
+        }
+        method.method = methods[&method.method];
+    }
+    let field_instances: std::collections::BTreeMap<(TypeId, FieldId), FieldId> = fields
+        .iter()
+        .map(|(source, target)| ((concrete_type, *source), *target))
+        .collect();
+    let method_instances: std::collections::BTreeMap<(TypeId, MethodId), MethodId> = methods
+        .iter()
+        .map(|(source, target)| ((concrete_type, *source), *target))
+        .collect();
+    let classes = std::collections::BTreeMap::from([(concrete_type, (symbol, concrete_class))]);
+    let rebound_methods = template_methods
+        .iter()
+        .filter(|method| method.class() == source_class)
+        .map(|method| {
+            let function = rebind_hir_function_template(
+                method.function(),
+                symbol,
+                bubble,
+                &[],
+                types,
+                functions,
+                &classes,
+                &method_instances,
+            )?;
+            let mut function = function;
+            let data = HirDataSpecialization::new(
+                std::collections::BTreeMap::new(),
+                field_instances.clone(),
+            )
+            .with_classes(classes.clone(), method_instances.clone());
+            remap_aggregate_statements(&mut function.body, &data);
+            Some(HirMethod {
+                method: methods[&method.method],
+                class: concrete_class,
+                definition: symbol,
+                function,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((rebound, rebound_methods))
+}
+
+#[must_use]
+pub fn remap_hir_function_dispatches(
+    function: &HirFunction,
+    functions: &std::collections::BTreeMap<SymbolId, SymbolId>,
+    references: &std::collections::BTreeMap<SymbolIdentity, SymbolId>,
+) -> HirFunction {
+    let mut remapped = function.clone();
+    let data = HirDataSpecialization::new(
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )
+    .with_functions(functions.clone())
+    .with_references(references.clone());
+    remap_aggregate_statements(&mut remapped.body, &data);
+    remapped
 }
 
 #[must_use]
@@ -1378,6 +1895,8 @@ pub fn specialize_hir_function(
     specialized.symbol = symbol;
     specialized.function = FunctionId::from_raw(symbol.raw());
     specialized.type_parameters.clear();
+    specialized.type_parameter_names.clear();
+    specialized.type_parameter_bounds.clear();
     for parameter in &mut specialized.parameters {
         parameter.type_id = arena.substitute_existing(parameter.type_id, &substitutions)?;
     }
@@ -1391,14 +1910,49 @@ pub fn specialize_hir_function(
     Some(specialized)
 }
 
+#[must_use]
+pub fn specialize_hir_method(
+    template: &HirMethod,
+    definition: &ClassDefinition,
+    method: &ClassMethodDefinition,
+    type_arguments: &[TypeId],
+    data_instances: &HirDataSpecialization,
+    arena: &pop_types::TypeArena,
+) -> Option<HirMethod> {
+    let function = specialize_hir_function(
+        template.function(),
+        definition.symbol(),
+        type_arguments,
+        &std::collections::BTreeMap::new(),
+        data_instances,
+        arena,
+    )?;
+    Some(HirMethod {
+        method: method.method(),
+        class: definition.class(),
+        definition: definition.symbol(),
+        function,
+    })
+}
+
 fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDataSpecialization) {
     for statement in statements {
         match &mut statement.kind {
-            HirStatementKind::Local { initializer, .. } => {
+            HirStatementKind::Local {
+                local_type,
+                initializer,
+                ..
+            } => {
+                *local_type = instances.type_id(*local_type);
                 remap_aggregate_expression(initializer, instances)
             }
-            HirStatementKind::MultipleLocal { value, .. }
-            | HirStatementKind::LocalSet { value, .. }
+            HirStatementKind::MultipleLocal { bindings, value } => {
+                for binding in bindings {
+                    binding.local_type = instances.type_id(binding.local_type);
+                }
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::LocalSet { value, .. }
             | HirStatementKind::ParameterSet { value, .. }
             | HirStatementKind::CaptureSet { value, .. }
             | HirStatementKind::Expression(value) => remap_aggregate_expression(value, instances),
@@ -1417,11 +1971,13 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_statements(else_body, instances);
             }
             HirStatementKind::OptionalIf {
+                inner_type,
                 initializer,
                 then_body,
                 else_body,
                 ..
             } => {
+                *inner_type = instances.type_id(*inner_type);
                 remap_aggregate_expression(initializer, instances);
                 remap_aggregate_statements(then_body, instances);
                 remap_aggregate_statements(else_body, instances);
@@ -1431,8 +1987,12 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_statements(body, instances);
             }
             HirStatementKind::OptionalWhile {
-                initializer, body, ..
+                inner_type,
+                initializer,
+                body,
+                ..
             } => {
+                *inner_type = instances.type_id(*inner_type);
                 remap_aggregate_expression(initializer, instances);
                 remap_aggregate_statements(body, instances);
             }
@@ -1441,15 +2001,35 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_expression(condition, instances);
             }
             HirStatementKind::NumericFor {
+                integer_type,
                 first,
                 last,
                 step,
                 body,
                 ..
             } => {
+                *integer_type = instances.type_id(*integer_type);
                 remap_aggregate_expression(first, instances);
                 remap_aggregate_expression(last, instances);
                 remap_aggregate_expression(step, instances);
+                remap_aggregate_statements(body, instances);
+            }
+            HirStatementKind::GeneralizedFor {
+                item_type,
+                iterator_type,
+                iteration_type,
+                bindings,
+                iterable,
+                body,
+                ..
+            } => {
+                *item_type = instances.type_id(*item_type);
+                *iterator_type = instances.type_id(*iterator_type);
+                *iteration_type = instances.type_id(*iteration_type);
+                for binding in bindings {
+                    binding.local_type = instances.type_id(binding.local_type);
+                }
+                remap_aggregate_expression(iterable, instances);
                 remap_aggregate_statements(body, instances);
             }
             HirStatementKind::Break | HirStatementKind::Continue => {}
@@ -1463,6 +2043,9 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                     *union = instance;
                 }
                 for arm in arms {
+                    for binding in &mut arm.bindings {
+                        binding.type_id = instances.type_id(binding.type_id);
+                    }
                     if let Some(instance) = instances.symbol(scrutinee.type_id()) {
                         arm.union = instance;
                     }
@@ -1474,14 +2057,24 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
             } => {
                 remap_aggregate_expression(scrutinee, instances);
                 for arm in arms {
+                    for binding in &mut arm.bindings {
+                        binding.type_id = instances.type_id(binding.type_id);
+                    }
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
             HirStatementKind::ResultMatch {
-                scrutinee, arms, ..
+                scrutinee,
+                result_type,
+                arms,
+                ..
             } => {
+                *result_type = instances.type_id(*result_type);
                 remap_aggregate_expression(scrutinee, instances);
                 for arm in arms {
+                    for binding in &mut arm.bindings {
+                        binding.type_id = instances.type_id(binding.type_id);
+                    }
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
@@ -1492,8 +2085,13 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_expression(value, instances);
             }
             HirStatementKind::CompoundFieldSet {
-                base, field, value, ..
+                base,
+                field,
+                value_type,
+                value,
+                ..
             } => {
+                *value_type = instances.type_id(*value_type);
                 remap_aggregate_expression(base, instances);
                 *field = instances.field(base.type_id(), *field);
                 remap_aggregate_expression(value, instances);
@@ -1502,14 +2100,25 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 array,
                 index,
                 value,
+            } => {
+                remap_aggregate_expression(array, instances);
+                remap_aggregate_expression(index, instances);
+                remap_aggregate_expression(value, instances);
             }
-            | HirStatementKind::CompoundArraySet {
+            HirStatementKind::CompoundArraySet {
                 array,
                 index,
+                element_type,
                 value,
                 ..
             } => {
+                *element_type = instances.type_id(*element_type);
                 remap_aggregate_expression(array, instances);
+                remap_aggregate_expression(index, instances);
+                remap_aggregate_expression(value, instances);
+            }
+            HirStatementKind::ListSet { list, index, value } => {
+                remap_aggregate_expression(list, instances);
                 remap_aggregate_expression(index, instances);
                 remap_aggregate_expression(value, instances);
             }
@@ -1520,6 +2129,7 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
             }
             HirStatementKind::MultipleAssignment { targets, value } => {
                 for target in targets {
+                    remap_assignment_target_type(target, instances);
                     match target {
                         HirAssignmentTarget::Local { .. } | HirAssignmentTarget::Capture { .. } => {
                         }
@@ -1531,6 +2141,10 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                             remap_aggregate_expression(array, instances);
                             remap_aggregate_expression(index, instances);
                         }
+                        HirAssignmentTarget::List { list, index, .. } => {
+                            remap_aggregate_expression(list, instances);
+                            remap_aggregate_expression(index, instances);
+                        }
                         HirAssignmentTarget::Table { table, key, .. } => {
                             remap_aggregate_expression(table, instances);
                             remap_aggregate_expression(key, instances);
@@ -1540,17 +2154,66 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_expression(value, instances);
             }
             HirStatementKind::Call(call) => {
+                for type_argument in &mut call.type_arguments {
+                    *type_argument = instances.type_id(*type_argument);
+                }
                 for argument in &mut call.arguments {
                     remap_aggregate_expression(argument, instances);
+                }
+                if let HirCallDispatch::Direct { function } = &mut call.dispatch {
+                    *function = instances.function(*function);
+                } else if let HirCallDispatch::Referenced { function } = &call.dispatch
+                    && let Some(concrete) = instances.reference(*function)
+                {
+                    call.dispatch = HirCallDispatch::Direct { function: concrete };
+                } else if let HirCallDispatch::InterfaceMethod {
+                    interface, method, ..
+                } = &mut call.dispatch
+                    && let Some(receiver) = call.arguments.first().map(HirExpression::type_id)
+                    && let Some((concrete_interface, concrete_method)) =
+                        instances.interface_method(receiver, *interface, *method)
+                {
+                    *interface = concrete_interface;
+                    *method = concrete_method;
                 }
             }
         }
     }
 }
 
+fn remap_assignment_target_type(
+    target: &mut HirAssignmentTarget,
+    instances: &HirDataSpecialization,
+) {
+    let type_id = match target {
+        HirAssignmentTarget::Local { value_type, .. }
+        | HirAssignmentTarget::Capture { value_type, .. }
+        | HirAssignmentTarget::Field { value_type, .. }
+        | HirAssignmentTarget::Table { value_type, .. } => value_type,
+        HirAssignmentTarget::Array { element_type, .. }
+        | HirAssignmentTarget::List { element_type, .. } => element_type,
+    };
+    *type_id = instances.type_id(*type_id);
+}
+
 fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDataSpecialization) {
+    expression.type_id = instances.type_id(expression.type_id);
+    if let HirExpressionKind::Parameter(parameter) = &expression.kind
+        && let Some(parameter_type) = instances.parameter_type(*parameter)
+    {
+        expression.type_id = parameter_type;
+    }
     match &mut expression.kind {
         HirExpressionKind::Closure(closure) => {
+            for parameter in &mut closure.parameters {
+                parameter.type_id = instances.type_id(parameter.type_id);
+            }
+            for result in &mut closure.results {
+                *result = instances.type_id(*result);
+            }
+            for capture in &mut closure.captures {
+                capture.type_id = instances.type_id(capture.type_id);
+            }
             remap_aggregate_statements(&mut closure.body, instances)
         }
         HirExpressionKind::Field { base, field } => {
@@ -1562,7 +2225,8 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
-        | HirExpressionKind::ArrayLength { array: base } => {
+        | HirExpressionKind::ArrayLength { array: base }
+        | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
         }
         HirExpressionKind::TableGet { table, key } => {
@@ -1571,6 +2235,8 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::ListGet { list: array, index }
+        | HirExpressionKind::ListGetChecked { list: array, index }
         | HirExpressionKind::Binary {
             left: array,
             right: index,
@@ -1594,12 +2260,27 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             remap_aggregate_expression(array, instances);
             remap_aggregate_expression(value, instances);
         }
+        HirExpressionKind::ListCreate { capacity } => {
+            if let Some(capacity) = capacity {
+                remap_aggregate_expression(capacity, instances);
+            }
+        }
+        HirExpressionKind::ListAdd { list, value } => {
+            remap_aggregate_expression(list, instances);
+            remap_aggregate_expression(value, instances);
+        }
         HirExpressionKind::OptionalDefault { optional, fallback } => {
             remap_aggregate_expression(optional, instances);
             remap_aggregate_expression(fallback, instances);
         }
-        HirExpressionKind::OptionalPropagate { optional, .. }
-        | HirExpressionKind::OptionalNarrow { optional } => {
+        HirExpressionKind::OptionalPropagate {
+            optional,
+            enclosing_result,
+        } => {
+            *enclosing_result = instances.type_id(*enclosing_result);
+            remap_aggregate_expression(optional, instances);
+        }
+        HirExpressionKind::OptionalNarrow { optional } => {
             remap_aggregate_expression(optional, instances);
         }
         HirExpressionKind::Record { record, fields } => {
@@ -1611,8 +2292,18 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
                 remap_aggregate_expression(&mut field.value, instances);
             }
         }
-        HirExpressionKind::ClassConstruct { fields, .. } => {
+        HirExpressionKind::ClassConstruct {
+            class,
+            definition,
+            fields,
+        } => {
+            if let Some((concrete_definition, concrete_class)) = instances.class(expression.type_id)
+            {
+                *class = concrete_class;
+                *definition = concrete_definition;
+            }
             for field in fields {
+                field.field = instances.field(expression.type_id, field.field);
                 remap_aggregate_expression(&mut field.value, instances);
             }
         }
@@ -1636,17 +2327,27 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             if let Some(instance) = instances.symbol(expression.type_id) {
                 *union = instance;
             }
-            for argument in arguments {
+            for argument in arguments.iter_mut() {
                 remap_aggregate_expression(argument, instances);
             }
         }
         HirExpressionKind::ResultCase { arguments, .. }
+        | HirExpressionKind::IterationCase { arguments, .. }
         | HirExpressionKind::ErrorCase { arguments, .. } => {
             for argument in arguments {
                 remap_aggregate_expression(argument, instances);
             }
         }
-        HirExpressionKind::ResultPropagate { result, .. } => {
+        HirExpressionKind::ResultPropagate {
+            result,
+            success_type,
+            error_type,
+            enclosing_result,
+            ..
+        } => {
+            *success_type = instances.type_id(*success_type);
+            *error_type = instances.type_id(*error_type);
+            *enclosing_result = instances.type_id(*enclosing_result);
             remap_aggregate_expression(result, instances);
         }
         HirExpressionKind::Array(values) | HirExpressionKind::Tuple(values) => {
@@ -1669,9 +2370,44 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             remap_aggregate_expression(when_true, instances);
             remap_aggregate_expression(when_false, instances);
         }
-        HirExpressionKind::Call { arguments, .. } => {
-            for argument in arguments {
+        HirExpressionKind::Call {
+            dispatch,
+            type_arguments,
+            arguments,
+        } => {
+            if let HirCallDispatch::Indirect { callee } = dispatch {
+                remap_aggregate_expression(callee, instances);
+            }
+            for argument in type_arguments {
+                *argument = instances.type_id(*argument);
+            }
+            for argument in arguments.iter_mut() {
                 remap_aggregate_expression(argument, instances);
+            }
+            if let HirCallDispatch::Direct { function } = dispatch {
+                *function = instances.function(*function);
+            } else if let HirCallDispatch::Referenced { function } = dispatch
+                && let Some(concrete) = instances.reference(*function)
+            {
+                *dispatch = HirCallDispatch::Direct { function: concrete };
+            } else if let HirCallDispatch::DirectMethod { method } = dispatch {
+                let receiver = arguments.first().map(HirExpression::type_id);
+                if let Some(concrete) = receiver
+                    .and_then(|receiver| instances.method(receiver, *method))
+                    .or_else(|| instances.method(expression.type_id, *method))
+                    .or_else(|| instances.unique_method(*method))
+                {
+                    *method = concrete;
+                }
+            } else if let HirCallDispatch::InterfaceMethod {
+                interface, method, ..
+            } = dispatch
+                && let Some(receiver) = arguments.first().map(HirExpression::type_id)
+                && let Some((concrete_interface, concrete_method)) =
+                    instances.interface_method(receiver, *interface, *method)
+            {
+                *interface = concrete_interface;
+                *method = concrete_method;
             }
         }
         HirExpressionKind::Integer(_)
@@ -1691,12 +2427,63 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
 pub fn hir_generic_call_instances(function: &HirFunction) -> Vec<(SymbolId, Vec<TypeId>)> {
     let mut calls = Vec::new();
     collect_statement_calls(&function.body, &mut calls);
-    calls.sort();
-    calls.dedup();
-    calls
+    let mut direct = calls
+        .into_iter()
+        .filter_map(|call| match call.target {
+            HirCollectedCallTarget::Direct(function) if !call.arguments.is_empty() => {
+                Some((function, call.arguments))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    direct.sort();
+    direct.dedup();
+    direct
 }
 
-fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolId, Vec<TypeId>)>) {
+#[must_use]
+pub fn hir_direct_call_instances(function: &HirFunction) -> Vec<(SymbolId, Vec<TypeId>)> {
+    let mut calls = Vec::new();
+    collect_statement_calls(&function.body, &mut calls);
+    let mut direct = calls
+        .into_iter()
+        .filter_map(|call| match call.target {
+            HirCollectedCallTarget::Direct(function) => Some((function, call.arguments)),
+            HirCollectedCallTarget::Referenced(_) => None,
+        })
+        .collect::<Vec<_>>();
+    direct.sort();
+    direct.dedup();
+    direct
+}
+
+#[must_use]
+pub fn hir_referenced_call_instances(function: &HirFunction) -> Vec<(SymbolIdentity, Vec<TypeId>)> {
+    let mut calls = Vec::new();
+    collect_statement_calls(&function.body, &mut calls);
+    let mut referenced = calls
+        .into_iter()
+        .filter_map(|call| match call.target {
+            HirCollectedCallTarget::Referenced(function) => Some((function, call.arguments)),
+            HirCollectedCallTarget::Direct(_) => None,
+        })
+        .collect::<Vec<_>>();
+    referenced.sort();
+    referenced.dedup();
+    referenced
+}
+
+struct HirCollectedCall {
+    target: HirCollectedCallTarget,
+    arguments: Vec<TypeId>,
+}
+
+enum HirCollectedCallTarget {
+    Direct(SymbolId),
+    Referenced(SymbolIdentity),
+}
+
+fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirCollectedCall>) {
     for statement in statements {
         match statement.kind() {
             HirStatementKind::Local { initializer, .. } => {
@@ -1757,6 +2544,10 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                 collect_expression_calls(step, calls);
                 collect_statement_calls(body, calls);
             }
+            HirStatementKind::GeneralizedFor { iterable, body, .. } => {
+                collect_expression_calls(iterable, calls);
+                collect_statement_calls(body, calls);
+            }
             HirStatementKind::Break | HirStatementKind::Continue => {}
             HirStatementKind::Match {
                 scrutinee, arms, ..
@@ -1803,6 +2594,11 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                 collect_expression_calls(index, calls);
                 collect_expression_calls(value, calls);
             }
+            HirStatementKind::ListSet { list, index, value } => {
+                collect_expression_calls(list, calls);
+                collect_expression_calls(index, calls);
+                collect_expression_calls(value, calls);
+            }
             HirStatementKind::TableSet { table, key, value } => {
                 collect_expression_calls(table, calls);
                 collect_expression_calls(key, calls);
@@ -1820,6 +2616,10 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                             collect_expression_calls(array, calls);
                             collect_expression_calls(index, calls);
                         }
+                        HirAssignmentTarget::List { list, index, .. } => {
+                            collect_expression_calls(list, calls);
+                            collect_expression_calls(index, calls);
+                        }
                         HirAssignmentTarget::Table { table, key, .. } => {
                             collect_expression_calls(table, calls);
                             collect_expression_calls(key, calls);
@@ -1829,10 +2629,20 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
                 collect_expression_calls(value, calls);
             }
             HirStatementKind::Call(call) => {
-                if let HirCallDispatch::Direct { function } = call.dispatch()
-                    && !call.type_arguments().is_empty()
-                {
-                    calls.push((*function, call.type_arguments().to_vec()));
+                let target = match call.dispatch() {
+                    HirCallDispatch::Direct { function } => {
+                        Some(HirCollectedCallTarget::Direct(*function))
+                    }
+                    HirCallDispatch::Referenced { function } => {
+                        Some(HirCollectedCallTarget::Referenced(*function))
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    calls.push(HirCollectedCall {
+                        target,
+                        arguments: call.type_arguments().to_vec(),
+                    });
                 }
                 for argument in call.arguments() {
                     collect_expression_calls(argument, calls);
@@ -1842,7 +2652,7 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<(SymbolI
     }
 }
 
-fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolId, Vec<TypeId>)>) {
+fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirCollectedCall>) {
     match expression.kind() {
         HirExpressionKind::Closure(closure) => collect_statement_calls(closure.body(), calls),
         HirExpressionKind::Field { base, .. }
@@ -1851,13 +2661,16 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
-        | HirExpressionKind::ArrayLength { array: base } => collect_expression_calls(base, calls),
+        | HirExpressionKind::ArrayLength { array: base }
+        | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TableGet { table, key } => {
             collect_expression_calls(table, calls);
             collect_expression_calls(key, calls);
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::ListGet { list: array, index }
+        | HirExpressionKind::ListGetChecked { list: array, index }
         | HirExpressionKind::Binary {
             left: array,
             right: index,
@@ -1879,6 +2692,15 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
         }
         HirExpressionKind::ArrayFill { array, value } => {
             collect_expression_calls(array, calls);
+            collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::ListCreate { capacity } => {
+            if let Some(capacity) = capacity {
+                collect_expression_calls(capacity, calls);
+            }
+        }
+        HirExpressionKind::ListAdd { list, value } => {
+            collect_expression_calls(list, calls);
             collect_expression_calls(value, calls);
         }
         HirExpressionKind::OptionalDefault { optional, fallback } => {
@@ -1907,6 +2729,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
             arguments: values, ..
         }
         | HirExpressionKind::ResultCase {
+            arguments: values, ..
+        }
+        | HirExpressionKind::IterationCase {
             arguments: values, ..
         }
         | HirExpressionKind::ErrorCase {
@@ -1939,10 +2764,20 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<(SymbolI
             type_arguments,
             arguments,
         } => {
-            if let HirCallDispatch::Direct { function } = dispatch
-                && !type_arguments.is_empty()
-            {
-                calls.push((*function, type_arguments.clone()));
+            let target = match dispatch {
+                HirCallDispatch::Direct { function } => {
+                    Some(HirCollectedCallTarget::Direct(*function))
+                }
+                HirCallDispatch::Referenced { function } => {
+                    Some(HirCollectedCallTarget::Referenced(*function))
+                }
+                _ => None,
+            };
+            if let Some(target) = target {
+                calls.push(HirCollectedCall {
+                    target,
+                    arguments: type_arguments.clone(),
+                });
             }
             for argument in arguments {
                 collect_expression_calls(argument, calls);
@@ -2067,6 +2902,51 @@ fn specialize_statement(
             specialize_expression(step, substitutions, instances, arena)?;
             specialize_statements(body, substitutions, instances, arena)?;
         }
+        HirStatementKind::GeneralizedFor {
+            protocol,
+            source,
+            item_type,
+            iterator_type,
+            iteration_type,
+            bindings,
+            iterable,
+            body,
+            ..
+        } => {
+            specialize_type(item_type, substitutions, arena)?;
+            specialize_type(iterator_type, substitutions, arena)?;
+            specialize_type(iteration_type, substitutions, arena)?;
+            for binding in bindings {
+                specialize_type(&mut binding.local_type, substitutions, arena)?;
+            }
+            specialize_expression(iterable, substitutions, instances, arena)?;
+            if matches!(
+                source,
+                HirIterationSource::BoundIterable | HirIterationSource::BoundIterator
+            ) {
+                *source = match arena.get(iterable.type_id())? {
+                    pop_types::SemanticType::Array(_) => HirIterationSource::Array,
+                    pop_types::SemanticType::Table { .. } => HirIterationSource::Table,
+                    pop_types::SemanticType::Builtin { definition, .. }
+                        if *definition == protocol.list() =>
+                    {
+                        HirIterationSource::List
+                    }
+                    pop_types::SemanticType::Builtin { definition, .. }
+                        if *definition == protocol.iterable() =>
+                    {
+                        HirIterationSource::Iterable
+                    }
+                    pop_types::SemanticType::Builtin { definition, .. }
+                        if *definition == protocol.iterator() =>
+                    {
+                        HirIterationSource::Iterator
+                    }
+                    _ => return None,
+                };
+            }
+            specialize_statements(body, substitutions, instances, arena)?;
+        }
         HirStatementKind::Break | HirStatementKind::Continue => {}
         HirStatementKind::Match {
             scrutinee, arms, ..
@@ -2131,6 +3011,11 @@ fn specialize_statement(
             specialize_expression(index, substitutions, instances, arena)?;
             specialize_expression(value, substitutions, instances, arena)?;
         }
+        HirStatementKind::ListSet { list, index, value } => {
+            specialize_expression(list, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
         HirStatementKind::CompoundArraySet {
             array,
             index,
@@ -2183,6 +3068,15 @@ fn specialize_assignment_target(
         } => {
             specialize_type(element_type, substitutions, arena)?;
             specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+        }
+        HirAssignmentTarget::List {
+            list,
+            index,
+            element_type,
+        } => {
+            specialize_type(element_type, substitutions, arena)?;
+            specialize_expression(list, substitutions, instances, arena)?;
             specialize_expression(index, substitutions, instances, arena)?;
         }
         HirAssignmentTarget::Table {
@@ -2249,7 +3143,8 @@ fn specialize_expression(
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
-        | HirExpressionKind::ArrayLength { array: base } => {
+        | HirExpressionKind::ArrayLength { array: base }
+        | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
         }
         HirExpressionKind::TableGet { table, key } => {
@@ -2258,6 +3153,8 @@ fn specialize_expression(
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::ListGet { list: array, index }
+        | HirExpressionKind::ListGetChecked { list: array, index }
         | HirExpressionKind::Binary {
             left: array,
             right: index,
@@ -2279,6 +3176,15 @@ fn specialize_expression(
         }
         HirExpressionKind::ArrayFill { array, value } => {
             specialize_expression(array, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::ListCreate { capacity } => {
+            if let Some(capacity) = capacity {
+                specialize_expression(capacity, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::ListAdd { list, value } => {
+            specialize_expression(list, substitutions, instances, arena)?;
             specialize_expression(value, substitutions, instances, arena)?;
         }
         HirExpressionKind::OptionalDefault { optional, fallback } => {
@@ -2313,6 +3219,9 @@ fn specialize_expression(
             arguments: values, ..
         }
         | HirExpressionKind::ResultCase {
+            arguments: values, ..
+        }
+        | HirExpressionKind::IterationCase {
             arguments: values, ..
         }
         | HirExpressionKind::ErrorCase {
@@ -2385,7 +3294,7 @@ fn specialize_expression(
     Some(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirAttribute {
     pub(crate) attribute: AttributeId,
     pub(crate) definition: SymbolId,
@@ -2415,7 +3324,7 @@ impl HirAttribute {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirAttributeArgument {
     pub(crate) name: String,
     pub(crate) value: AttributeConstant,
@@ -2445,7 +3354,7 @@ impl HirAttributeArgument {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirParameter {
     pub(crate) binding: BindingId,
     pub(crate) parameter: ValueParameterId,
@@ -2481,7 +3390,7 @@ impl HirParameter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirStatement {
     pub(crate) kind: HirStatementKind,
     pub(crate) span: SourceSpan,
@@ -2499,7 +3408,7 @@ impl HirStatement {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirStatementKind {
     Local {
         binding: BindingId,
@@ -2567,6 +3476,16 @@ pub enum HirStatementKind {
         step: HirExpression,
         body: Vec<HirStatement>,
     },
+    GeneralizedFor {
+        protocol: HirIterationProtocol,
+        source: HirIterationSource,
+        item_type: TypeId,
+        iterator_type: TypeId,
+        iteration_type: TypeId,
+        bindings: Vec<HirLocalBinding>,
+        iterable: HirExpression,
+        body: Vec<HirStatement>,
+    },
     Break,
     Continue,
     Match {
@@ -2605,6 +3524,11 @@ pub enum HirStatementKind {
         index: HirExpression,
         value: HirExpression,
     },
+    ListSet {
+        list: HirExpression,
+        index: HirExpression,
+        value: HirExpression,
+    },
     TableSet {
         table: HirExpression,
         key: HirExpression,
@@ -2625,7 +3549,79 @@ pub enum HirStatementKind {
     Expression(HirExpression),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum HirIterationSource {
+    Array,
+    List,
+    Table,
+    Iterable,
+    Iterator,
+    BoundIterable,
+    BoundIterator,
+    ClassIterable {
+        iterator_method: MethodId,
+    },
+    ClassIterator {
+        iterator_method: MethodId,
+        next_method: MethodId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirIterationProtocol {
+    pub(crate) iteration: BuiltinTypeId,
+    pub(crate) iterable: BuiltinTypeId,
+    pub(crate) iterator: BuiltinTypeId,
+    pub(crate) list: BuiltinTypeId,
+    pub(crate) item_case: IterationCaseId,
+    pub(crate) end_case: IterationCaseId,
+    pub(crate) iterator_method: IterationProtocolMethodId,
+    pub(crate) next_method: IterationProtocolMethodId,
+}
+
+impl HirIterationProtocol {
+    #[must_use]
+    pub const fn iteration(self) -> BuiltinTypeId {
+        self.iteration
+    }
+
+    #[must_use]
+    pub const fn iterable(self) -> BuiltinTypeId {
+        self.iterable
+    }
+
+    #[must_use]
+    pub const fn iterator(self) -> BuiltinTypeId {
+        self.iterator
+    }
+
+    #[must_use]
+    pub const fn list(self) -> BuiltinTypeId {
+        self.list
+    }
+
+    #[must_use]
+    pub const fn item_case(self) -> IterationCaseId {
+        self.item_case
+    }
+
+    #[must_use]
+    pub const fn end_case(self) -> IterationCaseId {
+        self.end_case
+    }
+
+    #[must_use]
+    pub const fn iterator_method(self) -> IterationProtocolMethodId {
+        self.iterator_method
+    }
+
+    #[must_use]
+    pub const fn next_method(self) -> IterationProtocolMethodId {
+        self.next_method
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirLocalBinding {
     pub(crate) binding: BindingId,
     pub(crate) local: LocalId,
@@ -2656,7 +3652,7 @@ impl HirLocalBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirAssignmentTarget {
     Local {
         binding: BindingId,
@@ -2678,6 +3674,11 @@ pub enum HirAssignmentTarget {
         index: HirExpression,
         element_type: TypeId,
     },
+    List {
+        list: HirExpression,
+        index: HirExpression,
+        element_type: TypeId,
+    },
     Table {
         table: HirExpression,
         key: HirExpression,
@@ -2685,7 +3686,7 @@ pub enum HirAssignmentTarget {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirMatchArm {
     pub(crate) union: SymbolId,
     pub(crate) case: UnionCaseId,
@@ -2721,7 +3722,7 @@ impl HirMatchArm {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirErrorMatchArm {
     pub(crate) error: ErrorId,
     pub(crate) case: ErrorCaseId,
@@ -2749,7 +3750,7 @@ impl HirErrorMatchArm {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirResultMatchArm {
     pub(crate) case: ResultCaseId,
     pub(crate) bindings: Vec<HirMatchBinding>,
@@ -2772,7 +3773,7 @@ impl HirResultMatchArm {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirMatchBinding {
     pub(crate) binding: Option<BindingId>,
     pub(crate) local: Option<LocalId>,
@@ -2813,7 +3814,7 @@ impl HirMatchBinding {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirCall {
     pub(crate) dispatch: HirCallDispatch,
     pub(crate) type_arguments: Vec<TypeId>,
@@ -2843,7 +3844,7 @@ impl HirCall {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirExpression {
     pub(crate) kind: HirExpressionKind,
     pub(crate) type_id: TypeId,
@@ -2867,7 +3868,7 @@ impl HirExpression {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirExpressionKind {
     Integer(IntegerValue),
     Float(FloatValue),
@@ -2910,6 +3911,24 @@ pub enum HirExpressionKind {
         array: Box<HirExpression>,
         value: Box<HirExpression>,
     },
+    ListCreate {
+        capacity: Option<Box<HirExpression>>,
+    },
+    ListLength {
+        list: Box<HirExpression>,
+    },
+    ListGet {
+        list: Box<HirExpression>,
+        index: Box<HirExpression>,
+    },
+    ListGetChecked {
+        list: Box<HirExpression>,
+        index: Box<HirExpression>,
+    },
+    ListAdd {
+        list: Box<HirExpression>,
+        value: Box<HirExpression>,
+    },
     Record {
         record: SymbolId,
         fields: Vec<HirFieldValue>,
@@ -2934,6 +3953,11 @@ pub enum HirExpressionKind {
     ResultCase {
         result: BuiltinTypeId,
         case: ResultCaseId,
+        arguments: Vec<HirExpression>,
+    },
+    IterationCase {
+        iteration: BuiltinTypeId,
+        case: IterationCaseId,
         arguments: Vec<HirExpression>,
     },
     ErrorCase {
@@ -2994,7 +4018,7 @@ pub enum HirExpressionKind {
     },
     InterfaceUpcast {
         value: Box<HirExpression>,
-        interface: InterfaceId,
+        interface: NominalInterfaceId,
     },
     NumericConvert {
         value: Box<HirExpression>,
@@ -3002,7 +4026,7 @@ pub enum HirExpressionKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClosure {
     pub(crate) function: NestedFunctionId,
     pub(crate) parameters: Vec<HirClosureParameter>,
@@ -3050,7 +4074,7 @@ impl HirClosure {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClosureParameter {
     pub(crate) binding: BindingId,
     pub(crate) parameter: ValueParameterId,
@@ -3086,20 +4110,20 @@ impl HirClosureParameter {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirCaptureMode {
     Value,
     Cell,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirCaptureSource {
     Local(LocalId),
     Parameter(ValueParameterId),
     Capture(CaptureId),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirCapture {
     pub(crate) capture: CaptureId,
     pub(crate) binding: BindingId,
@@ -3135,7 +4159,7 @@ impl HirCapture {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirTableEntry {
     pub(crate) key: HirExpression,
     pub(crate) value: HirExpression,
@@ -3159,7 +4183,7 @@ impl HirTableEntry {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirFieldValue {
     pub(crate) field: FieldId,
     pub(crate) value: HirExpression,
@@ -3183,7 +4207,7 @@ impl HirFieldValue {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HirCallDispatch {
     Standard {
         function: StandardFunctionId,
@@ -3201,6 +4225,10 @@ pub enum HirCallDispatch {
         interface: InterfaceId,
         method: InterfaceMethodId,
         slot: u32,
+    },
+    BuiltinInterfaceMethod {
+        interface: BuiltinTypeId,
+        method: IterationProtocolMethodId,
     },
     Indirect {
         callee: Box<HirExpression>,
