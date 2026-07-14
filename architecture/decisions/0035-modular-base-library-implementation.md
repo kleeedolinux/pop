@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-12
-- Depends on: ADR 0009, ADR 0018, ADR 0024, and ADR 0030
+- Depends on: ADR 0009, ADR 0018, ADR 0024, ADR 0030, and ADR 0069
 - Supersedes: none
 
 ## Context
@@ -75,6 +75,11 @@ dependent-Bubble consumption for the initial primitive-signature slice. On-disk
 `.poplib` encoding and implementation linking remain separate work. Portable
 Rust bodies remain bootstrap evidence until their focused API contracts and
 tests migrate to these Pop source Modules.
+
+ADRs 0061 and 0062 complete that migration for `Sequence` and the first `Int`
+`Math` functions. Their former Rust modules are removed; the remaining `text.rs`
+is still a prototype, while `native_output.rs` remains an accepted native
+bootstrap adapter.
 
 ## Consequences
 

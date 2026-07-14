@@ -292,6 +292,317 @@ fn ordinary_pop_sequence_adapters_are_lazy_ordered_and_materialize_on_demand() {
 }
 
 #[test]
+fn ordinary_pop_sequence_aggregates_short_circuit_without_materializing() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function aggregateResult(): Int\n\
+                 local values: {Int} = {1, 2, 3, 4}\n\
+                 local anyCalls = 0\n\
+                 local found = any(values, function(value: Int): Boolean\n\
+                     anyCalls += 1\n\
+                     return value > 2\n\
+                 end)\n\
+                 local allCalls = 0\n\
+                 local matched = all(values, function(value: Int): Boolean\n\
+                     allCalls += 1\n\
+                     return value < 3\n\
+                 end)\n\
+                 local empty: {Int} = {}\n\
+                 if not found or matched or any(empty, function(value: Int): Boolean\n\
+                     return true\n\
+                 end) or not all(empty, function(value: Int): Boolean\n\
+                     return false\n\
+                 end) then\n\
+                     return -1\n\
+                 end\n\
+                 return anyCalls * 10 + allCalls + count(values) + count(empty)\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("aggregateResult")
+        .symbol();
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified Sequence MIR");
+    assert_eq!(
+        interpreter
+            .call(function, &[])
+            .expect("Sequence aggregates"),
+        vec![int(37)]
+    );
+}
+
+#[test]
+fn ordinary_pop_sequence_inspection_and_visitation_are_direct() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function terminalResult(): Int\n\
+                 local empty: {Int} = {}\n\
+                 local single: {Int} = {9}\n\
+                 local values: {Int} = {1, 2, 3, 4}\n\
+                 local absent: Int? = empty[1]\n\
+                 local optionalValues: {Int?} = {absent}\n\
+                 if not isEmpty(empty) or isEmpty(values) then\n\
+                     return -1\n\
+                 end\n\
+                 if firstOr(optionalValues, absent) ~= nil then\n\
+                     return -1\n\
+                 end\n\
+                 local total = 0\n\
+                 each(values, function(value: Int)\n\
+                     total += value\n\
+                 end)\n\
+                 local matches = countWhere(values, function(value: Int): Boolean\n\
+                     return value % 2 == 0\n\
+                 end)\n\
+                 if not none(values, function(value: Int): Boolean\n\
+                     return value > 4\n\
+                 end) then\n\
+                     return -1\n\
+                 end\n\
+                 local noneCalls = 0\n\
+                 local noEven = none(values, function(value: Int): Boolean\n\
+                     noneCalls += 1\n\
+                     return value == 2\n\
+                 end)\n\
+                 if noEven or noneCalls ~= 2 then\n\
+                     return -1\n\
+                 end\n\
+                 return firstOr(values, 20) + lastOr(values, 20) * 2 + firstOr(empty, 7) + lastOr(empty, 8) + firstOr(single, 0) + lastOr(single, 0) + total + matches\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("terminalResult")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified Sequence terminal MIR")
+            .call(function, &[])
+            .expect("Sequence inspection and visitation"),
+        vec![int(54)]
+    );
+}
+
+#[test]
+fn ordinary_pop_integer_sequence_aggregates_are_checked_and_explicit() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function aggregateNumbers(mode: Int): Int\n\
+                 local empty: {Int} = {}\n\
+                 local values: {Int} = {2, 3, 4}\n\
+                 if mode == 0 then\n\
+                     return sum(values) + product(values) + minOr(values, 100) + maxOr(values, -100) + sum(empty) + product(empty) + minOr(empty, 7) + maxOr(empty, 8)\n\
+                 end\n\
+                 local overflow: {Int} = {9223372036854775807, 1}\n\
+                 if mode == 1 then\n\
+                     return sum(overflow)\n\
+                 end\n\
+                 local productOverflow: {Int} = {9223372036854775807, 2}\n\
+                 return product(productOverflow)\n\
+             end\n",
+        ),
+    ]);
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified Sequence numeric MIR");
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().len() == 1)
+        .expect("aggregateNumbers")
+        .symbol();
+    assert_eq!(interpreter.call(function, &[int(0)]), Ok(vec![int(55)]));
+    assert_eq!(
+        interpreter.call(function, &[int(1)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    assert_eq!(
+        interpreter.call(function, &[int(2)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+}
+
+#[test]
+fn ordinary_pop_lazy_sequence_bounds_and_composition_preserve_state() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function boundedResult(): Int\n\
+                 local empty: {Int} = {}\n\
+                 local single: {Int} = {9}\n\
+                 local values: {Int} = {1, 2, 3, 4, 5}\n\
+                 if count(take(values, -1)) ~= 0 or count(take(values, 0)) ~= 0 or count(take(values, 10)) ~= 5 then\n\
+                     return -1\n\
+                 end\n\
+                 if count(drop(values, -1)) ~= 5 or count(drop(values, 10)) ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 local takeCalls = 0\n\
+                 local prefix = takeWhile(values, function(value: Int): Boolean\n\
+                     takeCalls += 1\n\
+                     return value < 4\n\
+                 end)\n\
+                 local prefixSum = fold(prefix, 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local dropCalls = 0\n\
+                 local suffix = dropWhile(values, function(value: Int): Boolean\n\
+                     dropCalls += 1\n\
+                     return value < 3\n\
+                 end)\n\
+                 local suffixSum = fold(suffix, 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 if takeCalls ~= 4 or dropCalls ~= 3 or count(prefix) ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 local takeSum = fold(take(values, 3), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local dropSum = fold(drop(values, 2), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local joinedSum = fold(concat(take(values, 2), drop(values, 3)), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local edgeSum = fold(concat(empty, single), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end) + fold(concat(single, empty), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 return takeSum + dropSum + prefixSum + suffixSum + joinedSum + edgeSum + takeCalls + dropCalls\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("boundedResult")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified lazy Sequence MIR")
+            .call(function, &[])
+            .expect("lazy Sequence bounds and composition"),
+        vec![int(73)]
+    );
+}
+
+#[test]
+fn ordinary_pop_integer_math_is_portable_and_checked() {
+    let (mir, types) = executable_modules(&[(
+        "src/math.pop",
+        include_str!("../../../../libraries/standard/pop/src/math.pop"),
+    )]);
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified Math MIR");
+    let [minimum, maximum, absolute, divisor, sign, multiple, coprime] = mir.functions() else {
+        panic!("Math source must contain exactly seven functions");
+    };
+
+    assert_eq!(
+        interpreter.call(minimum.symbol(), &[int(7), int(3)]),
+        Ok(vec![int(3)])
+    );
+    assert_eq!(
+        interpreter.call(maximum.symbol(), &[int(-2), int(5)]),
+        Ok(vec![int(5)])
+    );
+    assert_eq!(
+        interpreter.call(absolute.symbol(), &[int(-4)]),
+        Ok(vec![int(4)])
+    );
+    assert_eq!(
+        interpreter.call(divisor.symbol(), &[int(54), int(-24)]),
+        Ok(vec![int(6)])
+    );
+    assert_eq!(
+        interpreter.call(divisor.symbol(), &[int(0), int(0)]),
+        Ok(vec![int(0)])
+    );
+    assert_eq!(
+        interpreter.call(divisor.symbol(), &[int(-54), int(24)]),
+        Ok(vec![int(6)])
+    );
+    assert_eq!(
+        interpreter.call(divisor.symbol(), &[int(13), int(17)]),
+        Ok(vec![int(1)])
+    );
+    assert_eq!(
+        interpreter.call(divisor.symbol(), &[int(24), int(54)]),
+        Ok(vec![int(6)])
+    );
+    assert_eq!(
+        interpreter.call(absolute.symbol(), &[int(i64::MIN)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    assert_eq!(
+        interpreter.call(sign.symbol(), &[int(-20)]),
+        Ok(vec![int(-1)])
+    );
+    assert_eq!(interpreter.call(sign.symbol(), &[int(0)]), Ok(vec![int(0)]));
+    assert_eq!(
+        interpreter.call(sign.symbol(), &[int(i64::MIN)]),
+        Ok(vec![int(-1)])
+    );
+    assert_eq!(
+        interpreter.call(multiple.symbol(), &[int(21), int(-6)]),
+        Ok(vec![int(42)])
+    );
+    assert_eq!(
+        interpreter.call(multiple.symbol(), &[int(i64::MIN), int(0)]),
+        Ok(vec![int(0)])
+    );
+    assert_eq!(
+        interpreter.call(multiple.symbol(), &[int(3_000_000_000), int(6_000_000_000)]),
+        Ok(vec![int(6_000_000_000)])
+    );
+    assert_eq!(
+        interpreter.call(multiple.symbol(), &[int(i64::MAX), int(2)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    assert_eq!(
+        interpreter.call(coprime.symbol(), &[int(35), int(64)]),
+        Ok(vec![MirValue::Boolean(true)])
+    );
+    assert_eq!(
+        interpreter.call(coprime.symbol(), &[int(21), int(6)]),
+        Ok(vec![MirValue::Boolean(false)])
+    );
+}
+
+#[test]
 fn cleanup_resume_preserves_the_original_unwind_reason() {
     let mir = parse_mir_dump(concat!(
         "mir bubble b0 namespace n0\n",
@@ -536,7 +847,7 @@ fn mutable_locals_flow_through_loop_backedges_and_branch_joins() {
 
 #[test]
 fn repeat_until_executes_once_and_repeats_through_its_false_backedge() {
-    // ADR 0032: the body runs before the first condition check, and `false`
+    // ADR 0060: the body runs before the first condition check, and `false`
     // returns to the body while `true` exits.
     let (mir, types) = executable_source(
         "namespace Main\n\

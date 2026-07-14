@@ -25,9 +25,17 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
                 0,
                 "src/contribution.pop",
                 "namespace Pop.Math\n\
-                 --- <summary>Returns the supplied value.</summary>\n\
-                 --- <param name=\"value\">The value to return.</param>\n\
-                 --- <returns>The unchanged value.</returns>\n\
+                 --- <summary>\n\
+                 --- Returns the supplied value.\n\
+                 --- </summary>\n\
+                 ---\n\
+                 --- <param name=\"value\">\n\
+                 --- The value to return.\n\
+                 --- </param>\n\
+                 ---\n\
+                 --- <returns>\n\
+                 --- The unchanged value.\n\
+                 --- </returns>\n\
                  public function contributorIdentity(value: Int): Int\n\
                      return value\n\
                  end\n",
@@ -297,6 +305,9 @@ fn portable_generic_capsules_specialize_private_helpers_without_widening_visibil
             0,
             "src/generics.pop",
             "namespace Pop.Sequence\n\
+             private class UnusedBox<T>\n\
+                 private value: T\n\
+             end\n\
              private function privateIdentity<T>(value: T): T\n\
                  return value\n\
              end\n\
@@ -326,6 +337,10 @@ fn portable_generic_capsules_specialize_private_helpers_without_widening_visibil
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
     assert_eq!(capsule.function_count(), 2);
+    assert!(
+        !format!("{capsule:?}").contains("UnusedBox"),
+        "portable capsules must exclude unrelated private declarations"
+    );
 
     let application = analyze_bubble(
         FrontEndBubbleInput::new(

@@ -456,7 +456,7 @@ and literal-string output use private C standard-I/O adapters without the Pop
 runtime. Unsupported managed allocation, PLRI, dispatch, unwind, coroutine,
 unsafe, or FFI operations are capability errors rather than unchecked C
 fallbacks. See
-[ADR 0031](./decisions/0031-experimental-secure-c-transpilation-backend.md).
+[ADR 0059](./decisions/0059-experimental-secure-c-transpilation-backend.md).
 
 `lib.pop` and `src/bin/` are reserved conventional filesystem names requested
 by the Package layout. They do not authorize `Lib`, `Bin`, or other truncated

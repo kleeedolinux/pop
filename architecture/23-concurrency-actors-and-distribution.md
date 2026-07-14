@@ -3,7 +3,7 @@
 ## Status and authority
 
 This document integrates
-[ADR 0057](./decisions/0057-typed-async-coroutines-and-cancellation.md).
+[ADR 0068](./decisions/0068-typed-async-tasks-actors-and-distribution.md).
 It defines Pop Lang's accepted concurrency, isolation, supervision, and
 distribution architecture. Exact library signatures may grow through normal
 API review, but they cannot weaken the semantic boundaries here.
@@ -400,7 +400,7 @@ serialization, visibility, authority, or remote reachability.
 
 Required proof includes positive, negative, regression, deterministic replay,
 GC stress, cross-backend, artifact round-trip, security/fault-injection, and
-performance tests from ADR 0057. Benchmarks cover cold creation, ready-task
+performance tests from ADR 0068. Benchmarks cover cold creation, ready-task
 throughput, one million suspended frames on a declared reference profile,
 channel/actor contention, mailbox pressure, supervision storms, actor-message
 copy size, cluster encoding, connection loss, and tail latency. Results always

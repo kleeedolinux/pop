@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{SymbolId, SymbolIdentity, TypeId};
-use pop_hir::{HirBubble, HirFunction, hir_direct_call_instances};
+use pop_hir::{HirBubble, HirFunction, hir_direct_call_instances, hir_direct_data_references};
 use pop_resolve::ResolutionDatabase;
 use pop_types::{
     PrimitiveType, ResolvedFunctionSignature, SemanticType, SignatureResolver, TypeArena,
@@ -176,13 +176,57 @@ fn specialization_capsule(
         .into_iter()
         .filter_map(|symbol| functions_by_symbol.get(&symbol).copied().cloned())
         .collect::<Vec<_>>();
+    let mut pending_classes = BTreeSet::new();
+    let mut pending_methods = BTreeSet::new();
+    for function in &functions {
+        let (classes, methods) = hir_direct_data_references(function);
+        pending_classes.extend(classes);
+        pending_methods.extend(methods);
+    }
+    let mut included_classes = BTreeSet::new();
+    let mut included_methods = BTreeSet::new();
+    while !pending_classes.is_empty() || !pending_methods.is_empty() {
+        if let Some(class) = pending_classes.pop_first() {
+            if included_classes.insert(class) {
+                pending_methods.extend(
+                    hir.methods()
+                        .iter()
+                        .filter(|method| method.class() == class)
+                        .map(pop_hir::HirMethod::method),
+                );
+            }
+            continue;
+        }
+        let Some(method) = pending_methods.pop_first() else {
+            continue;
+        };
+        if !included_methods.insert(method) {
+            continue;
+        }
+        let implementation = hir
+            .methods()
+            .iter()
+            .find(|candidate| candidate.method() == method)?;
+        pending_classes.insert(implementation.class());
+        let (classes, methods) = hir_direct_data_references(implementation.function());
+        pending_classes.extend(classes);
+        pending_methods.extend(methods);
+    }
     let declarations = hir
         .declarations()
         .iter()
-        .filter(|declaration| matches!(declaration.kind(), pop_hir::HirDeclarationKind::Class(_)))
+        .filter(|declaration| {
+            matches!(declaration.kind(), pop_hir::HirDeclarationKind::Class(class)
+                if included_classes.contains(&class.class()))
+        })
         .cloned()
         .collect::<Vec<_>>();
-    let methods = hir.methods().to_vec();
+    let methods = hir
+        .methods()
+        .iter()
+        .filter(|method| included_methods.contains(&method.method()))
+        .cloned()
+        .collect::<Vec<_>>();
     let identity = SymbolIdentity::new(hir.bubble(), root.symbol());
     let content_sha256 = capsule_sha256(identity, &declarations, &functions, &methods, arena)?;
     Some(ReferenceSpecializationCapsule {
@@ -516,7 +560,18 @@ pub(crate) fn hir_function_references(
                     &mut type_map,
                 );
             }
+            let capsule_classes = capsule
+                .declarations()
+                .iter()
+                .filter_map(|declaration| match declaration.kind() {
+                    pop_hir::HirDeclarationKind::Class(class) => Some(class.class()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
             for (class, arguments, concrete) in capsule.source_types().class_specializations() {
+                if !capsule_classes.contains(&class) {
+                    continue;
+                }
                 let Some(arguments) = arguments
                     .iter()
                     .map(|argument| type_map.get(argument).copied())

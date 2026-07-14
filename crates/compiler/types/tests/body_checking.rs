@@ -668,7 +668,7 @@ fn rejects_invalid_optional_control_without_dynamic_fallback() {
 
 #[test]
 fn repeat_until_requires_boolean_conditions_and_keeps_body_locals_scoped_to_the_loop() {
-    // ADR 0032: the body scope includes its corresponding `until` condition,
+    // ADR 0060: the body scope includes its corresponding `until` condition,
     // but does not escape the completed repeat-until statement.
     let accepted = check_function(
         "namespace Example\n\

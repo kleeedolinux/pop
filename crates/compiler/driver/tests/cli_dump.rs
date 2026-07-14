@@ -691,8 +691,13 @@ fn package_documentation_emits_checked_public_xml_separately() {
     let package = temporary_package(
         "documentation",
         "namespace Studio.Entry.Library\n\
-         --- <summary>Returns the answer.</summary>\n\
-         --- <returns>The stable answer.</returns>\n\
+         --- <summary>\n\
+         --- Returns the answer.\n\
+         --- </summary>\n\
+         ---\n\
+         --- <returns>\n\
+         --- The stable answer.\n\
+         --- </returns>\n\
          public function answer(): Int\n\
              return 42\n\
          end\n",

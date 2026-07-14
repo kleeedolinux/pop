@@ -7,7 +7,7 @@ use pop_types::embedded_bootstrap_schema;
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 44);
+    assert_eq!(baseline.entries().len(), 70);
 
     let prelude_names = baseline
         .entries()
@@ -16,6 +16,7 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .map(|entry| (entry.kind(), entry.name()))
         .collect::<Vec<_>>();
     assert!(prelude_names.contains(&(ApiKind::Namespace, "Sequence")));
+    assert!(!prelude_names.contains(&(ApiKind::Namespace, "Math")));
     assert!(!prelude_names.iter().any(|(_, name)| *name == "Option"));
     assert!(!prelude_names.iter().any(|(_, name)| *name == "Actor"));
     assert!(!prelude_names.iter().any(|(_, name)| *name == "Cluster"));
@@ -26,16 +27,51 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .filter(|entry| entry.status() == ApiStatus::Prototype)
         .map(|entry| entry.identity())
         .collect::<Vec<_>>();
+    assert_eq!(prototypes.len(), 33);
     assert_eq!(
-        prototypes,
+        &prototypes[..4],
+        ["namespace:0", "namespace:1", "function:0", "function:1"]
+    );
+    assert_eq!(prototypes.last(), Some(&"api:28"));
+
+    let portable_names = baseline
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind() == ApiKind::Api)
+        .map(|entry| (entry.namespace(), entry.name()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        portable_names,
         [
-            "namespace:0",
-            "function:0",
-            "function:1",
-            "api:0",
-            "api:1",
-            "api:2",
-            "api:3",
+            ("Pop.Sequence", "map"),
+            ("Pop.Sequence", "filter"),
+            ("Pop.Sequence", "fold"),
+            ("Pop.Sequence", "collect"),
+            ("Pop.Sequence", "any"),
+            ("Pop.Sequence", "all"),
+            ("Pop.Sequence", "count"),
+            ("Pop.Math", "min"),
+            ("Pop.Math", "max"),
+            ("Pop.Math", "abs"),
+            ("Pop.Math", "gcd"),
+            ("Pop.Sequence", "isEmpty"),
+            ("Pop.Sequence", "firstOr"),
+            ("Pop.Sequence", "lastOr"),
+            ("Pop.Sequence", "each"),
+            ("Pop.Sequence", "none"),
+            ("Pop.Sequence", "countWhere"),
+            ("Pop.Math", "sign"),
+            ("Pop.Math", "lcm"),
+            ("Pop.Math", "coprime"),
+            ("Pop.Sequence", "take"),
+            ("Pop.Sequence", "drop"),
+            ("Pop.Sequence", "takeWhile"),
+            ("Pop.Sequence", "dropWhile"),
+            ("Pop.Sequence", "concat"),
+            ("Pop.Sequence", "sum"),
+            ("Pop.Sequence", "product"),
+            ("Pop.Sequence", "minOr"),
+            ("Pop.Sequence", "maxOr"),
         ]
     );
 }

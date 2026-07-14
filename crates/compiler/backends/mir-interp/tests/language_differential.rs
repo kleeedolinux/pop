@@ -520,9 +520,13 @@ fn nominal_interface_upcast_and_call_use_verified_slots_in_both_mir_forms() {
 fn typed_failure_and_cleanup_execute_identically_before_and_after_optimization() {
     let (mir, arena, entry) = lower(
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>Loading failed.</summary>\n\
+             --- <summary>\n\
+             --- Loading failed.\n\
+             --- </summary>\n\
              Failed\n\
          end\n\
          public class Marker\n\

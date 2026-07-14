@@ -422,9 +422,9 @@ libraries/standard/ Pop.Standard verified bootstrap metadata
 The compiler and runtime are implemented in Rust. Rust is the implementation language of the toolchain; it does not define Pop source syntax or its package model.
 
 The [foundation-library contributor guide](crates/libraries/README.md) shows how
-ordinary Math, Text, and Sequence work stays inside one focused module and test,
-and when an intrinsic or native-boundary change genuinely needs compiler or
-runtime knowledge.
+ordinary portable Math and Sequence work stays in focused Pop Modules, how the
+remaining Text prototype is isolated, and when an intrinsic or native-boundary
+change genuinely needs compiler or runtime knowledge.
 
 ## License
 

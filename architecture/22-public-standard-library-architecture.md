@@ -119,6 +119,7 @@ still require explicit dependencies and manifests.
 | `Pop.Platform.Web` | `Platform.Web`, web-host adapters | platform; phases 2-8 | WebAssembly/web platform capabilities |
 | `Pop.Archive` | `Archive.Zip`, `Archive.Tar` | official; phase 3 | archive formats and safe extraction |
 | `Pop.Compress.*` | named compression algorithm subdivisions | official; phase 3 | one licensing/native manifest per algorithm family |
+| `Pop.Cluster` | `Cluster` | official/platform; phase 4 | authenticated distributed actors over explicit typed transports |
 | `Pop.Http` | `Http`, `WebSocket` | official; phase 4 | client/server/protocol surface; HTTP/1.1 baseline |
 | `Pop.Http2`, `Pop.Http3`, `Pop.Quic` | typed HTTP/2, HTTP/3, QUIC adapters | official; phase 4 | optional protocol implementations |
 | `Pop.Identity` | `Identity` and standard protocol subdivisions | official; phase 5 | authentication/authorization values and flows |
@@ -203,6 +204,11 @@ The following is the only authoritative root list. Catalog documents may define
 subnamespaces but may not introduce a new root without updating ADR 0031, this
 inventory, ownership, phase, and conformance tests.
 
+[`libraries/catalog/public-roots.tsv`](../libraries/catalog/public-roots.tsv)
+is its schema-versioned machine-readable projection. Tooling consumes that
+projection rather than scraping Markdown; conformance tests require exact root
+and tier agreement and one explicit implementation status per row.
+
 <!-- namespace-roots:start -->
 | Public root | Tier | Owning catalog |
 | --- | --- | --- |
@@ -215,7 +221,7 @@ inventory, ownership, phase, and conformance tests.
 | `Bytes` | standard | core/portable |
 | `Channel` | standard | system/network/security |
 | `Cli` | official/tooling | data/observability/tooling |
-| `Cluster` | official | system/network/security |
+| `Cluster` | official/platform | system/network/security |
 | `Codec` | standard/official | core/portable |
 | `Command` | official/tooling | data/observability/tooling |
 | `Compress` | official | core/portable |

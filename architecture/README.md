@@ -54,6 +54,7 @@ compile-time evaluator, or portable optimizer.
 27. [Application, media, and science catalog](./22.4-application-media-science-catalog.md)
 28. [Public library API examples](./22.5-standard-library-api-examples.md)
 29. [Public library implementation plan](./22.6-standard-library-implementation-plan.md)
+30. [Concurrency, actors, and distribution](./23-concurrency-actors-and-distribution.md)
 
 The examples define the canonical syntax direction. The full grammar will grow
 with implementation, but `.pop`, the `pop` command, naming rules, namespace/
@@ -126,6 +127,9 @@ transplanted into a Luau-shaped file.
   types and Bubble identity across dependency boundaries.
 - Lua-shaped `---` XML documentation comments are parsed, signature-checked,
   emitted with library metadata, and available to editors/doc tools.
+- Non-empty XML documentation elements always use separate opening, body, and
+  closing `---` lines; the formatter enforces the deterministic
+  [ADR 0057](./decisions/0057-multiline-xml-documentation-format.md) form.
 - Accepted architecture is a binding baseline. Undocumented semantic expansion
   or implementation divergence is a bug until an ADR changes the baseline.
 - Reintroducing Lua's dynamic/table-centered architecture is a release-blocking

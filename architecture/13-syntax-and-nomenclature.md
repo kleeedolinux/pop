@@ -214,9 +214,17 @@ needed merely to attach one operation to a value.
 Structured API documentation uses `---` plus XML:
 
 ```luau
---- <summary>Finds a player by identifier.</summary>
---- <param name="id">The player identifier.</param>
---- <returns>The player, or `nil` when absent.</returns>
+--- <summary>
+--- Finds a player by identifier.
+--- </summary>
+---
+--- <param name="id">
+--- The player identifier.
+--- </param>
+---
+--- <returns>
+--- The player, or `nil` when absent.
+--- </returns>
 public function findPlayer(id: PlayerId): Player?
 end
 ```
@@ -224,6 +232,10 @@ end
 Documentation precedes attributes/declarations, uses PascalCase symbol/type
 names inside checked references, and follows the canonical formatting/tag order
 defined in [XML documentation comments](./20-xml-documentation-comments.md).
+Every non-empty XML element uses separate opening, content, and closing `---`
+lines; sibling top-level elements are separated by an empty `---` line. There
+is no inline short-element form. See
+[ADR 0057](./decisions/0057-multiline-xml-documentation-format.md).
 
 ### Visibility and namespace declarations
 
@@ -498,7 +510,7 @@ An explicit third expression supplies the step. All range expressions have one
 fixed integer type and the loop binding is immutable. `break` and `continue`
 are standalone statements targeting the innermost loop; they do not take
 labels. `continue` reaches the natural condition or advancement point of the
-loop form. See ADR 0032 and ADR 0042.
+loop form. See ADR 0060 and ADR 0042.
 
 Generalized iteration keeps the same Luau-shaped clause with one statically
 typed source expression:

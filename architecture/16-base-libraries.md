@@ -180,9 +180,16 @@ The frozen ADR 0058 bootstrap foundation currently provides:
 - `Sequence.map`, `Sequence.filter`, `Sequence.fold`, and `Sequence.collect` as
   documented portable Pop prototypes with interpreter/LLVM evidence.
 
-Rust-only checked arithmetic and UTF-8 slicing helpers remain implementation
-prototypes. They are not Pop public declarations or API-baseline entries and do
-not make the planned `Math`, `Text`, or `Bytes` catalog families implemented.
+ADRs 0061 through 0067 append executable prototype rows without changing that
+prelude. `Sequence` now also owns predicate aggregates, explicit-fallback
+inspection, visitation, lazy bounds, concatenation, and checked integer
+aggregation. `Math` owns seven portable `Int` functions. These remain prototype
+APIs until the complete ADR 0058 evidence gate advances their status.
+
+The former Rust-only Math and eager Sequence helpers have been removed rather
+than retained as competing implementations. UTF-8 slicing helpers remain an
+isolated Rust prototype; they are not Pop public declarations or API-baseline
+entries and do not make the planned `Text` or `Bytes` families implemented.
 
 During the ADR 0024/0030 standalone native bootstrap, verified bootstrap
 metadata exposes source-level `print(Int) -> ()` and `print(String) -> ()`

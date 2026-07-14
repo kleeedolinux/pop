@@ -931,6 +931,320 @@ fn emitted_llvm_executes_lazy_ordinary_pop_sequence_adapters() {
 }
 
 #[test]
+fn emitted_llvm_executes_short_circuiting_sequence_aggregates() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local values: {Int} = {1, 2, 3, 4}\n\
+                 local anyCalls = 0\n\
+                 local found = any(values, function(value: Int): Boolean\n\
+                     anyCalls += 1\n\
+                     return value > 2\n\
+                 end)\n\
+                 local allCalls = 0\n\
+                 local matched = all(values, function(value: Int): Boolean\n\
+                     allCalls += 1\n\
+                     return value < 3\n\
+                 end)\n\
+                 if not found or matched then\n\
+                     return -1\n\
+                 end\n\
+                 return anyCalls * 10 + allCalls + count(values)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-aggregates");
+    assert_eq!(
+        result.status.code(),
+        Some(37),
+        "native executable misexecuted Sequence aggregates: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_sequence_inspection_and_visitation() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local empty: {Int} = {}\n\
+                 local single: {Int} = {9}\n\
+                 local values: {Int} = {1, 2, 3, 4}\n\
+                 if not isEmpty(empty) or isEmpty(values) then\n\
+                     return -1\n\
+                 end\n\
+                 local total = 0\n\
+                 each(values, function(value: Int)\n\
+                     total += value\n\
+                 end)\n\
+                 local matches = countWhere(values, function(value: Int): Boolean\n\
+                     return value % 2 == 0\n\
+                 end)\n\
+                 if not none(values, function(value: Int): Boolean\n\
+                     return value > 4\n\
+                 end) then\n\
+                     return -1\n\
+                 end\n\
+                 local noneCalls = 0\n\
+                 local noEven = none(values, function(value: Int): Boolean\n\
+                     noneCalls += 1\n\
+                     return value == 2\n\
+                 end)\n\
+                 if noEven or noneCalls ~= 2 then\n\
+                     return -1\n\
+                 end\n\
+                 return firstOr(values, 20) + lastOr(values, 20) * 2 + firstOr(empty, 7) + lastOr(empty, 8) + firstOr(single, 0) + lastOr(single, 0) + total + matches\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-inspection-visitation");
+    assert_eq!(
+        result.status.code(),
+        Some(54),
+        "native executable misexecuted Sequence terminals: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_integer_sequence_aggregates() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local empty: {Int} = {}\n\
+                 local values: {Int} = {2, 3, 4}\n\
+                 return sum(values) + product(values) + minOr(values, 100) + maxOr(values, -100) + sum(empty) + product(empty) + minOr(empty, 7) + maxOr(empty, 8)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "integer-sequence-aggregates");
+    assert_eq!(
+        result.status.code(),
+        Some(55),
+        "native executable misexecuted integer Sequence aggregates: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_integer_sequence_sum_overflow() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local values: {Int} = {9223372036854775807, 1}\n\
+                 return sum(values)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "integer-sequence-sum-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Sequence.sum must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_integer_sequence_product_overflow() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local values: {Int} = {9223372036854775807, 2}\n\
+                 return product(values)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "integer-sequence-product-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Sequence.product must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_lazy_sequence_bounds_and_composition() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local empty: {Int} = {}\n\
+                 local single: {Int} = {9}\n\
+                 local values: {Int} = {1, 2, 3, 4, 5}\n\
+                 if count(take(values, -1)) ~= 0 or count(take(values, 0)) ~= 0 or count(take(values, 10)) ~= 5 then\n\
+                     return -1\n\
+                 end\n\
+                 if count(drop(values, -1)) ~= 5 or count(drop(values, 10)) ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 local takeCalls = 0\n\
+                 local prefix = takeWhile(values, function(value: Int): Boolean\n\
+                     takeCalls += 1\n\
+                     return value < 4\n\
+                 end)\n\
+                 local prefixSum = fold(prefix, 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local dropCalls = 0\n\
+                 local suffix = dropWhile(values, function(value: Int): Boolean\n\
+                     dropCalls += 1\n\
+                     return value < 3\n\
+                 end)\n\
+                 local suffixSum = fold(suffix, 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 if takeCalls ~= 4 or dropCalls ~= 3 or count(prefix) ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 local takeSum = fold(take(values, 3), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local dropSum = fold(drop(values, 2), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local joinedSum = fold(concat(take(values, 2), drop(values, 3)), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 local edgeSum = fold(concat(empty, single), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end) + fold(concat(single, empty), 0, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 return takeSum + dropSum + prefixSum + suffixSum + joinedSum + edgeSum + takeCalls + dropCalls\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-bounds-composition");
+    assert_eq!(
+        result.status.code(),
+        Some(73),
+        "native executable misexecuted lazy Sequence adapters: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_portable_integer_math() {
+    let module = native_modules(&[
+        (
+            "src/math.pop",
+            include_str!("../../../../libraries/standard/pop/src/math.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Math\n\
+             private function main(): Int\n\
+                 local values = min(7, 3) + max(-2, 5) + abs(-4) + gcd(54, -24)\n\
+                 local numberTheory = lcm(21, -6) + sign(-20)\n\
+                 if not coprime(35, 64) or coprime(21, 6) or lcm(3000000000, 6000000000) ~= 6000000000 or lcm(-9223372036854775807 - 1, 0) ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 return values + numberTheory\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "portable-integer-math");
+    assert_eq!(
+        result.status.code(),
+        Some(59),
+        "native executable misexecuted portable Math: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_portable_math_overflow() {
+    let module = native_modules(&[
+        (
+            "src/math.pop",
+            include_str!("../../../../libraries/standard/pop/src/math.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Math\n\
+             private function main(): Int\n\
+                 local minimum = -9223372036854775807 - 1\n\
+                 return abs(minimum)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "portable-math-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Math.abs must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_portable_lcm_overflow() {
+    let module = native_modules(&[
+        (
+            "src/math.pop",
+            include_str!("../../../../libraries/standard/pop/src/math.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Math\n\
+             private function main(): Int\n\
+                 return lcm(9223372036854775807, 2)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "portable-lcm-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Math.lcm must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
 fn loop_safe_points_lower_to_an_llvm_promotable_function_local_poll() {
     let module = native_module(
         "namespace Main\n\
@@ -2338,15 +2652,21 @@ fn typed_results_errors_and_cleanup_lower_without_backend_semantic_fallback() {
         FileId::from_raw(0),
         "src/errors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>Loading failed.</summary>\n\
+             --- <summary>\n\
+             --- Loading failed.\n\
+             --- </summary>\n\
              Failed\n\
          end\n\
          private function fail(): Result<Int, LoadError>\n\
              return Result.Error(LoadError.Failed())\n\
          end\n\
-         --- <error type=\"LoadError.Failed\">Loading failed.</error>\n\
+         --- <error type=\"LoadError.Failed\">\n\
+         --- Loading failed.\n\
+         --- </error>\n\
          public function forward(): Result<Int, LoadError>\n\
              defer\n\
                  print(\"cleanup\")\n\
