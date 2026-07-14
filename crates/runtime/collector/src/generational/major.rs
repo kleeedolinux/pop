@@ -117,7 +117,7 @@ impl GenerationalRuntime {
                     };
                     if reclaim && self.nursery.objects.remove(&reference).is_some() {
                         self.major.reclaimed = self.major.reclaimed.saturating_add(1);
-                        self.allocation.remove(reference);
+                        self.allocation.remove_without_page_reclamation(reference);
                         self.nursery.dirty_cards.remove(&reference);
                     }
                     remaining -= 1;
@@ -343,7 +343,7 @@ impl GenerationalRuntime {
             if self.nursery.objects.remove(&reference).is_some() {
                 self.major.reclaimed = self.major.reclaimed.saturating_add(1);
             }
-            self.allocation.remove(reference);
+            self.allocation.remove_without_page_reclamation(reference);
             self.nursery.dirty_cards.remove(&reference);
         }
         Ok(completed_work)

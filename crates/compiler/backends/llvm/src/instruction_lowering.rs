@@ -1073,8 +1073,9 @@ pub(crate) fn lower_terminator(
     {
         let releases = direct_scalar_arrays
             .allocations
-            .keys()
-            .map(|origin| {
+            .iter()
+            .filter(|(_, allocation)| allocation.storage == DirectScalarArrayStorage::Native)
+            .map(|(origin, _)| {
                 format!(
                     "%pop_direct_array_{}_storage = inttoptr i64 %v{} to ptr\n  call void @free(ptr %pop_direct_array_{}_storage)",
                     origin.raw(),
@@ -1600,6 +1601,9 @@ pub(crate) fn lower_direct_array_create(
     if initial_type != allocation.element_type {
         return Err(LlvmLoweringError::InvalidType(allocation.element_type));
     }
+    if allocation.storage == DirectScalarArrayStorage::ScalarReplaced {
+        return Ok(lower_scalar_replaced_array_create(result, allocation));
+    }
     let (mut lines, stored) = lower_runtime_slot_store(
         allocation.initial_value,
         initial_type,
@@ -1661,6 +1665,36 @@ pub(crate) fn lower_direct_array_create(
     Ok(lines.join("\n"))
 }
 
+fn lower_scalar_replaced_array_create(result: &str, allocation: DirectScalarArray) -> String {
+    let label = result.trim_start_matches('%');
+    [
+        format!(
+            "{result}_size_pair = call {{ i64, i1 }} @llvm.umul.with.overflow.i64(i64 %v{}, i64 8)",
+            allocation.length.raw()
+        ),
+        format!("{result}_size_overflow = extractvalue {{ i64, i1 }} {result}_size_pair, 1"),
+        format!(
+            "{result}_length_nonnegative = icmp sge i64 %v{}, 0",
+            allocation.length.raw()
+        ),
+        format!("{result}_size_valid = xor i1 {result}_size_overflow, true"),
+        format!("{result}_shape_valid = and i1 {result}_length_nonnegative, {result}_size_valid"),
+        format!(
+            "{result}_shape_expected = call i1 @llvm.expect.i1(i1 {result}_shape_valid, i1 true)"
+        ),
+        format!("br i1 {result}_shape_expected, label %{label}_create, label %{label}_length_trap"),
+        format!("{label}_length_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_create:"),
+        format!("  {result} = add i64 %v{}, 0", allocation.length.raw()),
+    ]
+    .join("\n")
+}
+
 pub(crate) fn lower_direct_array_length(result: &str, allocation: DirectScalarArray) -> String {
     let label = result.trim_start_matches('%');
     format!(
@@ -1681,6 +1715,14 @@ pub(crate) fn lower_direct_array_get(
     let expected_type = llvm_type(allocation.element_type, types)?;
     if element_type != expected_type {
         return Err(LlvmLoweringError::InvalidType(result_type));
+    }
+    if allocation.storage == DirectScalarArrayStorage::ScalarReplaced {
+        return Ok(lower_scalar_replaced_array_get(
+            result,
+            allocation,
+            index,
+            &element_type,
+        ));
     }
     let label = result.trim_start_matches('%');
     let mut lines = vec![
@@ -1715,6 +1757,39 @@ pub(crate) fn lower_direct_array_get(
         types,
     )?);
     Ok(lines.join("\n"))
+}
+
+fn lower_scalar_replaced_array_get(
+    result: &str,
+    allocation: DirectScalarArray,
+    index: ValueId,
+    element_type: &str,
+) -> String {
+    let label = result.trim_start_matches('%');
+    [
+        format!("{result}_zero_index = sub i64 %v{}, 1", index.raw()),
+        format!(
+            "{result}_in_bounds = icmp ult i64 {result}_zero_index, %v{}",
+            allocation.length.raw()
+        ),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+        format!(
+            "  {result} = select i1 true, {element_type} %v{}, {element_type} %v{}",
+            allocation.initial_value.raw(),
+            allocation.initial_value.raw()
+        ),
+    ]
+    .join("\n")
 }
 
 #[allow(clippy::too_many_arguments)]

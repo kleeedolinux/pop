@@ -1,6 +1,6 @@
 //! Native ABI 1.10 storage for immutable first-class integer ranges.
 
-use pop_runtime_collector::BootstrapRuntime;
+use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::{
     AllocationClass, ObjectAllocationRequest, ObjectMap, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
 };
@@ -72,7 +72,7 @@ pub(crate) const fn signed_value(raw: u64, bit_width: u8) -> i64 {
 }
 
 pub(crate) fn load_range(
-    runtime: &BootstrapRuntime,
+    runtime: &StableGenerationalRuntime,
     source: pop_runtime_interface::ManagedReference,
 ) -> Option<(u64, u64, u64, bool, u8)> {
     let load = |slot| runtime.load_slot_value(source, ObjectSlot::new(slot)).ok();
@@ -91,7 +91,7 @@ pub(crate) struct RangeIterationStep {
 }
 
 pub(crate) fn range_iteration_step(
-    runtime: &BootstrapRuntime,
+    runtime: &StableGenerationalRuntime,
     source: pop_runtime_interface::ManagedReference,
     position: u64,
     state: u64,

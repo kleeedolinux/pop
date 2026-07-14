@@ -313,6 +313,11 @@ impl GenerationalRuntime {
     }
 
     #[must_use]
+    pub const fn collection_requested(&self) -> bool {
+        self.major_requested || self.major_cycle_active() || self.major_epoch.is_some()
+    }
+
+    #[must_use]
     pub const fn major_sweep_entries_examined(&self) -> u64 {
         self.major.sweep_entries_examined
     }
@@ -420,6 +425,7 @@ impl GenerationalRuntime {
         self.nursery
             .metrics
             .record_collection(statistics.reclaimed_objects(), statistics.scanned_objects());
+        self.allocation.reclaim_empty_pages_after_sweep();
         self.allocation
             .transition_shared_regions(RegionState::SharedAllocating);
         self.major.reset();

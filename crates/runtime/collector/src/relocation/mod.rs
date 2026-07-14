@@ -1,6 +1,7 @@
 //! Single-mutator moving-nursery conformance collector.
 
 mod adapter;
+mod allocation;
 mod collect;
 mod heap;
 

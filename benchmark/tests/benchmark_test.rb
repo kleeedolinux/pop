@@ -60,6 +60,14 @@ rescue RuntimeError => error
   BenchmarkAssertions.includes(error.message, "checksum mismatch")
 end
 
+pop_runtime = PopBenchmark::REGISTRY.runtimes.find { |runtime| runtime.id == "poplang" }
+allocation_churn = workloads.find { |workload| workload.id == "allocationChurn" }
+pop_result = validator.send(:result, pop_runtime, allocation_churn, [0.01])
+BenchmarkAssertions.assert(
+  pop_result.fetch("collectorStage") == "NativeStableGenerationalConformance",
+  "Pop Lang benchmark results must identify the native collector stage"
+)
+
 document = {
   "schemaVersion" => 2,
   "createdAt" => "2026-07-12T12:00:00Z",

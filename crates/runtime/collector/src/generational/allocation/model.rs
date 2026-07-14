@@ -198,6 +198,8 @@ pub struct AllocationMetrics {
     pub(super) survivor_copies: u64,
     pub(super) promotions: u64,
     pub(super) pages_returned: u64,
+    pub(super) page_reclamation_passes: u64,
+    pub(super) mature_page_index_hits: u64,
 }
 
 impl AllocationMetrics {
@@ -234,5 +236,15 @@ impl AllocationMetrics {
     #[must_use]
     pub const fn pages_returned(self) -> u64 {
         self.pages_returned
+    }
+
+    #[must_use]
+    pub const fn page_reclamation_passes(self) -> u64 {
+        self.page_reclamation_passes
+    }
+
+    #[must_use]
+    pub const fn mature_page_index_hits(self) -> u64 {
+        self.mature_page_index_hits
     }
 }

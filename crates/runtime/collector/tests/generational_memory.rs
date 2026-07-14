@@ -68,13 +68,13 @@ fn memory_configuration_rejects_unusable_limits_and_unbounded_assists() {
 #[test]
 fn hard_limit_protects_emergency_and_evacuation_reserves_before_mutation() {
     let mut runtime = runtime(256);
-    let request = object(AllocationClass::Mature, 0);
+    let request = object(AllocationClass::Large, 0);
     runtime
         .allocate_object(&request)
-        .expect("first mature page");
+        .expect("first dedicated page");
     runtime
         .allocate_object(&request)
-        .expect("second mature page");
+        .expect("second dedicated page");
 
     let first = runtime
         .allocate_object(&request)
@@ -110,7 +110,7 @@ fn hard_limit_protects_emergency_and_evacuation_reserves_before_mutation() {
 #[test]
 fn pressure_collection_reclaims_pages_and_restores_allocation_capacity() {
     let mut runtime = runtime(256);
-    let request = object(AllocationClass::Mature, 0);
+    let request = object(AllocationClass::Large, 0);
     runtime
         .allocate_object(&request)
         .expect("first garbage page");
@@ -139,9 +139,9 @@ fn pressure_collection_reclaims_pages_and_restores_allocation_capacity() {
 #[test]
 fn allocation_pressure_performs_only_the_configured_major_assist_budget() {
     let mut runtime = runtime(512);
-    let request = object(AllocationClass::Mature, 0);
+    let request = object(AllocationClass::Large, 0);
     for _ in 0..3 {
-        runtime.allocate_object(&request).expect("mature page");
+        runtime.allocate_object(&request).expect("dedicated page");
     }
     let roots = no_roots(2);
     runtime
@@ -233,8 +233,10 @@ fn non_heap_domains_reduce_capacity_and_failed_snapshots_are_atomic() {
     assert_eq!(runtime.memory_telemetry().non_heap_bytes(), 40);
     assert_eq!(runtime.memory_telemetry().stack_bytes(), 8);
 
-    let request = object(AllocationClass::Mature, 0);
-    runtime.allocate_object(&request).expect("one mature page");
+    let request = object(AllocationClass::Large, 0);
+    runtime
+        .allocate_object(&request)
+        .expect("one dedicated page");
     runtime
         .allocate_object(&request)
         .expect_err("second page plus non-heap usage exceeds ordinary capacity");

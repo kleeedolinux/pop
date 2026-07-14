@@ -2,12 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pop_runtime_interface::{
-    AllocationClass, ManagedReference, ObjectMap, ObjectSlot, PinHandle, RootHandle,
-    RuntimeFailure, RuntimeTypeId,
-};
+use pop_runtime_interface::{ManagedReference, ObjectSlot, PinHandle, RootHandle, RuntimeFailure};
 
-use crate::heap::{Allocation, AllocationKind, CollectorMetrics, SlotValue};
+use crate::heap::{Allocation, CollectorMetrics, SlotValue};
 use crate::ownership::ObjectOwnership;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,7 +14,7 @@ pub enum CollectorGeneration {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct CollectorObjectId(u64);
+pub struct CollectorObjectId(pub(super) u64);
 
 #[derive(Clone, Debug)]
 pub(crate) struct RelocationAllocation {
@@ -190,55 +187,6 @@ impl RelocationRuntime {
             }
             Some(SlotValue::Reference(_)) | None => Err(RuntimeFailure::runtime_invariant()),
         }
-    }
-
-    pub(super) fn allocate(
-        &mut self,
-        type_id: RuntimeTypeId,
-        class: AllocationClass,
-        kind: AllocationKind,
-        object_map: ObjectMap,
-    ) -> Result<ManagedReference, RuntimeFailure> {
-        let reference = self.fresh_reference()?;
-        let identity = CollectorObjectId(self.next_identity);
-        self.next_identity = self
-            .next_identity
-            .checked_add(1)
-            .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        let mut slots = Vec::new();
-        slots
-            .try_reserve_exact(object_map.slot_count() as usize)
-            .map_err(|_| RuntimeFailure::runtime_invariant())?;
-        for index in 0..object_map.slot_count() {
-            slots.push(if object_map.is_reference_slot(ObjectSlot::new(index)) {
-                SlotValue::Reference(None)
-            } else {
-                SlotValue::Scalar(0)
-            });
-        }
-        let generation = match class {
-            AllocationClass::NurseryEligible => CollectorGeneration::Nursery { age: 0 },
-            AllocationClass::Mature | AllocationClass::Large | AllocationClass::Pinned => {
-                CollectorGeneration::Mature
-            }
-        };
-        self.objects.insert(
-            reference,
-            RelocationAllocation {
-                identity,
-                generation,
-                allocation: Allocation {
-                    kind,
-                    type_id,
-                    class,
-                    object_map,
-                    slots,
-                },
-                ownership: ObjectOwnership::default(),
-            },
-        );
-        self.metrics.record_allocation();
-        Ok(reference)
     }
 
     pub(crate) fn discard_unpublished(

@@ -25,7 +25,7 @@ pub use generational::{
     MajorCollectionHandshakeError, MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase,
     MutatorExecutionState, MutatorId, MutatorPublication, NonHeapMemoryUsage,
     NonHeapMemoryUsageError, PageDescriptor, PageId, PinningConfig, PinningTelemetry, RegionId,
-    RegionState, RegionTelemetry,
+    RegionState, RegionTelemetry, StableGenerationalRuntime,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use ownership::{

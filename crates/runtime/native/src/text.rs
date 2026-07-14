@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, c_char};
 
-use pop_runtime_collector::BootstrapRuntime;
+use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, ManagedReference, ObjectSlot,
     RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
@@ -31,7 +31,7 @@ pub unsafe extern "C" fn pop_rt_string_literal(bytes: *const u8, length: u64) ->
     allocate_utf8_string_literal(bytes)
 }
 
-/// Safe Rust adapter for the bootstrap string-literal ABI.
+/// Safe Rust adapter for the native string-literal ABI.
 #[must_use]
 pub fn allocate_utf8_string_literal(bytes: &[u8]) -> u64 {
     let Ok(mut runtime) = abi_runtime().lock() else {
@@ -40,7 +40,7 @@ pub fn allocate_utf8_string_literal(bytes: &[u8]) -> u64 {
     allocate_utf8_string(&mut runtime, bytes).map_or(0, ManagedReference::raw)
 }
 
-/// Reads one immutable UTF-8 string through the bootstrap handle boundary.
+/// Reads one immutable UTF-8 string through the stable native-token boundary.
 ///
 /// The return value is the byte length plus one, reserving zero as failure.
 /// Passing a null target queries the required length without copying. A
@@ -91,7 +91,7 @@ pub unsafe extern "C" fn pop_rt_string_read(reference: u64, target: *mut u8, cap
 }
 
 fn allocate_utf8_string(
-    runtime: &mut BootstrapRuntime,
+    runtime: &mut StableGenerationalRuntime,
     bytes: &[u8],
 ) -> Result<ManagedReference, RuntimeFailure> {
     std::str::from_utf8(bytes).map_err(|_| RuntimeFailure::runtime_invariant())?;

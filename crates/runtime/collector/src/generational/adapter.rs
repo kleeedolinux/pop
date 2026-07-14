@@ -16,6 +16,44 @@ use super::heap::GenerationalRuntime;
 use super::workers::CardRefinementTask;
 
 impl GenerationalRuntime {
+    /// Allocates one array with its final scalar payload in a single pass.
+    ///
+    /// Managed-reference arrays retain the ordinary checked fill path.
+    ///
+    /// # Errors
+    ///
+    /// Forwards typed allocation, memory-admission, or initialization failures.
+    pub fn allocate_array_filled(
+        &mut self,
+        request: &ArrayAllocationRequest,
+        value: u64,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        if request.element_map() != ArrayElementMap::Scalar {
+            let reference = self.allocate_array(request)?;
+            self.fill_array_value(reference, value)?;
+            return Ok(reference);
+        }
+        let object_map = self.array_object_map(request)?;
+        self.prepare_allocation(
+            request.type_id(),
+            request.allocation_class(),
+            &object_map,
+            true,
+        )?;
+        let reference = self.nursery.allocate_scalar_array_filled(
+            request.type_id(),
+            request.allocation_class(),
+            object_map.clone(),
+            value,
+        )?;
+        self.finish_allocation(
+            reference,
+            request.type_id(),
+            request.allocation_class(),
+            &object_map,
+        )
+    }
+
     fn prepare_allocation(
         &mut self,
         type_id: pop_runtime_interface::RuntimeTypeId,

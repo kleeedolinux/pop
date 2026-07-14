@@ -36,12 +36,23 @@ mutator store can invalidate the snapshot. Mature sweeping advances through the
 ordered heap by a bounded cursor; the mark/sweep transition builds no heap-sized
 unreachable-object inventory, and allocations during sweeping are live for that
 cycle. It preserves snapshot edges, shades roots, pins, and new mature objects,
-and defers nursery relocation while a major snapshot still
-contains physical tokens. The implementation deliberately continues to report
+removes dead placements without rescanning the page inventory for every object,
+reclaims empty pages once when the sweep completes, and defers nursery
+relocation while a major snapshot still contains physical tokens. The
+generational composition deliberately continues to report
 `RelocationConformance`: epochs/workers are not yet integrated with native
 scheduler transitions, and worker batches currently join each bounded collector
 slice rather than tracing concurrently with mutator execution, so
 `ProductionConcurrentGenerational` cannot yet be selected.
+
+`StableGenerationalRuntime` is the closed ADR 0059 native composition. It maps
+ABI 1 nursery-eligible requests into stable mature placement, exposes the typed
+array/object/table access required by the native facade, and reports
+`NativeStableGenerationalConformance`. Exact-layout mature allocations use a
+scheduler-keyed active-page index, and scalar bulk construction writes the
+final initialized payload in one pass. This wrapper never invokes nursery
+relocation or selective evacuation; those remain gated on ABI 2 writable-root
+proof.
 
 The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
@@ -95,8 +106,8 @@ linker policy, or process-global singleton. See
 [ADR 0038](../../../architecture/decisions/0038-modular-portable-runtime-implementation.md).
 
 The bootstrap implementation is divided into `heap`, `access`, `trace`, and
-`adapter` modules. The `relocation` directory separately groups its heap,
-collection, and adapter ownership; `generational` groups mature-cycle state,
+`adapter` modules. The `relocation` directory separately groups its allocation,
+heap, collection, and adapter ownership; `generational` groups mature-cycle state,
 mark/sweep work, barriers, page/TLAB allocation, memory control, coordination,
 bounded workers, and its adapter. The allocation, coordination, memory, and
 worker submodules separate public typed descriptors from mutable state.

@@ -1,5 +1,6 @@
 //! Incremental mature-heap conformance on top of the moving nursery.
 
+mod access;
 mod adapter;
 mod allocation;
 mod arena;
@@ -11,6 +12,7 @@ mod major;
 mod memory;
 mod ownership;
 mod pinning;
+mod stable;
 mod workers;
 
 pub use allocation::{
@@ -35,6 +37,7 @@ pub use memory::{
     NonHeapMemoryUsage, NonHeapMemoryUsageError,
 };
 pub use pinning::{PinningConfig, PinningTelemetry};
+pub use stable::StableGenerationalRuntime;
 pub use workers::{
     BackgroundWorkerConfig, BackgroundWorkerConfigError, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,

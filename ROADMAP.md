@@ -197,6 +197,14 @@ Package for the first release.
     is validated and acknowledged, no worker work is dispatched before that
     boundary, and nursery relocation remains deferred while snapshots retain
     physical tokens.
+  - [x] Replace native `BootstrapRuntime` composition with the accepted
+    stable-token generational stage so real ABI 1 executables use mature SATB
+    marking, bounded sweeping, pacing, and page allocation without prematurely
+    enabling nursery relocation or evacuation.
+  - [x] Batch empty-page inventory reclamation once per mature sweep, index the
+    active mature page by exact layout and scheduler, initialize scalar arrays
+    in one pass, and scalar-replace non-escaping read-only loop-local arrays
+    while preserving traps, safe points, and managed-path negatives.
   - [x] Add opt-in persistent host workers with bounded owner-FIFO queues,
     opposite-end peer stealing, parallel exact object-map and collecting-safe-
     point remembered-card scans, deterministic result application, sweep

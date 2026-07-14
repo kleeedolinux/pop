@@ -17,6 +17,9 @@ managed runtimes, but they are not collector-only microbenchmarks: C and Rust
 perform equivalent explicit allocations, and optimizer/runtime policies remain
 part of what is measured.
 
+Pop Lang result records include `collectorStage` so bootstrap, stable-token
+generational, and future production-generational measurements cannot be mixed.
+
 ## Run a batch
 
 `bin/benchmark` is executable and defaults to `batch`. A batch prepares the
@@ -51,7 +54,10 @@ benchmark/bin/benchmark run \
 one value from each. `objectArray` retains 200,000 objects in a managed-reference
 array and then reads every element and field. The exact checksum gate runs
 before warmups and timing, so a miscompiled or non-equivalent result is excluded
-rather than ranked.
+rather than ranked. A compiler may prove the numeric arrays non-escaping and
+scalar-replace or stack-place them; that optimization is intentionally part of
+this cross-language workload. Use `objectArray` when retained managed-heap work
+must remain observable.
 
 The default outputs are `results/latest.json` and `results/latest.html`.
 `run` writes JSON only, while `render` can regenerate HTML from an existing

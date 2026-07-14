@@ -34,6 +34,7 @@ pub struct GarbageCollectorContract {
 pub enum GarbageCollectorStage {
     BootstrapPreciseStopTheWorld,
     RelocationConformance,
+    NativeStableGenerationalConformance,
     ProductionConcurrentGenerational,
 }
 
@@ -52,6 +53,7 @@ enum NurseryMobility {
 enum MatureHeapCollection {
     Retained,
     StopTheWorldMarkSweep,
+    IncrementalSatb,
     MostlyNonMovingConcurrent,
 }
 
@@ -93,6 +95,17 @@ impl GarbageCollectorContract {
             nursery: NurseryMobility::Moving,
             mature_heap: MatureHeapCollection::Retained,
             barriers: BarrierContract::GenerationalCard,
+        }
+    }
+
+    #[must_use]
+    pub const fn native_stable_generational() -> Self {
+        Self {
+            stage: GarbageCollectorStage::NativeStableGenerationalConformance,
+            roots: RootPrecision::Precise,
+            nursery: NurseryMobility::Absent,
+            mature_heap: MatureHeapCollection::IncrementalSatb,
+            barriers: BarrierContract::SatbAndGenerationalCard,
         }
     }
 

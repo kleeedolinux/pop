@@ -104,6 +104,12 @@ not table or runtime-name lookup.
   deterministic result application, steal telemetry, and joined shutdown;
 - runtime-owned major-mark epoch activation that validates and acknowledges
   every registered mutator root snapshot before tracing or worker dispatch;
+- accepted native stable-token generational composition that removes the
+  bootstrap collector from ABI 1 executables while reserving moving nursery and
+  evacuation for verified ABI 2 writable roots;
+- backend-private scalar replacement for non-escaping scalar arrays, including
+  read-only loop-local instances, with exact shape/bounds traps, loop safe
+  points, and managed, escaping, or mutated-loop negative coverage;
 - scoped pin handle/object counting and deterministic long-lived-pin telemetry;
 - domain/scheduler-homogeneous regions with exact fragmentation telemetry and
   bounded reserve-admitted selective-evacuation candidate selection;

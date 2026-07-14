@@ -22,11 +22,23 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 }
 
 #[test]
-fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
+fn native_runtime_exports_the_stable_generational_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
     assert_eq!(pop_rt_abi_minor(), 10);
-    assert_eq!(pop_rt_gc_stage(), 1);
+    assert_eq!(pop_rt_gc_stage(), 2);
+}
+
+#[test]
+fn stable_generational_safe_points_preserve_live_native_tokens() {
+    let _guard = abi_test_lock();
+    let reference = pop_rt_allocate_object(0);
+    assert_ne!(reference, 0);
+    assert!(request_abi_collection());
+    assert_eq!(abi_safe_point(19, &[reference]), 1);
+    let root = pop_rt_retain_root(reference);
+    assert_ne!(root, 0, "ABI 1 native tokens must not relocate");
+    assert_eq!(pop_rt_release_root(root), 1);
 }
 
 #[test]
@@ -57,6 +69,35 @@ fn bulk_scalar_array_operations_distinguish_zero_values_from_failure() {
 
 #[test]
 #[allow(unsafe_code)]
+fn allocation_churn_uses_the_native_stable_generational_path() {
+    let _guard = abi_test_lock();
+    let mut total = 0_u64;
+    let mut value = 0_u64;
+    let mut last = 0_u64;
+    for index in 1..=20_000_u64 {
+        let array = pop_rt_allocate_array_filled(256, 0, index);
+        assert_ne!(array, 0);
+        last = array;
+        // SAFETY: `value` is live and writable for the complete ABI call.
+        assert_eq!(
+            unsafe { pop_rt_array_get_checked(array, 1, &raw mut value) },
+            1
+        );
+        total = total.checked_add(value).expect("benchmark checksum");
+        if index.is_multiple_of(8_192) {
+            assert_eq!(abi_safe_point(index as u32, &[]), 1);
+        }
+    }
+    assert_eq!(total, 200_010_000);
+    for safe_point in 40_000..41_024 {
+        let _ = request_abi_collection();
+        assert_eq!(abi_safe_point(safe_point, &[]), 1);
+    }
+    assert_eq!(pop_rt_array_get(last, 1), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
 fn array_operations_reject_non_array_allocations() {
     let _guard = abi_test_lock();
     let object = pop_rt_allocate_object(2);
@@ -73,7 +114,7 @@ fn array_operations_reject_non_array_allocations() {
 }
 
 #[test]
-fn bootstrap_abi_pins_keep_handles_alive_until_explicit_unpin() {
+fn native_abi_pins_keep_handles_alive_until_explicit_unpin() {
     let _guard = abi_test_lock();
     let reference = pop_rt_allocate_object(0);
     let pin = pop_rt_pin(reference);
@@ -94,7 +135,7 @@ fn bootstrap_abi_pins_keep_handles_alive_until_explicit_unpin() {
 }
 
 #[test]
-fn bootstrap_strings_preserve_valid_utf8_and_compare_by_value() {
+fn native_strings_preserve_valid_utf8_and_compare_by_value() {
     let _guard = abi_test_lock();
     let pop = "Pop 🫧".as_bytes();
     let lua = "Lua".as_bytes();
@@ -113,7 +154,7 @@ fn bootstrap_strings_preserve_valid_utf8_and_compare_by_value() {
 
 #[test]
 #[allow(unsafe_code)]
-fn bootstrap_string_read_preserves_empty_ascii_and_non_ascii_utf8() {
+fn native_string_read_preserves_empty_ascii_and_non_ascii_utf8() {
     let _guard = abi_test_lock();
     for expected in ["", "teste", "Pop 🫧"] {
         let reference = allocate_utf8_string_literal(expected.as_bytes());
@@ -138,7 +179,7 @@ fn bootstrap_string_read_preserves_empty_ascii_and_non_ascii_utf8() {
 
 #[test]
 #[allow(unsafe_code)]
-fn bootstrap_string_read_rejects_invalid_handles_and_small_buffers() {
+fn native_string_read_rejects_invalid_handles_and_small_buffers() {
     let _guard = abi_test_lock();
     let string = allocate_utf8_string_literal(b"teste");
     let non_string = pop_rt_allocate_object(1);
@@ -155,7 +196,7 @@ fn bootstrap_string_read_rejects_invalid_handles_and_small_buffers() {
 }
 
 #[test]
-fn bootstrap_string_composition_is_typed_utf8_and_locale_independent() {
+fn native_string_composition_is_typed_utf8_and_locale_independent() {
     let _guard = abi_test_lock();
     let left = allocate_utf8_string_literal("Pop ".as_bytes());
     let right = allocate_utf8_string_literal("🫧".as_bytes());
@@ -237,7 +278,7 @@ fn platform_argument_adapter_omits_the_executable_path() {
 }
 
 #[test]
-fn bootstrap_abi_allocates_and_tracks_opaque_handles() {
+fn native_abi_allocates_and_tracks_opaque_tokens() {
     let _guard = abi_test_lock();
     let reference = pop_rt_allocate_array(2, 0);
     assert_ne!(reference, 0);

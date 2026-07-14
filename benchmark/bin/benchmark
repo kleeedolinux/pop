@@ -435,6 +435,9 @@ module PopBenchmark
         "minimumSeconds" => sorted.first,
         "comparable" => comparable
       }
+      if runtime.id == "poplang"
+        result["collectorStage"] = "NativeStableGenerationalConformance"
+      end
 
       result
     end

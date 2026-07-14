@@ -1033,6 +1033,85 @@ end\n",
 }
 
 #[test]
+fn read_only_loop_local_scalar_arrays_are_replaced_without_allocation() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local index = 1\n\
+    local total = 0\n\
+    repeat\n\
+        local values = Array.create<<Int>>(256, index)\n\
+        total = total + Array.get(values, 1)\n\
+        index = index + 1\n\
+    until index == 201\n\
+    return total\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s0()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered allocation-churn loop");
+
+    assert!(
+        !function.contains("pop_rt_allocate_array_filled"),
+        "{function}"
+    );
+    assert!(!function.contains("pop_rt_array_get_checked"), "{function}");
+    assert!(!function.contains("call noalias ptr @malloc"), "{function}");
+    assert!(
+        function.contains("_length_nonnegative = icmp sge i64"),
+        "{function}"
+    );
+    assert!(function.contains("_in_bounds = icmp ult i64"), "{function}");
+    assert!(function.contains("call void @pop_rt_trap()"), "{function}");
+    assert!(
+        function.contains("call i8 @pop_rt_gc_safe_point"),
+        "{function}"
+    );
+
+    let result = link_with_runtime_and_run(&module, "scalar-replaced-churn-loop");
+    assert_eq!(
+        result.status.code(),
+        Some(132),
+        "scalar-replaced churn loop failed: {}\n{function}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn mutated_loop_local_scalar_arrays_retain_the_managed_runtime_path() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local index = 1\n\
+    local total = 0\n\
+    repeat\n\
+        local values = Array.create<<Int>>(2, index)\n\
+        values[1] = index + 1\n\
+        total = total + Array.get(values, 1)\n\
+        index = index + 1\n\
+    until index == 3\n\
+    return total\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s0()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered mutated array loop");
+
+    assert!(
+        function.contains("pop_rt_allocate_array_filled"),
+        "{function}"
+    );
+    assert!(function.contains("pop_rt_array_set"), "{function}");
+    assert!(function.contains("pop_rt_array_get_checked"), "{function}");
+}
+
+#[test]
 fn constant_bounded_integer_reductions_elide_proven_overflow_edges() {
     let module = native_module(
         "namespace Main\n\

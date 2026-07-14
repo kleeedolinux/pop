@@ -15,7 +15,7 @@ use super::model::{
 };
 use super::{RegionKey, RegionRecord, RegionState};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct LayoutKey {
     type_id: RuntimeTypeId,
     slot_count: u32,
@@ -34,6 +34,8 @@ struct Tlab {
 pub(crate) struct AllocationInfrastructure {
     pub(super) config: AllocationInfrastructureConfig,
     pub(super) pages: BTreeMap<PageId, PageDescriptor>,
+    page_cursors: BTreeMap<PageId, usize>,
+    mature_pages: BTreeMap<(LayoutKey, SchedulerId), PageId>,
     pub(super) placements: BTreeMap<ManagedReference, AllocationPlacement>,
     tlabs: BTreeMap<SchedulerId, Tlab>,
     pub(super) regions: BTreeMap<RegionId, RegionRecord>,
@@ -55,6 +57,8 @@ impl AllocationInfrastructure {
         Self {
             config,
             pages: BTreeMap::new(),
+            page_cursors: BTreeMap::new(),
+            mature_pages: BTreeMap::new(),
             placements: BTreeMap::new(),
             tlabs: BTreeMap::new(),
             regions: BTreeMap::new(),
@@ -76,12 +80,13 @@ impl AllocationInfrastructure {
     ) -> Result<(), RuntimeFailure> {
         let layout = layout(type_id, object_map);
         let size = object_size(object_map.slot_count())?;
-        let placement = if class == AllocationClass::NurseryEligible {
-            self.place_in_tlab(&layout, size, scheduler)?
-        } else {
-            let domain = domain_for_class(class);
-            let page_scheduler = (domain == HeapDomain::LocalMature).then_some(scheduler);
-            self.place_on_new_page(&layout, size, domain, page_scheduler)?
+        let placement = match class {
+            AllocationClass::NurseryEligible => self.place_in_tlab(&layout, size, scheduler)?,
+            AllocationClass::Mature => self.place_in_mature_page(&layout, size, scheduler)?,
+            AllocationClass::Large | AllocationClass::Pinned => {
+                let domain = domain_for_class(class);
+                self.place_on_new_page(&layout, size, domain, None)?
+            }
         };
         self.record_bytes(size);
         self.placements.insert(reference, placement);
@@ -97,10 +102,15 @@ impl AllocationInfrastructure {
     ) -> Result<PlacementRequirement, RuntimeFailure> {
         let layout = layout(type_id, object_map);
         let object_bytes = object_size(object_map.slot_count())?;
-        let additional_committed_bytes = if class == AllocationClass::NurseryEligible
+        let reuses_capacity = (class == AllocationClass::NurseryEligible
             && self.tlabs.get(&scheduler).is_some_and(|tlab| {
                 tlab.layout == layout && tlab.cursor.saturating_add(object_bytes) <= tlab.limit
-            }) {
+            }))
+            || (class == AllocationClass::Mature
+                && self
+                    .indexed_mature_page(&layout, object_bytes, scheduler)
+                    .is_some());
+        let additional_committed_bytes = if reuses_capacity {
             0
         } else {
             self.config.page_bytes.max(object_bytes)
@@ -147,6 +157,7 @@ impl AllocationInfrastructure {
             .cursor
             .checked_add(size)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.page_cursors.insert(tlab.page, tlab.cursor);
         self.metrics.tlab_allocations = self.metrics.tlab_allocations.saturating_add(1);
         Ok(AllocationPlacement {
             page: tlab.page,
@@ -164,11 +175,99 @@ impl AllocationInfrastructure {
         scheduler: Option<SchedulerId>,
     ) -> Result<AllocationPlacement, RuntimeFailure> {
         let page = self.create_page(layout, domain, self.config.page_bytes.max(size), scheduler)?;
+        self.page_cursors.insert(page, size);
         Ok(AllocationPlacement {
             page,
             offset_bytes: 0,
             size_bytes: size,
             domain,
+        })
+    }
+
+    fn place_in_mature_page(
+        &mut self,
+        layout: &LayoutKey,
+        size: usize,
+        scheduler: SchedulerId,
+    ) -> Result<AllocationPlacement, RuntimeFailure> {
+        let key = (layout.clone(), scheduler);
+        let (page, offset_bytes) =
+            if let Some(reusable) = self.indexed_mature_page(layout, size, scheduler) {
+                self.metrics.mature_page_index_hits =
+                    self.metrics.mature_page_index_hits.saturating_add(1);
+                reusable
+            } else {
+                let page = self.create_page(
+                    layout,
+                    HeapDomain::LocalMature,
+                    self.config.page_bytes.max(size),
+                    Some(scheduler),
+                )?;
+                (page, 0)
+            };
+        let cursor = offset_bytes
+            .checked_add(size)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.page_cursors.insert(page, cursor);
+        if self
+            .pages
+            .get(&page)
+            .is_some_and(|descriptor| cursor < descriptor.capacity_bytes)
+        {
+            self.mature_pages.insert(key, page);
+        } else {
+            self.mature_pages.remove(&key);
+        }
+        Ok(AllocationPlacement {
+            page,
+            offset_bytes,
+            size_bytes: size,
+            domain: HeapDomain::LocalMature,
+        })
+    }
+
+    fn indexed_mature_page(
+        &self,
+        layout: &LayoutKey,
+        size: usize,
+        scheduler: SchedulerId,
+    ) -> Option<(PageId, usize)> {
+        let page = *self.mature_pages.get(&(layout.clone(), scheduler))?;
+        let descriptor = self.pages.get(&page)?;
+        let region = self.regions.get(&descriptor.region)?;
+        let cursor = self.page_cursors.get(&page).copied().unwrap_or(0);
+        (descriptor.domain == HeapDomain::LocalMature
+            && descriptor.scheduler == Some(scheduler)
+            && region.state.accepts_allocation()
+            && descriptor.type_id == layout.type_id
+            && descriptor.slot_count == layout.slot_count
+            && descriptor.reference_slots == layout.reference_slots
+            && cursor
+                .checked_add(size)
+                .is_some_and(|end| end <= descriptor.capacity_bytes))
+        .then_some((page, cursor))
+    }
+
+    fn reusable_page(
+        &self,
+        layout: &LayoutKey,
+        size: usize,
+        domain: HeapDomain,
+        scheduler: Option<SchedulerId>,
+    ) -> Option<(PageId, usize)> {
+        self.pages.values().find_map(|page| {
+            let region = self.regions.get(&page.region)?;
+            let cursor = self.page_cursors.get(&page.id).copied().unwrap_or(0);
+            (page.domain == domain
+                && page.scheduler == scheduler
+                && region.state.accepts_allocation()
+                && page.type_id == layout.type_id
+                && page.slot_count == layout.slot_count
+                && page.reference_slots == layout.reference_slots
+                && cursor
+                    .checked_add(size)
+                    .is_some_and(|end| end <= page.capacity_bytes))
+            .then_some((page.id, cursor))
         })
     }
 
@@ -198,6 +297,7 @@ impl AllocationInfrastructure {
                 capacity_bytes,
             },
         );
+        self.page_cursors.insert(id, 0);
         let (key, full) = {
             let record = self
                 .regions
@@ -239,7 +339,15 @@ impl AllocationInfrastructure {
     }
 
     pub(crate) fn remove(&mut self, reference: ManagedReference) {
+        self.remove_without_page_reclamation(reference);
+        self.reclaim_empty_pages();
+    }
+
+    pub(crate) fn remove_without_page_reclamation(&mut self, reference: ManagedReference) {
         self.placements.remove(&reference);
+    }
+
+    pub(crate) fn reclaim_empty_pages_after_sweep(&mut self) {
         self.reclaim_empty_pages();
     }
 
@@ -485,28 +593,7 @@ impl AllocationInfrastructure {
         layout: &LayoutKey,
         size: usize,
     ) -> Result<AllocationPlacement, RuntimeFailure> {
-        let reusable = self.pages.values().find_map(|page| {
-            let region = self.regions.get(&page.region)?;
-            if page.domain != HeapDomain::Shared
-                || !region.state.accepts_allocation()
-                || page.type_id != layout.type_id
-                || page.slot_count != layout.slot_count
-                || page.reference_slots != layout.reference_slots
-            {
-                return None;
-            }
-            let cursor = self
-                .placements
-                .values()
-                .filter(|placement| placement.page == page.id)
-                .map(|placement| placement.offset_bytes.saturating_add(placement.size_bytes))
-                .max()
-                .unwrap_or(0);
-            cursor
-                .checked_add(size)
-                .filter(|end| *end <= page.capacity_bytes)
-                .map(|_| (page.id, cursor))
-        });
+        let reusable = self.reusable_page(layout, size, HeapDomain::Shared, None);
         let (page, offset_bytes) = if let Some(reusable) = reusable {
             reusable
         } else {
@@ -520,6 +607,8 @@ impl AllocationInfrastructure {
                 0,
             )
         };
+        self.page_cursors
+            .insert(page, offset_bytes.saturating_add(size));
         Ok(AllocationPlacement {
             page,
             offset_bytes,
@@ -536,6 +625,8 @@ impl AllocationInfrastructure {
     }
 
     fn reclaim_empty_pages(&mut self) {
+        self.metrics.page_reclamation_passes =
+            self.metrics.page_reclamation_passes.saturating_add(1);
         let live_pages: BTreeSet<_> = self
             .placements
             .values()
@@ -543,6 +634,10 @@ impl AllocationInfrastructure {
             .collect();
         let before = self.pages.len();
         self.pages.retain(|page, _| live_pages.contains(page));
+        self.page_cursors
+            .retain(|page, _| self.pages.contains_key(page));
+        self.mature_pages
+            .retain(|_, page| self.pages.contains_key(page));
         let returned = before.saturating_sub(self.pages.len());
         self.metrics.pages_returned = self
             .metrics

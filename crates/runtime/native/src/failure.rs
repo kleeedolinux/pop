@@ -7,7 +7,7 @@ pub extern "C" fn pop_rt_trap() -> ! {
     std::process::abort()
 }
 
-/// Terminates the bootstrap process when a panic unwind reaches the native
+/// Terminates the process when a panic unwind reaches the native
 /// runtime boundary. Typed expected failures do not use this path.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
