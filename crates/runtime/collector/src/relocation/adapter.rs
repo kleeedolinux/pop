@@ -10,6 +10,19 @@ use crate::heap::AllocationKind;
 
 use super::heap::RelocationRuntime;
 
+impl RelocationRuntime {
+    pub(crate) fn validate_pin_transition(
+        &self,
+        reference: ManagedReference,
+    ) -> Result<(), RuntimeFailure> {
+        self.validate_reference(reference)?;
+        self.next_pin
+            .checked_add(1)
+            .map(|_| ())
+            .ok_or_else(RuntimeFailure::runtime_invariant)
+    }
+}
+
 impl RuntimeAdapter for RelocationRuntime {
     fn contract(&self) -> GarbageCollectorContract {
         GarbageCollectorContract::relocation_conformance_stage2()

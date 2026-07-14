@@ -100,6 +100,7 @@ not table or runtime-name lookup.
 - `BubbleContext` default loading and initialization;
 - moving nursery, card barriers, and GC stress tests;
 - bounded large-object pointer scanning with pointer-free field-scan elision;
+- scoped pin handle/object counting and deterministic long-lived-pin telemetry;
 - mutable typed root updates, runtime-profile/backend capability negotiation,
   and a real single-mutator relocation conformance collector before production
   TLAB/parallel-evacuation claims (ADR 0039);

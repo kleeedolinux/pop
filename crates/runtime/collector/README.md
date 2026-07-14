@@ -42,8 +42,8 @@ validated region/page/TLAB geometry, monomorphic page descriptors with precise
 pointer layouts, scheduler-indexed Eden pointer bumps and TLAB cursors, separate
 mature, large, and pinned domains, survivor-copy placement, deterministic
 promotion, and immediate pinned-space placement. A separate memory controller
-enforces a byte hard limit
-before heap mutation, protects emergency and evacuation reserves, accounts
+enforces a byte hard limit before heap mutation, protects emergency and
+evacuation reserves, accounts
 typed stack/code/metadata/native/arena/isolated usage, adapts the collection
 target, performs bounded mature-cycle assists, returns empty logical pages, and
 reports domain/debt/pressure/OOM telemetry. These logical descriptors validate
@@ -52,6 +52,14 @@ PLRI. Parallel per-scheduler TLAB ownership, virtual-memory reservation,
 size-class reuse, adaptive work stealing, concurrent card refinement/lazy
 sweeping, and measured production fast paths remain required before the
 production profile.
+
+Scoped pin metadata counts handles separately from uniquely pinned objects and
+tracks age in deterministic safe-point units. A configurable threshold reports
+each long-lived handle once; completed and currently active maximum ages remain
+observable without wall-clock dependence or heap-content reflection. The first
+pin performs constant-time token preflight and page-placement transition rather
+than cloning heap metadata, while additional handles reuse the stable pinned
+placement.
 
 This crate is reusable by native execution, the MIR interpreter, and a future
 VM. It contains no C exports, native symbol mapping, platform process adapters,

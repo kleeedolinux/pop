@@ -171,6 +171,10 @@ Package for the first release.
   - [x] Add scheduler-owned scoped bump arenas with disjoint typed managed/arena
     slots, precise relocating managed roots, same-arena edge enforcement,
     hard-limit accounting, stale-token checks, and bulk reclamation.
+  - [x] Count scoped pin handles and uniquely pinned objects, profile active and
+    completed lifetime in deterministic safe-point units, report long-lived
+    pins once, and keep first/additional pin transitions independent of heap
+    size.
   - [ ] Add shared immutability proofs and capability-driven barrier elimination.
   - [ ] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.

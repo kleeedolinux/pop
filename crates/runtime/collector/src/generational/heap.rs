@@ -18,6 +18,7 @@ use super::memory::{
     GenerationalMemoryConfig, GenerationalMemoryTelemetry, MemoryController, NonHeapMemoryUsage,
 };
 use super::ownership::IsolationState;
+use super::pinning::{PinningConfig, PinningState, PinningTelemetry};
 use super::workers::{
     BackgroundWorkerConfig, BackgroundWorkerPool, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,
@@ -182,6 +183,7 @@ pub struct GenerationalRuntime {
     pub(crate) memory: MemoryController,
     pub(crate) workers: Option<BackgroundWorkerPool>,
     pub(crate) isolation: IsolationState,
+    pub(crate) pinning: PinningState,
     pub(crate) scheduler: SchedulerId,
     pub(crate) arenas: ArenaState,
     pub(crate) minor_requested: BTreeSet<SchedulerId>,
@@ -222,6 +224,7 @@ impl GenerationalRuntime {
             memory: MemoryController::new(memory),
             workers: None,
             isolation: IsolationState::new(),
+            pinning: PinningState::new(PinningConfig::default()),
             scheduler: SchedulerId::new(1),
             arenas: ArenaState::new(),
             minor_requested: BTreeSet::new(),
@@ -231,6 +234,13 @@ impl GenerationalRuntime {
 
     pub fn select_scheduler(&mut self, scheduler: SchedulerId) {
         self.scheduler = scheduler;
+    }
+
+    #[must_use]
+    pub fn with_pinning_config(config: PinningConfig) -> Self {
+        let mut runtime = Self::new();
+        runtime.pinning = PinningState::new(config);
+        runtime
     }
 
     #[must_use]
@@ -317,6 +327,11 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn background_worker_telemetry(&self) -> Option<BackgroundWorkerTelemetry> {
         self.workers.as_ref().map(BackgroundWorkerPool::telemetry)
+    }
+
+    #[must_use]
+    pub fn pinning_telemetry(&self) -> PinningTelemetry {
+        self.pinning.telemetry()
     }
 
     /// Replaces the complete stack/code/metadata/native/arena/isolated usage

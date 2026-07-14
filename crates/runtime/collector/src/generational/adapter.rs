@@ -258,6 +258,7 @@ impl RuntimeAdapter for GenerationalRuntime {
         ) {
             return Err(RuntimeFailure::runtime_invariant());
         }
+        self.nursery.validate_pin_transition(reference)?;
         let (type_id, object_map, already_pinned) = self
             .nursery
             .objects
@@ -282,9 +283,15 @@ impl RuntimeAdapter for GenerationalRuntime {
                 false,
             )?;
         }
+        if !already_pinned {
+            self.allocation
+                .move_to_pinned(reference, type_id, &object_map)?;
+        }
         let pin = self.nursery.pin(reference)?;
-        self.allocation
-            .move_to_pinned(reference, type_id, &object_map)?;
+        if let Err(error) = self.pinning.register(pin, reference) {
+            self.nursery.unpin(pin)?;
+            return Err(error);
+        }
         self.memory
             .observe_committed(self.allocation.committed_bytes());
         self.mark_new_allocation(reference);
@@ -292,13 +299,19 @@ impl RuntimeAdapter for GenerationalRuntime {
     }
 
     fn unpin(&mut self, pin: PinHandle) -> Result<(), RuntimeFailure> {
-        self.nursery.unpin(pin)
+        let record = self
+            .pinning
+            .record(pin)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.nursery.unpin(pin)?;
+        self.pinning.complete_unpin(pin, record)
     }
 
     fn safe_point(
         &mut self,
         roots: &mut RootPublication,
     ) -> Result<SafePointOutcome, RuntimeFailure> {
+        self.pinning.advance_safe_point();
         let servicing_minor =
             self.minor_requested.contains(&self.scheduler) && !self.major_cycle_active();
         let identities_before: BTreeMap<_, _> = if servicing_minor {

@@ -9,6 +9,7 @@ mod heap;
 mod major;
 mod memory;
 mod ownership;
+mod pinning;
 mod workers;
 
 pub use allocation::{
@@ -27,6 +28,7 @@ pub use memory::{
     GenerationalMemoryConfig, GenerationalMemoryConfigError, GenerationalMemoryTelemetry,
     NonHeapMemoryUsage, NonHeapMemoryUsageError,
 };
+pub use pinning::{PinningConfig, PinningTelemetry};
 pub use workers::{
     BackgroundWorkerConfig, BackgroundWorkerConfigError, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,
