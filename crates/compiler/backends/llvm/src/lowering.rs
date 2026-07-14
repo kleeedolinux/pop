@@ -115,7 +115,7 @@ pub fn lower_mir_to_llvm_ir(
     functions.extend(lower_indirect_dispatchers(bubble, types)?);
     let entry_point = options
         .entry_point
-        .map(|symbol| lower_entry_point(symbol, bubble, types))
+        .map(|symbol| lower_entry_point(symbol, bubble, types, options.runtime_profile))
         .transpose()?;
     let mut declarations = vec![
         format!(
@@ -195,6 +195,15 @@ pub fn lower_mir_to_llvm_ir(
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
+    if matches!(
+        options.runtime_profile,
+        pop_backend_api::RuntimeProfile::ProductionGenerational
+    ) {
+        declarations.push(format!(
+            "declare i8 @{}(i16, i16)",
+            pop_runtime_native_abi::ABI_SUPPORT_SYMBOL
+        ));
+    }
     for reference in bubble.function_references() {
         let result = llvm_results(reference.results(), types)?;
         let parameters = reference
@@ -276,6 +285,7 @@ pub(crate) fn lower_entry_point(
     symbol: SymbolId,
     bubble: &MirBubble,
     types: &TypeArena,
+    runtime_profile: pop_backend_api::RuntimeProfile,
 ) -> Result<String, LlvmLoweringError> {
     let function = bubble
         .functions()
@@ -299,6 +309,26 @@ pub(crate) fn lower_entry_point(
         return Err(LlvmLoweringError::UnsupportedEntryPointSignature(symbol));
     }
     let entry = function_name(bubble.bubble(), symbol);
+    let abi_guard = if matches!(
+        runtime_profile,
+        pop_backend_api::RuntimeProfile::ProductionGenerational
+    ) {
+        let version = pop_runtime_native_abi::NATIVE_ABI_2_VERSION;
+        format!(
+            "  %pop_abi_supported = call i8 @{}(i16 {}, i16 {})\n  %pop_abi_valid = icmp eq i8 %pop_abi_supported, 1\n  br i1 %pop_abi_valid, label %abi_valid, label %trap\nabi_valid:\n",
+            pop_runtime_native_abi::ABI_SUPPORT_SYMBOL,
+            version.major(),
+            version.minor()
+        )
+    } else {
+        String::new()
+    };
+    let abi_trap = (!abi_guard.is_empty()).then(|| {
+        format!(
+            "\ntrap:\n  call void @{}()\n  unreachable",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        )
+    });
     if takes_arguments {
         let invocation = if returns_status {
             format!(
@@ -308,7 +338,7 @@ pub(crate) fn lower_entry_point(
             format!("  call void @{entry}(i64 %pop_arguments)\n  ret i32 0")
         };
         return Ok(format!(
-            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n{invocation}\n}}"
+            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n{invocation}\n}}"
         ));
     }
     let invocation = if returns_status {
@@ -319,7 +349,8 @@ pub(crate) fn lower_entry_point(
         format!("  call void @{entry}()\n  ret i32 0")
     };
     Ok(format!(
-        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{invocation}\n}}"
+        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}{invocation}{}\n}}",
+        abi_trap.unwrap_or_default()
     ))
 }
 

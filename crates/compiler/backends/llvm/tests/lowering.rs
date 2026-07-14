@@ -767,11 +767,24 @@ fn optimized_abi_two_execution_rejects_stale_tokens_after_forced_relocation() {
         .expect("valid forced relocation LLVM module");
 
     let text = module.to_string();
+    assert!(
+        text.contains("declare i8 @pop_rt_supports_abi(i16, i16)"),
+        "ABI 2 entry must declare exact descriptor negotiation: {text}"
+    );
+    assert!(
+        text.contains("call i8 @pop_rt_supports_abi(i16 2, i16 0)"),
+        "ABI 2 entry must validate the complete linked descriptor: {text}"
+    );
     let result = link_with_forced_relocation_runtime_and_run(&text, "abi-two-relocation");
     assert!(
         result.status.success(),
         "optimized native execution used a stale token: {}\n{module}",
         String::from_utf8_lossy(&result.stderr)
+    );
+    let stable_result = link_with_runtime_and_run(&module, "abi-two-stable-rejection");
+    assert!(
+        !stable_result.status.success(),
+        "the stable ABI 1 facade must reject an ABI 2 executable before normal entry"
     );
 
     let stale = text.replacen(
@@ -892,6 +905,10 @@ fn emitted_llvm_executes_a_pure_pop_function() {
     assert!(text.contains("define i32 @main(i32 %pop_argc, ptr %pop_argv)"));
     assert!(text.contains("call i64 @pop_rt_process_arguments"));
     assert!(text.contains("call i64 @pop_b0_s0(i64 %pop_arguments)"));
+    assert!(
+        !text.contains("pop_rt_supports_abi"),
+        "ABI 1 entry must retain its fixed bootstrap descriptor"
+    );
     let result = link_with_runtime_and_run(&module, "pure-entry");
     assert_eq!(
         result.status.code(),
@@ -2738,6 +2755,9 @@ fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output
             "#include <stdint.h>\n",
             "#include <stdlib.h>\n",
             "static uint64_t current_token;\n",
+            "uint8_t pop_rt_supports_abi(uint16_t major, uint16_t minor) {\n",
+            "  return major == 2 && minor == 0;\n",
+            "}\n",
             "uint64_t pop_rt_allocate_array(uint64_t length, uint8_t references) {\n",
             "  (void)length; (void)references; current_token = 41; return current_token;\n",
             "}\n",

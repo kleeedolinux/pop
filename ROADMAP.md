@@ -374,8 +374,9 @@ Post-baseline library work has begun without widening the release foundation:
   straight-line, divergent merge, and loop-backedge paths. Backend-private
   root cells preserve the current token across control flow, lowering rejects
   direct old-token operands, and negative mutations prove the conformance
-  runtime rejects stale uses. Load/link, unwind, coroutine, and FFI transition
-  proofs keep this item open.
+  runtime rejects stale uses. Exact ABI 2.0 load/link negotiation now fails
+  against the stable ABI 1 facade before normal entry. Unwind, coroutine, and
+  FFI transition proofs keep this item open.
 - [ ] **The production concurrent collector is not selectable.** Native
   scheduler integration, concurrent mature work, card refinement, lazy sweep,
   stack watermarks, bounded assists, and race/stress proof remain incomplete.

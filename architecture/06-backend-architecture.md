@@ -103,8 +103,10 @@ carry current tokens through divergent merges and are eligible for LLVM's
 ordinary promotion into SSA phis. Lowering rejects a direct old-token operand,
 and optimized straight-line, branch/merge, and loop-backedge executions pass
 with negative stale-token mutations. The relocation capability remains
-disabled until load/link validation plus unwind, coroutine, and FFI transition
-proofs pass.
+disabled until unwind, coroutine, and FFI transition proofs pass. ABI 2 entry
+wrappers now query exact descriptor 2.0 before argument decoding or normal
+program entry; the stable ABI 1 facade rejects that query and the conformance
+runtime accepts it.
 
 ## Experimental C backend
 
