@@ -350,6 +350,14 @@ pub enum SchedulerTaskFrameFailure {
     Collector,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerCollectorBindingFailure {
+    Registration,
+    ManagedTransition,
+    DetachedTransition,
+    Unregistration,
+}
+
 /// Exact compiler/runtime adapter for one scheduler-owned task frame.
 ///
 /// Implementations are mandatory even for trusted root-free host tasks; there
@@ -408,6 +416,10 @@ pub enum SchedulerError {
         task: SchedulerTaskId,
         failure: SchedulerTaskFrameFailure,
     },
+    CollectorBinding {
+        worker: SchedulerWorkerId,
+        failure: SchedulerCollectorBindingFailure,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -463,6 +475,10 @@ pub struct SchedulerTelemetry {
     pub(super) frame_root_restorations: u64,
     pub(super) frame_root_releases: u64,
     pub(super) frame_root_failures: u64,
+    pub(super) mutator_registrations: u64,
+    pub(super) managed_mutator_transitions: u64,
+    pub(super) detached_mutator_transitions: u64,
+    pub(super) mutator_unregistrations: u64,
 }
 
 macro_rules! telemetry_accessors {
@@ -528,6 +544,10 @@ impl SchedulerTelemetry {
         frame_root_restorations: u64,
         frame_root_releases: u64,
         frame_root_failures: u64,
+        mutator_registrations: u64,
+        managed_mutator_transitions: u64,
+        detached_mutator_transitions: u64,
+        mutator_unregistrations: u64,
     }
 
     #[must_use]

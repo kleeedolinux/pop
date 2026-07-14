@@ -9,7 +9,8 @@ use pop_runtime_native::{
     SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
     SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskFrameFailure,
     SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, abi_safe_point,
-    pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root, request_abi_collection,
+    native_epoch_telemetry, pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root,
+    request_abi_collection,
 };
 
 #[derive(Default)]
@@ -45,6 +46,34 @@ impl SchedulerRuntimeTransitions for PermitRuntimeTransitions {
         _transition: SchedulerRuntimeTransition,
     ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
         Ok(SchedulerRuntimeTransitionControl::Continue)
+    }
+}
+
+struct RejectDispatchRuntimeTransitions {
+    attempted: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+impl SchedulerRuntimeTransitions for RejectDispatchRuntimeTransitions {
+    fn apply(
+        &self,
+        transition: SchedulerRuntimeTransition,
+    ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
+        if matches!(
+            transition,
+            SchedulerRuntimeTransition::TaskDispatched { .. }
+        ) {
+            if let Some(attempted) = self
+                .attempted
+                .lock()
+                .expect("dispatch rejection sender")
+                .take()
+            {
+                attempted.send(()).expect("report dispatch rejection");
+            }
+            Err(SchedulerRuntimeTransitionFailure::CollectorState)
+        } else {
+            Ok(SchedulerRuntimeTransitionControl::Continue)
+        }
     }
 }
 
@@ -164,6 +193,17 @@ struct RejectRestoreTask {
 struct ManagedFrameTask {
     value: ManagedReference,
     first: bool,
+}
+
+struct EpochPollingTask;
+
+impl SchedulerTask for EpochPollingTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        assert!(request_abi_collection());
+        assert_eq!(abi_safe_point(931, &[]), 1);
+        assert_eq!(abi_safe_point(932, &[]), 1);
+        SchedulerTaskPoll::Complete
+    }
 }
 
 impl SchedulerTaskFrame for ManagedFrameTask {
@@ -426,6 +466,7 @@ impl_explicit_rootless_frame!(ReadyManyTask, 915);
 impl_explicit_rootless_frame!(SuspendOnceTask, 916);
 impl_explicit_rootless_frame!(WakeDuringPollTask, 917);
 impl_explicit_rootless_frame!(BlockingProbeTask, 918);
+impl_explicit_rootless_frame!(EpochPollingTask, 920);
 
 fn configuration(scheduler_count: usize, task_capacity: usize) -> SchedulerConfiguration {
     SchedulerConfiguration::new(
@@ -483,6 +524,97 @@ fn native_task_frames_restore_before_poll_and_retain_after_nonterminal_poll() {
     assert_eq!(final_telemetry.frame_root_retentions(), 2);
     assert_eq!(final_telemetry.frame_root_restorations(), 2);
     assert_eq!(final_telemetry.frame_root_failures(), 0);
+}
+
+#[test]
+fn native_workers_register_manage_detach_and_unregister_exact_mutators() {
+    let scheduler = NativeScheduler::new(configuration(2, 4)).expect("native scheduler");
+    let completions = Arc::new(Mutex::new(0));
+    for scheduler_raw in 1..=2 {
+        scheduler
+            .schedule_on(
+                SchedulerId::new(scheduler_raw),
+                SchedulerTaskMobility::Affine,
+                CompleteTask {
+                    completions: Arc::clone(&completions),
+                },
+            )
+            .expect("schedule exact-worker task");
+    }
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("worker tasks complete");
+    let telemetry = scheduler
+        .shutdown_with_telemetry()
+        .expect("worker mutators unregister");
+
+    assert_eq!(telemetry.mutator_registrations(), 2);
+    assert_eq!(telemetry.managed_mutator_transitions(), 2);
+    assert_eq!(telemetry.detached_mutator_transitions(), 2);
+    assert_eq!(telemetry.mutator_unregistrations(), 2);
+}
+
+#[test]
+fn rejected_dispatch_detaches_and_unregisters_without_losing_frame_roots() {
+    let (attempted, observed) = mpsc::channel();
+    let transitions = Arc::new(RejectDispatchRuntimeTransitions {
+        attempted: Mutex::new(Some(attempted)),
+    });
+    let scheduler = NativeScheduler::new_with_runtime_transitions(configuration(1, 1), transitions)
+        .expect("native scheduler");
+    scheduler
+        .schedule(CompleteTask {
+            completions: Arc::new(Mutex::new(0)),
+        })
+        .expect("schedule rejected dispatch");
+    observed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("dispatch rejection observed");
+
+    let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while scheduler.telemetry().mutator_unregistrations() == 0 {
+        assert!(
+            std::time::Instant::now() < cleanup_deadline,
+            "failed worker did not unregister its mutator"
+        );
+        std::thread::yield_now();
+    }
+    let failed = scheduler.telemetry();
+    assert_eq!(failed.managed_mutator_transitions(), 1);
+    assert_eq!(failed.detached_mutator_transitions(), 1);
+    assert_eq!(failed.mutator_unregistrations(), 1);
+    assert_eq!(failed.retained_frame_root_containers(), 1);
+    assert_eq!(
+        scheduler.shutdown(),
+        Err(SchedulerError::RuntimeTransition {
+            transition: SchedulerRuntimeTransition::TaskDispatched {
+                task: SchedulerTaskId::new(1),
+                worker: pop_runtime_native::SchedulerWorkerId::new(1),
+                scheduler: SchedulerId::new(1),
+            },
+            failure: SchedulerRuntimeTransitionFailure::CollectorState,
+        })
+    );
+}
+
+#[test]
+fn managed_safe_point_acknowledges_the_current_collector_epoch_once() {
+    let before = native_epoch_telemetry();
+    let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            EpochPollingTask,
+        )
+        .expect("schedule epoch poll");
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("epoch task completes");
+    scheduler.shutdown().expect("scheduler shutdown");
+    let after = native_epoch_telemetry();
+
+    assert_eq!(after.acknowledgements(), before.acknowledgements() + 1);
 }
 
 #[test]

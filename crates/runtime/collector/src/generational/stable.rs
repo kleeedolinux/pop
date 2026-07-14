@@ -9,6 +9,10 @@ use pop_runtime_interface::{
 
 use super::heap::GenerationalRuntime;
 use super::task_roots::{TaskFrameRootConfig, TaskFrameRootError, TaskFrameRootTelemetry};
+use super::{
+    EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress, MajorCollectionHandshakeError,
+    MutatorExecutionState, MutatorId,
+};
 
 pub struct StableGenerationalRuntime {
     inner: GenerationalRuntime,
@@ -27,6 +31,105 @@ impl StableGenerationalRuntime {
         Self {
             inner: GenerationalRuntime::with_task_frame_root_config(config),
         }
+    }
+
+    /// Selects the logical scheduler for the next serialized native operation.
+    pub fn select_scheduler(&mut self, scheduler: SchedulerId) {
+        self.inner.select_scheduler(scheduler);
+    }
+
+    /// Registers one native worker mutator for an exact logical scheduler.
+    ///
+    /// # Errors
+    ///
+    /// Rejects coordinator capacity or typed identity exhaustion.
+    pub fn register_scheduler_mutator(
+        &mut self,
+        scheduler: SchedulerId,
+        state: MutatorExecutionState,
+    ) -> Result<MutatorId, EpochCoordinatorError> {
+        self.inner.select_scheduler(scheduler);
+        self.inner.register_mutator(state)
+    }
+
+    /// Changes one registered native worker's collector execution state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale registrations and handshake completion failures.
+    pub fn transition_scheduler_mutator(
+        &mut self,
+        mutator: MutatorId,
+        scheduler: SchedulerId,
+        state: MutatorExecutionState,
+    ) -> Result<EpochProgress, MajorCollectionHandshakeError> {
+        if self.inner.mutator_scheduler(mutator) != Some(scheduler) {
+            return Err(pop_runtime_interface::RuntimeFailure::runtime_invariant().into());
+        }
+        self.inner.select_scheduler(scheduler);
+        self.inner.transition_mutator(mutator, state)
+    }
+
+    /// Removes one native worker mutator after its managed binding is clear.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale registrations and handshake completion failures.
+    pub fn unregister_scheduler_mutator(
+        &mut self,
+        mutator: MutatorId,
+        scheduler: SchedulerId,
+    ) -> Result<(), MajorCollectionHandshakeError> {
+        if self.inner.mutator_scheduler(mutator) != Some(scheduler) {
+            return Err(pop_runtime_interface::RuntimeFailure::runtime_invariant().into());
+        }
+        self.inner.select_scheduler(scheduler);
+        self.inner.unregister_mutator(mutator)
+    }
+
+    /// Runs one exact managed safe point and acknowledges its active epoch at
+    /// most once while scheduler selection remains serialized.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale registrations, scheduler mismatches, invalid roots, and
+    /// collector handshake failures.
+    pub fn scheduler_mutator_safe_point(
+        &mut self,
+        mutator: MutatorId,
+        scheduler: SchedulerId,
+        roots: &mut RootPublication,
+    ) -> Result<(SafePointOutcome, bool), MajorCollectionHandshakeError> {
+        if self.inner.mutator_scheduler(mutator) != Some(scheduler) {
+            return Err(pop_runtime_interface::RuntimeFailure::runtime_invariant().into());
+        }
+        self.inner.select_scheduler(scheduler);
+        let outcome = self.inner.safe_point(roots)?;
+        let Some(epoch) = self.inner.active_major_collection_epoch() else {
+            return Ok((outcome, false));
+        };
+        let acknowledged = match self
+            .inner
+            .acknowledge_major_collection_handshake(mutator, epoch, roots)
+        {
+            Ok(_) => true,
+            Err(MajorCollectionHandshakeError::Coordination(
+                EpochCoordinatorError::AlreadyAcknowledged(found),
+            )) if found == mutator => false,
+            Err(error) => return Err(error),
+        };
+        Ok((outcome, acknowledged))
+    }
+
+    #[must_use]
+    pub const fn epoch_coordinator_telemetry(&self) -> EpochCoordinatorTelemetry {
+        self.inner.epoch_coordinator_telemetry()
+    }
+
+    #[must_use]
+    pub fn allocation_scheduler(&self, reference: ManagedReference) -> Option<SchedulerId> {
+        let page = self.inner.placement(reference)?.page();
+        self.inner.page_descriptor(page)?.scheduler()
     }
 
     /// Retains the exact roots of one native ready or suspended task frame.

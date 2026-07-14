@@ -32,10 +32,14 @@ This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.
 
 [ADR 0072](../../../architecture/decisions/0072-scheduler-mutator-and-task-root-binding.md)
-defines the next integration boundary: one detached mutator registration per
-normal worker and one collector-visible precise root container for every ready
-or suspended task frame. The current transition hooks do not yet claim that
-collector binding.
+defines the scheduler/collector binding. Each normal worker now owns one
+detached mutator registration for its lifetime, enters managed state only while
+polling a task, carries an exact thread-local scheduler/mutator binding through
+serialized native ABI operations, acknowledges active collection epochs at
+managed safe points, and unregisters on shutdown. Every ready or suspended task
+frame owns one collector-visible precise root container. ABI 1 remains the
+stable-token serialized correctness stage; moving native execution still waits
+for the ABI 2 writable-root contract and its backend reload proof.
 
 The checksum-validated synchronized-reference benchmark is available with:
 

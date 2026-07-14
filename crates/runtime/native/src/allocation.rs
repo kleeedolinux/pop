@@ -6,7 +6,7 @@ use pop_runtime_interface::{
     TableAllocationRequest,
 };
 
-use crate::state::{TableMetadata, abi_runtime, abi_tables};
+use crate::state::{TableMetadata, abi_tables, lock_abi_runtime};
 
 /// Allocates a scalar array and returns its opaque managed handle, or zero on
 /// a typed runtime failure.
@@ -26,7 +26,7 @@ pub extern "C" fn pop_rt_allocate_array(length: u64, managed: u8) -> u64 {
             ArrayElementMap::ManagedReference
         },
     );
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -55,7 +55,7 @@ pub extern "C" fn pop_rt_allocate_array_filled(
             ArrayElementMap::ManagedReference
         },
     );
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -93,7 +93,7 @@ pub fn allocate_mapped_object(slot_count: u64, reference_slots: &[u32]) -> u64 {
     };
     let request =
         ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn pop_rt_allocate_initialized_object(
     };
     let request =
         ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -195,7 +195,7 @@ fn abi_allocate_object(slot_count: u32) -> u64 {
     let object_map = ObjectMap::scalar(slot_count);
     let request =
         ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -232,7 +232,7 @@ pub extern "C" fn pop_rt_allocate_table(
     ) else {
         return 0;
     };
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(reference) = runtime.allocate_table(&request) else {

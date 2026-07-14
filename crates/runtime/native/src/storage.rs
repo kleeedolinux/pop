@@ -2,7 +2,7 @@
 
 use pop_runtime_interface::{ManagedReference, ObjectSlot};
 
-use crate::state::{abi_runtime, abi_tables};
+use crate::state::{abi_tables, lock_abi_runtime};
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
@@ -11,7 +11,7 @@ pub extern "C" fn pop_rt_table_get(reference: u64, key: u64, managed_key: u8) ->
 }
 
 fn table_value(reference: u64, key: u64, managed_key: u8) -> Option<u64> {
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return None;
     };
     let Ok(tables) = abi_tables().lock() else {
@@ -76,7 +76,7 @@ pub extern "C" fn pop_rt_table_set(
     managed_key: u8,
     managed_value: u8,
 ) -> u8 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(mut tables) = abi_tables().lock() else {
@@ -147,7 +147,7 @@ pub extern "C" fn pop_rt_array_get(reference: u64, index: u64) -> u64 {
     let Some(slot) = array_slot(index) else {
         return 0;
     };
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -161,7 +161,7 @@ pub extern "C" fn pop_rt_array_set(reference: u64, index: u64, value: u64) -> u8
     let Some(slot) = array_slot(index) else {
         return 0;
     };
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     u8::from(
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn pop_rt_array_length(reference: u64, output: *mut u64) -
     if output.is_null() {
         return 0;
     }
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Some(length) = runtime.array_length(ManagedReference::new(reference)) else {
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn pop_rt_array_get_checked(
     if output.is_null() {
         return 0;
     }
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(value) = runtime.load_array_value(ManagedReference::new(reference), slot) else {
@@ -226,7 +226,7 @@ pub unsafe extern "C" fn pop_rt_array_get_checked(
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_array_fill(reference: u64, value: u64) -> u8 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     u8::from(
@@ -242,7 +242,7 @@ pub extern "C" fn pop_rt_field_get(reference: u64, field: u64) -> u64 {
     let Some(slot) = array_slot(field) else {
         return 0;
     };
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -256,7 +256,7 @@ pub extern "C" fn pop_rt_field_set(reference: u64, field: u64, value: u64) -> u8
     let Some(slot) = array_slot(field) else {
         return 0;
     };
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     u8::from(

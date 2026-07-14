@@ -4,12 +4,12 @@ use pop_runtime_interface::{
     ManagedReference, PinHandle, RootHandle, RootPublication, RuntimeAdapter,
 };
 
-use crate::state::abi_runtime;
+use crate::state::{current_native_execution_binding, epoch_telemetry, lock_abi_runtime};
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_retain_root(reference: u64) -> u64 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -20,7 +20,7 @@ pub extern "C" fn pop_rt_retain_root(reference: u64) -> u64 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     u8::from(runtime.release_root(RootHandle::new(root)).is_ok())
@@ -31,7 +31,7 @@ pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_pin(reference: u64) -> u64 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     runtime
@@ -43,7 +43,7 @@ pub extern "C" fn pop_rt_pin(reference: u64) -> u64 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_unpin(pin: u64) -> u8 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     u8::from(runtime.unpin(PinHandle::new(pin)).is_ok())
@@ -51,7 +51,7 @@ pub extern "C" fn pop_rt_unpin(pin: u64) -> u8 {
 
 #[must_use]
 pub fn request_abi_collection() -> bool {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return false;
     };
     runtime.request_collection();
@@ -62,10 +62,11 @@ pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
     if roots.len() > u32::MAX as usize {
         return 0;
     }
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
-    if !runtime.collection_requested() {
+    let binding = current_native_execution_binding();
+    if binding.is_none() && !runtime.collection_requested() {
         return u8::from(
             roots
                 .iter()
@@ -90,7 +91,24 @@ pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
     let Ok(mut publication) = RootPublication::new(stack_map, roots) else {
         return 0;
     };
-    u8::from(runtime.safe_point(&mut publication).is_ok())
+    if let Some(binding) = binding {
+        u8::from(
+            runtime
+                .scheduler_mutator_safe_point(
+                    binding.mutator(),
+                    binding.scheduler(),
+                    &mut publication,
+                )
+                .is_ok(),
+        )
+    } else {
+        u8::from(runtime.safe_point(&mut publication).is_ok())
+    }
+}
+
+#[must_use]
+pub fn native_epoch_telemetry() -> pop_runtime_collector::EpochCoordinatorTelemetry {
+    epoch_telemetry()
 }
 
 /// Publishes exact live managed handles for one native safe point.
@@ -124,7 +142,7 @@ pub unsafe extern "C" fn pop_rt_gc_safe_point(
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_satb_write_barrier(owner: u64) {
-    if let Ok(runtime) = abi_runtime().lock() {
+    if let Ok(runtime) = lock_abi_runtime() {
         let _ = runtime.contains(ManagedReference::new(owner));
     }
 }

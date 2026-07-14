@@ -282,10 +282,10 @@ Post-baseline library work has begun without widening the release foundation:
         bounded retained task-root container identities.
       - [x] Retain exact initial/nonterminal frame roots before queue
         publication and restore relocated `RootSlot` values before dispatch.
-      - [ ] Register each normal worker as a detached mutator, bind managed
+      - [x] Register each normal worker as a detached mutator, bind managed
         native entries per dispatch, and make safe points acknowledge epochs
         exactly once.
-      - [ ] Prove scheduler-local allocation ownership, root-container
+      - [x] Prove scheduler-local allocation ownership, root-container
         migration/refusal, and exact cleanup under forced minor/major GC.
     - [ ] Extend declared benchmark profiles with local/foreign wake and
       ping-pong latency, continuous I/O fairness, steal-storm and million-frame

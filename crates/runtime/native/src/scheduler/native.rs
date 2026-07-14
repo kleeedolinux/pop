@@ -7,15 +7,16 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use pop_runtime_collector::SchedulerId;
+use pop_runtime_collector::{MutatorId, SchedulerId};
 use pop_runtime_interface::TaskFrameRootId;
 
 use super::{
-    DetachedSchedulerRuntimeTransitions, SchedulerBlockingOperationId, SchedulerConfiguration,
-    SchedulerError, SchedulerExternalEventId, SchedulerRuntimeTransition,
-    SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitions, SchedulerTask,
-    SchedulerTaskContext, SchedulerTaskFrameFailure, SchedulerTaskId, SchedulerTaskMobility,
-    SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
+    DetachedSchedulerRuntimeTransitions, SchedulerBlockingOperationId,
+    SchedulerCollectorBindingFailure, SchedulerConfiguration, SchedulerError,
+    SchedulerExternalEventId, SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
+    SchedulerRuntimeTransitions, SchedulerTask, SchedulerTaskContext, SchedulerTaskFrameFailure,
+    SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
+    SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
 };
 
 enum InternalTaskState {
@@ -834,6 +835,84 @@ impl SharedScheduler {
         SchedulerError::TaskFrame { task, failure }
     }
 
+    const fn collector_binding_error(
+        worker: SchedulerWorkerId,
+        failure: SchedulerCollectorBindingFailure,
+    ) -> SchedulerError {
+        SchedulerError::CollectorBinding { worker, failure }
+    }
+
+    fn register_worker_mutator(
+        &self,
+        worker: SchedulerWorkerId,
+        scheduler: SchedulerId,
+    ) -> Result<MutatorId, SchedulerError> {
+        let mutator = crate::state::register_scheduler_mutator(scheduler).map_err(|_| {
+            Self::collector_binding_error(worker, SchedulerCollectorBindingFailure::Registration)
+        })?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.mutator_registrations =
+            telemetry.telemetry.mutator_registrations.saturating_add(1);
+        Ok(mutator)
+    }
+
+    fn enter_worker_managed(
+        &self,
+        worker: SchedulerWorkerId,
+        scheduler: SchedulerId,
+        mutator: MutatorId,
+    ) -> Result<(), SchedulerError> {
+        crate::state::enter_native_managed_execution(scheduler, mutator).map_err(|_| {
+            Self::collector_binding_error(
+                worker,
+                SchedulerCollectorBindingFailure::ManagedTransition,
+            )
+        })?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.managed_mutator_transitions = telemetry
+            .telemetry
+            .managed_mutator_transitions
+            .saturating_add(1);
+        Ok(())
+    }
+
+    fn leave_worker_managed(
+        &self,
+        worker: SchedulerWorkerId,
+        scheduler: SchedulerId,
+        mutator: MutatorId,
+    ) -> Result<(), SchedulerError> {
+        crate::state::leave_native_managed_execution(scheduler, mutator).map_err(|_| {
+            Self::collector_binding_error(
+                worker,
+                SchedulerCollectorBindingFailure::DetachedTransition,
+            )
+        })?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.detached_mutator_transitions = telemetry
+            .telemetry
+            .detached_mutator_transitions
+            .saturating_add(1);
+        Ok(())
+    }
+
+    fn unregister_worker_mutator(
+        &self,
+        worker: SchedulerWorkerId,
+        scheduler: SchedulerId,
+        mutator: MutatorId,
+    ) -> Result<(), SchedulerError> {
+        crate::state::unregister_scheduler_mutator(scheduler, mutator).map_err(|_| {
+            Self::collector_binding_error(worker, SchedulerCollectorBindingFailure::Unregistration)
+        })?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.mutator_unregistrations = telemetry
+            .telemetry
+            .mutator_unregistrations
+            .saturating_add(1);
+        Ok(())
+    }
+
     fn retain_task_frame(
         &self,
         id: SchedulerTaskId,
@@ -1554,6 +1633,7 @@ impl SharedScheduler {
         &self,
         queued: &QueuedTask,
         worker: SchedulerWorkerId,
+        mutator: MutatorId,
     ) -> Result<Option<StartedTask>, SchedulerError> {
         let cell = self.task(queued.id)?;
         let mut record = lock(&cell.record);
@@ -1570,16 +1650,35 @@ impl SharedScheduler {
             return Err(self.task_frame_error(queued.id, SchedulerTaskFrameFailure::Restoration));
         };
         self.prepare_task_frame_restore(queued.id, task_scheduler, frame_roots, task.as_mut())?;
-        self.require_runtime_transition(SchedulerRuntimeTransition::TaskDispatched {
-            task: queued.id,
-            worker,
-            scheduler: record.scheduler,
-        })?;
-        self.complete_task_frame_restore(queued.id, record.scheduler, frame_roots)?;
+        self.enter_worker_managed(worker, task_scheduler, mutator)?;
+        if let Err(error) =
+            self.require_runtime_transition(SchedulerRuntimeTransition::TaskDispatched {
+                task: queued.id,
+                worker,
+                scheduler: record.scheduler,
+            })
+        {
+            return Err(self
+                .leave_worker_managed(worker, task_scheduler, mutator)
+                .err()
+                .unwrap_or(error));
+        }
+        if let Err(error) =
+            self.complete_task_frame_restore(queued.id, record.scheduler, frame_roots)
+        {
+            return Err(self
+                .leave_worker_managed(worker, task_scheduler, mutator)
+                .err()
+                .unwrap_or(error));
+        }
         record.frame_roots = None;
         record.state = InternalTaskState::Running { notified: false };
         let Some(task) = record.task.take() else {
-            return Ok(None);
+            let error = self.task_frame_error(queued.id, SchedulerTaskFrameFailure::Restoration);
+            return Err(self
+                .leave_worker_managed(worker, task_scheduler, mutator)
+                .err()
+                .unwrap_or(error));
         };
         let context = SchedulerTaskContext::new(
             queued.id,
@@ -1610,37 +1709,72 @@ impl SharedScheduler {
         &self,
         id: SchedulerTaskId,
         cell: &TaskCell,
-        task: Box<dyn SchedulerTask>,
+        worker: SchedulerWorkerId,
+        mutator: MutatorId,
+        mut task: Box<dyn SchedulerTask>,
         result: Result<SchedulerTaskPoll, Box<dyn std::any::Any + Send>>,
     ) -> Result<(), SchedulerError> {
         let mut record = lock(&cell.record);
         let notified = matches!(record.state, InternalTaskState::Running { notified: true });
         let scheduler = record.scheduler;
+        let frame_roots = if matches!(
+            &result,
+            Ok(SchedulerTaskPoll::Ready | SchedulerTaskPoll::Pending)
+        ) {
+            match self.retain_task_frame(id, scheduler, task.as_mut()) {
+                Ok(frame_roots) => Some(frame_roots),
+                Err(error) => {
+                    let _ = self.leave_worker_managed(worker, scheduler, mutator);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(error) = self.leave_worker_managed(worker, scheduler, mutator) {
+            if let Some(frame_roots) = frame_roots {
+                record.task = Some(task);
+                record.frame_roots = Some(frame_roots);
+            }
+            return Err(error);
+        }
         let enqueue;
         let terminal_state = match result {
             Ok(SchedulerTaskPoll::Ready) => {
+                let frame_roots = frame_roots.ok_or_else(|| {
+                    self.task_frame_error(id, SchedulerTaskFrameFailure::Collector)
+                })?;
                 enqueue = self.finish_nonterminal_poll(
                     id,
                     &mut record,
                     task,
+                    frame_roots,
                     NonterminalPollState::Ready,
                 )?;
                 None
             }
             Ok(SchedulerTaskPoll::Pending) if notified => {
+                let frame_roots = frame_roots.ok_or_else(|| {
+                    self.task_frame_error(id, SchedulerTaskFrameFailure::Collector)
+                })?;
                 enqueue = self.finish_nonterminal_poll(
                     id,
                     &mut record,
                     task,
+                    frame_roots,
                     NonterminalPollState::Resumed,
                 )?;
                 None
             }
             Ok(SchedulerTaskPoll::Pending) => {
+                let frame_roots = frame_roots.ok_or_else(|| {
+                    self.task_frame_error(id, SchedulerTaskFrameFailure::Collector)
+                })?;
                 enqueue = self.finish_nonterminal_poll(
                     id,
                     &mut record,
                     task,
+                    frame_roots,
                     NonterminalPollState::Suspended,
                 )?;
                 None
@@ -1663,6 +1797,16 @@ impl SharedScheduler {
             }
         };
         drop(record);
+        self.publish_finished_poll_state(id, scheduler, enqueue, terminal_state)
+    }
+
+    fn publish_finished_poll_state(
+        &self,
+        id: SchedulerTaskId,
+        scheduler: SchedulerId,
+        enqueue: bool,
+        terminal_state: Option<SchedulerTaskState>,
+    ) -> Result<(), SchedulerError> {
         {
             let mut telemetry = lock(&self.telemetry);
             telemetry.telemetry.running_tasks = telemetry.telemetry.running_tasks.saturating_sub(1);
@@ -1734,11 +1878,11 @@ impl SharedScheduler {
         &self,
         id: SchedulerTaskId,
         record: &mut TaskRecord,
-        mut task: Box<dyn SchedulerTask>,
+        task: Box<dyn SchedulerTask>,
+        frame_roots: TaskFrameRootId,
         state: NonterminalPollState,
     ) -> Result<bool, SchedulerError> {
         let scheduler = record.scheduler;
-        let frame_roots = self.retain_task_frame(id, scheduler, task.as_mut())?;
         let transition = match state {
             NonterminalPollState::Ready => Ok(()),
             NonterminalPollState::Resumed => {
@@ -1956,10 +2100,15 @@ fn worker_loop(
     worker: SchedulerWorkerId,
     scheduler: SchedulerId,
 ) -> Result<(), SchedulerError> {
-    shared.require_runtime_transition(SchedulerRuntimeTransition::WorkerStarted {
-        worker,
-        scheduler,
-    })?;
+    let mutator = shared.register_worker_mutator(worker, scheduler)?;
+    if let Err(error) = shared
+        .require_runtime_transition(SchedulerRuntimeTransition::WorkerStarted { worker, scheduler })
+    {
+        return Err(shared
+            .unregister_worker_mutator(worker, scheduler, mutator)
+            .err()
+            .unwrap_or(error));
+    }
     shared.record_worker_started();
     let work_result = (|| {
         let mut local_polls = 0;
@@ -1968,11 +2117,12 @@ fn worker_loop(
             if matches!(queued.source, WorkSource::Stolen(batch) if batch > 1) {
                 shared.notify_work();
             }
-            let Some((cell, mut task, context)) = shared.begin_poll(&queued, worker)? else {
+            let Some((cell, mut task, context)) = shared.begin_poll(&queued, worker, mutator)?
+            else {
                 continue;
             };
             let result = catch_unwind(AssertUnwindSafe(|| task.poll(&context)));
-            shared.finish_poll(queued.id, &cell, task, result)?;
+            shared.finish_poll(queued.id, &cell, worker, mutator, task, result)?;
             if local {
                 local_polls = local_polls.saturating_add(1);
             } else {
@@ -1987,7 +2137,9 @@ fn worker_loop(
     let stop_result = shared
         .require_runtime_transition(SchedulerRuntimeTransition::WorkerStopped { worker, scheduler })
         .map(|()| shared.record_worker_stopped());
-    work_result.and(stop_result)
+    crate::state::clear_native_execution_binding();
+    let unregister_result = shared.unregister_worker_mutator(worker, scheduler, mutator);
+    work_result.and(stop_result).and(unregister_result)
 }
 
 fn blocking_worker_loop(pool: &BlockingPool, scheduler: &SharedScheduler) {
@@ -2121,5 +2273,86 @@ fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
         Ok(guard) => Some(guard),
         Err(TryLockError::WouldBlock) => None,
         Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use pop_runtime_interface::{ManagedReference, RootPublication, SafePointId, StackMap};
+
+    use crate::state::allocation_scheduler;
+    use crate::{
+        SchedulerConfiguration, SchedulerTask, SchedulerTaskContext, SchedulerTaskFrame,
+        SchedulerTaskFrameError, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
+        pop_rt_allocate_object,
+    };
+
+    use super::{NativeScheduler, SchedulerId};
+
+    struct AllocationOwnershipTask;
+
+    impl SchedulerTaskFrame for AllocationOwnershipTask {
+        fn frame_stack_map(&self) -> StackMap {
+            StackMap::new(SafePointId::new(1_001), Vec::new()).expect("allocation task frame map")
+        }
+
+        fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+            RootPublication::new(self.frame_stack_map(), Vec::new())
+                .map_err(|_| SchedulerTaskFrameError::PublicationRejected)
+        }
+
+        fn restore_frame_roots(
+            &mut self,
+            publication: RootPublication,
+        ) -> Result<(), SchedulerTaskFrameError> {
+            if publication.stack_map() == &self.frame_stack_map() {
+                Ok(())
+            } else {
+                Err(SchedulerTaskFrameError::RestorationRejected)
+            }
+        }
+    }
+
+    impl SchedulerTask for AllocationOwnershipTask {
+        fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+            let reference = pop_rt_allocate_object(0);
+            assert_ne!(reference, 0, "managed scheduler allocation");
+            assert_eq!(
+                allocation_scheduler(ManagedReference::new(reference)),
+                Some(context.scheduler())
+            );
+            SchedulerTaskPoll::Complete
+        }
+    }
+
+    #[test]
+    fn managed_native_allocations_use_the_dispatching_logical_scheduler() {
+        let configuration =
+            SchedulerConfiguration::new(2, 2, 4, 4, 1, 1).expect("scheduler configuration");
+        let scheduler = NativeScheduler::new(configuration).expect("native scheduler");
+        let mut tasks = Vec::new();
+        for scheduler_raw in 1..=2 {
+            tasks.push(
+                scheduler
+                    .schedule_on(
+                        SchedulerId::new(scheduler_raw),
+                        SchedulerTaskMobility::Affine,
+                        AllocationOwnershipTask,
+                    )
+                    .expect("schedule allocation owner"),
+            );
+        }
+        scheduler
+            .wait_until_idle(Duration::from_secs(1))
+            .expect("allocation tasks complete");
+        for task in tasks {
+            assert_eq!(
+                scheduler.task_state(task),
+                Ok(SchedulerTaskState::Completed)
+            );
+        }
+        scheduler.shutdown().expect("scheduler shutdown");
     }
 }

@@ -1,6 +1,6 @@
 //! Runtime-owned major-cycle handshake integration.
 
-use pop_runtime_interface::{RootPublication, RuntimeFailure};
+use pop_runtime_interface::{RootPublication, RuntimeFailure, SchedulerId};
 
 use super::model::{
     CollectorEpoch, CollectorPhase, EpochCoordinatorError, EpochCoordinatorTelemetry,
@@ -128,6 +128,11 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn mutator_publication(&self, id: MutatorId) -> Option<MutatorPublication> {
         self.coordination.publication(id)
+    }
+
+    #[must_use]
+    pub(crate) fn mutator_scheduler(&self, id: MutatorId) -> Option<SchedulerId> {
+        self.mutator_schedulers.get(&id).copied()
     }
 
     #[must_use]

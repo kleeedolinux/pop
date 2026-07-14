@@ -2,6 +2,7 @@ use pop_runtime_collector::{
     BackgroundWorkerConfig, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
     EpochCoordinatorConfigError, EpochCoordinatorError, GenerationalRuntime,
     MajorCollectionHandshakeError, MajorCyclePhase, MutatorExecutionState, MutatorPublication,
+    SchedulerId, StableGenerationalRuntime,
 };
 use pop_runtime_interface::{
     AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, RootPublication,
@@ -320,4 +321,39 @@ fn invalid_registered_root_fails_before_acknowledgement_or_worker_dispatch() {
             .jobs_submitted(),
         0
     );
+}
+
+#[test]
+fn stable_scheduler_safe_point_acknowledges_each_epoch_at_most_once() {
+    let first_scheduler = SchedulerId::new(1);
+    let second_scheduler = SchedulerId::new(2);
+    let mut runtime = StableGenerationalRuntime::new();
+    let first = runtime
+        .register_scheduler_mutator(first_scheduler, MutatorExecutionState::Managed)
+        .expect("first scheduler mutator");
+    let second = runtime
+        .register_scheduler_mutator(second_scheduler, MutatorExecutionState::Managed)
+        .expect("second scheduler mutator");
+    runtime.request_collection();
+
+    let (_, first_acknowledged) = runtime
+        .scheduler_mutator_safe_point(first, first_scheduler, &mut empty_roots(24))
+        .expect("first managed safe point");
+    assert!(first_acknowledged);
+    let (_, duplicate_acknowledged) = runtime
+        .scheduler_mutator_safe_point(first, first_scheduler, &mut empty_roots(25))
+        .expect("duplicate epoch poll is a successful no-op");
+    assert!(!duplicate_acknowledged);
+    assert_eq!(runtime.epoch_coordinator_telemetry().acknowledgements(), 1);
+
+    runtime
+        .transition_scheduler_mutator(second, second_scheduler, MutatorExecutionState::Detached)
+        .expect("detached peer automatically acknowledges");
+    assert_eq!(runtime.epoch_coordinator_telemetry().epochs_completed(), 1);
+    runtime
+        .unregister_scheduler_mutator(first, first_scheduler)
+        .expect("unregister first mutator");
+    runtime
+        .unregister_scheduler_mutator(second, second_scheduler)
+        .expect("unregister second mutator");
 }

@@ -8,7 +8,7 @@ use pop_runtime_interface::{
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 
 use crate::range::{load_range, range_iteration_step};
-use crate::state::{abi_lists, abi_runtime, abi_tables};
+use crate::state::{abi_lists, abi_tables, lock_abi_runtime};
 
 const SOURCE_SLOT: u32 = 0;
 const KIND_SLOT: u32 = 1;
@@ -26,7 +26,7 @@ struct IterationStep {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_iteration_acquire(source: u64, kind: u8) -> u64 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let state = if kind == IterationCollectionKind::Array as u8 {
@@ -89,7 +89,7 @@ pub unsafe extern "C" fn pop_rt_iteration_next(iterator: u64, output: *mut u64) 
     if output.is_null() {
         return IterationStatus::Failure as u8;
     }
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return IterationStatus::Failure as u8;
     };
     let iterator = ManagedReference::new(iterator);
