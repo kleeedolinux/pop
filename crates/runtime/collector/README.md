@@ -19,8 +19,9 @@ mutation. The bounded coordinator registers managed and foreign execution
 states, collects exact once-only root/TLAB/barrier publications, and completes
 protocol epochs without heap tracing in the handshake. Persistent named worker
 threads receive immutable precise-slot snapshots through bounded per-worker
-queues, scan exact object maps and remembered cards in parallel, and return
-sequence-ordered results for collector-owned mutation. Large pointer and mixed
+queues, keep owner work FIFO, steal peer work from the opposite end, scan exact
+object maps and remembered cards in parallel, and return sequence-ordered
+results for collector-owned mutation. Large pointer and mixed
 layouts advance through one bounded scan-range continuation at a time, so
 neither discovery nor a worker job scales with the complete pointer array;
 pointer-free large objects perform no field tracing after liveness is
@@ -71,9 +72,9 @@ target, performs bounded mature-cycle assists, returns empty logical pages, and
 reports domain/debt/pressure/OOM telemetry. These logical descriptors validate
 ownership and allocation transitions without exposing a raw address through
 PLRI. Parallel per-scheduler TLAB ownership, virtual-memory reservation,
-size-class reuse, adaptive work stealing, concurrent card refinement/lazy
-sweeping, and measured production fast paths remain required before the
-production profile.
+size-class reuse, adaptive worker sizing and stealing policy, concurrent card
+refinement/lazy sweeping, and measured production fast paths remain required
+before the production profile.
 
 Scoped pin metadata counts handles separately from uniquely pinned objects and
 tracks age in deterministic safe-point units. A configurable threshold reports
@@ -105,13 +106,15 @@ is protocol infrastructure, not a claim that background collection or native
 scheduler handshakes are complete.
 
 The `generational::workers` partition owns persistent host threads, bounded
-per-worker queues, immutable bounded mark-slot snapshots, deterministic result
-ordering, telemetry, and joined shutdown. It performs parallel marking,
+owner-FIFO queues with opposite-end peer stealing, immutable bounded mark-slot
+snapshots, deterministic result ordering, telemetry, and joined shutdown. It
+performs parallel marking,
 remembered-card refinement, and sweep dispatch only when explicitly configured;
 selected-region evacuation can also submit one internal-edge-rewrite job per
 collector-staged selected-object copy while retaining a collector-owned atomic
-commit. It does not claim adaptive sizing, work stealing, mutator-concurrent
-tracing/refinement, or concurrent heap mutation. Major telemetry records
+commit. It does not claim adaptive sizing or stealing policy,
+mutator-concurrent tracing/refinement, or concurrent heap mutation. Major
+telemetry records
 completed large-object scan chunks, the maximum slots per chunk, pending chunk
 queue depth, and pointer-free large objects without exposing heap contents.
 

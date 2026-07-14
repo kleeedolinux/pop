@@ -454,6 +454,8 @@ fn configured_workers_rewrite_selected_object_edges_before_atomic_evacuation_com
     assert_eq!(worker_telemetry.evacuation_jobs_completed(), 4);
     assert_eq!(worker_telemetry.jobs_submitted(), 4);
     assert_eq!(worker_telemetry.jobs_completed(), 4);
-    assert_eq!(worker_telemetry.worker_threads_used(), 2);
+    assert!(worker_telemetry.jobs_stolen() <= worker_telemetry.jobs_completed());
+    assert!((1..=2).contains(&worker_telemetry.worker_threads_used()));
+    assert!(worker_telemetry.worker_threads_used() == 2 || worker_telemetry.jobs_stolen() > 0);
     assert_eq!(worker_telemetry.maximum_batch_size(), 4);
 }

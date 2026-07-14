@@ -100,6 +100,8 @@ not table or runtime-name lookup.
 - `BubbleContext` default loading and initialization;
 - moving nursery, card barriers, and GC stress tests;
 - bounded large-object pointer scanning with pointer-free field-scan elision;
+- bounded worker-local FIFO queues with opposite-end peer stealing,
+  deterministic result application, steal telemetry, and joined shutdown;
 - scoped pin handle/object counting and deterministic long-lived-pin telemetry;
 - domain/scheduler-homogeneous regions with exact fragmentation telemetry and
   bounded reserve-admitted selective-evacuation candidate selection;

@@ -123,10 +123,12 @@ fn background_workers_scan_and_sweep_without_changing_reachability() {
         .background_worker_telemetry()
         .expect("worker telemetry");
     assert_eq!(telemetry.workers_started(), 2);
-    assert_eq!(telemetry.worker_threads_used(), 2);
+    assert!((1..=2).contains(&telemetry.worker_threads_used()));
+    assert!(telemetry.worker_threads_used() == 2 || telemetry.jobs_stolen() > 0);
     assert!(telemetry.mark_jobs_completed() >= 64);
     assert!(telemetry.sweep_jobs_completed() >= 64);
     assert_eq!(telemetry.jobs_submitted(), telemetry.jobs_completed());
+    assert!(telemetry.jobs_stolen() <= telemetry.jobs_completed());
     assert!(telemetry.maximum_batch_size() <= 64);
 }
 

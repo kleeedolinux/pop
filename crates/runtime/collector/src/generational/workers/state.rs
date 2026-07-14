@@ -1,8 +1,9 @@
 //! Per-worker bounded queues and deterministic result collection.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 use pop_runtime_interface::{ManagedReference, RuntimeFailure};
@@ -48,7 +49,24 @@ enum WorkerCommand {
         task: EvacuationRewriteTask,
         relocations: Arc<BTreeMap<ManagedReference, ManagedReference>>,
     },
-    Shutdown,
+}
+
+struct QueuedWorkerCommand {
+    command: WorkerCommand,
+    stolen: bool,
+}
+
+struct WorkerQueue {
+    commands: Mutex<VecDeque<WorkerCommand>>,
+    space_available: Condvar,
+}
+
+struct SharedWorkerQueues {
+    queues: Vec<WorkerQueue>,
+    idle_gate: Mutex<()>,
+    work_available: Condvar,
+    shutdown: AtomicBool,
+    queue_capacity: usize,
 }
 
 enum WorkerOutcome {
@@ -72,6 +90,7 @@ enum WorkerOutcome {
 struct WorkerResult {
     sequence: u64,
     worker: usize,
+    stolen: bool,
     outcome: WorkerOutcome,
 }
 
@@ -88,7 +107,7 @@ pub(crate) struct EvacuationRewriteResult {
 }
 
 pub(crate) struct BackgroundWorkerPool {
-    senders: Vec<SyncSender<WorkerCommand>>,
+    queues: Arc<SharedWorkerQueues>,
     results: Receiver<WorkerResult>,
     threads: Vec<JoinHandle<()>>,
     next_worker: usize,
@@ -97,32 +116,137 @@ pub(crate) struct BackgroundWorkerPool {
     telemetry: BackgroundWorkerTelemetry,
 }
 
+impl SharedWorkerQueues {
+    fn new(worker_count: usize, queue_capacity: usize) -> Self {
+        Self {
+            queues: (0..worker_count)
+                .map(|_| WorkerQueue {
+                    commands: Mutex::new(VecDeque::new()),
+                    space_available: Condvar::new(),
+                })
+                .collect(),
+            idle_gate: Mutex::new(()),
+            work_available: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+            queue_capacity,
+        }
+    }
+
+    fn submit(&self, worker: usize, command: WorkerCommand) -> Result<(), RuntimeFailure> {
+        let queue = self
+            .queues
+            .get(worker)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let mut commands = queue
+            .commands
+            .lock()
+            .map_err(|_| RuntimeFailure::runtime_invariant())?;
+        while !self.shutdown.load(Ordering::Acquire) && commands.len() >= self.queue_capacity {
+            commands = queue
+                .space_available
+                .wait(commands)
+                .map_err(|_| RuntimeFailure::runtime_invariant())?;
+        }
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        commands.push_back(command);
+        drop(commands);
+        let _idle = self
+            .idle_gate
+            .lock()
+            .map_err(|_| RuntimeFailure::runtime_invariant())?;
+        self.work_available.notify_one();
+        Ok(())
+    }
+
+    fn take(&self, worker: usize) -> Option<QueuedWorkerCommand> {
+        loop {
+            if let Some(command) = self.try_take(worker).ok()? {
+                return Some(command);
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                return None;
+            }
+            let idle = self.idle_gate.lock().ok()?;
+            if let Some(command) = self.try_take(worker).ok()? {
+                return Some(command);
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                return None;
+            }
+            drop(self.work_available.wait(idle).ok()?);
+        }
+    }
+
+    fn try_take(&self, worker: usize) -> Result<Option<QueuedWorkerCommand>, ()> {
+        let Some(local) = self.queues.get(worker) else {
+            return Err(());
+        };
+        if let Some(command) = local.commands.lock().map_err(|_| ())?.pop_front() {
+            local.space_available.notify_one();
+            return Ok(Some(QueuedWorkerCommand {
+                command,
+                stolen: false,
+            }));
+        }
+        for offset in 1..self.queues.len() {
+            let victim = (worker + offset) % self.queues.len();
+            let queue = &self.queues[victim];
+            if let Some(command) = queue.commands.lock().map_err(|_| ())?.pop_back() {
+                queue.space_available.notify_one();
+                return Ok(Some(QueuedWorkerCommand {
+                    command,
+                    stolen: true,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    const fn worker_count(&self) -> usize {
+        self.queues.len()
+    }
+
+    fn shutdown(&self) {
+        if let Ok(_idle) = self.idle_gate.lock() {
+            self.shutdown.store(true, Ordering::Release);
+            for queue in &self.queues {
+                if let Ok(_commands) = queue.commands.lock() {
+                    queue.space_available.notify_all();
+                }
+            }
+            self.work_available.notify_all();
+        }
+    }
+}
+
 impl BackgroundWorkerPool {
     pub(crate) fn new(config: BackgroundWorkerConfig) -> Result<Self, BackgroundWorkerStartError> {
         let (result_sender, results) = mpsc::channel();
-        let mut senders: Vec<SyncSender<WorkerCommand>> = Vec::with_capacity(config.worker_count);
+        let queues = Arc::new(SharedWorkerQueues::new(
+            config.worker_count,
+            config.queue_capacity,
+        ));
         let mut threads: Vec<JoinHandle<()>> = Vec::with_capacity(config.worker_count);
         for worker in 0..config.worker_count {
-            let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
+            let worker_queues = Arc::clone(&queues);
             let worker_results = result_sender.clone();
             let Ok(handle) = thread::Builder::new()
                 .name(format!("pop-gc-{worker}"))
-                .spawn(move || worker_loop(worker, &receiver, &worker_results))
+                .spawn(move || worker_loop(worker, &worker_queues, &worker_results))
             else {
-                for sender in &senders {
-                    let _ = sender.send(WorkerCommand::Shutdown);
-                }
+                queues.shutdown();
                 for thread in threads {
                     let _ = thread.join();
                 }
                 return Err(BackgroundWorkerStartError::ThreadSpawn);
             };
-            senders.push(sender);
             threads.push(handle);
         }
         drop(result_sender);
         Ok(Self {
-            senders,
+            queues,
             results,
             threads,
             next_worker: 0,
@@ -305,10 +429,8 @@ impl BackgroundWorkerPool {
 
     fn submit(&mut self, command: WorkerCommand) -> Result<(), RuntimeFailure> {
         let worker = self.next_worker;
-        self.next_worker = (self.next_worker + 1) % self.senders.len();
-        self.senders[worker]
-            .send(command)
-            .map_err(|_| RuntimeFailure::runtime_invariant())?;
+        self.next_worker = (self.next_worker + 1) % self.queues.worker_count();
+        self.queues.submit(worker, command)?;
         self.telemetry.jobs_submitted = self.telemetry.jobs_submitted.saturating_add(1);
         Ok(())
     }
@@ -321,6 +443,9 @@ impl BackgroundWorkerPool {
                 .recv()
                 .map_err(|_| RuntimeFailure::runtime_invariant())?;
             self.workers_used.insert(result.worker);
+            if result.stolen {
+                self.telemetry.jobs_stolen = self.telemetry.jobs_stolen.saturating_add(1);
+            }
             completed.push(result);
         }
         completed.sort_by_key(|result| result.sequence);
@@ -342,25 +467,20 @@ impl BackgroundWorkerPool {
 
 impl Drop for BackgroundWorkerPool {
     fn drop(&mut self) {
-        for sender in &self.senders {
-            let _ = sender.send(WorkerCommand::Shutdown);
-        }
+        self.queues.shutdown();
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
 }
 
-fn worker_loop(
-    worker: usize,
-    receiver: &Receiver<WorkerCommand>,
-    results: &mpsc::Sender<WorkerResult>,
-) {
-    while let Ok(command) = receiver.recv() {
-        let result = match command {
+fn worker_loop(worker: usize, queues: &SharedWorkerQueues, results: &mpsc::Sender<WorkerResult>) {
+    while let Some(queued) = queues.take(worker) {
+        let result = match queued.command {
             WorkerCommand::Mark { sequence, task } => WorkerResult {
                 sequence,
                 worker,
+                stolen: queued.stolen,
                 outcome: scan(&task),
             },
             WorkerCommand::RefineCard {
@@ -370,6 +490,7 @@ fn worker_loop(
             } => WorkerResult {
                 sequence,
                 worker,
+                stolen: queued.stolen,
                 outcome: refine_card(&task, &young),
             },
             WorkerCommand::Sweep {
@@ -378,6 +499,7 @@ fn worker_loop(
             } => WorkerResult {
                 sequence,
                 worker,
+                stolen: queued.stolen,
                 outcome: WorkerOutcome::Sweep(reference),
             },
             WorkerCommand::Evacuate {
@@ -387,9 +509,9 @@ fn worker_loop(
             } => WorkerResult {
                 sequence,
                 worker,
+                stolen: queued.stolen,
                 outcome: evacuate(task, &relocations),
             },
-            WorkerCommand::Shutdown => break,
         };
         if results.send(result).is_err() {
             break;
@@ -458,4 +580,56 @@ pub(crate) fn scan_slots(slots: &[SlotValue]) -> Result<Vec<ManagedReference>, (
         }
     }
     Ok(children)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueuedWorkerCommand, SharedWorkerQueues, WorkerCommand};
+    use pop_runtime_interface::ManagedReference;
+
+    #[test]
+    fn idle_worker_steals_newest_peer_job_without_reordering_peer_fifo() {
+        let queues = SharedWorkerQueues::new(2, 2);
+        queues.submit(0, sweep(1)).expect("submit oldest peer job");
+        queues.submit(0, sweep(2)).expect("submit newest peer job");
+
+        let stolen = queues.take(1).expect("idle worker steals");
+        assert!(stolen.stolen);
+        assert_eq!(sequence(&stolen), 2);
+
+        let local = queues.take(0).expect("owner retains oldest job");
+        assert!(!local.stolen);
+        assert_eq!(sequence(&local), 1);
+    }
+
+    #[test]
+    fn worker_prefers_its_local_fifo_before_stealing() {
+        let queues = SharedWorkerQueues::new(2, 2);
+        queues.submit(0, sweep(1)).expect("submit peer job");
+        queues.submit(1, sweep(2)).expect("submit local job");
+
+        let local = queues.take(1).expect("take local job");
+        assert!(!local.stolen);
+        assert_eq!(sequence(&local), 2);
+
+        let stolen = queues.take(1).expect("steal remaining peer job");
+        assert!(stolen.stolen);
+        assert_eq!(sequence(&stolen), 1);
+    }
+
+    fn sweep(sequence: u64) -> WorkerCommand {
+        WorkerCommand::Sweep {
+            sequence,
+            reference: ManagedReference::new(sequence),
+        }
+    }
+
+    fn sequence(command: &QueuedWorkerCommand) -> u64 {
+        match &command.command {
+            WorkerCommand::Sweep { sequence, .. } => *sequence,
+            WorkerCommand::Mark { .. }
+            | WorkerCommand::RefineCard { .. }
+            | WorkerCommand::Evacuate { .. } => panic!("test queue contained a non-sweep command"),
+        }
+    }
 }

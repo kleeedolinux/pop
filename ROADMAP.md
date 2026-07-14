@@ -192,10 +192,10 @@ Package for the first release.
   - [x] Add typed mutator registration and bounded epoch handshakes with exact
     once-only acknowledgements, published root/TLAB/barrier state, explicit
     foreign-execution states, and deterministic transition telemetry.
-  - [x] Add opt-in persistent host workers with bounded per-worker queues,
-    parallel exact object-map and collecting-safe-point remembered-card scans,
-    deterministic result application, sweep dispatch, worker telemetry, and
-    joined shutdown.
+  - [x] Add opt-in persistent host workers with bounded owner-FIFO queues,
+    opposite-end peer stealing, parallel exact object-map and collecting-safe-
+    point remembered-card scans, deterministic result application, sweep
+    dispatch, worker/steal telemetry, and joined shutdown.
   - [x] Divide large pointer, mixed-layout, and large pinned scans into bounded
     precise-slot chunks with one continuation per object, skip field tracing for
     pointer-free large objects, and preserve SATB/post-scan mutation barriers in
@@ -217,8 +217,9 @@ Package for the first release.
     Phase-specific resolution and mutator-concurrent evacuation remain
     production work.
   - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
-    adaptive worker sizing/work stealing, concurrent card refinement and page
-    reclamation, stack watermarks, race/stress proof, and latency measurements.
+    adaptive worker sizing and stealing policy, concurrent card refinement and
+    page reclamation, stack watermarks, race/stress proof, and latency
+    measurements.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.
