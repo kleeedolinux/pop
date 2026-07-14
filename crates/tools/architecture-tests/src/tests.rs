@@ -1510,7 +1510,8 @@ fn assert_example_contract(root: &Path) {
             .contains("closures, `Result`, exhaustive `match`, prefix `try`, and lexical `defer`")
     );
     assert!(examples.contains("Postfix `?` remains optional-only."));
-    assert!(examples.contains("Proposed syntax only."));
+    assert!(examples.contains("async function(group: Task.Group)"));
+    assert!(!examples.contains("Proposed syntax only."));
     for stale in ["Data.Json", "Text.Pattern", "Async.run", "Io.open"] {
         assert!(
             !examples.contains(stale),
