@@ -32,6 +32,7 @@ struct DeterministicTask {
     mobility: SchedulerTaskMobility,
     cancellation_requested: bool,
     frame_roots: Option<RootPublication>,
+    ready_since_work: u64,
 }
 
 pub struct DeterministicScheduler {
@@ -44,6 +45,7 @@ pub struct DeterministicScheduler {
     transcript: Vec<SchedulerDecision>,
     telemetry: SchedulerTelemetry,
     virtual_work: u64,
+    observation_work: u64,
     timers: BTreeMap<(u64, SchedulerTimerId), SchedulerTaskId>,
     next_timer: u64,
     events: BTreeMap<SchedulerExternalEventId, (SchedulerTaskId, bool)>,
@@ -95,6 +97,7 @@ impl DeterministicScheduler {
             transcript: Vec::new(),
             telemetry: SchedulerTelemetry::default(),
             virtual_work: 0,
+            observation_work: 0,
             timers: BTreeMap::new(),
             next_timer: 1,
             events: BTreeMap::new(),
@@ -139,6 +142,8 @@ impl DeterministicScheduler {
             .checked_add(1)
             .ok_or(SchedulerError::IdentityOverflow)?;
         let publication = publish_task_frame(&mut task, id, &mut self.telemetry)?;
+        self.observation_work = self.observation_work.saturating_add(1);
+        let ready_since_work = self.observation_work;
         self.next_task = next_task;
         self.tasks.insert(
             id,
@@ -149,6 +154,7 @@ impl DeterministicScheduler {
                 mobility,
                 cancellation_requested: false,
                 frame_roots: Some(publication),
+                ready_since_work,
             },
         );
         self.telemetry.frame_root_retentions =
@@ -208,6 +214,8 @@ impl DeterministicScheduler {
                     return Err(SchedulerError::LocalQueueCapacity);
                 }
                 record.state = SchedulerTaskState::Ready;
+                self.observation_work = self.observation_work.saturating_add(1);
+                record.ready_since_work = self.observation_work;
                 self.ready.push_back(id);
                 self.refresh_counts();
                 Ok(true)
@@ -246,6 +254,8 @@ impl DeterministicScheduler {
                 return Err(SchedulerError::LocalQueueCapacity);
             }
             record.state = SchedulerTaskState::Ready;
+            self.observation_work = self.observation_work.saturating_add(1);
+            record.ready_since_work = self.observation_work;
             self.ready.push_back(id);
         }
         self.refresh_counts();
@@ -607,6 +617,11 @@ impl DeterministicScheduler {
         record.frame_roots = None;
         self.telemetry.frame_root_restorations =
             self.telemetry.frame_root_restorations.saturating_add(1);
+        self.observation_work = self.observation_work.saturating_add(1);
+        self.telemetry.ready_to_run_delay.record(
+            self.observation_work
+                .saturating_sub(record.ready_since_work),
+        );
         record.state = SchedulerTaskState::Running;
         let context = SchedulerTaskContext::new(
             id,
@@ -632,6 +647,8 @@ impl DeterministicScheduler {
                 self.telemetry.frame_root_retentions =
                     self.telemetry.frame_root_retentions.saturating_add(1);
                 record.state = SchedulerTaskState::Ready;
+                self.observation_work = self.observation_work.saturating_add(1);
+                record.ready_since_work = self.observation_work;
                 self.ready.push_back(id);
             }
             Ok(SchedulerTaskPoll::Pending) => {

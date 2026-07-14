@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -52,6 +52,7 @@ struct TaskRecord {
     mobility: SchedulerTaskMobility,
     cancellation_requested: bool,
     frame_roots: Option<TaskFrameRootId>,
+    ready_since_work: u64,
 }
 
 struct TaskCell {
@@ -93,6 +94,7 @@ struct SharedScheduler {
     searchers: AtomicUsize,
     migration_enabled: bool,
     submissions_active: AtomicUsize,
+    observation_work: AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -821,7 +823,17 @@ impl SharedScheduler {
             searchers: AtomicUsize::new(0),
             migration_enabled,
             submissions_active: AtomicUsize::new(0),
+            observation_work: AtomicU64::new(0),
         }
+    }
+
+    fn advance_observation_work(&self) -> u64 {
+        self.observation_work
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |work| {
+                Some(work.saturating_add(1))
+            })
+            .unwrap_or(u64::MAX)
+            .saturating_add(1)
     }
 
     fn task_frame_error(
@@ -1044,6 +1056,7 @@ impl SharedScheduler {
             .checked_add(1)
             .ok_or(SchedulerError::IdentityOverflow)?;
         let frame_roots = self.retain_task_frame(id, scheduler, task.as_mut())?;
+        let ready_since_work = self.advance_observation_work();
         registry.next_task = next_task;
         registry.tasks.insert(
             id,
@@ -1055,6 +1068,7 @@ impl SharedScheduler {
                     mobility: SchedulerTaskMobility::Movable,
                     cancellation_requested: false,
                     frame_roots: Some(frame_roots),
+                    ready_since_work,
                 }),
             }),
         );
@@ -1091,6 +1105,7 @@ impl SharedScheduler {
             .checked_add(1)
             .ok_or(SchedulerError::IdentityOverflow)?;
         let frame_roots = self.retain_task_frame(id, scheduler, task.as_mut())?;
+        let ready_since_work = self.advance_observation_work();
         registry.next_task = next_task;
         registry.tasks.insert(
             id,
@@ -1102,6 +1117,7 @@ impl SharedScheduler {
                     mobility,
                     cancellation_requested: false,
                     frame_roots: Some(frame_roots),
+                    ready_since_work,
                 }),
             }),
         );
@@ -1169,6 +1185,7 @@ impl SharedScheduler {
         }
         registry.next_task = next_task;
         for (id, task, frame_roots) in prepared {
+            let ready_since_work = self.advance_observation_work();
             registry.tasks.insert(
                 id,
                 Arc::new(TaskCell {
@@ -1179,6 +1196,7 @@ impl SharedScheduler {
                         mobility,
                         cancellation_requested: false,
                         frame_roots: Some(frame_roots),
+                        ready_since_work,
                     }),
                 }),
             );
@@ -1243,6 +1261,7 @@ impl SharedScheduler {
                     task: id,
                     scheduler,
                 })?;
+                record.ready_since_work = self.advance_observation_work();
                 record.state = InternalTaskState::Ready;
                 queue.push_back(id);
                 self.record_local_enqueued(1);
@@ -1305,6 +1324,7 @@ impl SharedScheduler {
                     task: id,
                     scheduler,
                 })?;
+                record.ready_since_work = self.advance_observation_work();
                 record.state = InternalTaskState::Ready;
                 queue.push_back(id);
                 self.record_local_enqueued(1);
@@ -1674,6 +1694,9 @@ impl SharedScheduler {
                 .err()
                 .unwrap_or(error));
         }
+        let ready_delay = self
+            .advance_observation_work()
+            .saturating_sub(record.ready_since_work);
         record.frame_roots = None;
         record.state = InternalTaskState::Running { notified: false };
         let Some(task) = record.task.take() else {
@@ -1699,6 +1722,7 @@ impl SharedScheduler {
         {
             let mut telemetry = lock(&self.telemetry);
             telemetry.telemetry.polls = telemetry.telemetry.polls.saturating_add(1);
+            telemetry.telemetry.ready_to_run_delay.record(ready_delay);
             telemetry.telemetry.ready_tasks = telemetry.telemetry.ready_tasks.saturating_sub(1);
             telemetry.telemetry.running_tasks = telemetry.telemetry.running_tasks.saturating_add(1);
             telemetry.workers_used.insert(worker);
@@ -1915,6 +1939,7 @@ impl SharedScheduler {
             telemetry.telemetry.suspensions = telemetry.telemetry.suspensions.saturating_add(1);
             Ok(false)
         } else {
+            record.ready_since_work = self.advance_observation_work();
             record.state = InternalTaskState::Ready;
             Ok(true)
         }

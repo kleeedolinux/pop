@@ -1984,6 +1984,55 @@ fn deterministic_telemetry_tracks_ready_queue_depth_and_high_water_mark() {
 }
 
 #[test]
+fn deterministic_telemetry_records_bounded_ready_to_run_percentiles() {
+    let mut scheduler = DeterministicScheduler::recording(configuration(1, 4));
+    scheduler
+        .schedule(ReadyManyTask {
+            remaining_ready_polls: 2,
+        })
+        .expect("multi-poll deterministic task");
+    scheduler
+        .schedule(CancellationTask)
+        .expect("deterministic peer task");
+
+    scheduler
+        .run_until_idle(8)
+        .expect("collect deterministic ready delays");
+    let telemetry = scheduler.telemetry();
+    let delay = telemetry.ready_to_run_delay();
+
+    assert_eq!(delay.samples(), telemetry.polls());
+    assert!(delay.p50_work_units() <= delay.p95_work_units());
+    assert!(delay.p95_work_units() <= delay.p99_work_units());
+    assert!(delay.p99_work_units() <= delay.p999_work_units());
+    assert!(delay.p999_work_units() <= delay.maximum_work_units());
+    assert!(delay.maximum_work_units() > 0);
+}
+
+#[test]
+fn native_telemetry_records_one_ready_delay_for_every_dispatch() {
+    let scheduler = NativeScheduler::new(configuration(2, 8)).expect("native scheduler");
+    scheduler
+        .schedule(YieldOnceTask { first: true })
+        .expect("yielding native task");
+    scheduler
+        .schedule(CancellationTask)
+        .expect("native peer task");
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("native tasks become idle");
+
+    let telemetry = scheduler
+        .shutdown_with_telemetry()
+        .expect("clean native shutdown");
+    let delay = telemetry.ready_to_run_delay();
+
+    assert_eq!(delay.samples(), telemetry.polls());
+    assert!(delay.p50_work_units() <= delay.p999_work_units());
+    assert!(delay.p999_work_units() <= delay.maximum_work_units());
+}
+
+#[test]
 fn deterministic_replay_fails_closed_when_the_recorded_task_is_not_ready() {
     let mut recording = DeterministicScheduler::recording(configuration(1, 2));
     recording

@@ -499,6 +499,103 @@ pub enum SchedulerError {
     },
 }
 
+const SCHEDULER_DELAY_BUCKETS: usize = 65;
+
+/// Bounded logarithmic distribution of scheduler delay in semantic work units.
+///
+/// Percentiles are conservative bucket upper bounds capped by the exact
+/// observed maximum. The fixed histogram prevents telemetry from retaining an
+/// unbounded sample stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchedulerDelayTelemetry {
+    buckets: [u64; SCHEDULER_DELAY_BUCKETS],
+    samples: u64,
+    maximum_work_units: u64,
+}
+
+impl Default for SchedulerDelayTelemetry {
+    fn default() -> Self {
+        Self {
+            buckets: [0; SCHEDULER_DELAY_BUCKETS],
+            samples: 0,
+            maximum_work_units: 0,
+        }
+    }
+}
+
+impl SchedulerDelayTelemetry {
+    pub(super) fn record(&mut self, work_units: u64) {
+        let bucket = if work_units == 0 {
+            0
+        } else {
+            usize::try_from(u64::BITS - work_units.leading_zeros())
+                .expect("u64 bit count fits usize")
+        };
+        self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
+        self.samples = self.samples.saturating_add(1);
+        self.maximum_work_units = self.maximum_work_units.max(work_units);
+    }
+
+    #[must_use]
+    pub const fn samples(self) -> u64 {
+        self.samples
+    }
+
+    #[must_use]
+    pub fn p50_work_units(self) -> u64 {
+        self.percentile(50, 100)
+    }
+
+    #[must_use]
+    pub fn p95_work_units(self) -> u64 {
+        self.percentile(95, 100)
+    }
+
+    #[must_use]
+    pub fn p99_work_units(self) -> u64 {
+        self.percentile(99, 100)
+    }
+
+    #[must_use]
+    pub fn p999_work_units(self) -> u64 {
+        self.percentile(999, 1_000)
+    }
+
+    #[must_use]
+    pub const fn maximum_work_units(self) -> u64 {
+        self.maximum_work_units
+    }
+
+    fn percentile(self, numerator: u64, denominator: u64) -> u64 {
+        if self.samples == 0 {
+            return 0;
+        }
+        let whole = (self.samples / denominator).saturating_mul(numerator);
+        let remainder = self.samples % denominator;
+        let partial = remainder
+            .saturating_mul(numerator)
+            .saturating_add(denominator - 1)
+            / denominator;
+        let rank = whole.saturating_add(partial);
+        let mut cumulative = 0_u64;
+        for (bucket, samples) in self.buckets.into_iter().enumerate() {
+            cumulative = cumulative.saturating_add(samples);
+            if cumulative >= rank {
+                return delay_bucket_upper_bound(bucket).min(self.maximum_work_units);
+            }
+        }
+        self.maximum_work_units
+    }
+}
+
+const fn delay_bucket_upper_bound(bucket: usize) -> u64 {
+    match bucket {
+        0 => 0,
+        64 => u64::MAX,
+        _ => (1_u64 << bucket) - 1,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SchedulerTelemetry {
     pub(super) retained_tasks: usize,
@@ -558,6 +655,7 @@ pub struct SchedulerTelemetry {
     pub(super) detached_mutator_transitions: u64,
     pub(super) mutator_unregistrations: u64,
     pub(super) work_budget_exhaustions: u64,
+    pub(super) ready_to_run_delay: SchedulerDelayTelemetry,
 }
 
 macro_rules! telemetry_accessors {
@@ -629,11 +727,32 @@ impl SchedulerTelemetry {
         detached_mutator_transitions: u64,
         mutator_unregistrations: u64,
         work_budget_exhaustions: u64,
+        ready_to_run_delay: SchedulerDelayTelemetry,
     }
 
     #[must_use]
     pub const fn worker_threads_used(self) -> usize {
         self.worker_threads_used
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SchedulerDelayTelemetry;
+
+    #[test]
+    fn delay_histogram_is_bounded_and_reports_conservative_percentiles() {
+        let mut delay = SchedulerDelayTelemetry::default();
+        for work_units in [0, 1, 2, 3, 8, u64::MAX] {
+            delay.record(work_units);
+        }
+
+        assert_eq!(delay.samples(), 6);
+        assert_eq!(delay.p50_work_units(), 3);
+        assert_eq!(delay.p95_work_units(), u64::MAX);
+        assert_eq!(delay.p99_work_units(), u64::MAX);
+        assert_eq!(delay.p999_work_units(), u64::MAX);
+        assert_eq!(delay.maximum_work_units(), u64::MAX);
     }
 }
 
