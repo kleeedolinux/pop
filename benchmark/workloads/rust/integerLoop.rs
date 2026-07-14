@@ -1,7 +1,11 @@
 fn main() {
-    let mut value: u64 = 0;
-    for index in 1..=50_000_000_u64 {
+    let mut index: i64 = 1;
+    let mut value: i64 = 0;
+
+    while index <= 50_000_000 {
         value += index;
+        index += 1;
     }
+
     println!("{value}");
 }
