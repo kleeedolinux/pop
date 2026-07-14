@@ -30,3 +30,16 @@ specified by the
 [scheduler runtime design](../../../architecture/23.1-scheduler-runtime-implementation.md).
 This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.
+
+The checksum-validated synchronized-reference benchmark is available with:
+
+```text
+cargo bench -p pop-runtime-native --bench scheduler -- \
+  --profile local-declared --workload all --workers standard
+```
+
+Its `pop-scheduler-benchmark-v1` records label the target, scheduler stage,
+workload, worker profile, logical work, initial dispatch latency scope, and
+typed telemetry. The default run is local optimization evidence, not a
+portable performance claim or a substitute for the pending GC-coupled and
+operating-system resource profiles.

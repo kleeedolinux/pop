@@ -9,6 +9,10 @@ license.workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
 
+[[bench]]
+name = "scheduler"
+harness = false
+
 [dependencies]
 pop-runtime-collector.workspace = true
 pop-runtime-interface.workspace = true

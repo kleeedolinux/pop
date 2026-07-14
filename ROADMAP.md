@@ -266,9 +266,17 @@ Post-baseline library work has begun without widening the release foundation:
       record/replay, explicit migration refusal, isolated bounded blocking
       workers, host/virtual timers, external events, failure containment, and
       initial wake/cancellation/migration stress coverage.
+    - [x] Add bounded enabled-set schedule exploration and the versioned,
+      checksum-validated synchronized-reference benchmark for task control,
+      ready polls, injection, hot-queue stealing, suspended frames, timers,
+      external events, and blocking saturation.
     - [ ] Bind scheduler transition events to native mutator registration,
       precise suspended-frame root publication, collector epochs, and the ABI 2
       writable-root transition before claiming production GC integration.
+    - [ ] Extend declared benchmark profiles with local/foreign wake and
+      ping-pong latency, continuous I/O fairness, steal-storm and million-frame
+      memory evidence, operating-system resource counters, and scheduler/GC
+      interaction after the production collector binding exists.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.
