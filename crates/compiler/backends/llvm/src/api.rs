@@ -203,6 +203,10 @@ pub enum LlvmLoweringError {
         function: FunctionId,
         value: ValueId,
     },
+    StaleManagedReference {
+        value: ValueId,
+        location: String,
+    },
     InvalidType(TypeId),
     InvalidFieldLayout(FieldId),
     InvalidEntryPoint(SymbolId),
@@ -219,6 +223,11 @@ impl fmt::Display for LlvmLoweringError {
                 formatter,
                 "LLVM backend does not support MIR instruction f{} v{}",
                 function.raw(),
+                value.raw()
+            ),
+            Self::StaleManagedReference { value, location } => write!(
+                formatter,
+                "LLVM ABI 2 lowering retained stale managed value v{} at {location}",
                 value.raw()
             ),
             Self::InvalidType(type_id) => write!(formatter, "invalid MIR type t{}", type_id.raw()),

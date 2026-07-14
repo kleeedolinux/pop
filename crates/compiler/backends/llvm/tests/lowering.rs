@@ -518,7 +518,7 @@ fn abi_two_safe_points_reload_roots_before_later_uses() {
         "root must reload into a new SSA value: {text}"
     );
     assert!(
-        text.contains("call i64 @pop_rt_retain_root(i64 %v1_after_v2)"),
+        text.contains("call i64 @pop_rt_retain_root(i64 %v1_before_v3)"),
         "later managed use must consume the reloaded alias: {text}"
     );
     assert!(
@@ -551,7 +551,7 @@ fn abi_two_root_reload_flows_through_control_flow_arguments() {
     let text = module.to_string();
 
     assert!(
-        text.contains("%v3 = phi i64 [ %v1_after_v2,"),
+        text.contains("%v3 = phi i64 [ %v1_before_b0_exit,"),
         "control-flow merge must receive the reloaded token: {text}"
     );
     assert!(
@@ -587,12 +587,116 @@ fn abi_two_root_reload_flows_through_loop_backedges() {
     let text = module.to_string();
 
     assert!(
-        text.contains("[ %v2_after_v4, %v4_poll_continue ]"),
+        text.contains("[ %v2_before_b2_exit, %v4_poll_continue ]"),
         "loop backedge must carry the latest relocated token: {text}"
     );
     assert!(
         !text.contains("[ %v2, %v4_poll_continue ]"),
         "loop backedge retained an old root token: {text}"
+    );
+}
+
+#[test]
+fn abi_two_root_reload_survives_a_divergent_control_flow_merge() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let boolean = types.source_type("Boolean").expect("Boolean");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{boolean} = const.boolean true\n    condBranch v2 b1 b2\n  b1():\n    do v3 gcSafePoint sp1 roots (v1)\n    branch b3 ()\n  b2():\n    branch b3 ()\n  b3():\n    do v4 retainRoot v1\n    do v5 releaseRoot v4\n    v6:t{integer} = const.integer Int64 0\n    return (v6)\n",
+        integer = integer.raw(),
+        boolean = boolean.raw(),
+        array = array.raw(),
+    ))
+    .expect("ABI 2 divergent merge MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default()
+            .with_entry_point(mir.functions()[0].symbol())
+            .with_runtime_profile(RuntimeProfile::ProductionGenerational)
+            .with_gc_poll_interval(NonZeroU32::MIN),
+    )
+    .expect("ABI 2 divergent merge LLVM lowering");
+    module
+        .verify()
+        .expect("valid ABI 2 divergent merge LLVM module");
+    let text = module.to_string();
+
+    assert!(
+        !text.contains("call i64 @pop_rt_retain_root(i64 %v1)"),
+        "a join reached from a relocating path must not use the old token: {text}"
+    );
+    let result = link_with_forced_relocation_runtime_and_run(&text, "abi-two-divergent-merge");
+    assert!(
+        result.status.success(),
+        "optimized divergent merge lost a relocated token: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stale = text.replacen(
+        "call i64 @pop_rt_retain_root(i64 %v1_before_v4)",
+        "call i64 @pop_rt_retain_root(i64 %v1)",
+        1,
+    );
+    assert_ne!(stale, text, "merge mutation must restore the old token");
+    assert!(
+        !link_with_forced_relocation_runtime_and_run(&stale, "abi-two-stale-merge")
+            .status
+            .success(),
+        "the forced-relocation runtime accepted a stale merge token"
+    );
+}
+
+#[test]
+fn optimized_abi_two_execution_carries_relocated_tokens_over_loop_backedges() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let boolean = types.source_type("Boolean").expect("Boolean");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{boolean} = const.boolean true\n    branch b1 (v1, v2)\n  b1(v3:t{array}, v4:t{boolean}):\n    condBranch v4 b2 b3\n  b2():\n    v5:t{boolean} = const.boolean false\n    do v6 gcSafePoint sp1 roots (v3)\n    branch b1 (v3, v5)\n  b3():\n    do v7 retainRoot v3\n    do v8 releaseRoot v7\n    v9:t{integer} = const.integer Int64 0\n    return (v9)\n",
+        integer = integer.raw(),
+        boolean = boolean.raw(),
+        array = array.raw(),
+    ))
+    .expect("forced loop relocation MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default()
+            .with_entry_point(mir.functions()[0].symbol())
+            .with_runtime_profile(RuntimeProfile::ProductionGenerational)
+            .with_gc_poll_interval(NonZeroU32::MIN),
+    )
+    .expect("forced loop relocation LLVM lowering");
+    module
+        .verify()
+        .expect("valid forced loop relocation LLVM module");
+    let text = module.to_string();
+
+    let result = link_with_forced_relocation_runtime_and_run(&text, "abi-two-loop-backedge");
+    assert!(
+        result.status.success(),
+        "optimized loop backedge lost a relocated token: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stale = text.replacen(
+        "[ %v3_before_b2_exit, %v6_poll_continue ]",
+        "[ %v3, %v6_poll_continue ]",
+        1,
+    );
+    assert_ne!(stale, text, "loop mutation must restore the old token");
+    assert!(
+        !link_with_forced_relocation_runtime_and_run(&stale, "abi-two-stale-loop")
+            .status
+            .success(),
+        "the forced-relocation runtime accepted a stale loop token"
     );
 }
 
@@ -622,7 +726,7 @@ fn abi_two_repeated_safe_points_chain_reloaded_roots() {
     let text = module.to_string();
 
     assert!(
-        text.contains("store i64 %v1_after_v2, ptr %v3_roots_0"),
+        text.contains("store i64 %v1_before_v3, ptr %v3_roots_0"),
         "the second publication must spill the first reload: {text}"
     );
     assert!(
@@ -630,7 +734,7 @@ fn abi_two_repeated_safe_points_chain_reloaded_roots() {
         "the second safe point must define a fresh reload: {text}"
     );
     assert!(
-        text.contains("call i64 @pop_rt_retain_root(i64 %v1_after_v3)"),
+        text.contains("call i64 @pop_rt_retain_root(i64 %v1_before_v4)"),
         "later uses must consume the newest reload: {text}"
     );
 }
@@ -671,7 +775,7 @@ fn optimized_abi_two_execution_rejects_stale_tokens_after_forced_relocation() {
     );
 
     let stale = text.replacen(
-        "call i64 @pop_rt_retain_root(i64 %v1_after_v2)",
+        "call i64 @pop_rt_retain_root(i64 %v1_before_v3)",
         "call i64 @pop_rt_retain_root(i64 %v1)",
         1,
     );

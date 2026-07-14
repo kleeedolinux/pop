@@ -97,11 +97,14 @@ branch arguments, merges, and loop backedges. ABI 1 lowering remains unchanged.
 The presence of this path does not enable the relocation capability until old-
 SSA-use verification and forced native relocation both pass.
 
-The deterministic native ABI 2 conformance runtime now forces every published
-token to change, aborts on every stale token, and passes optimized straight-line
-LLVM execution. The relocation capability remains disabled: emitted old-SSA
-verification and forced branch, merge, loop, unwind, coroutine, and FFI
-execution proofs are still required.
+The deterministic native ABI 2 conformance runtime forces every published token
+to change and aborts on every stale token. Backend-private writable root cells
+carry current tokens through divergent merges and are eligible for LLVM's
+ordinary promotion into SSA phis. Lowering rejects a direct old-token operand,
+and optimized straight-line, branch/merge, and loop-backedge executions pass
+with negative stale-token mutations. The relocation capability remains
+disabled until load/link validation plus unwind, coroutine, and FFI transition
+proofs pass.
 
 ## Experimental C backend
 
