@@ -264,7 +264,7 @@ fn specialized_generic_data_and_calls_execute_natively() {
     )
     .expect("LLVM lowering");
 
-    let result = link_with_runtime_and_run(&module, "generics");
+    let result = link_with_runtime_and_run(&module, "generic-execution");
     assert_eq!(result.status.code(), Some(7), "{}", module);
 }
 
