@@ -261,6 +261,12 @@ checked replacement operations preserve invariant element typing and stable
 managed identity. Array assignment never acquires list growth semantics. See
 ADR 0053.
 
+`Range<TInteger>` is the distinct immutable inclusive integer progression.
+`Range.create(first, last, step?)` infers one exact fixed integer type and
+preserves the numeric `for` direction, zero-step, and checked-advancement
+contract while implementing `Iterable<TInteger>`. It is not an array/list
+materialization and does not add a range operator. See ADR 0056.
+
 ## Control flow and loops
 
 Conditions are exactly `Boolean`. Statement `if` supports Luau-shaped `elseif`

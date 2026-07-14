@@ -517,6 +517,11 @@ The second form destructures one fixed tuple item. It is not Lua's dynamic
 iterator-triple convention. Protocol calls resolve the nominal ADR 0053
 identities and formatting never inserts an implicit close/disposal construct.
 
+When the progression must be stored or passed as a value, the canonical form
+is `Range.create(first, last, step?)`. It infers one exact fixed integer type
+and implements `Iterable<TInteger>` without introducing a `..` range operator.
+See ADR 0056.
+
 ### Tagged-union matching
 
 The initial exhaustive statement uses ordinary block words rather than arrows:

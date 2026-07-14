@@ -1,9 +1,9 @@
 use pop_runtime_interface::RuntimeOperation;
 
-/// ABI 1.9 lookup adapter that separates presence from a scalar payload.
+/// ABI 1.10 lookup adapter that separates presence from a scalar payload.
 pub const TABLE_GET_CHECKED_SYMBOL: &str = "pop_rt_table_get_checked";
 
-/// Returns the native C symbol for an operation implemented by ABI 1.9.
+/// Returns the native C symbol for an operation implemented by ABI 1.10.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.
@@ -28,6 +28,7 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::ListGetChecked => Some("pop_rt_list_get_checked"),
         RuntimeOperation::ListSet => Some("pop_rt_list_set"),
         RuntimeOperation::ListAdd => Some("pop_rt_list_add"),
+        RuntimeOperation::RangeCreate => Some("pop_rt_range_create"),
         RuntimeOperation::IterationAcquire => Some("pop_rt_iteration_acquire"),
         RuntimeOperation::IterationNext => Some("pop_rt_iteration_next"),
         RuntimeOperation::FieldGet => Some("pop_rt_field_get"),

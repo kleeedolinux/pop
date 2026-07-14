@@ -1121,6 +1121,11 @@ fn visit_expression_closures(
             visit_expression_closures(list, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
+        HirExpressionKind::RangeCreate { first, last, step } => {
+            visit_expression_closures(first, parameters, locals);
+            visit_expression_closures(last, parameters, locals);
+            visit_expression_closures(step, parameters, locals);
+        }
         HirExpressionKind::ArrayFill { array, value } => {
             visit_expression_closures(array, parameters, locals);
             visit_expression_closures(value, parameters, locals);
@@ -3115,6 +3120,13 @@ impl<'hir> FunctionBuilder<'hir> {
                 value: self.lower_expression(value),
                 element_map: list_element_map(self.arena, list.type_id()),
             },
+            HirExpressionKind::RangeCreate { first, last, step } => {
+                MirInstructionKind::RangeCreate {
+                    first: self.lower_expression(first),
+                    last: self.lower_expression(last),
+                    step: self.lower_expression(step),
+                }
+            }
             HirExpressionKind::Record { record, fields } => MirInstructionKind::RecordMake {
                 record: *record,
                 fields: self.lower_fields(fields),
@@ -4301,12 +4313,14 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
             MirEffect::MayUnwind,
             MirEffect::GcSafePoint,
         ]),
-        MirInstructionKind::ListCreate { .. } => MirEffectSummary::from_effects([
-            MirEffect::Allocates,
-            MirEffect::MayTrap,
-            MirEffect::MayUnwind,
-            MirEffect::GcSafePoint,
-        ]),
+        MirInstructionKind::ListCreate { .. } | MirInstructionKind::RangeCreate { .. } => {
+            MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayTrap,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ])
+        }
         MirInstructionKind::ListAdd { element_map, .. } => {
             let effects = MirEffectSummary::from_effects([
                 MirEffect::Allocates,

@@ -18,6 +18,7 @@ pub enum RuntimeOperation {
     ListGetChecked,
     ListSet,
     ListAdd,
+    RangeCreate,
     IterationAcquire,
     IterationNext,
     FieldGet,

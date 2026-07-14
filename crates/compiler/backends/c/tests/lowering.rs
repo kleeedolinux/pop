@@ -290,6 +290,29 @@ fn rejects_managed_declarations_without_emitting_a_fallback() {
 }
 
 #[test]
+fn rejects_first_class_ranges_without_emitting_a_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         function main(): Int\n\
+             local total = 0\n\
+             for value in Range.create(1, 3) do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+    let entry = mir.functions()[0].symbol();
+    assert!(matches!(
+        lower_mir_to_c(
+            &mir,
+            &types,
+            CLoweringOptions::default().with_entry_point(entry),
+        ),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
+}
+
+#[test]
 fn rejects_typed_results_errors_and_cleanup_without_emitting_a_fallback() {
     let (mir, types) = lower(
         "namespace Main\n\

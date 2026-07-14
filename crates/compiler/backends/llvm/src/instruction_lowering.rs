@@ -697,6 +697,14 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::RangeCreate { first, last, step } => lower_range_create(
+            &result,
+            instruction.result_type(),
+            *first,
+            *last,
+            *step,
+            types,
+        )?,
         MirInstructionKind::RecordUpdate {
             record,
             base,
@@ -831,6 +839,9 @@ pub(crate) fn lower_builtin_iteration_call(
             Some(SemanticType::Table { .. }) => IterationCollectionKind::Table,
             Some(SemanticType::Builtin { definition, .. }) if *definition == protocol.list() => {
                 IterationCollectionKind::List
+            }
+            Some(SemanticType::Builtin { definition, .. }) if *definition == protocol.range() => {
+                IterationCollectionKind::Range
             }
             Some(SemanticType::Builtin { definition, .. })
                 if *definition == protocol.iterator() =>
@@ -1948,6 +1959,66 @@ pub(crate) fn lower_list_create(
         format!("{label}_create:"),
     ]);
     lines.join("\n")
+}
+
+fn lower_range_create(
+    result: &str,
+    result_type: TypeId,
+    first: ValueId,
+    last: ValueId,
+    step: ValueId,
+    types: &TypeArena,
+) -> Result<String, LlvmLoweringError> {
+    let protocol = pop_types::embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.iteration_protocol())
+        .ok_or(LlvmLoweringError::InvalidType(result_type))?;
+    let integer_type = match types.get(result_type) {
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) if *definition == protocol.range() && arguments.len() == 1 => arguments[0],
+        _ => return Err(LlvmLoweringError::InvalidType(result_type)),
+    };
+    let Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) = types.get(integer_type)
+    else {
+        return Err(LlvmLoweringError::InvalidType(integer_type));
+    };
+    let bits = kind.bit_width();
+    let mut lines = Vec::new();
+    let raw = |name: &str, value: ValueId, lines: &mut Vec<String>| {
+        if bits == 64 {
+            format!("%v{}", value.raw())
+        } else {
+            let converted = format!("{result}_{name}");
+            lines.push(format!(
+                "{converted} = zext i{bits} %v{} to i64",
+                value.raw()
+            ));
+            converted
+        }
+    };
+    let first = raw("first", first, &mut lines);
+    let last = raw("last", last, &mut lines);
+    let step = raw("step", step, &mut lines);
+    let label = result.trim_start_matches('%');
+    lines.extend([
+        format!(
+            "{result} = call i64 @{}(i64 {first}, i64 {last}, i64 {step}, i1 {}, i8 {bits})",
+            native_runtime_symbol(RuntimeOperation::RangeCreate),
+            kind.is_signed()
+        ),
+        format!("{result}_allocated = icmp ne i64 {result}, 0"),
+        format!("br i1 {result}_allocated, label %{label}_create, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_create:"),
+    ]);
+    Ok(lines.join("\n"))
 }
 
 #[allow(clippy::too_many_arguments)]

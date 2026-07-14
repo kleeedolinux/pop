@@ -4,13 +4,13 @@ use pop_runtime_native::{
     pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_object,
     pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
     pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
-    pop_rt_list_add, pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked,
-    pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_release_root, pop_rt_retain_root,
-    pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read,
-    pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set, pop_rt_unpin,
-    request_abi_collection,
+    pop_rt_iteration_acquire, pop_rt_iteration_next, pop_rt_list_add, pop_rt_list_create,
+    pop_rt_list_get, pop_rt_list_get_checked, pop_rt_list_length, pop_rt_list_set, pop_rt_pin,
+    pop_rt_range_create, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat,
+    pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read, pop_rt_table_get,
+    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_unpin, request_abi_collection,
 };
-use pop_runtime_native_abi::StringFormatTag;
+use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
 use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -25,7 +25,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn bootstrap_runtime_exports_a_stable_c_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 9);
+    assert_eq!(pop_rt_abi_minor(), 10);
     assert_eq!(pop_rt_gc_stage(), 1);
 }
 
@@ -342,6 +342,26 @@ fn growable_list_abi_preserves_identity_order_bounds_and_zero_values() {
         assert_eq!(pop_rt_list_get_checked(list, 2, &raw mut second), 1);
     }
     assert_eq!(second, 7);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn integer_range_abi_iterates_without_materializing_items() {
+    let _guard = abi_test_lock();
+    let range = pop_rt_range_create(1, 5, 2, true, 64);
+    assert_ne!(range, 0);
+    let iterator = pop_rt_iteration_acquire(range, IterationCollectionKind::Range as u8);
+    assert_ne!(iterator, 0);
+    let mut value = 0;
+    for expected in [1, 3, 5] {
+        // SAFETY: `value` is live and writable for the complete call.
+        let status = unsafe { pop_rt_iteration_next(iterator, &raw mut value) };
+        assert_eq!(status, IterationStatus::Item as u8);
+        assert_eq!(value, expected);
+    }
+    // SAFETY: `value` is live and writable for the complete call.
+    let status = unsafe { pop_rt_iteration_next(iterator, &raw mut value) };
+    assert_eq!(status, IterationStatus::End as u8);
 }
 
 #[test]

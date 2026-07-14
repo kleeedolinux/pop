@@ -491,6 +491,7 @@ fn unsupported_compile_time_construct(
         }
         TypedExpressionKind::ArrayFill { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedExpressionKind::ListCreate { .. } => UnsupportedCompileTimeConstruct::Array,
+        TypedExpressionKind::RangeCreate { .. } => UnsupportedCompileTimeConstruct::Array,
         TypedExpressionKind::ListLength { .. }
         | TypedExpressionKind::ListGet { .. }
         | TypedExpressionKind::ListGetChecked { .. } => {

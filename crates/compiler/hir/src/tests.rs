@@ -1295,6 +1295,7 @@ fn verifier_rejects_spoofed_iteration_case_and_method_identities() {
                 iterable: BuiltinTypeId::from_raw(106),
                 iterator: BuiltinTypeId::from_raw(107),
                 list: BuiltinTypeId::from_raw(101),
+                range: BuiltinTypeId::from_raw(103),
                 item_case,
                 end_case: IterationCaseId::from_raw(1),
                 iterator_method: IterationProtocolMethodId::from_raw(0),

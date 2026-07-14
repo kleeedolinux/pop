@@ -358,6 +358,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             } if arguments.len() == 1 => {
                 if definition == protocol.list() {
                     (TypedIterationSource::List, arguments[0])
+                } else if definition == protocol.range() && self.is_integer(arguments[0]) {
+                    (TypedIterationSource::Range, arguments[0])
                 } else if definition == protocol.iterable() {
                     (TypedIterationSource::Iterable, arguments[0])
                 } else if definition == protocol.iterator() {

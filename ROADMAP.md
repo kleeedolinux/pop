@@ -43,7 +43,7 @@ and does not define the work remaining for `0.1.0`.
 - [x] Implement the complete typed-error workflow: declarations, `Result`,
   propagation, matching boundaries, explicit MIR failure and cleanup
   edges, diagnostics, and checked XML documentation.
-- [ ] Finish generalized `for` over the nominal `Iterable<T>` and `Iterator<T>`
+- [x] Finish generalized `for` over the nominal `Iterable<T>` and `Iterator<T>`
   protocols, including deterministic `Sequence` adapters. Keep arrays
   fixed-length; provide growth through the accepted growable collection type.
   - [x] Accept ADR 0053 and implement reserved `Iterable<T>`, `Iterator<T>`, and
@@ -54,6 +54,10 @@ and does not define the work remaining for `0.1.0`.
     materializing `collect` in `Pop.Standard` Pop source.
   - [x] Reject statically proven structural mutation of the directly iterated
     collection while preserving typed indexed replacement.
+  - [x] Accept ADR 0056 to close first-class `Range<TInteger>` construction,
+    typing, cost, iteration, and backend contracts without a range operator.
+  - [x] Implement `Range.create` and its interpreter/LLVM generalized-iteration
+    conformance, including zero-step and checked-advancement behavior.
 - [x] Complete generic behavior needed across Bubble boundaries: portable
   reference metadata, type-argument inference, constraints, and the accepted
   typed sharing/specialization policy. Preserve full specialization as a valid

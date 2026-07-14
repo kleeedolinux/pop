@@ -57,9 +57,11 @@ unchanged and apply equally to explicit `continue` edges.
 
 This ADR originally deferred generalized `for binding in iterable do` until the
 nominal iteration protocol, specialization, disposal, and multiple-binding
-behavior were accepted together. ADR 0053 now closes that later contract. This
-decision still does not make a range a runtime object or add a range operator;
-`..` remains string concatenation.
+behavior were accepted together. ADR 0053 now closes that later contract, and
+ADR 0056 adds the distinct first-class `Range<TInteger>` value form through
+`Range.create`. The numeric `for` clause still lowers directly and is not a
+range expression. No range operator is added; `..` remains string
+concatenation.
 
 ## Consequences
 

@@ -104,7 +104,9 @@ The following trusted implementations have fixed observable order:
 - `Array<T>` yields elements from index one through its fixed length;
 - `List<T>` yields elements from index one through its current length;
 - `Table<K, V>` yields `(K, V)` tuples in ADR 0046 insertion order;
-- `Range<TInteger>` yields its accepted inclusive numeric progression; and
+- `Range<TInteger>` values constructed through the exact ADR 0056
+  `Range.create(first, last, step?)` companion function yield their accepted
+  inclusive numeric progression; and
 - an `Iterator<T>` yields its remaining items from its current single-pass
   state.
 

@@ -231,6 +231,72 @@ fn generalized_for_accepts_exact_list_and_protocol_instances() {
 }
 
 #[test]
+fn first_class_integer_ranges_are_exact_generalized_iteration_sources() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function collections(first: Int, last: Int): Int\n\
+             local ascending = Range.create(first, last)\n\
+             local descending = Range.create(last, first, -2)\n\
+             local total = 0\n\
+             for value in ascending do\n\
+                 total += value\n\
+             end\n\
+             for value in descending do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let statements = fixture.result.body().expect("typed body").statements();
+    assert!(matches!(
+        statements[3].kind(),
+        TypedStatementKind::GeneralizedFor { item_type, .. }
+            if *item_type == fixture.arena.source_type("Int").expect("Int")
+    ));
+    assert!(matches!(
+        statements[4].kind(),
+        TypedStatementKind::GeneralizedFor { item_type, .. }
+            if *item_type == fixture.arena.source_type("Int").expect("Int")
+    ));
+}
+
+#[test]
+fn first_class_integer_ranges_reject_noninteger_mixed_and_zero_steps() {
+    for source in [
+        "namespace Example\n\
+         public function collections(): Int\n\
+             local values = Range.create(1.0, 3.0)\n\
+             return 0\n\
+         end\n",
+        "namespace Example\n\
+         public function collections(last: UInt8): Int\n\
+             local values = Range.create(1, last)\n\
+             return 0\n\
+         end\n",
+        "namespace Example\n\
+         public function collections(): Int\n\
+             local values = Range.create(1, 3, 0)\n\
+             return 0\n\
+         end\n",
+    ] {
+        let fixture = check_function(source);
+        assert!(fixture.result.body().is_none());
+        assert!(
+            fixture.result.diagnostic_snapshot().contains("POP2005")
+                || fixture.result.diagnostic_snapshot().contains("POP2003"),
+            "{}",
+            fixture.result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
 fn generalized_for_rejects_nonprotocol_sources_and_invalid_bindings() {
     for (source, code) in [
         (

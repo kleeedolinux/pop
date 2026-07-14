@@ -468,7 +468,7 @@ fn dump_statements(
             } => {
                 let _ = write!(
                     output,
-                    "generalizedFor {:?} item:{} iterator:{} step:{} protocol(iteration#{}, iterable#{}, iterator#{}, list#{}, cases {}:{}, methods {}:{}) ",
+                    "generalizedFor {:?} item:{} iterator:{} step:{} protocol(iteration#{}, iterable#{}, iterator#{}, list#{}, range#{}, cases {}:{}, methods {}:{}) ",
                     source,
                     type_text(*item_type, arena),
                     type_text(*iterator_type, arena),
@@ -477,6 +477,7 @@ fn dump_statements(
                     protocol.iterable().raw(),
                     protocol.iterator().raw(),
                     protocol.list().raw(),
+                    protocol.range().raw(),
                     protocol.item_case().raw(),
                     protocol.end_case().raw(),
                     protocol.iterator_method().raw(),
@@ -840,6 +841,14 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, list, arena);
             output.push(' ');
             dump_expression(output, value, arena);
+        }
+        HirExpressionKind::RangeCreate { first, last, step } => {
+            output.push_str("range.create ");
+            dump_expression(output, first, arena);
+            output.push(' ');
+            dump_expression(output, last, arena);
+            output.push(' ');
+            dump_expression(output, step, arena);
         }
         HirExpressionKind::Record { record, fields } => {
             let _ = write!(output, "record s{} ", record.raw());

@@ -191,6 +191,7 @@ pub enum TypedStatementKind {
 pub enum TypedIterationSource {
     Array,
     List,
+    Range,
     Table,
     Iterable,
     Iterator,
@@ -447,6 +448,11 @@ pub enum TypedExpressionKind {
     ListAdd {
         list: Box<TypedExpression>,
         value: Box<TypedExpression>,
+    },
+    RangeCreate {
+        first: Box<TypedExpression>,
+        last: Box<TypedExpression>,
+        step: Box<TypedExpression>,
     },
     Record {
         record: SymbolId,

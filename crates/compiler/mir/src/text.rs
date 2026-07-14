@@ -1035,6 +1035,10 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             element_map: parse_array_element_map(element_map, line)?,
         });
     }
+    if let Some(operands) = text.strip_prefix("rangeCreate ") {
+        let (first, last, step) = parse_three_values(operands, line)?;
+        return Ok(MirInstructionKind::RangeCreate { first, last, step });
+    }
     if let Some(optional) = text.strip_prefix("optionalIsPresent ") {
         return Ok(MirInstructionKind::OptionalIsPresent {
             optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),

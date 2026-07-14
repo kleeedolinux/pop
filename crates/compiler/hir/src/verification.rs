@@ -1560,6 +1560,7 @@ impl Verifier<'_> {
                         protocol.iterable(),
                         protocol.iterator(),
                         protocol.list(),
+                        protocol.range(),
                     ];
                     let unique_protocol_identities: BTreeSet<_> =
                         protocol_identities.into_iter().collect();
@@ -1592,6 +1593,22 @@ impl Verifier<'_> {
                                 arguments,
                             }),
                         ) => *definition == protocol.list() && arguments.as_slice() == [*item_type],
+                        (
+                            HirIterationSource::Range,
+                            Some(SemanticType::Builtin {
+                                definition,
+                                arguments,
+                            }),
+                        ) => {
+                            *definition == protocol.range()
+                                && arguments.as_slice() == [*item_type]
+                                && matches!(
+                                    self.arena.get(*item_type),
+                                    Some(SemanticType::Primitive(
+                                        pop_types::PrimitiveType::Integer(_)
+                                    ))
+                                )
+                        }
                         (
                             HirIterationSource::Iterable,
                             Some(SemanticType::Builtin {
@@ -2321,6 +2338,35 @@ impl Verifier<'_> {
                 if let Some(nil) = self.arena.source_type("nil") {
                     self.verify_expression_type(nil, expression);
                 }
+            }
+            HirExpressionKind::RangeCreate { first, last, step } => {
+                self.verify_expression(first, visible);
+                self.verify_expression(last, visible);
+                self.verify_expression(step, visible);
+                let protocol = pop_types::embedded_bootstrap_schema()
+                    .ok()
+                    .and_then(|schema| schema.iteration_protocol());
+                let valid_result = matches!(
+                    (protocol, self.arena.get(expression.type_id())),
+                    (
+                        Some(protocol),
+                        Some(SemanticType::Builtin { definition, arguments })
+                    ) if *definition == protocol.range()
+                        && arguments.as_slice() == [first.type_id()]
+                        && matches!(
+                            self.arena.get(first.type_id()),
+                            Some(SemanticType::Primitive(pop_types::PrimitiveType::Integer(_)))
+                        )
+                );
+                if !valid_result {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
+                self.verify_expression_type(first.type_id(), last);
+                self.verify_expression_type(first.type_id(), step);
             }
             HirExpressionKind::Array(elements) => {
                 self.verify_array(expression, elements, visible);
@@ -4676,6 +4722,11 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::ListAdd { list, value } => {
             collect_cell_captures(list, written);
             collect_cell_captures(value, written);
+        }
+        HirExpressionKind::RangeCreate { first, last, step } => {
+            collect_cell_captures(first, written);
+            collect_cell_captures(last, written);
+            collect_cell_captures(step, written);
         }
         HirExpressionKind::ArrayFill { array, value } => {
             collect_cell_captures(array, written);

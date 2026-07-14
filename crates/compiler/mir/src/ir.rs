@@ -1048,6 +1048,11 @@ pub enum MirInstructionKind {
         value: ValueId,
         element_map: ArrayElementMap,
     },
+    RangeCreate {
+        first: ValueId,
+        last: ValueId,
+        step: ValueId,
+    },
     CheckedIntegerAdd {
         kind: IntegerKind,
         left: ValueId,
