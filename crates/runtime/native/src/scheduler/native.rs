@@ -8,13 +8,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use pop_runtime_collector::SchedulerId;
+use pop_runtime_interface::TaskFrameRootId;
 
 use super::{
     DetachedSchedulerRuntimeTransitions, SchedulerBlockingOperationId, SchedulerConfiguration,
     SchedulerError, SchedulerExternalEventId, SchedulerRuntimeTransition,
     SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitions, SchedulerTask,
-    SchedulerTaskContext, SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll,
-    SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
+    SchedulerTaskContext, SchedulerTaskFrameFailure, SchedulerTaskId, SchedulerTaskMobility,
+    SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
 };
 
 enum InternalTaskState {
@@ -49,6 +50,7 @@ struct TaskRecord {
     scheduler: SchedulerId,
     mobility: SchedulerTaskMobility,
     cancellation_requested: bool,
+    frame_roots: Option<TaskFrameRootId>,
 }
 
 struct TaskCell {
@@ -97,6 +99,13 @@ enum WorkSource {
     Local,
     Injection,
     Stolen(usize),
+}
+
+#[derive(Clone, Copy)]
+enum NonterminalPollState {
+    Ready,
+    Resumed,
+    Suspended,
 }
 
 struct QueuedTask {
@@ -537,6 +546,9 @@ impl NativeScheduler {
                 }
             }
         }
+        if let Err(error) = self.shared.release_all_task_frames() {
+            failure.get_or_insert(error);
+        }
         failure.map_or(Ok(()), Err)
     }
 }
@@ -811,9 +823,122 @@ impl SharedScheduler {
         }
     }
 
+    fn task_frame_error(
+        &self,
+        task: SchedulerTaskId,
+        failure: SchedulerTaskFrameFailure,
+    ) -> SchedulerError {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.frame_root_failures =
+            telemetry.telemetry.frame_root_failures.saturating_add(1);
+        SchedulerError::TaskFrame { task, failure }
+    }
+
+    fn retain_task_frame(
+        &self,
+        id: SchedulerTaskId,
+        scheduler: SchedulerId,
+        task: &mut dyn SchedulerTask,
+    ) -> Result<TaskFrameRootId, SchedulerError> {
+        let expected = task.frame_stack_map();
+        let publication = task
+            .publish_frame_roots()
+            .map_err(|_| self.task_frame_error(id, SchedulerTaskFrameFailure::Publication))?;
+        if publication.stack_map() != &expected {
+            return Err(self.task_frame_error(id, SchedulerTaskFrameFailure::PublicationShape));
+        }
+        let identity = crate::state::retain_scheduler_task_roots(scheduler, &publication)
+            .map_err(|_| self.task_frame_error(id, SchedulerTaskFrameFailure::Collector))?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.retained_frame_root_containers = telemetry
+            .telemetry
+            .retained_frame_root_containers
+            .saturating_add(1);
+        telemetry.telemetry.maximum_retained_frame_root_containers = telemetry
+            .telemetry
+            .maximum_retained_frame_root_containers
+            .max(telemetry.telemetry.retained_frame_root_containers);
+        telemetry.telemetry.frame_root_retentions =
+            telemetry.telemetry.frame_root_retentions.saturating_add(1);
+        Ok(identity)
+    }
+
+    fn prepare_task_frame_restore(
+        &self,
+        id: SchedulerTaskId,
+        scheduler: SchedulerId,
+        identity: TaskFrameRootId,
+        task: &mut dyn SchedulerTask,
+    ) -> Result<(), SchedulerError> {
+        let expected = task.frame_stack_map();
+        let publication =
+            crate::state::prepare_scheduler_task_root_restore(identity, scheduler, &expected)
+                .map_err(|_| self.task_frame_error(id, SchedulerTaskFrameFailure::Collector))?;
+        task.restore_frame_roots(publication)
+            .map_err(|_| self.task_frame_error(id, SchedulerTaskFrameFailure::Restoration))
+    }
+
+    fn complete_task_frame_restore(
+        &self,
+        id: SchedulerTaskId,
+        scheduler: SchedulerId,
+        identity: TaskFrameRootId,
+    ) -> Result<(), SchedulerError> {
+        crate::state::complete_scheduler_task_root_restore(identity, scheduler)
+            .map_err(|_| self.task_frame_error(id, SchedulerTaskFrameFailure::Collector))?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.retained_frame_root_containers = telemetry
+            .telemetry
+            .retained_frame_root_containers
+            .saturating_sub(1);
+        telemetry.telemetry.frame_root_restorations = telemetry
+            .telemetry
+            .frame_root_restorations
+            .saturating_add(1);
+        Ok(())
+    }
+
+    fn release_task_frame(
+        &self,
+        id: SchedulerTaskId,
+        scheduler: SchedulerId,
+        identity: TaskFrameRootId,
+    ) -> Result<(), SchedulerError> {
+        crate::state::release_scheduler_task_roots(identity, scheduler)
+            .map_err(|_| self.task_frame_error(id, SchedulerTaskFrameFailure::Collector))?;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.retained_frame_root_containers = telemetry
+            .telemetry
+            .retained_frame_root_containers
+            .saturating_sub(1);
+        telemetry.telemetry.frame_root_releases =
+            telemetry.telemetry.frame_root_releases.saturating_add(1);
+        Ok(())
+    }
+
+    fn release_all_task_frames(&self) -> Result<(), SchedulerError> {
+        let tasks = lock(&self.registry)
+            .tasks
+            .iter()
+            .map(|(id, cell)| (*id, Arc::clone(cell)))
+            .collect::<Vec<_>>();
+        let mut first_failure = None;
+        for (id, cell) in tasks {
+            let mut record = lock(&cell.record);
+            let Some(identity) = record.frame_roots.take() else {
+                continue;
+            };
+            if let Err(error) = self.release_task_frame(id, record.scheduler, identity) {
+                record.frame_roots = Some(identity);
+                first_failure.get_or_insert(error);
+            }
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
     fn schedule_injected(
         &self,
-        task: Box<dyn SchedulerTask>,
+        mut task: Box<dyn SchedulerTask>,
     ) -> Result<SchedulerTaskId, SchedulerError> {
         self.ensure_open()?;
         let _submission = SubmissionGuard::enter(&self.submissions_active, &self.searchers);
@@ -834,7 +959,13 @@ impl SharedScheduler {
         let scheduler = SchedulerId::new(
             u32::try_from(scheduler_index + 1).expect("validated scheduler identity range"),
         );
-        let id = next_task_id(&mut registry)?;
+        let id = SchedulerTaskId::new(registry.next_task);
+        let next_task = registry
+            .next_task
+            .checked_add(1)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        let frame_roots = self.retain_task_frame(id, scheduler, task.as_mut())?;
+        registry.next_task = next_task;
         registry.tasks.insert(
             id,
             Arc::new(TaskCell {
@@ -844,6 +975,7 @@ impl SharedScheduler {
                     scheduler,
                     mobility: SchedulerTaskMobility::Movable,
                     cancellation_requested: false,
+                    frame_roots: Some(frame_roots),
                 }),
             }),
         );
@@ -861,7 +993,7 @@ impl SharedScheduler {
         &self,
         scheduler: SchedulerId,
         mobility: SchedulerTaskMobility,
-        task: Box<dyn SchedulerTask>,
+        mut task: Box<dyn SchedulerTask>,
     ) -> Result<SchedulerTaskId, SchedulerError> {
         self.ensure_open()?;
         let _submission = SubmissionGuard::enter(&self.submissions_active, &self.searchers);
@@ -874,7 +1006,13 @@ impl SharedScheduler {
         if registry.tasks.len() >= self.configuration.task_capacity {
             return Err(SchedulerError::TaskCapacity);
         }
-        let id = next_task_id(&mut registry)?;
+        let id = SchedulerTaskId::new(registry.next_task);
+        let next_task = registry
+            .next_task
+            .checked_add(1)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        let frame_roots = self.retain_task_frame(id, scheduler, task.as_mut())?;
+        registry.next_task = next_task;
         registry.tasks.insert(
             id,
             Arc::new(TaskCell {
@@ -884,6 +1022,7 @@ impl SharedScheduler {
                     scheduler,
                     mobility,
                     cancellation_requested: false,
+                    frame_roots: Some(frame_roots),
                 }),
             }),
         );
@@ -919,14 +1058,38 @@ impl SharedScheduler {
         }
         let additional =
             u64::try_from(tasks.len()).map_err(|_| SchedulerError::IdentityOverflow)?;
-        registry
+        let next_task = registry
             .next_task
             .checked_add(additional)
             .ok_or(SchedulerError::IdentityOverflow)?;
 
         let mut ids = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            let id = next_task_id(&mut registry)?;
+        let mut prepared = Vec::with_capacity(tasks.len());
+        for (offset, mut task) in tasks.into_iter().enumerate() {
+            let offset = u64::try_from(offset).map_err(|_| SchedulerError::IdentityOverflow)?;
+            let raw = registry
+                .next_task
+                .checked_add(offset)
+                .ok_or(SchedulerError::IdentityOverflow)?;
+            let id = SchedulerTaskId::new(raw);
+            let frame_roots = match self.retain_task_frame(id, scheduler, task.as_mut()) {
+                Ok(frame_roots) => frame_roots,
+                Err(error) => {
+                    let mut cleanup_failure = None;
+                    for (prepared_id, _, prepared_roots) in prepared {
+                        if let Err(cleanup) =
+                            self.release_task_frame(prepared_id, scheduler, prepared_roots)
+                        {
+                            cleanup_failure.get_or_insert(cleanup);
+                        }
+                    }
+                    return Err(cleanup_failure.unwrap_or(error));
+                }
+            };
+            prepared.push((id, task, frame_roots));
+        }
+        registry.next_task = next_task;
+        for (id, task, frame_roots) in prepared {
             registry.tasks.insert(
                 id,
                 Arc::new(TaskCell {
@@ -936,6 +1099,7 @@ impl SharedScheduler {
                         scheduler,
                         mobility,
                         cancellation_requested: false,
+                        frame_roots: Some(frame_roots),
                     }),
                 }),
             );
@@ -1275,17 +1439,17 @@ impl SharedScheduler {
                 let Some(mut record) = try_lock(&cell.record) else {
                     continue;
                 };
-                if record.mobility != SchedulerTaskMobility::Movable
-                    || !self.migration_allowed(id, record.scheduler, scheduler_id(thief))
-                {
+                if record.mobility != SchedulerTaskMobility::Movable {
                     continue;
                 }
                 let Some(position) = victim_queue.iter().position(|candidate| *candidate == id)
                 else {
                     continue;
                 };
+                if !self.migrate_task_record(id, &mut record, scheduler_id(thief)) {
+                    continue;
+                }
                 victim_queue.remove(position);
-                record.scheduler = scheduler_id(thief);
                 stolen.push(id);
             }
             drop(registry);
@@ -1353,15 +1517,36 @@ impl SharedScheduler {
         if let Ok(cell) = self.task(id) {
             let mut record = lock(&cell.record);
             if record.mobility == SchedulerTaskMobility::Movable {
-                let destination = scheduler_id(index);
-                if record.scheduler != destination
-                    && !self.migration_allowed(id, record.scheduler, destination)
-                {
-                    return false;
-                }
-                record.scheduler = destination;
+                return self.migrate_task_record(id, &mut record, scheduler_id(index));
             }
         }
+        true
+    }
+
+    fn migrate_task_record(
+        &self,
+        id: SchedulerTaskId,
+        record: &mut TaskRecord,
+        destination: SchedulerId,
+    ) -> bool {
+        if record.scheduler == destination {
+            return true;
+        }
+        if !self.migration_allowed(id, record.scheduler, destination) {
+            return false;
+        }
+        let Some(frame_roots) = record.frame_roots else {
+            return false;
+        };
+        if crate::state::transfer_scheduler_task_roots(frame_roots, record.scheduler, destination)
+            .is_err()
+        {
+            let mut telemetry = lock(&self.telemetry);
+            telemetry.telemetry.gc_delayed_migrations =
+                telemetry.telemetry.gc_delayed_migrations.saturating_add(1);
+            return false;
+        }
+        record.scheduler = destination;
         true
     }
 
@@ -1377,11 +1562,21 @@ impl SharedScheduler {
             self.discard_stale_ready_entry();
             return Ok(None);
         }
+        let Some(frame_roots) = record.frame_roots else {
+            return Err(self.task_frame_error(queued.id, SchedulerTaskFrameFailure::Collector));
+        };
+        let task_scheduler = record.scheduler;
+        let Some(task) = record.task.as_mut() else {
+            return Err(self.task_frame_error(queued.id, SchedulerTaskFrameFailure::Restoration));
+        };
+        self.prepare_task_frame_restore(queued.id, task_scheduler, frame_roots, task.as_mut())?;
         self.require_runtime_transition(SchedulerRuntimeTransition::TaskDispatched {
             task: queued.id,
             worker,
             scheduler: record.scheduler,
         })?;
+        self.complete_task_frame_restore(queued.id, record.scheduler, frame_roots)?;
+        record.frame_roots = None;
         record.state = InternalTaskState::Running { notified: false };
         let Some(task) = record.task.take() else {
             return Ok(None);
@@ -1420,50 +1615,53 @@ impl SharedScheduler {
     ) -> Result<(), SchedulerError> {
         let mut record = lock(&cell.record);
         let notified = matches!(record.state, InternalTaskState::Running { notified: true });
-        let suspended = matches!(&result, Ok(SchedulerTaskPoll::Pending));
-        let mut enqueue = false;
+        let scheduler = record.scheduler;
+        let enqueue;
         let terminal_state = match result {
             Ok(SchedulerTaskPoll::Ready) => {
-                record.task = Some(task);
-                record.state = InternalTaskState::Ready;
-                enqueue = true;
+                enqueue = self.finish_nonterminal_poll(
+                    id,
+                    &mut record,
+                    task,
+                    NonterminalPollState::Ready,
+                )?;
                 None
             }
             Ok(SchedulerTaskPoll::Pending) if notified => {
-                record.task = Some(task);
-                record.state = InternalTaskState::Ready;
-                enqueue = true;
+                enqueue = self.finish_nonterminal_poll(
+                    id,
+                    &mut record,
+                    task,
+                    NonterminalPollState::Resumed,
+                )?;
                 None
             }
             Ok(SchedulerTaskPoll::Pending) => {
-                record.task = Some(task);
-                record.state = InternalTaskState::Suspended;
-                let mut telemetry = lock(&self.telemetry);
-                telemetry.telemetry.suspensions = telemetry.telemetry.suspensions.saturating_add(1);
+                enqueue = self.finish_nonterminal_poll(
+                    id,
+                    &mut record,
+                    task,
+                    NonterminalPollState::Suspended,
+                )?;
                 None
             }
             Ok(SchedulerTaskPoll::Complete) => {
-                record.state = InternalTaskState::Completed;
-                let mut telemetry = lock(&self.telemetry);
-                telemetry.telemetry.completions = telemetry.telemetry.completions.saturating_add(1);
+                enqueue = false;
+                self.finish_terminal_poll(id, &mut record, SchedulerTaskState::Completed)?;
                 Some(SchedulerTaskState::Completed)
             }
             Ok(SchedulerTaskPoll::Cancelled) => {
-                record.state = InternalTaskState::Cancelled;
-                let mut telemetry = lock(&self.telemetry);
-                telemetry.telemetry.cancellations_observed =
-                    telemetry.telemetry.cancellations_observed.saturating_add(1);
+                enqueue = false;
+                self.finish_terminal_poll(id, &mut record, SchedulerTaskState::Cancelled)?;
                 Some(SchedulerTaskState::Cancelled)
             }
             Err(panic) => {
+                enqueue = false;
                 drop(panic);
-                record.state = InternalTaskState::Panicked;
-                let mut telemetry = lock(&self.telemetry);
-                telemetry.telemetry.panics = telemetry.telemetry.panics.saturating_add(1);
+                self.finish_terminal_poll(id, &mut record, SchedulerTaskState::Panicked)?;
                 Some(SchedulerTaskState::Panicked)
             }
         };
-        let scheduler = record.scheduler;
         drop(record);
         {
             let mut telemetry = lock(&self.telemetry);
@@ -1489,34 +1687,89 @@ impl SharedScheduler {
             }
         }
         if enqueue {
-            let index = self
-                .scheduler_index(scheduler)
-                .expect("task scheduler remains configured");
+            let index = self.scheduler_index(scheduler)?;
             lock(&self.queues.local[index]).push_back(id);
             self.record_local_enqueued(1);
         }
         if enqueue {
             self.notify_work();
         }
-        if suspended && !notified {
-            self.require_runtime_transition(SchedulerRuntimeTransition::TaskSuspended {
-                task: id,
-                scheduler,
-            })?;
-        } else if suspended && notified {
-            self.require_runtime_transition(SchedulerRuntimeTransition::TaskResumed {
-                task: id,
-                scheduler,
-            })?;
-        }
-        if let Some(state) = terminal_state {
-            self.require_runtime_transition(SchedulerRuntimeTransition::TaskTerminal {
-                task: id,
-                scheduler,
-                state,
-            })?;
+        Ok(())
+    }
+
+    fn finish_terminal_poll(
+        &self,
+        id: SchedulerTaskId,
+        record: &mut TaskRecord,
+        state: SchedulerTaskState,
+    ) -> Result<(), SchedulerError> {
+        self.require_runtime_transition(SchedulerRuntimeTransition::TaskTerminal {
+            task: id,
+            scheduler: record.scheduler,
+            state,
+        })?;
+        let mut telemetry = lock(&self.telemetry);
+        match state {
+            SchedulerTaskState::Completed => {
+                record.state = InternalTaskState::Completed;
+                telemetry.telemetry.completions = telemetry.telemetry.completions.saturating_add(1);
+            }
+            SchedulerTaskState::Cancelled => {
+                record.state = InternalTaskState::Cancelled;
+                telemetry.telemetry.cancellations_observed =
+                    telemetry.telemetry.cancellations_observed.saturating_add(1);
+            }
+            SchedulerTaskState::Panicked => {
+                record.state = InternalTaskState::Panicked;
+                telemetry.telemetry.panics = telemetry.telemetry.panics.saturating_add(1);
+            }
+            SchedulerTaskState::Ready
+            | SchedulerTaskState::Running
+            | SchedulerTaskState::Suspended => unreachable!("terminal poll state"),
         }
         Ok(())
+    }
+
+    fn finish_nonterminal_poll(
+        &self,
+        id: SchedulerTaskId,
+        record: &mut TaskRecord,
+        mut task: Box<dyn SchedulerTask>,
+        state: NonterminalPollState,
+    ) -> Result<bool, SchedulerError> {
+        let scheduler = record.scheduler;
+        let frame_roots = self.retain_task_frame(id, scheduler, task.as_mut())?;
+        let transition = match state {
+            NonterminalPollState::Ready => Ok(()),
+            NonterminalPollState::Resumed => {
+                self.require_runtime_transition(SchedulerRuntimeTransition::TaskResumed {
+                    task: id,
+                    scheduler,
+                })
+            }
+            NonterminalPollState::Suspended => {
+                self.require_runtime_transition(SchedulerRuntimeTransition::TaskSuspended {
+                    task: id,
+                    scheduler,
+                })
+            }
+        };
+        if let Err(error) = transition {
+            record.task = Some(task);
+            record.frame_roots = Some(frame_roots);
+            return Err(error);
+        }
+        record.task = Some(task);
+        record.frame_roots = Some(frame_roots);
+        if matches!(state, NonterminalPollState::Suspended) {
+            record.state = InternalTaskState::Suspended;
+            let mut telemetry = lock(&self.telemetry);
+            telemetry.telemetry.suspensions = telemetry.telemetry.suspensions.saturating_add(1);
+            Ok(false)
+        } else {
+            record.state = InternalTaskState::Ready;
+            Ok(true)
+        }
     }
 
     fn scheduler_index(&self, scheduler: SchedulerId) -> Result<usize, SchedulerError> {
@@ -1728,6 +1981,9 @@ fn worker_loop(
         }
         Ok(())
     })();
+    if work_result.is_err() {
+        shared.shutdown();
+    }
     let stop_result = shared
         .require_runtime_transition(SchedulerRuntimeTransition::WorkerStopped { worker, scheduler })
         .map(|()| shared.record_worker_stopped());
@@ -1848,15 +2104,6 @@ fn remaining_until(deadline: Instant) -> Result<Duration, SchedulerError> {
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
         .ok_or(SchedulerError::WaitTimedOut)
-}
-
-fn next_task_id(registry: &mut Registry) -> Result<SchedulerTaskId, SchedulerError> {
-    let id = SchedulerTaskId::new(registry.next_task);
-    registry.next_task = registry
-        .next_task
-        .checked_add(1)
-        .ok_or(SchedulerError::IdentityOverflow)?;
-    Ok(id)
 }
 
 fn scheduler_id(index: usize) -> SchedulerId {

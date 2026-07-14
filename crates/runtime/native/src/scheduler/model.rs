@@ -1,6 +1,7 @@
 //! Scheduler identities, configuration, task transitions, and telemetry.
 
 use pop_runtime_collector::SchedulerId;
+use pop_runtime_interface::{RootPublication, StackMap};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SchedulerTaskId(u64);
@@ -335,7 +336,44 @@ impl SchedulerTaskContext {
     }
 }
 
-pub trait SchedulerTask: Send + 'static {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerTaskFrameError {
+    PublicationRejected,
+    RestorationRejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerTaskFrameFailure {
+    Publication,
+    PublicationShape,
+    Restoration,
+    Collector,
+}
+
+/// Exact compiler/runtime adapter for one scheduler-owned task frame.
+///
+/// Implementations are mandatory even for trusted root-free host tasks; there
+/// is deliberately no implicit empty-frame fallback.
+pub trait SchedulerTaskFrame: Send + 'static {
+    fn frame_stack_map(&self) -> StackMap;
+
+    /// # Errors
+    ///
+    /// Returns a closed rejection when the task cannot publish its exact live
+    /// frame values.
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError>;
+
+    /// # Errors
+    ///
+    /// Returns a closed rejection when the task cannot install the exact
+    /// possibly relocated values before polling.
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError>;
+}
+
+pub trait SchedulerTask: SchedulerTaskFrame {
     fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll;
 }
 
@@ -365,6 +403,10 @@ pub enum SchedulerError {
     RuntimeTransition {
         transition: SchedulerRuntimeTransition,
         failure: SchedulerRuntimeTransitionFailure,
+    },
+    TaskFrame {
+        task: SchedulerTaskId,
+        failure: SchedulerTaskFrameFailure,
     },
 }
 
@@ -415,6 +457,12 @@ pub struct SchedulerTelemetry {
     pub(super) worker_unparks: u64,
     pub(super) worker_stops: u64,
     pub(super) worker_threads_used: usize,
+    pub(super) retained_frame_root_containers: usize,
+    pub(super) maximum_retained_frame_root_containers: usize,
+    pub(super) frame_root_retentions: u64,
+    pub(super) frame_root_restorations: u64,
+    pub(super) frame_root_releases: u64,
+    pub(super) frame_root_failures: u64,
 }
 
 macro_rules! telemetry_accessors {
@@ -474,6 +522,12 @@ impl SchedulerTelemetry {
         worker_parks: u64,
         worker_unparks: u64,
         worker_stops: u64,
+        retained_frame_root_containers: usize,
+        maximum_retained_frame_root_containers: usize,
+        frame_root_retentions: u64,
+        frame_root_restorations: u64,
+        frame_root_releases: u64,
+        frame_root_failures: u64,
     }
 
     #[must_use]

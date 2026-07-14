@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pop_runtime_collector::SchedulerId;
+use pop_runtime_interface::{RootPublication, SafePointId, StackMap};
 use pop_runtime_native::{
     NativeScheduler, SchedulerConfiguration, SchedulerConfigurationError, SchedulerError,
     SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
     SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
-    SchedulerTaskContext, SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll,
-    SchedulerTaskState, SchedulerTelemetry,
+    SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskId,
+    SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry,
 };
 
 const WAIT_TIMEOUT: Duration = Duration::from_mins(5);
@@ -188,6 +189,28 @@ struct BenchmarkTask {
     latencies: Arc<Latencies>,
     ready_at: Instant,
     first_poll: bool,
+}
+
+impl SchedulerTaskFrame for BenchmarkTask {
+    fn frame_stack_map(&self) -> StackMap {
+        StackMap::new(SafePointId::new(1), Vec::new()).expect("benchmark empty frame map")
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        RootPublication::new(self.frame_stack_map(), Vec::new())
+            .map_err(|_| SchedulerTaskFrameError::PublicationRejected)
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() == &self.frame_stack_map() {
+            Ok(())
+        } else {
+            Err(SchedulerTaskFrameError::RestorationRejected)
+        }
+    }
 }
 
 impl SchedulerTask for BenchmarkTask {

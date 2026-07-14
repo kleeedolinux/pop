@@ -2,11 +2,14 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use pop_runtime_collector::SchedulerId;
+use pop_runtime_interface::{ManagedReference, RootPublication, RootSlot, SafePointId, StackMap};
 use pop_runtime_native::{
     DeterministicScheduler, NativeScheduler, SchedulerConfiguration, SchedulerConfigurationError,
     SchedulerError, SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
     SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
-    SchedulerTaskContext, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
+    SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskFrameFailure,
+    SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, abi_safe_point,
+    pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root, request_abi_collection,
 };
 
 #[derive(Default)]
@@ -43,6 +46,215 @@ impl SchedulerRuntimeTransitions for PermitRuntimeTransitions {
     ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
         Ok(SchedulerRuntimeTransitionControl::Continue)
     }
+}
+
+fn explicit_empty_frame(id: u32) -> StackMap {
+    StackMap::new(SafePointId::new(id), Vec::new()).expect("empty task frame map")
+}
+
+fn explicit_empty_publication(map: StackMap) -> RootPublication {
+    RootPublication::new(map, Vec::new()).expect("empty task frame publication")
+}
+
+struct FrameLifecycleTask {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    map: StackMap,
+    first: bool,
+}
+
+impl SchedulerTaskFrame for FrameLifecycleTask {
+    fn frame_stack_map(&self) -> StackMap {
+        self.map.clone()
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        self.events.lock().expect("frame event log").push("publish");
+        Ok(explicit_empty_publication(self.map.clone()))
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() != &self.map {
+            return Err(SchedulerTaskFrameError::RestorationRejected);
+        }
+        self.events.lock().expect("frame event log").push("restore");
+        Ok(())
+    }
+}
+
+impl SchedulerTask for FrameLifecycleTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        self.events.lock().expect("frame event log").push("poll");
+        if self.first {
+            self.first = false;
+            SchedulerTaskPoll::Pending
+        } else {
+            SchedulerTaskPoll::Complete
+        }
+    }
+}
+
+struct InvalidInitialFrameTask;
+
+impl SchedulerTaskFrame for InvalidInitialFrameTask {
+    fn frame_stack_map(&self) -> StackMap {
+        explicit_empty_frame(901)
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        Ok(explicit_empty_publication(explicit_empty_frame(902)))
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        _publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        Ok(())
+    }
+}
+
+impl SchedulerTask for InvalidInitialFrameTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        panic!("invalid initial frame must never enter a ready queue")
+    }
+}
+
+struct BatchFrameTask {
+    valid: bool,
+}
+
+impl SchedulerTaskFrame for BatchFrameTask {
+    fn frame_stack_map(&self) -> StackMap {
+        explicit_empty_frame(906)
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        let map = if self.valid {
+            self.frame_stack_map()
+        } else {
+            explicit_empty_frame(907)
+        };
+        Ok(explicit_empty_publication(map))
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() == &self.frame_stack_map() {
+            Ok(())
+        } else {
+            Err(SchedulerTaskFrameError::RestorationRejected)
+        }
+    }
+}
+
+impl SchedulerTask for BatchFrameTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        SchedulerTaskPoll::Complete
+    }
+}
+
+struct RejectRestoreTask {
+    attempted: Option<mpsc::Sender<()>>,
+}
+
+struct ManagedFrameTask {
+    value: ManagedReference,
+    first: bool,
+}
+
+impl SchedulerTaskFrame for ManagedFrameTask {
+    fn frame_stack_map(&self) -> StackMap {
+        StackMap::new(SafePointId::new(909), vec![RootSlot::new(0)])
+            .expect("managed task frame map")
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        RootPublication::new(self.frame_stack_map(), vec![Some(self.value)])
+            .map_err(|_| SchedulerTaskFrameError::PublicationRejected)
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() != &self.frame_stack_map() {
+            return Err(SchedulerTaskFrameError::RestorationRejected);
+        }
+        self.value = publication
+            .managed_references()
+            .next()
+            .ok_or(SchedulerTaskFrameError::RestorationRejected)?;
+        Ok(())
+    }
+}
+
+impl SchedulerTask for ManagedFrameTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        if self.first {
+            self.first = false;
+            SchedulerTaskPoll::Pending
+        } else {
+            let root = pop_rt_retain_root(self.value.raw());
+            assert_ne!(root, 0, "retained frame value must survive collection");
+            assert_eq!(pop_rt_release_root(root), 1);
+            SchedulerTaskPoll::Complete
+        }
+    }
+}
+
+impl SchedulerTaskFrame for RejectRestoreTask {
+    fn frame_stack_map(&self) -> StackMap {
+        explicit_empty_frame(908)
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        Ok(explicit_empty_publication(self.frame_stack_map()))
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        _publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if let Some(attempted) = self.attempted.take() {
+            attempted.send(()).expect("report rejected restoration");
+        }
+        Err(SchedulerTaskFrameError::RestorationRejected)
+    }
+}
+
+impl SchedulerTask for RejectRestoreTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        panic!("rejected root installation must prevent task polling")
+    }
+}
+
+macro_rules! impl_explicit_rootless_frame {
+    ($task:ty, $safe_point:expr) => {
+        impl SchedulerTaskFrame for $task {
+            fn frame_stack_map(&self) -> StackMap {
+                explicit_empty_frame($safe_point)
+            }
+
+            fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+                Ok(explicit_empty_publication(self.frame_stack_map()))
+            }
+
+            fn restore_frame_roots(
+                &mut self,
+                publication: RootPublication,
+            ) -> Result<(), SchedulerTaskFrameError> {
+                if publication.stack_map() == &self.frame_stack_map() {
+                    Ok(())
+                } else {
+                    Err(SchedulerTaskFrameError::RestorationRejected)
+                }
+            }
+        }
+    };
 }
 
 type PollRecord = (u64, u32, u32, bool);
@@ -205,6 +417,16 @@ impl SchedulerTask for BlockingProbeTask {
     }
 }
 
+impl_explicit_rootless_frame!(StepTask, 910);
+impl_explicit_rootless_frame!(CancellationTask, 911);
+impl_explicit_rootless_frame!(PanicTask, 912);
+impl_explicit_rootless_frame!(CompleteTask, 913);
+impl_explicit_rootless_frame!(YieldOnceTask, 914);
+impl_explicit_rootless_frame!(ReadyManyTask, 915);
+impl_explicit_rootless_frame!(SuspendOnceTask, 916);
+impl_explicit_rootless_frame!(WakeDuringPollTask, 917);
+impl_explicit_rootless_frame!(BlockingProbeTask, 918);
+
 fn configuration(scheduler_count: usize, task_capacity: usize) -> SchedulerConfiguration {
     SchedulerConfiguration::new(
         scheduler_count,
@@ -215,6 +437,233 @@ fn configuration(scheduler_count: usize, task_capacity: usize) -> SchedulerConfi
         8,
     )
     .expect("scheduler configuration")
+}
+
+#[test]
+fn native_task_frames_restore_before_poll_and_retain_after_nonterminal_poll() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = NativeScheduler::new(configuration(1, 2)).expect("native scheduler");
+    let task = scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            FrameLifecycleTask {
+                events: Arc::clone(&events),
+                map: explicit_empty_frame(900),
+                first: true,
+            },
+        )
+        .expect("schedule framed task");
+
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("first suspension");
+    assert_eq!(
+        *events.lock().expect("frame event log"),
+        ["publish", "restore", "poll", "publish"]
+    );
+    let suspended = scheduler.telemetry();
+    assert_eq!(suspended.retained_frame_root_containers(), 1);
+    assert_eq!(suspended.frame_root_retentions(), 2);
+    assert_eq!(suspended.frame_root_restorations(), 1);
+
+    assert!(scheduler.wake(task).expect("wake framed task"));
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("terminal completion");
+    assert_eq!(
+        *events.lock().expect("frame event log"),
+        ["publish", "restore", "poll", "publish", "restore", "poll"]
+    );
+    let final_telemetry = scheduler
+        .shutdown_with_telemetry()
+        .expect("shutdown framed scheduler");
+    assert_eq!(final_telemetry.retained_frame_root_containers(), 0);
+    assert_eq!(final_telemetry.maximum_retained_frame_root_containers(), 1);
+    assert_eq!(final_telemetry.frame_root_retentions(), 2);
+    assert_eq!(final_telemetry.frame_root_restorations(), 2);
+    assert_eq!(final_telemetry.frame_root_failures(), 0);
+}
+
+#[test]
+fn suspended_native_frame_keeps_managed_value_alive_through_forced_collection() {
+    let value = pop_rt_allocate_object(0);
+    assert_ne!(value, 0, "allocate managed frame value");
+    let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
+    let task = scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            ManagedFrameTask {
+                value: ManagedReference::new(value),
+                first: true,
+            },
+        )
+        .expect("schedule managed frame");
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("managed task suspension");
+
+    assert!(request_abi_collection());
+    for safe_point in 920..928 {
+        assert_eq!(abi_safe_point(safe_point, &[]), 1);
+    }
+
+    assert!(scheduler.wake(task).expect("wake managed frame"));
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("managed task completion");
+    assert_eq!(
+        scheduler.task_state(task),
+        Ok(SchedulerTaskState::Completed)
+    );
+    scheduler.shutdown().expect("scheduler shutdown");
+}
+
+#[test]
+fn invalid_initial_frame_fails_before_identity_or_queue_publication() {
+    let scheduler = NativeScheduler::new(configuration(1, 2)).expect("native scheduler");
+
+    assert_eq!(
+        scheduler.schedule(InvalidInitialFrameTask),
+        Err(SchedulerError::TaskFrame {
+            task: SchedulerTaskId::new(1),
+            failure: SchedulerTaskFrameFailure::PublicationShape,
+        })
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let admitted = scheduler
+        .schedule(FrameLifecycleTask {
+            events,
+            map: explicit_empty_frame(903),
+            first: true,
+        })
+        .expect("failed admission must not consume task identity");
+    assert_eq!(admitted, SchedulerTaskId::new(1));
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.tasks_scheduled(), 1);
+    assert_eq!(telemetry.frame_root_failures(), 1);
+    scheduler.shutdown().expect("scheduler shutdown");
+}
+
+#[test]
+fn failed_batch_admission_releases_prior_roots_and_preserves_task_identity() {
+    let scheduler = NativeScheduler::new(configuration(1, 2)).expect("native scheduler");
+
+    assert_eq!(
+        scheduler.schedule_batch_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            vec![
+                BatchFrameTask { valid: true },
+                BatchFrameTask { valid: false }
+            ],
+        ),
+        Err(SchedulerError::TaskFrame {
+            task: SchedulerTaskId::new(2),
+            failure: SchedulerTaskFrameFailure::PublicationShape,
+        })
+    );
+    let failed = scheduler.telemetry();
+    assert_eq!(failed.retained_tasks(), 0);
+    assert_eq!(failed.retained_frame_root_containers(), 0);
+    assert_eq!(failed.frame_root_retentions(), 1);
+    assert_eq!(failed.frame_root_releases(), 1);
+    assert_eq!(failed.frame_root_failures(), 1);
+
+    let admitted = scheduler
+        .schedule(BatchFrameTask { valid: true })
+        .expect("failed batch must not consume identities");
+    assert_eq!(admitted, SchedulerTaskId::new(1));
+    scheduler.shutdown().expect("scheduler shutdown");
+}
+
+#[test]
+fn rejected_restoration_stops_runtime_without_polling_or_losing_container() {
+    let (attempted, observed) = mpsc::channel();
+    let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
+    scheduler
+        .schedule(RejectRestoreTask {
+            attempted: Some(attempted),
+        })
+        .expect("schedule rejection probe");
+
+    observed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker attempted frame restoration");
+    let failure_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while scheduler.telemetry().frame_root_failures() == 0 {
+        assert!(
+            std::time::Instant::now() < failure_deadline,
+            "worker did not publish the restoration failure"
+        );
+        std::thread::yield_now();
+    }
+    let failed = scheduler.telemetry();
+    assert_eq!(failed.polls(), 0);
+    assert_eq!(failed.retained_frame_root_containers(), 1);
+    assert_eq!(failed.frame_root_failures(), 1);
+    assert_eq!(
+        scheduler.shutdown(),
+        Err(SchedulerError::TaskFrame {
+            task: SchedulerTaskId::new(1),
+            failure: SchedulerTaskFrameFailure::Restoration,
+        })
+    );
+}
+
+#[test]
+fn shutdown_releases_suspended_task_frame_container_exactly_once() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
+    scheduler
+        .schedule(FrameLifecycleTask {
+            events,
+            map: explicit_empty_frame(904),
+            first: true,
+        })
+        .expect("schedule suspending task");
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("task suspension");
+    assert_eq!(scheduler.telemetry().retained_frame_root_containers(), 1);
+
+    let telemetry = scheduler
+        .shutdown_with_telemetry()
+        .expect("shutdown releases retained roots");
+    assert_eq!(telemetry.retained_frame_root_containers(), 0);
+    assert_eq!(telemetry.frame_root_releases(), 1);
+    assert_eq!(telemetry.frame_root_failures(), 0);
+}
+
+#[test]
+fn deterministic_scheduler_uses_the_same_explicit_frame_root_lifecycle() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut scheduler = DeterministicScheduler::recording(configuration(1, 1));
+    let task = scheduler
+        .schedule(FrameLifecycleTask {
+            events: Arc::clone(&events),
+            map: explicit_empty_frame(905),
+            first: true,
+        })
+        .expect("schedule deterministic framed task");
+
+    scheduler
+        .run_until_idle(1)
+        .expect("first deterministic poll");
+    assert_eq!(scheduler.telemetry().retained_frame_root_containers(), 1);
+    assert!(scheduler.wake(task).expect("wake deterministic task"));
+    scheduler
+        .run_until_idle(1)
+        .expect("second deterministic poll");
+    assert_eq!(
+        *events.lock().expect("frame event log"),
+        ["publish", "restore", "poll", "publish", "restore", "poll"]
+    );
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.retained_frame_root_containers(), 0);
+    assert_eq!(telemetry.frame_root_retentions(), 2);
+    assert_eq!(telemetry.frame_root_restorations(), 2);
 }
 
 #[test]

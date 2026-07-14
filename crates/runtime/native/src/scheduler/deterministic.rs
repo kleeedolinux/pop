@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pop_runtime_collector::SchedulerId;
+use pop_runtime_interface::RootPublication;
 
 use super::{
     SchedulerConfiguration, SchedulerDecision, SchedulerError, SchedulerExternalEventId,
-    SchedulerTask, SchedulerTaskContext, SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll,
-    SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
+    SchedulerTask, SchedulerTaskContext, SchedulerTaskFrameFailure, SchedulerTaskId,
+    SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry,
+    SchedulerTimerId, SchedulerWorkerId,
 };
 
 enum ReplayMode {
@@ -29,6 +31,7 @@ struct DeterministicTask {
     scheduler: SchedulerId,
     mobility: SchedulerTaskMobility,
     cancellation_requested: bool,
+    frame_roots: Option<RootPublication>,
 }
 
 pub struct DeterministicScheduler {
@@ -121,7 +124,7 @@ impl DeterministicScheduler {
         &mut self,
         scheduler: SchedulerId,
         mobility: SchedulerTaskMobility,
-        task: T,
+        mut task: T,
     ) -> Result<SchedulerTaskId, SchedulerError> {
         self.validate_scheduler(scheduler)?;
         if self.tasks.len() >= self.configuration.task_capacity {
@@ -131,10 +134,12 @@ impl DeterministicScheduler {
             return Err(SchedulerError::InjectionQueueCapacity);
         }
         let id = SchedulerTaskId::new(self.next_task);
-        self.next_task = self
+        let next_task = self
             .next_task
             .checked_add(1)
             .ok_or(SchedulerError::IdentityOverflow)?;
+        let publication = publish_task_frame(&mut task, id, &mut self.telemetry)?;
+        self.next_task = next_task;
         self.tasks.insert(
             id,
             DeterministicTask {
@@ -143,8 +148,11 @@ impl DeterministicScheduler {
                 scheduler,
                 mobility,
                 cancellation_requested: false,
+                frame_roots: Some(publication),
             },
         );
+        self.telemetry.frame_root_retentions =
+            self.telemetry.frame_root_retentions.saturating_add(1);
         self.ready.push_back(id);
         self.telemetry.tasks_scheduled = self.telemetry.tasks_scheduled.saturating_add(1);
         self.refresh_counts();
@@ -588,6 +596,17 @@ impl DeterministicScheduler {
             .tasks
             .get_mut(&id)
             .ok_or(SchedulerError::UnknownTask(id))?;
+        let Some(publication) = record.frame_roots.clone() else {
+            return Err(task_frame_error(
+                &mut self.telemetry,
+                id,
+                SchedulerTaskFrameFailure::Collector,
+            ));
+        };
+        restore_task_frame(record.task.as_mut(), publication, id, &mut self.telemetry)?;
+        record.frame_roots = None;
+        self.telemetry.frame_root_restorations =
+            self.telemetry.frame_root_restorations.saturating_add(1);
         record.state = SchedulerTaskState::Running;
         let context = SchedulerTaskContext::new(
             id,
@@ -599,10 +618,20 @@ impl DeterministicScheduler {
         let result = catch_unwind(AssertUnwindSafe(|| record.task.poll(&context)));
         match result {
             Ok(SchedulerTaskPoll::Ready) => {
+                let publication =
+                    publish_task_frame(record.task.as_mut(), id, &mut self.telemetry)?;
+                record.frame_roots = Some(publication);
+                self.telemetry.frame_root_retentions =
+                    self.telemetry.frame_root_retentions.saturating_add(1);
                 record.state = SchedulerTaskState::Ready;
                 self.ready.push_back(id);
             }
             Ok(SchedulerTaskPoll::Pending) => {
+                let publication =
+                    publish_task_frame(record.task.as_mut(), id, &mut self.telemetry)?;
+                record.frame_roots = Some(publication);
+                self.telemetry.frame_root_retentions =
+                    self.telemetry.frame_root_retentions.saturating_add(1);
                 record.state = SchedulerTaskState::Suspended;
                 self.telemetry.suspensions = self.telemetry.suspensions.saturating_add(1);
             }
@@ -626,6 +655,15 @@ impl DeterministicScheduler {
 
     fn refresh_counts(&mut self) {
         self.telemetry.retained_tasks = self.tasks.len();
+        self.telemetry.retained_frame_root_containers = self
+            .tasks
+            .values()
+            .filter(|record| record.frame_roots.is_some())
+            .count();
+        self.telemetry.maximum_retained_frame_root_containers = self
+            .telemetry
+            .maximum_retained_frame_root_containers
+            .max(self.telemetry.retained_frame_root_containers);
         self.telemetry.local_queue_depth = self.ready.len();
         self.telemetry.maximum_local_queue_depth = self
             .telemetry
@@ -646,4 +684,49 @@ impl DeterministicScheduler {
             }
         }
     }
+}
+
+fn publish_task_frame(
+    task: &mut dyn SchedulerTask,
+    id: SchedulerTaskId,
+    telemetry: &mut SchedulerTelemetry,
+) -> Result<RootPublication, SchedulerError> {
+    let expected = task.frame_stack_map();
+    let publication = task
+        .publish_frame_roots()
+        .map_err(|_| task_frame_error(telemetry, id, SchedulerTaskFrameFailure::Publication))?;
+    if publication.stack_map() != &expected {
+        return Err(task_frame_error(
+            telemetry,
+            id,
+            SchedulerTaskFrameFailure::PublicationShape,
+        ));
+    }
+    Ok(publication)
+}
+
+fn restore_task_frame(
+    task: &mut dyn SchedulerTask,
+    publication: RootPublication,
+    id: SchedulerTaskId,
+    telemetry: &mut SchedulerTelemetry,
+) -> Result<(), SchedulerError> {
+    if publication.stack_map() != &task.frame_stack_map() {
+        return Err(task_frame_error(
+            telemetry,
+            id,
+            SchedulerTaskFrameFailure::PublicationShape,
+        ));
+    }
+    task.restore_frame_roots(publication)
+        .map_err(|_| task_frame_error(telemetry, id, SchedulerTaskFrameFailure::Restoration))
+}
+
+fn task_frame_error(
+    telemetry: &mut SchedulerTelemetry,
+    task: SchedulerTaskId,
+    failure: SchedulerTaskFrameFailure,
+) -> SchedulerError {
+    telemetry.frame_root_failures = telemetry.frame_root_failures.saturating_add(1);
+    SchedulerError::TaskFrame { task, failure }
 }
