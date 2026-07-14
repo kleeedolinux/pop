@@ -29,6 +29,7 @@ fn verifier_rejects_collection_elements_with_inconsistent_types() {
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        is_async: false,
         type_parameters: Vec::new(),
         type_parameter_names: Vec::new(),
         type_parameter_bounds: Vec::new(),
@@ -76,6 +77,7 @@ fn verifier_rejects_array_access_on_a_non_array_base() {
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        is_async: false,
         type_parameters: Vec::new(),
         type_parameter_names: Vec::new(),
         type_parameter_bounds: Vec::new(),
@@ -470,6 +472,7 @@ fn bubble_verifier_rejects_indirect_call_argument_and_result_spoofing() {
     let string = arena.source_type("String").expect("String");
     let callable = arena
         .intern(SemanticType::Function {
+            is_async: false,
             parameters: vec![integer],
             results: vec![integer],
             effects: pop_types::EffectSummary::empty(),
@@ -899,6 +902,7 @@ fn closure_verifier_rejects_duplicate_mistyped_and_wrongly_owned_captures() {
     let string = arena.source_type("String").expect("String");
     let closure_type = arena
         .intern(SemanticType::Function {
+            is_async: false,
             parameters: Vec::new(),
             results: Vec::new(),
             effects: pop_types::EffectSummary::empty(),
@@ -1361,6 +1365,7 @@ fn hir_function_with_symbol(
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        is_async: false,
         type_parameters: Vec::new(),
         type_parameter_names: Vec::new(),
         type_parameter_bounds: Vec::new(),
@@ -1443,6 +1448,7 @@ fn verify_expression_statement(
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
+        is_async: false,
         type_parameters: Vec::new(),
         type_parameter_names: Vec::new(),
         type_parameter_bounds: Vec::new(),
@@ -1471,6 +1477,7 @@ fn verifier_rejects_generic_parameter_bound_arity_mismatch() {
         bubble: BubbleId::from_raw(0),
         visibility: Visibility::Private,
         name: "invalidBounds".to_owned(),
+        is_async: false,
         type_parameters: vec![parameter],
         type_parameter_names: vec!["T".to_owned()],
         type_parameter_bounds: Vec::new(),

@@ -1,6 +1,6 @@
 //! Verified MIR backend and artifact contracts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -55,6 +55,7 @@ impl RuntimeProfile {
                     RuntimeContract::GarbageCollector,
                     RuntimeContract::ExceptionRuntime,
                     RuntimeContract::CoroutineScheduler,
+                    RuntimeContract::BlockingPool,
                     RuntimeContract::ThreadRuntime,
                     RuntimeContract::DynamicLoader,
                     RuntimeContract::RuntimeReflection,
@@ -121,6 +122,7 @@ pub enum RuntimeContract {
     GarbageCollector,
     ExceptionRuntime,
     CoroutineScheduler,
+    BlockingPool,
     ThreadRuntime,
     DynamicLoader,
     RuntimeReflection,
@@ -202,6 +204,11 @@ impl ProgramRequirements {
     #[must_use]
     pub fn derive_from_mir(bubble: &MirBubble) -> Self {
         let mut requirements = Self::default();
+        let async_functions: BTreeMap<_, _> = bubble
+            .functions()
+            .iter()
+            .map(|function| (function.symbol(), function.is_async()))
+            .collect();
         for function in bubble.functions() {
             for effect in function.effects().iter() {
                 requirements.require_effect(function.function(), effect);
@@ -212,6 +219,7 @@ impl ProgramRequirements {
                         function.function(),
                         instruction.result(),
                         instruction.kind(),
+                        &async_functions,
                     );
                 }
             }
@@ -247,6 +255,9 @@ impl ProgramRequirements {
             MirEffect::Suspends => {
                 self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
             }
+            MirEffect::Blocks => {
+                self.require_runtime(RuntimeContract::BlockingPool, origin);
+            }
             MirEffect::ForeignFunction | MirEffect::AmbientIo => {
                 self.require_runtime(RuntimeContract::StandardLibraryAdapters, origin);
             }
@@ -259,6 +270,7 @@ impl ProgramRequirements {
         function: FunctionId,
         value: ValueId,
         instruction: &MirInstructionKind,
+        async_functions: &BTreeMap<pop_foundation::SymbolId, bool>,
     ) {
         let origin = RequirementOrigin::Instruction { function, value };
         match instruction {
@@ -276,8 +288,13 @@ impl ProgramRequirements {
             | MirInstructionKind::CompareIntegerGreaterOrEqual { .. } => {
                 self.require_runtime(RuntimeContract::IntegerOperations, origin);
             }
-            MirInstructionKind::CallDirect { .. } => {
+            MirInstructionKind::CallDirect {
+                function: callee, ..
+            } => {
                 self.require_runtime(RuntimeContract::DirectCalls, origin);
+                if async_functions.get(callee).copied().unwrap_or(false) {
+                    self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
+                }
             }
             MirInstructionKind::StringConcat { .. }
             | MirInstructionKind::StringFormat { .. }
@@ -307,6 +324,9 @@ impl ProgramRequirements {
             | MirInstructionKind::CaptureCellReference { .. }
             | MirInstructionKind::CaptureStore { .. } => {
                 self.require_runtime(RuntimeContract::ClosureEnvironment, origin);
+            }
+            MirInstructionKind::Await { .. } => {
+                self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
             }
             _ => {}
         }

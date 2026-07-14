@@ -188,6 +188,28 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     body: self.check_nested_statements(signature, body),
                 }
             }
+            StatementSyntaxKind::AsyncDefer { body } => {
+                if !signature.is_async() {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        statement.span(),
+                        "async defer",
+                        "async function",
+                    ));
+                    let _ = self.check_nested_statements(signature, body);
+                    return None;
+                }
+                if let Some((control, control_span)) = illegal_cleanup_control(body) {
+                    self.diagnostics
+                        .push(type_diagnostics::illegal_cleanup_control(
+                            control_span,
+                            control,
+                        ));
+                    return None;
+                }
+                TypedStatementKind::AsyncDefer {
+                    body: self.check_nested_statements(signature, body),
+                }
+            }
             StatementSyntaxKind::Assignment {
                 target,
                 operator,
@@ -890,6 +912,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .resolver
             .arena_mut()
             .intern(SemanticType::Function {
+                is_async: function.is_async(),
                 parameters: parameters.iter().map(|(_, type_id, _)| *type_id).collect(),
                 results: results.iter().map(|(type_id, _)| *type_id).collect(),
                 effects: crate::EffectSummary::empty(),
@@ -947,11 +970,13 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             });
         }
 
-        let nested_signature = ResolvedFunctionSignature::canonical(
+        let nested_signature = ResolvedFunctionSignature::canonical_with_async(
             outer.symbol(),
             format!("{}$closure{}", outer.name(), nested.raw()),
+            Vec::new(),
             shape.parameters.clone(),
             shape.results.clone(),
+            function.is_async(),
         );
         self.signature_stack.push(nested_signature.clone());
         let enclosing_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
@@ -2180,6 +2205,7 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
         | StatementSyntaxKind::NumericFor { .. }
         | StatementSyntaxKind::GeneralizedFor { .. }
         | StatementSyntaxKind::Defer { .. }
+        | StatementSyntaxKind::AsyncDefer { .. }
         | StatementSyntaxKind::Local { .. }
         | StatementSyntaxKind::MultipleLocal { .. }
         | StatementSyntaxKind::LocalFunction { .. }
@@ -2198,6 +2224,9 @@ fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static s
             StatementSyntaxKind::Break => return Some(("break", statement.span())),
             StatementSyntaxKind::Continue => return Some(("continue", statement.span())),
             StatementSyntaxKind::Defer { .. } => return Some(("defer", statement.span())),
+            StatementSyntaxKind::AsyncDefer { .. } => {
+                return Some(("async defer", statement.span()));
+            }
             StatementSyntaxKind::Local { initializer, .. } => {
                 if expression_contains_result_propagation(initializer) {
                     return Some(("try", initializer.span()));
@@ -2354,7 +2383,8 @@ fn expression_contains_result_propagation(expression: &ExpressionSyntax) -> bool
             elements.iter().any(expression_contains_result_propagation)
         }
         ExpressionSyntaxKind::Unary { operand, .. }
-        | ExpressionSyntaxKind::OptionalPropagate { operand } => {
+        | ExpressionSyntaxKind::OptionalPropagate { operand }
+        | ExpressionSyntaxKind::Await { operand } => {
             expression_contains_result_propagation(operand)
         }
         ExpressionSyntaxKind::Binary { left, right, .. } => {

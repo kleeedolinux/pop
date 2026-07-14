@@ -192,6 +192,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
         let callee = self.check_expression(callee)?;
         let Some(SemanticType::Function {
+            is_async,
             parameters,
             results,
             ..
@@ -241,6 +242,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             typed_arguments.push(typed);
         }
         let dispatch = self.call_dispatch(callee);
+        let results = self.call_results(is_async, results)?;
         Some(CheckedInvocation::Call(CheckedCall {
             call: TypedCall {
                 dispatch,
@@ -250,6 +252,30 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn call_results(&mut self, is_async: bool, results: Vec<TypeId>) -> Option<Vec<TypeId>> {
+        if !is_async {
+            return Some(results);
+        }
+        let completion = self.pack_result_types(results)?;
+        Some(vec![self.resolver.task_type(completion)?])
+    }
+
+    fn pack_result_types(&mut self, results: Vec<TypeId>) -> Option<TypeId> {
+        match results.as_slice() {
+            [] => self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Tuple(Vec::new()))
+                .ok(),
+            [single] => Some(*single),
+            _ => self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Tuple(results))
+                .ok(),
+        }
     }
 
     fn check_exact_source_overload(
@@ -459,6 +485,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .substitute_type_parameters(result.type_id()?, &substitution_map)
             })
             .collect::<Option<Vec<_>>>()?;
+        let results = self.call_results(signature.is_async(), results)?;
         let dispatch = self
             .resolver
             .database()
@@ -524,17 +551,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             (
                 SemanticType::Function {
+                    is_async: left_async,
                     parameters: left_parameters,
                     results: left_results,
                     effects: left_effects,
                 },
                 SemanticType::Function {
+                    is_async: right_async,
                     parameters: right_parameters,
                     results: right_results,
                     effects: right_effects,
                 },
             ) => {
-                left_effects == right_effects
+                left_async == right_async
+                    && left_effects == right_effects
                     && self.infer_type_lists(&left_parameters, &right_parameters, substitutions)
                     && self.infer_type_lists(&left_results, &right_results, substitutions)
             }

@@ -44,6 +44,10 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::SatbWriteBarrier => Some("pop_rt_satb_write_barrier"),
         RuntimeOperation::Trap => Some("pop_rt_trap"),
         RuntimeOperation::ContinueUnwind => Some("pop_rt_continue_unwind"),
+        RuntimeOperation::Suspend => Some("pop_rt_suspend"),
+        RuntimeOperation::Resume => Some("pop_rt_resume"),
+        RuntimeOperation::TaskCancel => Some("pop_rt_task_cancel"),
+        RuntimeOperation::TaskCancellationRequested => Some("pop_rt_task_cancellation_requested"),
         RuntimeOperation::RecordUpdate
         | RuntimeOperation::UnionMake
         | RuntimeOperation::CaptureLoad
@@ -52,8 +56,6 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         | RuntimeOperation::PublishRoots
         | RuntimeOperation::GenerationalWriteBarrier
         | RuntimeOperation::Panic
-        | RuntimeOperation::Suspend
-        | RuntimeOperation::Resume
         | RuntimeOperation::InitializeModule
         | RuntimeOperation::InitializeBubble => None,
     }

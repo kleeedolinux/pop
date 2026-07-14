@@ -105,6 +105,9 @@ pub enum StatementSyntaxKind {
     Defer {
         body: Vec<StatementSyntax>,
     },
+    AsyncDefer {
+        body: Vec<StatementSyntax>,
+    },
     Assignment {
         target: ExpressionSyntax,
         operator: Option<BinaryOperator>,
@@ -210,6 +213,9 @@ pub enum ExpressionSyntaxKind {
     ResultPropagate {
         operand: Box<ExpressionSyntax>,
     },
+    Await {
+        operand: Box<ExpressionSyntax>,
+    },
     Binary {
         operator: BinaryOperator,
         left: Box<ExpressionSyntax>,
@@ -248,6 +254,7 @@ pub enum StringSegmentSyntaxKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureFunctionSyntax {
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<CaptureFunctionParameterSyntax>,
     pub(crate) results: Vec<TypeSyntax>,
     pub(crate) body: Vec<StatementSyntax>,
@@ -255,6 +262,11 @@ pub struct CaptureFunctionSyntax {
 }
 
 impl CaptureFunctionSyntax {
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
+    }
+
     #[must_use]
     pub fn parameters(&self) -> &[CaptureFunctionParameterSyntax] {
         &self.parameters
@@ -546,6 +558,9 @@ impl BodyParser<'_> {
             Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
             Some(TokenKind::Defer) => self.parse_defer(),
+            Some(TokenKind::Async) if self.peek_kind() == Some(TokenKind::Defer) => {
+                self.parse_async_defer()
+            }
             _ => {
                 let expression = self.parse_expression(0)?;
                 if self.current_kind() == Some(TokenKind::Comma) {
@@ -629,6 +644,21 @@ impl BodyParser<'_> {
         })
     }
 
+    fn parse_async_defer(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+        let start = self.expect(TokenKind::Async, "`async`")?.range().start();
+        self.expect(TokenKind::Defer, "`defer`")?;
+        self.expect(TokenKind::Newline, "line break after `async defer`")?;
+        let body = self.parse_statement_list(&[TokenKind::End])?;
+        let end = self
+            .expect(TokenKind::End, "async cleanup `end`")?
+            .range()
+            .end();
+        Ok(StatementSyntax {
+            kind: StatementSyntaxKind::AsyncDefer { body },
+            span: SourceSpan::new(self.file, ordered_range(start, end)),
+        })
+    }
+
     pub(crate) fn parse_statement_list(
         &mut self,
         terminators: &[TokenKind],
@@ -653,15 +683,24 @@ impl BodyParser<'_> {
 
     fn parse_local(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::Local, "`local`")?.range().start();
+        let async_token = self.consume(TokenKind::Async);
         if let Some(function_token) = self.consume(TokenKind::Function) {
             let name = self.expect(TokenKind::Identifier, "local function name")?;
             let name = name.text(self.source).to_owned();
-            let function = self.parse_capture_function(function_token.range().start())?;
+            let function = self.parse_capture_function(
+                async_token.is_some(),
+                async_token.map_or(function_token.range().start(), |token| {
+                    token.range().start()
+                }),
+            )?;
             let end = function.span().range().end();
             return Ok(StatementSyntax {
                 kind: StatementSyntaxKind::LocalFunction { name, function },
                 span: SourceSpan::new(self.file, ordered_range(start, end)),
             });
+        }
+        if async_token.is_some() {
+            return Err(self.error("local name"));
         }
         let mut bindings = Vec::new();
         loop {

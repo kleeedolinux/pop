@@ -125,7 +125,7 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 }
             }
         }
-        TypedStatementKind::Defer { body } => {
+        TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
             for statement in body {
                 finalize_statement_captures(statement, written);
             }
@@ -337,6 +337,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         }
         TypedExpressionKind::ResultPropagate { result, .. } => {
             finalize_expression_captures(result, written);
+        }
+        TypedExpressionKind::Await { task } => {
+            finalize_expression_captures(task, written);
         }
         TypedExpressionKind::OptionalNarrow { optional } => {
             finalize_expression_captures(optional, written);

@@ -74,6 +74,7 @@ pub enum ResolvedTypeKind {
     Union(Vec<ResolvedType>),
     Optional(Box<ResolvedType>),
     Function {
+        is_async: bool,
         parameters: Vec<ResolvedType>,
         results: Vec<ResolvedType>,
         effects: crate::EffectSummary,
@@ -148,6 +149,7 @@ pub struct ResolvedFunctionSignature {
     parameters: Vec<ResolvedFunctionParameter>,
     results: Vec<ResolvedType>,
     effects: crate::EffectSummary,
+    is_async: bool,
 }
 
 impl ResolvedFunctionSignature {
@@ -157,7 +159,7 @@ impl ResolvedFunctionSignature {
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
     ) -> Self {
-        Self::canonical_generic(symbol, name, Vec::new(), parameters, results)
+        Self::canonical_with_async(symbol, name, Vec::new(), parameters, results, false)
     }
 
     pub(crate) fn canonical_generic(
@@ -166,6 +168,17 @@ impl ResolvedFunctionSignature {
         type_parameters: Vec<ResolvedTypeParameter>,
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
+    ) -> Self {
+        Self::canonical_with_async(symbol, name, type_parameters, parameters, results, false)
+    }
+
+    pub(crate) fn canonical_with_async(
+        symbol: SymbolId,
+        name: String,
+        type_parameters: Vec<ResolvedTypeParameter>,
+        parameters: Vec<(String, TypeId, SourceSpan)>,
+        results: Vec<(TypeId, SourceSpan)>,
+        is_async: bool,
     ) -> Self {
         Self {
             symbol,
@@ -184,6 +197,7 @@ impl ResolvedFunctionSignature {
                 .map(|(type_id, span)| ResolvedType::canonical(type_id, span))
                 .collect(),
             effects: crate::EffectSummary::empty(),
+            is_async,
         }
     }
 
@@ -246,6 +260,11 @@ impl ResolvedFunctionSignature {
     #[must_use]
     pub const fn effects(&self) -> crate::EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 }
 
@@ -818,6 +837,33 @@ impl<'index> SignatureResolver<'index> {
     }
 
     #[must_use]
+    pub fn task_definition(&self) -> Option<BuiltinTypeId> {
+        Some(self.schema.type_by_source_name("Task")?.id())
+    }
+
+    pub(crate) fn task_type(&mut self, completion: TypeId) -> Option<TypeId> {
+        let definition = self.task_definition()?;
+        self.arena
+            .intern(SemanticType::Builtin {
+                definition,
+                arguments: vec![completion],
+            })
+            .ok()
+    }
+
+    #[must_use]
+    pub fn task_completion_type(&self, type_id: TypeId) -> Option<TypeId> {
+        let task = self.task_definition()?;
+        match self.arena.get(type_id)? {
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if *definition == task && arguments.len() == 1 => Some(arguments[0]),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn into_arena(self) -> TypeArena {
         self.arena
     }
@@ -943,10 +989,12 @@ impl<'index> SignatureResolver<'index> {
                 SemanticType::Optional(self.substitute_type_parameters(element, substitutions)?)
             }
             SemanticType::Function {
+                is_async,
                 parameters,
                 results,
                 effects,
             } => SemanticType::Function {
+                is_async,
                 parameters: parameters
                     .into_iter()
                     .map(|parameter| self.substitute_type_parameters(parameter, substitutions))
@@ -1786,6 +1834,7 @@ impl<'index> SignatureResolver<'index> {
             parameters,
             results,
             effects: crate::EffectSummary::empty(),
+            is_async: syntax.is_async(),
         });
         ResolvedSignatureResult {
             signature,
@@ -1934,16 +1983,39 @@ impl<'index> SignatureResolver<'index> {
                 ))
             }
             TypeSyntaxKind::Function {
+                is_async,
                 parameters,
                 results,
-            } => self.resolve_function_type(
-                module,
-                syntax,
-                parameters,
-                results,
-                generics,
-                diagnostics,
-            ),
+            } => {
+                let parameters = self.resolve_types(module, parameters, generics, diagnostics)?;
+                let results = self.resolve_types(module, results, generics, diagnostics)?;
+                let parameter_ids: Option<Vec<_>> =
+                    parameters.iter().map(ResolvedType::type_id).collect();
+                let result_ids: Option<Vec<_>> =
+                    results.iter().map(ResolvedType::type_id).collect();
+                let type_id = parameter_ids
+                    .zip(result_ids)
+                    .and_then(|(parameters, results)| {
+                        self.arena
+                            .intern(SemanticType::Function {
+                                is_async: *is_async,
+                                parameters,
+                                results,
+                                effects: crate::EffectSummary::empty(),
+                            })
+                            .ok()
+                    });
+                Some(resolved(
+                    ResolvedTypeKind::Function {
+                        is_async: *is_async,
+                        parameters,
+                        results,
+                        effects: crate::EffectSummary::empty(),
+                    },
+                    type_id,
+                    syntax.span(),
+                ))
+            }
         }
     }
 
@@ -2325,41 +2397,6 @@ impl<'index> SignatureResolver<'index> {
             Compound::Union => ResolvedTypeKind::Union(elements),
         };
         Some(resolved(kind, type_id, syntax.span()))
-    }
-
-    fn resolve_function_type(
-        &mut self,
-        module: ModuleId,
-        syntax: &TypeSyntax,
-        parameters: &[TypeSyntax],
-        results: &[TypeSyntax],
-        generics: &BTreeMap<String, (ParameterId, TypeId)>,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Option<ResolvedType> {
-        let parameters = self.resolve_types(module, parameters, generics, diagnostics)?;
-        let results = self.resolve_types(module, results, generics, diagnostics)?;
-        let parameter_ids: Option<Vec<_>> = parameters.iter().map(ResolvedType::type_id).collect();
-        let result_ids: Option<Vec<_>> = results.iter().map(ResolvedType::type_id).collect();
-        let type_id = parameter_ids
-            .zip(result_ids)
-            .and_then(|(parameters, results)| {
-                self.arena
-                    .intern(SemanticType::Function {
-                        parameters,
-                        results,
-                        effects: crate::EffectSummary::empty(),
-                    })
-                    .ok()
-            });
-        Some(resolved(
-            ResolvedTypeKind::Function {
-                parameters,
-                results,
-                effects: crate::EffectSummary::empty(),
-            },
-            type_id,
-            syntax.span(),
-        ))
     }
 }
 

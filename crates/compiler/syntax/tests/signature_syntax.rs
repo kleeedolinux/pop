@@ -109,8 +109,45 @@ fn function_types_remain_fully_typed() {
 
     assert!(matches!(
         signature.parameters()[0].parameter_type().kind(),
-        TypeSyntaxKind::Function { parameters, results }
-            if parameters.len() == 1 && results.len() == 1
+        TypeSyntaxKind::Function {
+            is_async: false,
+            parameters,
+            results
+        } if parameters.len() == 1 && results.len() == 1
+    ));
+}
+
+#[test]
+fn async_function_declarations_preserve_their_calling_convention() {
+    let signature = signature(
+        "namespace Values\n\
+         public async function load(): Result<String, Error>\n\
+             return fetch()\n\
+         end\n",
+    );
+
+    assert_eq!(signature.name(), "load");
+    assert!(signature.is_async());
+    assert_eq!(signature.results().len(), 1);
+}
+
+#[test]
+fn async_function_types_preserve_their_calling_convention() {
+    let signature = signature(
+        "namespace Values\n\
+         internal function schedule(\n\
+             callback: async function(value: String): Result<Int, Error>\n\
+         )\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        signature.parameters()[0].parameter_type().kind(),
+        TypeSyntaxKind::Function {
+            is_async: true,
+            parameters,
+            results
+        } if parameters.len() == 1 && results.len() == 1
     ));
 }
 

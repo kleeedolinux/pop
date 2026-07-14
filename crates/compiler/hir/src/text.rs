@@ -585,6 +585,12 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::AsyncDefer { body } => {
+                output.push_str("async defer\n");
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 output.push_str("field.set ");
                 dump_expression(output, base, arena);
@@ -1048,6 +1054,10 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             let _ = write!(output, "convert.{}(", conversion_text(*conversion));
             dump_expression(output, value, arena);
             output.push(')');
+        }
+        HirExpressionKind::Await { task } => {
+            output.push_str("await ");
+            dump_expression(output, task, arena);
         }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));

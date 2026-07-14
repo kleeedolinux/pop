@@ -25,6 +25,34 @@ fn executable_source(text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     (mir, front_end.types().clone())
 }
 
+fn executable_source_function(
+    text: &str,
+    function_name: &str,
+) -> (pop_mir::MirBubble, pop_types::TypeArena, SymbolId) {
+    let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", text).expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let symbol = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == function_name)
+        .expect("named function")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    (mir, front_end.types().clone(), symbol)
+}
+
 fn executable_modules(texts: &[(&str, &str)]) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     let modules = texts
         .iter()
@@ -91,6 +119,24 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .expect("else branch"),
         vec![int(3)]
     );
+}
+
+#[test]
+fn completed_async_tasks_execute_through_await() {
+    let (mir, types, run) = executable_source_function(
+        "namespace Main\n\
+         private async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local pending = load()\n\
+             return await pending\n\
+        end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+
+    assert_eq!(interpreter.call(run, &[]).expect("await"), vec![int(42)]);
 }
 
 #[test]

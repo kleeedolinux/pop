@@ -173,6 +173,14 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::ContinueUnwind)
         ),
         format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::Suspend)
+        ),
+        format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::Resume)
+        ),
+        format!(
             "declare i64 @{}(i64, i64)",
             native_runtime_symbol(RuntimeOperation::StringConcat)
         ),

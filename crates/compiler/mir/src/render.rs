@@ -940,6 +940,9 @@ fn dump_callable_or_schema_instruction(
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }
+        MirInstructionKind::Await { task } => {
+            let _ = write!(output, "await v{}", task.raw());
+        }
         MirInstructionKind::RecordMake { record, fields } => {
             dump_fields(output, "recordMake", *record, None, fields);
         }
@@ -1309,6 +1312,7 @@ fn dump_effects(output: &mut String, effects: MirEffectSummary) {
             MirEffect::MayTrap => "MayTrap",
             MirEffect::MayUnwind => "MayUnwind",
             MirEffect::Suspends => "Suspends",
+            MirEffect::Blocks => "Blocks",
             MirEffect::UnsafeMemory => "UnsafeMemory",
             MirEffect::ForeignFunction => "ForeignFunction",
             MirEffect::AmbientIo => "AmbientIo",

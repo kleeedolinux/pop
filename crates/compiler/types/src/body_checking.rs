@@ -472,6 +472,37 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 };
                 self.check_result_propagate(operand, span)
             }
+            ExpressionSyntaxKind::Await { operand } => {
+                if !self
+                    .signature_stack
+                    .last()
+                    .is_some_and(ResolvedFunctionSignature::is_async)
+                {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "await",
+                        "async function",
+                    ));
+                    return None;
+                }
+                let task = self.check_expression(operand)?;
+                let Some(completion) = self.resolver.task_completion_type(task.type_id()) else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "await",
+                        self.type_name(task.type_id()),
+                    ));
+                    return None;
+                };
+                self.invalidate_flow_narrowings();
+                Some(TypedExpression {
+                    type_id: completion,
+                    kind: TypedExpressionKind::Await {
+                        task: Box::new(task),
+                    },
+                    span,
+                })
+            }
             ExpressionSyntaxKind::Binary {
                 operator,
                 left,
@@ -1221,6 +1252,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .resolver
             .arena_mut()
             .intern(SemanticType::Function {
+                is_async: signature.is_async(),
                 parameters: parameters?,
                 results: results?,
                 effects: crate::EffectSummary::empty(),
@@ -1635,6 +1667,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::NumericFor { .. }
         | TypedStatementKind::GeneralizedFor { .. }
         | TypedStatementKind::Defer { .. }
+        | TypedStatementKind::AsyncDefer { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }

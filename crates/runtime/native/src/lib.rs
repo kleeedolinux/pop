@@ -9,6 +9,7 @@ mod range;
 mod roots;
 mod state;
 mod storage;
+mod task;
 mod text;
 
 pub use allocation::*;
@@ -19,4 +20,5 @@ pub use list::*;
 pub use range::*;
 pub use roots::*;
 pub use storage::*;
+pub use task::*;
 pub use text::*;

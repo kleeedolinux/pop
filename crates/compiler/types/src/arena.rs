@@ -179,10 +179,12 @@ impl TypeArena {
             },
             SemanticType::Optional(value) => SemanticType::Optional(map(value)?),
             SemanticType::Function {
+                is_async,
                 parameters,
                 results,
                 effects,
             } => SemanticType::Function {
+                is_async,
                 parameters: parameters.into_iter().map(map).collect::<Option<_>>()?,
                 results: results.into_iter().map(map).collect::<Option<_>>()?,
                 effects,

@@ -437,7 +437,9 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         TypedStatementKind::ErrorMatch { .. } | TypedStatementKind::ResultMatch { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
-        TypedStatementKind::Defer { .. } => UnsupportedCompileTimeConstruct::TypedFailure,
+        TypedStatementKind::Defer { .. } | TypedStatementKind::AsyncDefer { .. } => {
+            UnsupportedCompileTimeConstruct::TypedFailure
+        }
         TypedStatementKind::OptionalIf { .. } => UnsupportedCompileTimeConstruct::OptionalFlow,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
@@ -511,9 +513,8 @@ fn unsupported_compile_time_construct(
         }
         TypedExpressionKind::ResultCase { .. }
         | TypedExpressionKind::ErrorCase { .. }
-        | TypedExpressionKind::ResultPropagate { .. } => {
-            UnsupportedCompileTimeConstruct::TypedFailure
-        }
+        | TypedExpressionKind::ResultPropagate { .. }
+        | TypedExpressionKind::Await { .. } => UnsupportedCompileTimeConstruct::TypedFailure,
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }

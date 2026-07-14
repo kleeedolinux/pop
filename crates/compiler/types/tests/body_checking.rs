@@ -1083,6 +1083,162 @@ fn local_and_anonymous_closures_capture_lexical_values_with_static_function_type
 }
 
 #[test]
+fn async_calls_return_tasks_and_await_extracts_the_completion_type() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function useTask(): Int\n\
+             local pending = load()\n\
+             return await pending\n\
+         end\n",
+        "useTask",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let body = fixture.result.body().expect("typed body");
+    let TypedStatementKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("pending local");
+    };
+    let Some(SemanticType::Builtin {
+        definition,
+        arguments,
+    }) = fixture.arena.get(initializer.type_id())
+    else {
+        panic!("task type");
+    };
+    assert_eq!(arguments.len(), 1);
+    assert_eq!(
+        fixture.arena.get(*arguments.first().expect("completion")),
+        fixture
+            .arena
+            .get(fixture.arena.source_type("Int").expect("Int"))
+    );
+    let task = fixture
+        .arena
+        .find(&SemanticType::Builtin {
+            definition: *definition,
+            arguments: arguments.clone(),
+        })
+        .expect("canonical task");
+    assert_eq!(initializer.type_id(), task);
+
+    let TypedStatementKind::Return { values } = body.statements()[1].kind() else {
+        panic!("return");
+    };
+    let TypedExpressionKind::Await { task } = values[0].kind() else {
+        panic!("await expression");
+    };
+    assert_eq!(task.type_id(), initializer.type_id());
+    assert_eq!(
+        values[0].type_id(),
+        fixture.arena.source_type("Int").expect("Int")
+    );
+}
+
+#[test]
+fn await_rejects_non_task_operands_without_dynamic_fallback() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public async function invalid(value: Int): Int\n\
+             return await value\n\
+         end\n",
+        "invalid",
+    );
+
+    assert!(fixture.result.body().is_none());
+    assert!(fixture.result.diagnostic_snapshot().contains("POP2005"));
+}
+
+#[test]
+fn await_is_valid_only_inside_async_bodies() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public function invalid(): Int\n\
+             local pending = load()\n\
+             return await pending\n\
+         end\n",
+        "invalid",
+    );
+
+    assert!(fixture.result.body().is_none());
+    assert!(fixture.result.diagnostic_snapshot().contains("POP2005"));
+}
+
+#[test]
+fn async_closure_bodies_keep_async_context_for_await() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local worker = async function(): Int\n\
+                 return await load()\n\
+             end\n\
+             return await worker()\n\
+         end\n",
+        "run",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn async_defer_is_valid_only_inside_async_bodies() {
+    let accepted = check_function(
+        "namespace Example\n\
+         public async function close(): Int\n\
+             return 0\n\
+         end\n\
+         public async function valid(): Int\n\
+             async defer\n\
+                 local ignored = await close()\n\
+             end\n\
+             return 1\n\
+         end\n",
+        "valid",
+    );
+
+    assert!(
+        accepted.result.diagnostics().is_empty(),
+        "{}",
+        accepted.result.diagnostic_snapshot()
+    );
+    let body = accepted.result.body().expect("typed body");
+    assert!(matches!(
+        body.statements()[0].kind(),
+        TypedStatementKind::AsyncDefer { .. }
+    ));
+
+    let rejected = check_function(
+        "namespace Example\n\
+         public function invalid(): Int\n\
+             async defer\n\
+                 local value = 1\n\
+             end\n\
+             return 1\n\
+         end\n",
+        "invalid",
+    );
+
+    assert!(rejected.result.body().is_none());
+    assert!(rejected.result.diagnostic_snapshot().contains("POP2005"));
+}
+
+#[test]
 fn captured_mutation_uses_one_typed_cell_and_shadowing_does_not_capture() {
     let fixture = check_function(
         "namespace Example\n\

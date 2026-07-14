@@ -240,6 +240,7 @@ pub enum SemanticType {
     Primitive(PrimitiveType),
     Tuple(Vec<TypeId>),
     Function {
+        is_async: bool,
         parameters: Vec<TypeId>,
         results: Vec<TypeId>,
         effects: EffectSummary,
@@ -299,6 +300,7 @@ pub enum Effect {
     MayTrap,
     MayUnwind,
     Suspends,
+    Blocks,
     UnsafeMemory,
     ForeignFunction,
     AmbientIo,

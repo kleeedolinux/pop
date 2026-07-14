@@ -127,6 +127,7 @@ pub enum ReferenceType {
     TypeParameter(u16),
     Tuple(Vec<ReferenceType>),
     Function {
+        is_async: bool,
         parameters: Vec<ReferenceType>,
         results: Vec<ReferenceType>,
         effects: pop_types::EffectSummary,
@@ -452,6 +453,7 @@ const fn native_effect_name(value: NativeEffect) -> &'static str {
         NativeEffect::MayTrap => "MayTrap",
         NativeEffect::MayUnwind => "MayUnwind",
         NativeEffect::Suspends => "Suspends",
+        NativeEffect::Blocks => "Blocks",
         NativeEffect::UnsafeMemory => "UnsafeMemory",
         NativeEffect::ForeignFunction => "ForeignFunction",
         NativeEffect::AmbientIo => "AmbientIo",

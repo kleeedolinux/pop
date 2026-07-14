@@ -554,6 +554,7 @@ fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), 
         MirFunction {
             function: FunctionId::from_raw(function),
             symbol: SymbolId::from_raw(symbol),
+            is_async: false,
             parameters,
             results,
             effects,
@@ -870,6 +871,11 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         return Ok(MirInstructionKind::FunctionReference(SymbolId::from_raw(
             parse_prefixed(function, 's', line)?,
         )));
+    }
+    if let Some(task) = text.strip_prefix("await ") {
+        return Ok(MirInstructionKind::Await {
+            task: ValueId::from_raw(parse_prefixed(task, 'v', line)?),
+        });
     }
     if let Some(operands) = text.strip_prefix("string.concat ") {
         let (left, right) = parse_two_values(operands, line)?;
@@ -1535,6 +1541,7 @@ fn parse_effects(text: &str, line: usize) -> Result<MirEffectSummary, MirParseEr
             "MayTrap" => Ok(MirEffect::MayTrap),
             "MayUnwind" => Ok(MirEffect::MayUnwind),
             "Suspends" => Ok(MirEffect::Suspends),
+            "Blocks" => Ok(MirEffect::Blocks),
             "UnsafeMemory" => Ok(MirEffect::UnsafeMemory),
             "ForeignFunction" => Ok(MirEffect::ForeignFunction),
             "AmbientIo" => Ok(MirEffect::AmbientIo),
