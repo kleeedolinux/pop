@@ -113,6 +113,9 @@ and does not define the work remaining for `0.1.0`.
   API.
   - [x] Preserve checked public documentation by stable `SymbolIdentity` and
     reject duplicate output member IDs deterministically.
+  - [x] Complete checked type-parameter, iteration, allocation, complexity, and
+    dispatch documentation plus compiled examples for the portable `Sequence`
+    baseline.
 
 The broad catalog after the standard foundation remains planned work. It is not
 necessary to implement every format, network, media, data, tooling, or AI

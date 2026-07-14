@@ -483,6 +483,7 @@ dependencies = [
 name = "pop-test-runner"
 version = "0.1.0"
 dependencies = [
+ "pop-documentation",
  "pop-driver",
  "pop-foundation",
  "pop-mir",
