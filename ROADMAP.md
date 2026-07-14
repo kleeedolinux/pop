@@ -291,6 +291,13 @@ Post-baseline library work has begun without widening the release foundation:
       ping-pong latency, continuous I/O fairness, steal-storm and million-frame
       memory evidence, operating-system resource counters, and scheduler/GC
       interaction after the production collector binding exists.
+      The synchronized-reference v3 profiles are implemented. Its local
+      12-worker x86-64 Linux scale run completed 1,000,000 suspended minimal
+      frames and 2,000,000 polls in 19.397 seconds with zero stale entries,
+      339,070,976 bytes observed peak RSS, 2,070,200,320 bytes observed virtual
+      memory, 839,376 voluntary and 10,984 involuntary context switches. These
+      figures are host evidence, not portable performance gates. The checkbox
+      remains open until ABI 2 permits the required production collector run.
     - [x] Add work-budget exhaustion, event/timer poll and delivery-delay,
       blocking shutdown-delay, ready-to-run percentile, and scheduler migration
       telemetry before treating observability as complete.
