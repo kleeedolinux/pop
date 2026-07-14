@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "createdAt": "2026-07-14T09:18:17Z",
+  "createdAt": "2026-07-14T10:42:32Z",
   "samples": 1,
   "warmups": 2,
   "timing": "execution only; provisioning and compilation are excluded",
@@ -44,10 +44,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.526750096003525
+        0.5068395019625314
       ],
-      "medianSeconds": 0.526750096003525,
-      "minimumSeconds": 0.526750096003525,
+      "medianSeconds": 0.5068395019625314,
+      "minimumSeconds": 0.5068395019625314,
       "comparable": true
     },
     {
@@ -57,10 +57,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.17096637201029807
+        0.1985150669934228
       ],
-      "medianSeconds": 0.17096637201029807,
-      "minimumSeconds": 0.17096637201029807,
+      "medianSeconds": 0.1985150669934228,
+      "minimumSeconds": 0.1985150669934228,
       "comparable": true
     },
     {
@@ -70,10 +70,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.01845360198058188
+        0.017980992968659848
       ],
-      "medianSeconds": 0.01845360198058188,
-      "minimumSeconds": 0.01845360198058188,
+      "medianSeconds": 0.017980992968659848,
+      "minimumSeconds": 0.017980992968659848,
       "comparable": true
     },
     {
@@ -83,10 +83,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.045686649973504245
+        0.036520402994938195
       ],
-      "medianSeconds": 0.045686649973504245,
-      "minimumSeconds": 0.045686649973504245,
+      "medianSeconds": 0.036520402994938195,
+      "minimumSeconds": 0.036520402994938195,
       "comparable": true
     },
     {
@@ -96,10 +96,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.030306036002002656
+        0.03419796598609537
       ],
-      "medianSeconds": 0.030306036002002656,
-      "minimumSeconds": 0.030306036002002656,
+      "medianSeconds": 0.03419796598609537,
+      "minimumSeconds": 0.03419796598609537,
       "comparable": true
     },
     {
@@ -109,10 +109,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.08344045898411423
+        0.07987152901478112
       ],
-      "medianSeconds": 0.08344045898411423,
-      "minimumSeconds": 0.08344045898411423,
+      "medianSeconds": 0.07987152901478112,
+      "minimumSeconds": 0.07987152901478112,
       "comparable": true
     },
     {
@@ -122,10 +122,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.045022897014860064
+        0.027033785998355597
       ],
-      "medianSeconds": 0.045022897014860064,
-      "minimumSeconds": 0.045022897014860064,
+      "medianSeconds": 0.027033785998355597,
+      "minimumSeconds": 0.027033785998355597,
       "comparable": true
     },
     {
@@ -135,10 +135,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.007134263054467738
+        0.006977986020501703
       ],
-      "medianSeconds": 0.007134263054467738,
-      "minimumSeconds": 0.007134263054467738,
+      "medianSeconds": 0.006977986020501703,
+      "minimumSeconds": 0.006977986020501703,
       "comparable": true
     },
     {
@@ -148,10 +148,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.019013232027646154
+        0.020322605036199093
       ],
-      "medianSeconds": 0.019013232027646154,
-      "minimumSeconds": 0.019013232027646154,
+      "medianSeconds": 0.020322605036199093,
+      "minimumSeconds": 0.020322605036199093,
       "comparable": true
     },
     {
@@ -161,10 +161,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.03337616997305304
+        0.03463197499513626
       ],
-      "medianSeconds": 0.03337616997305304,
-      "minimumSeconds": 0.03337616997305304,
+      "medianSeconds": 0.03463197499513626,
+      "minimumSeconds": 0.03463197499513626,
       "comparable": true
     },
     {
@@ -174,10 +174,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.4987952889641747
+        0.4700264389975928
       ],
-      "medianSeconds": 0.4987952889641747,
-      "minimumSeconds": 0.4987952889641747,
+      "medianSeconds": 0.4700264389975928,
+      "minimumSeconds": 0.4700264389975928,
       "comparable": true
     },
     {
@@ -187,10 +187,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.1989815830020234
+        0.19911240600049496
       ],
-      "medianSeconds": 0.1989815830020234,
-      "minimumSeconds": 0.1989815830020234,
+      "medianSeconds": 0.19911240600049496,
+      "minimumSeconds": 0.19911240600049496,
       "comparable": true
     },
     {
@@ -200,10 +200,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.01908987300703302
+        0.020516437012702227
       ],
-      "medianSeconds": 0.01908987300703302,
-      "minimumSeconds": 0.01908987300703302,
+      "medianSeconds": 0.020516437012702227,
+      "minimumSeconds": 0.020516437012702227,
       "comparable": true
     },
     {
@@ -213,10 +213,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.011331147979944944
+        0.010348248004447669
       ],
-      "medianSeconds": 0.011331147979944944,
-      "minimumSeconds": 0.011331147979944944,
+      "medianSeconds": 0.010348248004447669,
+      "minimumSeconds": 0.010348248004447669,
       "comparable": true
     },
     {
@@ -226,10 +226,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.0260875960229896
+        0.024284267972689122
       ],
-      "medianSeconds": 0.0260875960229896,
-      "minimumSeconds": 0.0260875960229896,
+      "medianSeconds": 0.024284267972689122,
+      "minimumSeconds": 0.024284267972689122,
       "comparable": true
     },
     {
@@ -239,10 +239,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.30710898101096973
+        0.3047038170043379
       ],
-      "medianSeconds": 0.30710898101096973,
-      "minimumSeconds": 0.30710898101096973,
+      "medianSeconds": 0.3047038170043379,
+      "minimumSeconds": 0.3047038170043379,
       "comparable": true
     },
     {
@@ -252,10 +252,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.12774937000358477
+        0.12054286303464323
       ],
-      "medianSeconds": 0.12774937000358477,
-      "minimumSeconds": 0.12774937000358477,
+      "medianSeconds": 0.12054286303464323,
+      "minimumSeconds": 0.12054286303464323,
       "comparable": true
     },
     {
@@ -265,10 +265,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.016898631991352886
+        0.012724387983325869
       ],
-      "medianSeconds": 0.016898631991352886,
-      "minimumSeconds": 0.016898631991352886,
+      "medianSeconds": 0.012724387983325869,
+      "minimumSeconds": 0.012724387983325869,
       "comparable": true
     },
     {
@@ -278,10 +278,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.011440680013038218
+        0.009959264018107206
       ],
-      "medianSeconds": 0.011440680013038218,
-      "minimumSeconds": 0.011440680013038218,
+      "medianSeconds": 0.009959264018107206,
+      "minimumSeconds": 0.009959264018107206,
       "comparable": true
     },
     {
@@ -291,10 +291,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.02235640201251954
+        0.022795607976149768
       ],
-      "medianSeconds": 0.02235640201251954,
-      "minimumSeconds": 0.02235640201251954,
+      "medianSeconds": 0.022795607976149768,
+      "minimumSeconds": 0.022795607976149768,
       "comparable": true
     },
     {
@@ -304,10 +304,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.6774719009990804
+        0.7086333130137064
       ],
-      "medianSeconds": 0.6774719009990804,
-      "minimumSeconds": 0.6774719009990804,
+      "medianSeconds": 0.7086333130137064,
+      "minimumSeconds": 0.7086333130137064,
       "comparable": true
     },
     {
@@ -317,10 +317,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.9598890640190803
+        0.9443076890311204
       ],
-      "medianSeconds": 0.9598890640190803,
-      "minimumSeconds": 0.9598890640190803,
+      "medianSeconds": 0.9443076890311204,
+      "minimumSeconds": 0.9443076890311204,
       "comparable": true
     },
     {
@@ -330,10 +330,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.0920291650108993
+        0.09267484396696091
       ],
-      "medianSeconds": 0.0920291650108993,
-      "minimumSeconds": 0.0920291650108993,
+      "medianSeconds": 0.09267484396696091,
+      "minimumSeconds": 0.09267484396696091,
       "comparable": true
     },
     {
@@ -343,10 +343,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.051741019007749856
+        0.050690530973952264
       ],
-      "medianSeconds": 0.051741019007749856,
-      "minimumSeconds": 0.051741019007749856,
+      "medianSeconds": 0.050690530973952264,
+      "minimumSeconds": 0.050690530973952264,
       "comparable": true
     },
     {
@@ -356,10 +356,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.0762709190021269
+        0.08747955597937107
       ],
-      "medianSeconds": 0.0762709190021269,
-      "minimumSeconds": 0.0762709190021269,
+      "medianSeconds": 0.08747955597937107,
+      "minimumSeconds": 0.08747955597937107,
       "comparable": true
     },
     {
@@ -369,10 +369,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.8480237959884107
+        0.8040649740141816
       ],
-      "medianSeconds": 0.8480237959884107,
-      "minimumSeconds": 0.8480237959884107,
+      "medianSeconds": 0.8040649740141816,
+      "minimumSeconds": 0.8040649740141816,
       "comparable": true
     },
     {
@@ -382,10 +382,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        4.13345817202935
+        3.7347009149962105
       ],
-      "medianSeconds": 4.13345817202935,
-      "minimumSeconds": 4.13345817202935,
+      "medianSeconds": 3.7347009149962105,
+      "minimumSeconds": 3.7347009149962105,
       "comparable": true
     },
     {
@@ -395,10 +395,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.2673351080156863
+        0.2744669950334355
       ],
-      "medianSeconds": 0.2673351080156863,
-      "minimumSeconds": 0.2673351080156863,
+      "medianSeconds": 0.2744669950334355,
+      "minimumSeconds": 0.2744669950334355,
       "comparable": true
     },
     {
@@ -408,10 +408,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.025697437988128513
+        0.016763793013524264
       ],
-      "medianSeconds": 0.025697437988128513,
-      "minimumSeconds": 0.025697437988128513,
+      "medianSeconds": 0.016763793013524264,
+      "minimumSeconds": 0.016763793013524264,
       "comparable": true
     },
     {
@@ -421,10 +421,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.11577688797842711
+        0.11237092298688367
       ],
-      "medianSeconds": 0.11577688797842711,
-      "minimumSeconds": 0.11577688797842711,
+      "medianSeconds": 0.11237092298688367,
+      "minimumSeconds": 0.11237092298688367,
       "comparable": true
     },
     {
@@ -434,10 +434,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.11606959195341915
+        0.10718722600722685
       ],
-      "medianSeconds": 0.11606959195341915,
-      "minimumSeconds": 0.11606959195341915,
+      "medianSeconds": 0.10718722600722685,
+      "minimumSeconds": 0.10718722600722685,
       "comparable": true
     },
     {
@@ -447,10 +447,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.2389125510235317
+        0.24533195298863575
       ],
-      "medianSeconds": 0.2389125510235317,
-      "minimumSeconds": 0.2389125510235317,
+      "medianSeconds": 0.24533195298863575,
+      "minimumSeconds": 0.24533195298863575,
       "comparable": true
     },
     {
@@ -460,10 +460,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.0378496460034512
+        0.029038103006314486
       ],
-      "medianSeconds": 0.0378496460034512,
-      "minimumSeconds": 0.0378496460034512,
+      "medianSeconds": 0.029038103006314486,
+      "minimumSeconds": 0.029038103006314486,
       "comparable": true
     },
     {
@@ -473,10 +473,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.03444917104206979
+        0.032490677025634795
       ],
-      "medianSeconds": 0.03444917104206979,
-      "minimumSeconds": 0.03444917104206979,
+      "medianSeconds": 0.032490677025634795,
+      "minimumSeconds": 0.032490677025634795,
       "comparable": true
     },
     {
@@ -486,10 +486,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.05866540805436671
+        0.05062567500863224
       ],
-      "medianSeconds": 0.05866540805436671,
-      "minimumSeconds": 0.05866540805436671,
+      "medianSeconds": 0.05062567500863224,
+      "minimumSeconds": 0.05062567500863224,
       "comparable": true
     },
     {
@@ -499,10 +499,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0019143500248901546
+        0.0017406420083716512
       ],
-      "medianSeconds": 0.0019143500248901546,
-      "minimumSeconds": 0.0019143500248901546,
+      "medianSeconds": 0.0017406420083716512,
+      "minimumSeconds": 0.0017406420083716512,
       "comparable": true
     },
     {
@@ -512,10 +512,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.0006049009971320629
+        0.0005551240174099803
       ],
-      "medianSeconds": 0.0006049009971320629,
-      "minimumSeconds": 0.0006049009971320629,
+      "medianSeconds": 0.0005551240174099803,
+      "minimumSeconds": 0.0005551240174099803,
       "comparable": true
     },
     {
@@ -525,10 +525,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.004597441991791129
+        0.004136547970119864
       ],
-      "medianSeconds": 0.004597441991791129,
-      "minimumSeconds": 0.004597441991791129,
+      "medianSeconds": 0.004136547970119864,
+      "minimumSeconds": 0.004136547970119864,
       "comparable": true
     },
     {
@@ -538,10 +538,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.001578611962031573
+        0.0014458619989454746
       ],
-      "medianSeconds": 0.001578611962031573,
-      "minimumSeconds": 0.001578611962031573,
+      "medianSeconds": 0.0014458619989454746,
+      "minimumSeconds": 0.0014458619989454746,
       "comparable": true
     },
     {
@@ -551,10 +551,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.009293585026171058
+        0.009195611986797303
       ],
-      "medianSeconds": 0.009293585026171058,
-      "minimumSeconds": 0.009293585026171058,
+      "medianSeconds": 0.009195611986797303,
+      "minimumSeconds": 0.009195611986797303,
       "comparable": true
     },
     {
@@ -564,10 +564,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.04926164395874366
+        0.04192129703005776
       ],
-      "medianSeconds": 0.04926164395874366,
-      "minimumSeconds": 0.04926164395874366,
+      "medianSeconds": 0.04192129703005776,
+      "minimumSeconds": 0.04192129703005776,
       "comparable": true
     },
     {
@@ -577,10 +577,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.019932080002035946
+        0.01558378100162372
       ],
-      "medianSeconds": 0.019932080002035946,
-      "minimumSeconds": 0.019932080002035946,
+      "medianSeconds": 0.01558378100162372,
+      "minimumSeconds": 0.01558378100162372,
       "comparable": true
     },
     {
@@ -590,10 +590,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.005845637992024422
+        0.005333926004823297
       ],
-      "medianSeconds": 0.005845637992024422,
-      "minimumSeconds": 0.005845637992024422,
+      "medianSeconds": 0.005333926004823297,
+      "minimumSeconds": 0.005333926004823297,
       "comparable": true
     },
     {
@@ -603,10 +603,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.005287199979647994
+        0.0058170059928670526
       ],
-      "medianSeconds": 0.005287199979647994,
-      "minimumSeconds": 0.005287199979647994,
+      "medianSeconds": 0.0058170059928670526,
+      "minimumSeconds": 0.0058170059928670526,
       "comparable": true
     },
     {
@@ -616,10 +616,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.005496124969795346
+        0.005259126017335802
       ],
-      "medianSeconds": 0.005496124969795346,
-      "minimumSeconds": 0.005496124969795346,
+      "medianSeconds": 0.005259126017335802,
+      "minimumSeconds": 0.005259126017335802,
       "comparable": true
     },
     {
@@ -629,10 +629,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0017622750019654632
+        0.001914196996949613
       ],
-      "medianSeconds": 0.0017622750019654632,
-      "minimumSeconds": 0.0017622750019654632,
+      "medianSeconds": 0.001914196996949613,
+      "minimumSeconds": 0.001914196996949613,
       "comparable": true
     },
     {
@@ -642,10 +642,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.000547364994417876
+        0.00046249403385445476
       ],
-      "medianSeconds": 0.000547364994417876,
-      "minimumSeconds": 0.000547364994417876,
+      "medianSeconds": 0.00046249403385445476,
+      "minimumSeconds": 0.00046249403385445476,
       "comparable": true
     },
     {
@@ -655,10 +655,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.004039389954414219
+        0.00648318202001974
       ],
-      "medianSeconds": 0.004039389954414219,
-      "minimumSeconds": 0.004039389954414219,
+      "medianSeconds": 0.00648318202001974,
+      "minimumSeconds": 0.00648318202001974,
       "comparable": true
     },
     {
@@ -668,10 +668,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.0010378359584137797
+        0.0016180769889615476
       ],
-      "medianSeconds": 0.0010378359584137797,
-      "minimumSeconds": 0.0010378359584137797,
+      "medianSeconds": 0.0016180769889615476,
+      "minimumSeconds": 0.0016180769889615476,
       "comparable": true
     },
     {
@@ -681,10 +681,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.006427799991797656
+        0.006769397994503379
       ],
-      "medianSeconds": 0.006427799991797656,
-      "minimumSeconds": 0.006427799991797656,
+      "medianSeconds": 0.006769397994503379,
+      "minimumSeconds": 0.006769397994503379,
       "comparable": true
     },
     {
@@ -694,10 +694,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0020818469929508865
+        0.0016210069879889488
       ],
-      "medianSeconds": 0.0020818469929508865,
-      "minimumSeconds": 0.0020818469929508865,
+      "medianSeconds": 0.0016210069879889488,
+      "minimumSeconds": 0.0016210069879889488,
       "comparable": true
     },
     {
@@ -707,10 +707,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.000932946044486016
+        0.0010047249961644411
       ],
-      "medianSeconds": 0.000932946044486016,
-      "minimumSeconds": 0.000932946044486016,
+      "medianSeconds": 0.0010047249961644411,
+      "minimumSeconds": 0.0010047249961644411,
       "comparable": true
     },
     {
@@ -720,10 +720,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.006070225965231657
+        0.006805012992117554
       ],
-      "medianSeconds": 0.006070225965231657,
-      "minimumSeconds": 0.006070225965231657,
+      "medianSeconds": 0.006805012992117554,
+      "minimumSeconds": 0.006805012992117554,
       "comparable": true
     },
     {
@@ -733,10 +733,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.005514040007255971
+        0.006037587998434901
       ],
-      "medianSeconds": 0.005514040007255971,
-      "minimumSeconds": 0.005514040007255971,
+      "medianSeconds": 0.006037587998434901,
+      "minimumSeconds": 0.006037587998434901,
       "comparable": true
     },
     {
@@ -746,10 +746,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.010118722973857075
+        0.01077717897715047
       ],
-      "medianSeconds": 0.010118722973857075,
-      "minimumSeconds": 0.010118722973857075,
+      "medianSeconds": 0.01077717897715047,
+      "minimumSeconds": 0.01077717897715047,
       "comparable": true
     },
     {
@@ -759,10 +759,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0773815989959985
+        0.0688901060493663
       ],
-      "medianSeconds": 0.0773815989959985,
-      "minimumSeconds": 0.0773815989959985,
+      "medianSeconds": 0.0688901060493663,
+      "minimumSeconds": 0.0688901060493663,
       "comparable": true
     },
     {
@@ -772,10 +772,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.03641786298248917
+        0.04778943303972483
       ],
-      "medianSeconds": 0.03641786298248917,
-      "minimumSeconds": 0.03641786298248917,
+      "medianSeconds": 0.04778943303972483,
+      "minimumSeconds": 0.04778943303972483,
       "comparable": true
     },
     {
@@ -785,10 +785,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.029480030003469437
+        0.03142740001203492
       ],
-      "medianSeconds": 0.029480030003469437,
-      "minimumSeconds": 0.029480030003469437,
+      "medianSeconds": 0.03142740001203492,
+      "minimumSeconds": 0.03142740001203492,
       "comparable": true
     },
     {
@@ -798,10 +798,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.0349995750002563
+        0.03335093299392611
       ],
-      "medianSeconds": 0.0349995750002563,
-      "minimumSeconds": 0.0349995750002563,
+      "medianSeconds": 0.03335093299392611,
+      "minimumSeconds": 0.03335093299392611,
       "comparable": true
     },
     {
@@ -811,10 +811,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.03238153696293011
+        0.03072321100626141
       ],
-      "medianSeconds": 0.03238153696293011,
-      "minimumSeconds": 0.03238153696293011,
+      "medianSeconds": 0.03072321100626141,
+      "minimumSeconds": 0.03072321100626141,
       "comparable": true
     },
     {
@@ -824,10 +824,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.0466713469941169
+        0.04625522397691384
       ],
-      "medianSeconds": 0.0466713469941169,
-      "minimumSeconds": 0.0466713469941169,
+      "medianSeconds": 0.04625522397691384,
+      "minimumSeconds": 0.04625522397691384,
       "comparable": true
     },
     {
@@ -837,10 +837,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.01622742402832955
+        0.01828260300680995
       ],
-      "medianSeconds": 0.01622742402832955,
-      "minimumSeconds": 0.01622742402832955,
+      "medianSeconds": 0.01828260300680995,
+      "minimumSeconds": 0.01828260300680995,
       "comparable": true
     },
     {
@@ -850,10 +850,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.007171716017182916
+        0.0065655430080369115
       ],
-      "medianSeconds": 0.007171716017182916,
-      "minimumSeconds": 0.007171716017182916,
+      "medianSeconds": 0.0065655430080369115,
+      "minimumSeconds": 0.0065655430080369115,
       "comparable": true
     },
     {
@@ -863,10 +863,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.012375373975373805
+        0.012698810023721308
       ],
-      "medianSeconds": 0.012375373975373805,
-      "minimumSeconds": 0.012375373975373805,
+      "medianSeconds": 0.012698810023721308,
+      "minimumSeconds": 0.012698810023721308,
       "comparable": true
     },
     {
@@ -876,10 +876,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.010049617034383118
+        0.009331205976195633
       ],
-      "medianSeconds": 0.010049617034383118,
-      "minimumSeconds": 0.010049617034383118,
+      "medianSeconds": 0.009331205976195633,
+      "minimumSeconds": 0.009331205976195633,
       "comparable": true
     },
     {
@@ -889,10 +889,10 @@
       "workload": "fibonacci",
       "workloadName": "Recursive Fibonacci",
       "samplesSeconds": [
-        0.002669698966201395
+        0.0025819820002652705
       ],
-      "medianSeconds": 0.002669698966201395,
-      "minimumSeconds": 0.002669698966201395,
+      "medianSeconds": 0.0025819820002652705,
+      "minimumSeconds": 0.0025819820002652705,
       "comparable": true,
       "collectorStage": "NativeStableGenerationalConformance"
     },
@@ -903,10 +903,10 @@
       "workload": "integerLoop",
       "workloadName": "Integer loop",
       "samplesSeconds": [
-        0.0005986029864288867
+        0.0005667050136253238
       ],
-      "medianSeconds": 0.0005986029864288867,
-      "minimumSeconds": 0.0005986029864288867,
+      "medianSeconds": 0.0005667050136253238,
+      "minimumSeconds": 0.0005667050136253238,
       "comparable": true,
       "collectorStage": "NativeStableGenerationalConformance"
     },
@@ -917,10 +917,10 @@
       "workload": "tableLoop",
       "workloadName": "Numeric array",
       "samplesSeconds": [
-        0.0054781060316599905
+        0.004798301961272955
       ],
-      "medianSeconds": 0.0054781060316599905,
-      "minimumSeconds": 0.0054781060316599905,
+      "medianSeconds": 0.004798301961272955,
+      "minimumSeconds": 0.004798301961272955,
       "comparable": true,
       "collectorStage": "NativeStableGenerationalConformance"
     },
@@ -931,10 +931,10 @@
       "workload": "allocationChurn",
       "workloadName": "Allocation churn",
       "samplesSeconds": [
-        0.0008644120534881949
+        0.0007699580164626241
       ],
-      "medianSeconds": 0.0008644120534881949,
-      "minimumSeconds": 0.0008644120534881949,
+      "medianSeconds": 0.0007699580164626241,
+      "minimumSeconds": 0.0007699580164626241,
       "comparable": true,
       "collectorStage": "NativeStableGenerationalConformance"
     },
@@ -945,10 +945,10 @@
       "workload": "objectArray",
       "workloadName": "Retained object array",
       "samplesSeconds": [
-        0.41492724599083886
+        0.03214463498443365
       ],
-      "medianSeconds": 0.41492724599083886,
-      "minimumSeconds": 0.41492724599083886,
+      "medianSeconds": 0.03214463498443365,
+      "minimumSeconds": 0.03214463498443365,
       "comparable": true,
       "collectorStage": "NativeStableGenerationalConformance"
     }
