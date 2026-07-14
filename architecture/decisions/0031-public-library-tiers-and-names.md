@@ -4,6 +4,7 @@
 - Date: 2026-07-12
 - Depends on: ADR 0030
 - Clarified by: ADR 0032 concise APIs and explicit cost contracts
+- Superseded in part by: ADR 0058 exact standard-foundation prelude
 
 ## Context
 
@@ -14,11 +15,10 @@ prelude or making every program depend on platform frameworks.
 
 `Pop` remains the root namespace and `Pop.Standard` remains the automatically
 referenced foundation Bubble. `Pop.Standard.Core` is an implementation
-partition, not another public Bubble or source namespace. The fixed prelude
-contains only primitive types, `Result`, `Option`, core collection/protocol
-types, `Sequence`, tasks/cancellation values, and a small set of pure functions.
-Common standard roots are directly available only after an exact prelude
-baseline review; members remain qualified.
+partition, not another public Bubble or source namespace. ADR 0058 supersedes
+this record's illustrative prelude contents with one exact baseline. Optional
+values use `T?`, not a duplicate nominal `Option<T>` wrapper, and `Sequence` is
+the sole initial namespace root. Members remain qualified.
 
 Names describe a stable capability, not a framework role. Common formats are
 the direct roots `Json`, `Yaml`, `Xml`, `Csv`, and `Toml`; shared schema and
@@ -111,9 +111,9 @@ when the semantic replacement is exact.
 domain-standard and improves qualified call sites without creating ambiguous
 arbitrary truncation.
 
-## Unresolved questions
+## Resolved questions
 
-- Which namespace roots enter the first fixed prelude.
+ADR 0058 fixes the first prelude and its sole namespace root, `Sequence`.
 
 ## Required conformance tests
 

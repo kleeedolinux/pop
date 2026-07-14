@@ -229,13 +229,16 @@ accepted architecture.
 
 New `.pop` Modules are conventionally discovered, reach verified HIR and MIR,
 and can participate in the initial typed primitive-signature logical metadata
-path. The repository does not yet encode arbitrary contributions into an
-on-disk `.poplib` and link their implementations for released execution.
+path. `pop build` now encodes arbitrary library contributions into verified
+on-disk `.poplib` artifacts with checked documentation and a selected native
+implementation. Dependency resolution still compiles local source and links
+the corresponding object directly; consuming and linking the selected
+implementation from a loaded `.poplib` remains unfinished.
 
 Only the accepted `print(Int)` and `print(String)` bootstrap identities
 currently execute through native Standard adapters. Do not turn a convenience
 function into a compiler-known bootstrap identity merely to bypass this
-remaining artifact work.
+remaining artifact-consumption work.
 
 ## Focused commands
 

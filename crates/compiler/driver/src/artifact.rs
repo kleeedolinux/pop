@@ -159,6 +159,21 @@ impl PoplibDependency {
             public_api_sha256: public_api_sha256.into(),
         }
     }
+
+    #[must_use]
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    #[must_use]
+    pub fn bubble(&self) -> &str {
+        &self.bubble
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -242,6 +257,26 @@ pub struct LoadedPoplib {
 }
 
 impl LoadedPoplib {
+    #[must_use]
+    pub fn package(&self) -> &str {
+        &self.manifest.identity.package
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.manifest.identity.version
+    }
+
+    #[must_use]
+    pub fn bubble(&self) -> &str {
+        &self.manifest.identity.bubble
+    }
+
+    #[must_use]
+    pub fn dependencies(&self) -> &[PoplibDependency] {
+        &self.manifest.dependencies
+    }
+
     #[must_use]
     pub const fn reference_metadata(&self) -> &ReferenceMetadata {
         &self.reference_metadata

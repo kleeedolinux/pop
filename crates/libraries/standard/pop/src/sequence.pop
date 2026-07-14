@@ -42,21 +42,27 @@ private class FilteringIterator<T> implements Iterator<T>
     end
 end
 
---- <summary>
---- Creates a lazy single-pass iterator that transforms source items.
---- </summary>
----
---- <param name="source">
---- The statically iterable source.
---- </param>
----
---- <param name="transform">
---- The function called once for each requested item.
---- </param>
----
---- <returns>
---- A newly allocated lazy iterator adapter.
---- </returns>
+--- <summary>Creates a lazy single-pass iterator that transforms source items.</summary>
+--- <typeparam name="T">The source item type.</typeparam>
+--- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
+--- <typeparam name="U">The transformed item type.</typeparam>
+--- <param name="source">The statically iterable source.</param>
+--- <param name="transform">The function called once for each requested item.</param>
+--- <returns>A newly allocated lazy iterator adapter.</returns>
+--- <remarks>Iteration is lazy, preserves source order, and uses statically resolved protocol and function calls.</remarks>
+--- <allocation>Allocates one small iterator-state object; it does not materialize output items.</allocation>
+--- <complexity time="O(1) creation and O(n) total consumption" space="O(1) adapter state"/>
+--- <example>
+--- <code language="pop" test="true">
+--- private function mapExample(): Int
+---     local values: {Int} = {1, 2, 3}
+---     local doubled = Sequence.map(values, function(value: Int): Int
+---         return value * 2
+---     end)
+---     return List.get(Sequence.collect(doubled), 2)
+--- end
+--- </code>
+--- </example>
 public function map<T, TSource: Iterable<T>, U>(
     source: TSource,
     transform: function(value: T): U
@@ -65,21 +71,26 @@ public function map<T, TSource: Iterable<T>, U>(
     return iterator
 end
 
---- <summary>
---- Creates a lazy single-pass iterator that retains matching items.
---- </summary>
----
---- <param name="source">
---- The statically iterable source.
---- </param>
----
---- <param name="predicate">
---- The function called at most once per examined item.
---- </param>
----
---- <returns>
---- A newly allocated lazy iterator adapter.
---- </returns>
+--- <summary>Creates a lazy single-pass iterator that retains matching items.</summary>
+--- <typeparam name="T">The source and result item type.</typeparam>
+--- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
+--- <param name="source">The statically iterable source.</param>
+--- <param name="predicate">The function called at most once per examined item.</param>
+--- <returns>A newly allocated lazy iterator adapter.</returns>
+--- <remarks>Iteration is lazy, stable in source order, and never performs runtime member lookup.</remarks>
+--- <allocation>Allocates one small iterator-state object; it does not materialize matching items.</allocation>
+--- <complexity time="O(1) creation and O(n) total consumption" space="O(1) adapter state"/>
+--- <example>
+--- <code language="pop" test="true">
+--- private function filterExample(): Int
+---     local values: {Int} = {1, 2, 3, 4}
+---     local even = Sequence.filter(values, function(value: Int): Boolean
+---         return value % 2 == 0
+---     end)
+---     return List.length(Sequence.collect(even))
+--- end
+--- </code>
+--- </example>
 public function filter<T, TSource: Iterable<T>>(
     source: TSource,
     predicate: function(value: T): Boolean
@@ -88,25 +99,27 @@ public function filter<T, TSource: Iterable<T>>(
     return iterator
 end
 
---- <summary>
---- Consumes a sequence from left to right into one state value.
---- </summary>
----
---- <param name="source">
---- The statically iterable source.
---- </param>
----
---- <param name="initial">
---- The initial state.
---- </param>
----
---- <param name="combine">
---- The function called once for each item in order.
---- </param>
----
---- <returns>
---- The final state.
---- </returns>
+--- <summary>Consumes a sequence from left to right into one state value.</summary>
+--- <typeparam name="T">The source item type.</typeparam>
+--- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
+--- <typeparam name="TState">The accumulated state type.</typeparam>
+--- <param name="source">The statically iterable source.</param>
+--- <param name="initial">The initial state.</param>
+--- <param name="combine">The function called once for each item in order.</param>
+--- <returns>The final state.</returns>
+--- <remarks>Consumption is eager, single-pass, and uses statically resolved protocol and function calls.</remarks>
+--- <allocation>The algorithm itself allocates no collection; the supplied iterator or function may allocate according to its own contract.</allocation>
+--- <complexity time="O(n)" space="O(1) algorithm state"/>
+--- <example>
+--- <code language="pop" test="true">
+--- private function foldExample(): Int
+---     local values: {Int} = {1, 2, 3}
+---     return Sequence.fold(values, 0, function(total: Int, value: Int): Int
+---         return total + value
+---     end)
+--- end
+--- </code>
+--- </example>
 public function fold<T, TSource: Iterable<T>, TState>(
     source: TSource,
     initial: TState,
@@ -119,17 +132,23 @@ public function fold<T, TSource: Iterable<T>, TState>(
     return state
 end
 
---- <summary>
---- Consumes a sequence into a new growable list in source order.
---- </summary>
----
---- <param name="source">
---- The statically iterable source.
---- </param>
----
---- <returns>
---- A newly allocated list containing every source item.
---- </returns>
+--- <summary>Consumes a sequence into a new growable list in source order.</summary>
+--- <typeparam name="T">The source and collected item type.</typeparam>
+--- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
+--- <param name="source">The statically iterable source.</param>
+--- <returns>A newly allocated list containing every source item.</returns>
+--- <remarks>Consumption is eager and materializes every item in stable source order.</remarks>
+--- <allocation>Allocates one list and may grow its backing storage as items are appended.</allocation>
+--- <complexity time="O(n)" space="O(n) owned result"/>
+--- <example>
+--- <code language="pop" test="true">
+--- private function collectExample(): Int
+---     local values: {Int} = {4, 5, 6}
+---     local collected = Sequence.collect(values)
+---     return List.get(collected, 3)
+--- end
+--- </code>
+--- </example>
 public function collect<T, TSource: Iterable<T>>(source: TSource): List<T>
     local values = List.create<<T>>()
     for value in source do

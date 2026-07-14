@@ -49,6 +49,42 @@ fn standard_prelude_types_and_protocols_are_explicit_not_user_injectable() {
 }
 
 #[test]
+fn standard_foundation_prelude_matches_the_frozen_adr_0058_type_baseline() {
+    let schema = embedded_bootstrap_schema().expect("bootstrap metadata");
+    let actual = schema
+        .types()
+        .iter()
+        .filter(|entry| entry.is_in_prelude())
+        .map(|entry| (entry.id().raw(), entry.source_name(), entry.owner_bubble()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual,
+        vec![
+            (0, "Bytes", "Pop.Internal"),
+            (1, "Array", "Pop.Internal"),
+            (2, "Table", "Pop.Internal"),
+            (100, "Result", "Pop.Standard"),
+            (101, "List", "Pop.Standard"),
+            (102, "Set", "Pop.Standard"),
+            (103, "Range", "Pop.Standard"),
+            (104, "Task", "Pop.Standard"),
+            (105, "Guid", "Pop.Standard"),
+            (106, "Iterable", "Pop.Standard"),
+            (107, "Iterator", "Pop.Standard"),
+            (108, "Equal", "Pop.Standard"),
+            (109, "Order", "Pop.Standard"),
+            (110, "Hash", "Pop.Standard"),
+            (111, "Close", "Pop.Standard"),
+            (112, "AsyncClose", "Pop.Standard"),
+            (113, "Iteration", "Pop.Standard"),
+            (114, "CancelToken", "Pop.Standard"),
+        ]
+    );
+    assert!(schema.type_by_source_name("Option").is_none());
+}
+
+#[test]
 fn foundational_type_ids_and_source_names_are_unique() {
     let schema = embedded_bootstrap_schema().expect("bootstrap metadata");
     let ids: BTreeSet<_> = schema.types().iter().map(|entry| entry.id()).collect();

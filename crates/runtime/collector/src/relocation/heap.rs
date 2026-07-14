@@ -19,23 +19,23 @@ pub enum CollectorGeneration {
 pub struct CollectorObjectId(u64);
 
 #[derive(Clone, Debug)]
-pub(super) struct RelocationAllocation {
-    pub(super) identity: CollectorObjectId,
-    pub(super) generation: CollectorGeneration,
-    pub(super) allocation: Allocation,
+pub(crate) struct RelocationAllocation {
+    pub(crate) identity: CollectorObjectId,
+    pub(crate) generation: CollectorGeneration,
+    pub(crate) allocation: Allocation,
 }
 
 pub struct RelocationRuntime {
-    pub(super) objects: BTreeMap<ManagedReference, RelocationAllocation>,
-    pub(super) roots: BTreeMap<RootHandle, ManagedReference>,
-    pub(super) pins: BTreeMap<PinHandle, ManagedReference>,
-    pub(super) dirty_cards: BTreeSet<ManagedReference>,
+    pub(crate) objects: BTreeMap<ManagedReference, RelocationAllocation>,
+    pub(crate) roots: BTreeMap<RootHandle, ManagedReference>,
+    pub(crate) pins: BTreeMap<PinHandle, ManagedReference>,
+    pub(crate) dirty_cards: BTreeSet<ManagedReference>,
     pub(super) next_reference: u64,
     pub(super) next_identity: u64,
     pub(super) next_root: u64,
     pub(super) next_pin: u64,
     pub(super) collection_requested: bool,
-    pub(super) metrics: CollectorMetrics,
+    pub(crate) metrics: CollectorMetrics,
 }
 
 impl RelocationRuntime {
