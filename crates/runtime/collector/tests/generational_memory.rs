@@ -66,6 +66,18 @@ fn memory_configuration_rejects_unusable_limits_and_unbounded_assists() {
 }
 
 #[test]
+fn default_memory_policy_reserves_startup_headroom_for_small_live_heaps() {
+    let config = GenerationalMemoryConfig::default();
+    let runtime = GenerationalRuntime::new();
+
+    assert_eq!(config.minimum_headroom_bytes(), 16 * 1024 * 1024);
+    assert_eq!(
+        runtime.memory_telemetry().current_target_bytes(),
+        16 * 1024 * 1024
+    );
+}
+
+#[test]
 fn hard_limit_protects_emergency_and_evacuation_reserves_before_mutation() {
     let mut runtime = runtime(256);
     let request = object(AllocationClass::Large, 0);

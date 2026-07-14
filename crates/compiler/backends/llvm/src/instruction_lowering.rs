@@ -2247,34 +2247,135 @@ pub(crate) fn lower_object_make(
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
 ) -> Result<String, LlvmLoweringError> {
-    let reference_slots = fields
-        .iter()
-        .filter_map(|(field, value)| {
-            values
-                .get(value)
+    lower_initialized_object(
+        result,
+        fields,
+        slot_count,
+        None,
+        values,
+        types,
+        field_layout,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ObjectInitializer {
+    Constant(u64),
+    Value(ValueId),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_initialized_object(
+    result: &str,
+    fields: &[(FieldId, ValueId)],
+    slot_count: u32,
+    class: Option<ClassId>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+) -> Result<String, LlvmLoweringError> {
+    let mut reference_slots = Vec::new();
+    for (field, value) in fields {
+        if values
+            .get(value)
+            .copied()
+            .is_some_and(|type_id| is_managed_type(type_id, types))
+        {
+            let slot = field_layout
+                .get(field)
                 .copied()
-                .filter(|type_id| is_managed_type(*type_id, types))
-                .and_then(|_| field_layout.get(field).copied())
-                .map(|slot| slot - 1)
-        })
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(result, slot_count, &reference_slots);
+                .and_then(|slot| slot.checked_sub(1))
+                .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+            reference_slots.push(slot);
+        }
+    }
+    let slot_count_usize = usize::try_from(slot_count)
+        .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let mut initializers = vec![None; slot_count_usize];
+    if let Some(class) = class {
+        let Some(slot) = initializers.first_mut() else {
+            return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+        };
+        *slot = Some(ObjectInitializer::Constant(u64::from(class.raw())));
+    }
     for (field, value) in fields {
         let slot = field_layout
             .get(field)
             .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
-        let type_id = *values
-            .get(value)
-            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-        let (conversions, stored) =
-            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
-        lines.extend(conversions);
+        let index = slot
+            .checked_sub(1)
+            .and_then(|slot| usize::try_from(slot).ok())
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let Some(initializer) = initializers.get_mut(index) else {
+            return Err(LlvmLoweringError::InvalidFieldLayout(*field));
+        };
+        *initializer = Some(ObjectInitializer::Value(*value));
+    }
+    if initializers.iter().any(Option::is_none) {
+        return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+    }
+
+    let map = format!("{result}_object_map");
+    let map_pointer = if reference_slots.is_empty() {
+        "null".to_owned()
+    } else {
+        format!("{map}_pointer")
+    };
+    let mut lines = Vec::new();
+    if !reference_slots.is_empty() {
+        lines.push(format!("{map} = alloca [{} x i32]", reference_slots.len()));
+        for (index, slot) in reference_slots.iter().enumerate() {
+            let entry = format!("{map}_{index}");
+            lines.extend([
+                format!(
+                    "{entry} = getelementptr [{} x i32], ptr {map}, i64 0, i64 {index}",
+                    reference_slots.len()
+                ),
+                format!("store i32 {slot}, ptr {entry}"),
+            ]);
+        }
         lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            slot
+            "{map_pointer} = getelementptr [{} x i32], ptr {map}, i64 0, i64 0",
+            reference_slots.len()
         ));
     }
+
+    let payload = format!("{result}_initial_values");
+    let payload_pointer = if slot_count == 0 {
+        "null".to_owned()
+    } else {
+        format!("{payload}_pointer")
+    };
+    if slot_count != 0 {
+        lines.push(format!("{payload} = alloca [{slot_count} x i64]"));
+        for (index, initializer) in initializers.into_iter().enumerate() {
+            let entry = format!("{payload}_{index}");
+            lines.push(format!(
+                "{entry} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 {index}"
+            ));
+            let stored = match initializer.expect("complete initializers were validated") {
+                ObjectInitializer::Constant(value) => value.to_string(),
+                ObjectInitializer::Value(value) => {
+                    let type_id = *values
+                        .get(&value)
+                        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+                    let (conversions, stored) =
+                        lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
+                    lines.extend(conversions);
+                    stored
+                }
+            };
+            lines.push(format!("store i64 {stored}, ptr {entry}"));
+        }
+        lines.push(format!(
+            "{payload_pointer} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 0"
+        ));
+    }
+    lines.push(format!(
+        "{result} = call i64 @{}(i64 {slot_count}, ptr {map_pointer}, i64 {}, ptr {payload_pointer}, i64 {slot_count})",
+        native_runtime_symbol(RuntimeOperation::AllocateObjectInitialized),
+        reference_slots.len()
+    ));
     Ok(lines.join("\n"))
 }
 
@@ -2498,25 +2599,15 @@ pub(crate) fn lower_class_make(
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
 ) -> Result<String, LlvmLoweringError> {
-    let lowered = lower_object_make(result, fields, slot_count, values, types, field_layout)?;
-    let mut lines = lowered.lines().map(str::to_owned).collect::<Vec<_>>();
-    let allocation = lines
-        .iter()
-        .position(|line| {
-            line.starts_with(&format!(
-                "{result} = call i64 @pop_rt_allocate_mapped_object("
-            ))
-        })
-        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    lines.insert(
-        allocation + 1,
-        format!(
-            "call i8 @{}(i64 {result}, i64 1, i64 {})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            class.raw()
-        ),
-    );
-    Ok(lines.join("\n"))
+    lower_initialized_object(
+        result,
+        fields,
+        slot_count,
+        Some(class),
+        values,
+        types,
+        field_layout,
+    )
 }
 
 pub(crate) fn lower_union_make(

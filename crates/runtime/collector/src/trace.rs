@@ -101,7 +101,7 @@ impl BootstrapRuntime {
                 type_id,
                 class: allocation_class,
                 object_map,
-                slots,
+                slots: slots.into(),
             },
         );
         self.slot_count += requested_slots;

@@ -105,7 +105,7 @@ impl GenerationalMemoryConfig {
 
 impl Default for GenerationalMemoryConfig {
     fn default() -> Self {
-        Self::new(usize::MAX, 0, 0, 4 * 1024 * 1024, 50, 64)
+        Self::new(usize::MAX, 0, 0, 16 * 1024 * 1024, 50, 64)
             .expect("default generational memory policy is valid")
     }
 }

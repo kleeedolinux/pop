@@ -1,7 +1,5 @@
 //! Precise SATB marking and bounded mature sweeping.
 
-use std::ops::Bound::{Excluded, Unbounded};
-
 use pop_runtime_interface::{
     AllocationClass, CollectionStatistics, ManagedReference, RootPublication, RuntimeFailure,
 };
@@ -350,21 +348,17 @@ impl GenerationalRuntime {
     }
 
     fn next_sweep_entry(&mut self) -> Option<(ManagedReference, bool)> {
-        let next = match self.major.sweep_cursor {
-            Some(cursor) => self
-                .nursery
-                .objects
-                .range((Excluded(cursor), Unbounded))
-                .next(),
-            None => self.nursery.objects.iter().next(),
-        }
-        .map(|(reference, object)| {
-            (
-                *reference,
-                object.generation == CollectorGeneration::Mature
-                    && !self.major.marked_mature.contains(reference),
-            )
-        });
+        let next = self
+            .nursery
+            .objects
+            .next_after(self.major.sweep_cursor)
+            .map(|(reference, object)| {
+                (
+                    *reference,
+                    object.generation == CollectorGeneration::Mature
+                        && !self.major.marked_mature.contains(reference),
+                )
+            });
         let Some((reference, reclaim)) = next else {
             self.major.sweep_complete = true;
             return None;

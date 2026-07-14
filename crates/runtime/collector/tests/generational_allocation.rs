@@ -169,6 +169,36 @@ fn scalar_array_bulk_initialization_constructs_the_final_payload_once() {
 }
 
 #[test]
+fn managed_array_bulk_initialization_installs_the_precise_value_before_publication() {
+    let mut runtime = runtime();
+    let child = runtime
+        .allocate_object(&object(27, AllocationClass::Mature, 0, &[]))
+        .expect("managed child");
+    let request = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(28),
+        AllocationClass::Mature,
+        256,
+        ArrayElementMap::ManagedReference,
+    );
+    let array = runtime
+        .allocate_array_filled(&request, child.raw())
+        .expect("bulk initialized managed array");
+
+    assert_eq!(
+        runtime
+            .load_array_value(array, ObjectSlot::new(0))
+            .expect("first reference"),
+        child.raw()
+    );
+    assert_eq!(
+        runtime
+            .load_array_value(array, ObjectSlot::new(255))
+            .expect("last reference"),
+        child.raw()
+    );
+}
+
+#[test]
 fn mature_page_reuse_preserves_monomorphic_layout_and_scheduler() {
     let mut runtime = runtime();
     let first = runtime

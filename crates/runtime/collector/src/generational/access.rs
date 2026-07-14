@@ -150,6 +150,23 @@ impl GenerationalRuntime {
         self.store_slot_value(owner, slot, value)
     }
 
+    pub(crate) fn store_stable_array_value(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        value: u64,
+    ) -> Result<(), RuntimeFailure> {
+        if !self
+            .nursery
+            .objects
+            .get(&owner)
+            .is_some_and(|object| matches!(object.allocation.kind, AllocationKind::Array(_)))
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        self.store_stable_slot_value(owner, slot, value)
+    }
+
     /// Stores a value according to the allocation's precise slot map.
     ///
     /// # Errors
@@ -175,6 +192,27 @@ impl GenerationalRuntime {
             )
         } else {
             self.store_scalar(owner, slot, value)
+        }
+    }
+
+    pub(crate) fn store_stable_slot_value(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        value: u64,
+    ) -> Result<(), RuntimeFailure> {
+        match self.nursery.slot_value(owner, slot)? {
+            SlotValue::Scalar(_) => self.nursery.store_scalar(owner, slot, value),
+            SlotValue::Reference(previous) => {
+                let value = (value != 0).then(|| ManagedReference::new(value));
+                if value.is_some_and(|reference| !self.nursery.contains(reference)) {
+                    return Err(RuntimeFailure::runtime_invariant());
+                }
+                self.record_satb(previous);
+                self.record_post_scan_edge(owner, value);
+                self.nursery
+                    .store_validated_reference(owner, slot, previous, value)
+            }
         }
     }
 

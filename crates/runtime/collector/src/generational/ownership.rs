@@ -116,7 +116,7 @@ impl GenerationalRuntime {
         {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        for (reference, object) in &self.nursery.objects {
+        for (reference, object) in self.nursery.objects.iter() {
             if objects.contains(reference) {
                 continue;
             }
@@ -147,7 +147,7 @@ impl GenerationalRuntime {
 
         let region = self.isolation.fresh_region()?;
         self.allocation = next_allocation;
-        for (reference, object) in &mut self.nursery.objects {
+        for (reference, object) in self.nursery.objects.iter_mut() {
             if objects.contains(reference) {
                 object.ownership = ObjectOwnership::Isolated(region);
                 object.generation = CollectorGeneration::Mature;
@@ -242,7 +242,7 @@ impl GenerationalRuntime {
             return Err(BootstrapRuntime::out_of_memory(0, 0));
         }
         self.allocation = next_allocation;
-        for (reference, object) in &mut self.nursery.objects {
+        for (reference, object) in self.nursery.objects.iter_mut() {
             if record.objects.contains(reference) {
                 object.ownership = ObjectOwnership::SchedulerLocal(owner);
             }

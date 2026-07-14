@@ -21,7 +21,7 @@ impl NativeAbiVersion {
     }
 }
 
-pub const NATIVE_ABI_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 10);
+pub const NATIVE_ABI_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 11);
 pub const INVALID_HANDLE: u64 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

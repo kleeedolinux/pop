@@ -16,6 +16,31 @@ use super::heap::GenerationalRuntime;
 use super::workers::CardRefinementTask;
 
 impl GenerationalRuntime {
+    /// Allocates one object with its complete typed payload before publication.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid initializers, managed tokens, or memory admission.
+    pub fn allocate_object_initialized(
+        &mut self,
+        request: &ObjectAllocationRequest,
+        values: &[u64],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.prepare_allocation(
+            request.type_id(),
+            request.allocation_class(),
+            request.object_map(),
+            true,
+        )?;
+        let reference = self.nursery.allocate_object_initialized(request, values)?;
+        self.finish_allocation(
+            reference,
+            request.type_id(),
+            request.allocation_class(),
+            request.object_map(),
+        )
+    }
+
     /// Allocates one array with its final scalar payload in a single pass.
     ///
     /// Managed-reference arrays retain the ordinary checked fill path.
@@ -28,11 +53,6 @@ impl GenerationalRuntime {
         request: &ArrayAllocationRequest,
         value: u64,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        if request.element_map() != ArrayElementMap::Scalar {
-            let reference = self.allocate_array(request)?;
-            self.fill_array_value(reference, value)?;
-            return Ok(reference);
-        }
         let object_map = self.array_object_map(request)?;
         self.prepare_allocation(
             request.type_id(),
@@ -40,9 +60,10 @@ impl GenerationalRuntime {
             &object_map,
             true,
         )?;
-        let reference = self.nursery.allocate_scalar_array_filled(
+        let reference = self.nursery.allocate_array_filled(
             request.type_id(),
             request.allocation_class(),
+            request.element_map(),
             object_map.clone(),
             value,
         )?;
@@ -63,10 +84,10 @@ impl GenerationalRuntime {
     ) -> Result<(), RuntimeFailure> {
         let requested_slots = usize::try_from(object_map.slot_count())
             .map_err(|_| BootstrapRuntime::out_of_memory(1, usize::MAX))?;
-        let requirement =
+        let mut requirement =
             self.allocation
                 .placement_requirement(type_id, class, object_map, self.scheduler)?;
-        let committed_after = self
+        let mut committed_after = self
             .allocation
             .committed_bytes()
             .saturating_add(requirement.additional_committed_bytes);
@@ -88,15 +109,17 @@ impl GenerationalRuntime {
                         .observe_committed(self.allocation.committed_bytes());
                 }
             }
+            requirement = self.allocation.placement_requirement(
+                type_id,
+                class,
+                object_map,
+                self.scheduler,
+            )?;
+            committed_after = self
+                .allocation
+                .committed_bytes()
+                .saturating_add(requirement.additional_committed_bytes);
         }
-
-        let requirement =
-            self.allocation
-                .placement_requirement(type_id, class, object_map, self.scheduler)?;
-        let committed_after = self
-            .allocation
-            .committed_bytes()
-            .saturating_add(requirement.additional_committed_bytes);
         if !self.memory.admits(committed_after) {
             if class == pop_runtime_interface::AllocationClass::NurseryEligible {
                 self.request_major_collection();

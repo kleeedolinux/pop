@@ -321,7 +321,7 @@ fn specialized_generic_data_lowers_to_concrete_native_ir() {
     )
     .expect("LLVM lowering")
     .to_string();
-    assert!(text.contains("pop_rt_allocate_mapped_object"));
+    assert!(text.contains("pop_rt_allocate_initialized_object"));
     assert!(text.contains("pop_rt_field_set"));
     assert!(text.contains("switch i64"));
     let input = std::env::temp_dir().join("pop-backend-llvm-generics.ll");
@@ -340,6 +340,53 @@ fn specialized_generic_data_lowers_to_concrete_native_ir() {
     );
     let _ = fs::remove_file(input);
     let _ = fs::remove_file(output);
+}
+
+#[test]
+fn class_construction_uses_one_atomic_initialized_allocation() {
+    let module = native_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+    function Box.new(value: Int): Box\n\
+        return Box { value = value }\n\
+    end\n\
+end\n\
+private function main(): Int\n\
+    local box = Box.new(42)\n\
+    return box.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    assert_eq!(
+        text.matches("call i64 @pop_rt_allocate_initialized_object")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert!(!text.contains("call i8 @pop_rt_field_set"), "{text}");
+
+    let result = link_with_runtime_and_run(&module, "initialized-class");
+    assert_eq!(result.status.code(), Some(42), "{module}");
+}
+
+#[test]
+fn class_mutation_after_publication_keeps_the_checked_store_path() {
+    let module = native_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+end\n\
+private function main(): Int\n\
+    local box = Box { value = 1 }\n\
+    box.value = 9\n\
+    return box.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    assert!(text.contains("call i8 @pop_rt_field_set"), "{text}");
+    let result = link_with_runtime_and_run(&module, "mutated-class");
+    assert_eq!(result.status.code(), Some(9), "{module}");
 }
 
 #[test]

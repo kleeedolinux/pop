@@ -33,8 +33,8 @@ impl RelocationRuntime {
             relocations.insert(*old, self.fresh_reference()?);
         }
 
-        let mut next_objects = BTreeMap::new();
-        for (reference, object) in &self.objects {
+        let mut next_objects = super::table::ObjectTable::new();
+        for (reference, object) in self.objects.iter() {
             if object.generation == CollectorGeneration::Mature
                 || object.ownership != crate::ObjectOwnership::SchedulerLocal(scheduler)
             {
@@ -199,7 +199,7 @@ fn relocate_handles<Handle: Copy + Ord>(
 }
 
 fn remembered_cards(
-    objects: &BTreeMap<ManagedReference, super::heap::RelocationAllocation>,
+    objects: &super::table::ObjectTable<super::heap::RelocationAllocation>,
 ) -> BTreeSet<ManagedReference> {
     objects
         .iter()

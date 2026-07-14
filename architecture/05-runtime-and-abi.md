@@ -130,6 +130,14 @@ and capacity private, grows storage without changing the list handle, and
 applies precise barriers for managed elements. MIR retains distinct typed list
 operations; no backend may reinterpret them as array or table operations.
 
+ADR 0060 advances native ABI 1 to version 1.11 with atomic initialized object
+allocation. LLVM passes the exact pointer map and one physical initializer per
+logical slot in a single native transition. The runtime validates every managed
+initializer before publication and returns either a completely initialized
+object or the closed allocation-failure sentinel. MIR retains one backend-neutral
+typed record/class construction operation; later mutation still uses the
+ordinary checked store and barrier path.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry

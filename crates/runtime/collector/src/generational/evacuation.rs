@@ -424,7 +424,7 @@ impl GenerationalRuntime {
         relocations: &BTreeMap<ManagedReference, ManagedReference>,
     ) -> Result<
         (
-            BTreeMap<ManagedReference, crate::relocation::RelocationAllocation>,
+            crate::relocation::table::ObjectTable<crate::relocation::RelocationAllocation>,
             usize,
             usize,
         ),
@@ -456,8 +456,8 @@ impl GenerationalRuntime {
             .ok_or_else(RuntimeFailure::runtime_invariant)?
             .evacuate(tasks, &relocation_snapshot)?;
         let mut fields_updated = 0usize;
-        let mut next_objects = BTreeMap::new();
-        for (reference, object) in &self.nursery.objects {
+        let mut next_objects = crate::relocation::table::ObjectTable::new();
+        for (reference, object) in self.nursery.objects.iter() {
             if relocations.contains_key(reference) {
                 continue;
             }
@@ -486,14 +486,14 @@ impl GenerationalRuntime {
         relocations: &BTreeMap<ManagedReference, ManagedReference>,
     ) -> Result<
         (
-            BTreeMap<ManagedReference, crate::relocation::RelocationAllocation>,
+            crate::relocation::table::ObjectTable<crate::relocation::RelocationAllocation>,
             usize,
         ),
         RuntimeFailure,
     > {
         let mut fields_updated = 0usize;
-        let mut next_objects = BTreeMap::new();
-        for (reference, object) in &self.nursery.objects {
+        let mut next_objects = crate::relocation::table::ObjectTable::new();
+        for (reference, object) in self.nursery.objects.iter() {
             let next_key = relocated(*reference, relocations);
             let mut next_object = object.clone();
             fields_updated = fields_updated

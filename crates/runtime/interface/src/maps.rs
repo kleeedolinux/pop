@@ -13,6 +13,15 @@ pub struct ObjectMap {
 }
 
 impl ObjectMap {
+    /// Constructs the canonical map for a pointer-free logical payload.
+    #[must_use]
+    pub const fn scalar(slot_count: u32) -> Self {
+        Self {
+            slot_count,
+            reference_slots: Vec::new(),
+        }
+    }
+
     /// Constructs a canonical logical object pointer map.
     ///
     /// # Errors

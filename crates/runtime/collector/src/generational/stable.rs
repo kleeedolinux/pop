@@ -92,6 +92,29 @@ impl StableGenerationalRuntime {
         self.inner.allocate_array_filled(&stable, value)
     }
 
+    /// Allocates one stable-token object with its complete typed payload.
+    ///
+    /// # Errors
+    ///
+    /// Forwards typed allocation, initializer, or memory-admission failures.
+    pub fn allocate_object_initialized(
+        &mut self,
+        request: &ObjectAllocationRequest,
+        values: &[u64],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        if request.allocation_class() == Self::stable_class(request.allocation_class()) {
+            return self.inner.allocate_object_initialized(request, values);
+        }
+        self.inner.allocate_object_initialized(
+            &ObjectAllocationRequest::new(
+                request.type_id(),
+                Self::stable_class(request.allocation_class()),
+                request.object_map().clone(),
+            ),
+            values,
+        )
+    }
+
     /// # Errors
     ///
     /// Forwards invalid array, value, or slot-map failures.
@@ -124,7 +147,7 @@ impl StableGenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        self.inner.store_array_value(owner, slot, value)
+        self.inner.store_stable_array_value(owner, slot, value)
     }
 
     /// # Errors
@@ -136,7 +159,7 @@ impl StableGenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        self.inner.store_slot_value(owner, slot, value)
+        self.inner.store_stable_slot_value(owner, slot, value)
     }
 
     /// # Errors
@@ -210,6 +233,9 @@ impl RuntimeAdapter for StableGenerationalRuntime {
         &mut self,
         request: &ObjectAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
+        if request.allocation_class() == Self::stable_class(request.allocation_class()) {
+            return self.inner.allocate_object(request);
+        }
         self.inner.allocate_object(&ObjectAllocationRequest::new(
             request.type_id(),
             Self::stable_class(request.allocation_class()),

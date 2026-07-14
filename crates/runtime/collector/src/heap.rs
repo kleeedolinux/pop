@@ -7,6 +7,10 @@ use pop_runtime_interface::{
     RuntimeTypeId,
 };
 
+mod slot;
+
+pub(crate) use slot::{SlotStorage, SlotValue};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapLimits {
     pub(crate) maximum_objects: usize,
@@ -100,12 +104,6 @@ impl CollectorMetrics {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SlotValue {
-    Scalar(u64),
-    Reference(Option<ManagedReference>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AllocationKind {
     Object,
     Array(ArrayElementMap),
@@ -118,7 +116,7 @@ pub(crate) struct Allocation {
     pub(crate) type_id: RuntimeTypeId,
     pub(crate) class: AllocationClass,
     pub(crate) object_map: ObjectMap,
-    pub(crate) slots: Vec<SlotValue>,
+    pub(crate) slots: SlotStorage,
 }
 
 pub struct BootstrapRuntime {

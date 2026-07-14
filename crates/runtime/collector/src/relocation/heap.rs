@@ -7,6 +7,8 @@ use pop_runtime_interface::{ManagedReference, ObjectSlot, PinHandle, RootHandle,
 use crate::heap::{Allocation, CollectorMetrics, SlotValue};
 use crate::ownership::ObjectOwnership;
 
+use super::table::ObjectTable;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectorGeneration {
     Nursery { age: u8 },
@@ -25,7 +27,7 @@ pub(crate) struct RelocationAllocation {
 }
 
 pub struct RelocationRuntime {
-    pub(crate) objects: BTreeMap<ManagedReference, RelocationAllocation>,
+    pub(crate) objects: ObjectTable<RelocationAllocation>,
     pub(crate) roots: BTreeMap<RootHandle, ManagedReference>,
     pub(crate) pins: BTreeMap<PinHandle, ManagedReference>,
     pub(crate) dirty_cards: BTreeSet<ManagedReference>,
@@ -42,7 +44,7 @@ impl RelocationRuntime {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            objects: BTreeMap::new(),
+            objects: ObjectTable::new(),
             roots: BTreeMap::new(),
             pins: BTreeMap::new(),
             dirty_cards: BTreeSet::new(),
@@ -143,6 +145,41 @@ impl RelocationRuntime {
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         object.allocation.slots[slot.raw() as usize] = SlotValue::Reference(value);
         Ok(())
+    }
+
+    pub(crate) fn slot_value(
+        &self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+    ) -> Result<SlotValue, RuntimeFailure> {
+        self.objects
+            .get(&owner)
+            .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
+            .copied()
+            .ok_or_else(RuntimeFailure::runtime_invariant)
+    }
+
+    pub(crate) fn store_validated_reference(
+        &mut self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+        previous: Option<ManagedReference>,
+        value: Option<ManagedReference>,
+    ) -> Result<(), RuntimeFailure> {
+        let current = self
+            .objects
+            .get_mut(&owner)
+            .and_then(|object| object.allocation.slots.get_mut(slot.raw() as usize))
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        match current {
+            SlotValue::Reference(found) if *found == previous => {
+                *found = value;
+                Ok(())
+            }
+            SlotValue::Reference(_) | SlotValue::Scalar(_) => {
+                Err(RuntimeFailure::runtime_invariant())
+            }
+        }
     }
 
     /// Loads a precise managed-reference slot.

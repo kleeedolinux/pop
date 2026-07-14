@@ -123,6 +123,10 @@ pub fn lower_mir_to_llvm_ir(
             "declare i64 @{}(i64)",
             native_runtime_symbol(RuntimeOperation::AllocateObject)
         ),
+        format!(
+            "declare i64 @{}(i64, ptr, i64, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::AllocateObjectInitialized)
+        ),
         "declare i64 @pop_rt_allocate_mapped_object(i64, ptr, i64)".to_owned(),
         format!(
             "declare i64 @{}(i64, i1)",

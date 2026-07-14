@@ -107,6 +107,10 @@ not table or runtime-name lookup.
 - accepted native stable-token generational composition that removes the
   bootstrap collector from ABI 1 executables while reserving moving nursery and
   evacuation for verified ABI 2 writable roots;
+- ABI 1.11 atomic initialized-object publication plus profiled retained-graph
+  fast paths: cached committed accounting, prepublication managed-array fill,
+  stable-stage barrier specialization, mutator-local mature-span cursors,
+  inline small payloads, and deterministic arena-indexed token metadata;
 - backend-private scalar replacement for non-escaping scalar arrays, including
   read-only loop-local instances, with exact shape/bounds traps, loop safe
   points, and managed, escaping, or mutated-loop negative coverage;

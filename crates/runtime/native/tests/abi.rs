@@ -1,14 +1,15 @@
 use pop_runtime_native::{
     abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
     allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
-    pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_object,
-    pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
-    pop_rt_array_length, pop_rt_array_set, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_stage,
-    pop_rt_iteration_acquire, pop_rt_iteration_next, pop_rt_list_add, pop_rt_list_create,
-    pop_rt_list_get, pop_rt_list_get_checked, pop_rt_list_length, pop_rt_list_set, pop_rt_pin,
-    pop_rt_range_create, pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat,
-    pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read, pop_rt_table_get,
-    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_unpin, request_abi_collection,
+    pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_initialized_object,
+    pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get,
+    pop_rt_array_get_checked, pop_rt_array_length, pop_rt_array_set, pop_rt_field_get,
+    pop_rt_field_set, pop_rt_gc_stage, pop_rt_iteration_acquire, pop_rt_iteration_next,
+    pop_rt_list_add, pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked,
+    pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_range_create, pop_rt_release_root,
+    pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format,
+    pop_rt_string_read, pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set, pop_rt_unpin,
+    request_abi_collection,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
 use std::ffi::CString;
@@ -25,8 +26,63 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn native_runtime_exports_the_stable_generational_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 10);
+    assert_eq!(pop_rt_abi_minor(), 11);
     assert_eq!(pop_rt_gc_stage(), 2);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn initialized_object_allocation_publishes_one_complete_typed_payload() {
+    let _guard = abi_test_lock();
+    let child = pop_rt_allocate_object(0);
+    assert_ne!(child, 0);
+    let reference_slots = [1_u32];
+    let initial_values = [77_u64, child];
+
+    // SAFETY: Both pointers address the exact immutable arrays declared by the
+    // accompanying counts for the duration of the call.
+    let object = unsafe {
+        pop_rt_allocate_initialized_object(
+            2,
+            reference_slots.as_ptr(),
+            reference_slots.len() as u64,
+            initial_values.as_ptr(),
+            initial_values.len() as u64,
+        )
+    };
+    assert_ne!(object, 0);
+    assert_eq!(pop_rt_field_get(object, 1), 77);
+    assert_eq!(pop_rt_field_get(object, 2), child);
+
+    // SAFETY: The pointers remain valid; the deliberately mismatched value
+    // count and invalid managed token must fail before publication.
+    unsafe {
+        assert_eq!(
+            pop_rt_allocate_initialized_object(
+                2,
+                reference_slots.as_ptr(),
+                1,
+                initial_values.as_ptr(),
+                1,
+            ),
+            0
+        );
+        let invalid_values = [77_u64, u64::MAX];
+        assert_eq!(
+            pop_rt_allocate_initialized_object(
+                2,
+                reference_slots.as_ptr(),
+                1,
+                invalid_values.as_ptr(),
+                2,
+            ),
+            0
+        );
+        assert_eq!(
+            pop_rt_allocate_initialized_object(1, std::ptr::null(), 0, std::ptr::null(), 1),
+            0
+        );
+    }
 }
 
 #[test]

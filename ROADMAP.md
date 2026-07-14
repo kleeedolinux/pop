@@ -205,6 +205,16 @@ Package for the first release.
     active mature page by exact layout and scheduler, initialize scalar arrays
     in one pass, and scalar-replace non-escaping read-only loop-local arrays
     while preserving traps, safe points, and managed-path negatives.
+  - [x] Profile the real retained managed-object workload and remove its
+    bootstrap-era allocation costs: ABI 1.11 now publishes initialized objects
+    atomically, committed-byte accounting is constant-time, stable mature
+    stores skip impossible nursery cards, managed arrays initialize before
+    publication, active mature spans retain mutator-local cursors, small
+    payloads remain inline, and object/placement metadata uses deterministic
+    arena-indexed token segments. On the development host this reduced the
+    checksum-validated `objectArray` median from about 408 ms to about 40 ms;
+    direct page-backed payload access and inline conditional barriers remain
+    required before the production throughput gate can close.
   - [x] Add opt-in persistent host workers with bounded owner-FIFO queues,
     opposite-end peer stealing, parallel exact object-map and collecting-safe-
     point remembered-card scans, deterministic result application, sweep

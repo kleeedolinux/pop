@@ -49,10 +49,16 @@ slice rather than tracing concurrently with mutator execution, so
 ABI 1 nursery-eligible requests into stable mature placement, exposes the typed
 array/object/table access required by the native facade, and reports
 `NativeStableGenerationalConformance`. Exact-layout mature allocations use a
-scheduler-keyed active-page index, and scalar bulk construction writes the
-final initialized payload in one pass. This wrapper never invokes nursery
-relocation or selective evacuation; those remain gated on ABI 2 writable-root
-proof.
+scheduler-keyed active-page index with one mutator-local authoritative cursor;
+central page metadata changes only when that active page switches or fills.
+Atomic object construction and scalar or managed-array bulk construction write
+the complete precise payload before publication. Two-slot payloads stay inline,
+and monotonically assigned managed tokens index deterministic sliding segment
+directories for both objects and placements instead of one ordered-tree node
+per allocation. The stable-only reference barrier preserves SATB/post-scan
+shading while omitting the impossible mature-to-young card path. This wrapper
+never invokes nursery relocation or selective evacuation; those remain gated on
+ABI 2 writable-root proof.
 
 The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
@@ -84,7 +90,8 @@ unfinished production work. A separate memory controller
 enforces a byte hard limit before heap mutation, protects emergency and
 evacuation reserves, accounts
 typed stack/code/metadata/native/arena/isolated usage, adapts the collection
-target, performs bounded mature-cycle assists, returns empty logical pages, and
+target with sixteen MiB of default startup headroom, performs bounded
+mature-cycle assists, returns empty logical pages, and
 reports domain/debt/pressure/OOM telemetry. These logical descriptors validate
 ownership and allocation transitions without exposing a raw address through
 PLRI. Parallel per-scheduler TLAB ownership, virtual-memory reservation,

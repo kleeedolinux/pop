@@ -59,6 +59,15 @@ scalar-replace or stack-place them; that optimization is intentionally part of
 this cross-language workload. Use `objectArray` when retained managed-heap work
 must remain observable.
 
+Retained-object optimization must not replace the managed graph with a scalar
+checksum. The Pop Lang executable must still allocate 200,000 distinct managed
+objects, retain their tokens through the managed-reference array, read every
+element and field, and print the checksum. Profile-guided allocator work may
+amortize page metadata, compact token indexes, inline small payload storage, or
+specialize proven barriers. Machine-specific timings are evidence, not a
+portable performance promise; record the before/after JSON outside the checked-
+in `latest` result unless intentionally publishing a complete benchmark run.
+
 The default outputs are `results/latest.json` and `results/latest.html`.
 `run` writes JSON only, while `render` can regenerate HTML from an existing
 result:
