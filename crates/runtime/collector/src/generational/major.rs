@@ -1,5 +1,7 @@
 //! Precise SATB marking and bounded mature sweeping.
 
+use std::ops::Bound::{Excluded, Unbounded};
+
 use pop_runtime_interface::{
     CollectionStatistics, ManagedReference, RootPublication, RuntimeFailure,
 };
@@ -77,20 +79,20 @@ impl GenerationalRuntime {
                         completed_work += work;
                         continue;
                     }
-                    let Some(reference) = self.major.sweep.pop() else {
+                    let Some((reference, reclaim)) = self.next_sweep_entry() else {
                         return Ok((Some(self.finish_major()), completed_work));
                     };
-                    if self.nursery.objects.remove(&reference).is_some() {
+                    if reclaim && self.nursery.objects.remove(&reference).is_some() {
                         self.major.reclaimed = self.major.reclaimed.saturating_add(1);
+                        self.allocation.remove(reference);
+                        self.nursery.dirty_cards.remove(&reference);
                     }
-                    self.allocation.remove(reference);
-                    self.nursery.dirty_cards.remove(&reference);
                     remaining -= 1;
                     completed_work += 1;
                 }
             }
         }
-        if self.major.phase == MajorCyclePhase::Sweeping && self.major.sweep.is_empty() {
+        if self.major.phase == MajorCyclePhase::Sweeping && self.major.sweep_complete {
             return Ok((Some(self.finish_major()), completed_work));
         }
         Ok((None, completed_work))
@@ -137,22 +139,25 @@ impl GenerationalRuntime {
     }
 
     fn advance_background_sweep(&mut self, work_budget: usize) -> Result<usize, RuntimeFailure> {
-        let mut references = Vec::with_capacity(work_budget.min(self.major.sweep.len()));
-        while references.len() < work_budget {
-            let Some(reference) = self.major.sweep.pop() else {
+        let mut references = Vec::new();
+        let mut completed_work = 0;
+        while completed_work < work_budget {
+            let Some((reference, reclaim)) = self.next_sweep_entry() else {
                 break;
             };
-            references.push(reference);
+            completed_work += 1;
+            if reclaim {
+                references.push(reference);
+            }
         }
         if references.is_empty() {
-            return Ok(0);
+            return Ok(completed_work);
         }
         let swept = self
             .workers
             .as_mut()
             .ok_or_else(RuntimeFailure::runtime_invariant)?
             .sweep(references)?;
-        let completed_work = swept.len();
         for reference in swept {
             if self.nursery.objects.remove(&reference).is_some() {
                 self.major.reclaimed = self.major.reclaimed.saturating_add(1);
@@ -161,6 +166,31 @@ impl GenerationalRuntime {
             self.nursery.dirty_cards.remove(&reference);
         }
         Ok(completed_work)
+    }
+
+    fn next_sweep_entry(&mut self) -> Option<(ManagedReference, bool)> {
+        let next = match self.major.sweep_cursor {
+            Some(cursor) => self
+                .nursery
+                .objects
+                .range((Excluded(cursor), Unbounded))
+                .next(),
+            None => self.nursery.objects.iter().next(),
+        }
+        .map(|(reference, object)| {
+            (
+                *reference,
+                object.generation == CollectorGeneration::Mature
+                    && !self.major.marked_mature.contains(reference),
+            )
+        });
+        let Some((reference, reclaim)) = next else {
+            self.major.sweep_complete = true;
+            return None;
+        };
+        self.major.sweep_cursor = Some(reference);
+        self.major.sweep_entries_examined = self.major.sweep_entries_examined.saturating_add(1);
+        Some((reference, reclaim))
     }
 
     fn scan_snapshot_reference(
@@ -192,16 +222,8 @@ impl GenerationalRuntime {
     }
 
     fn prepare_sweep(&mut self) {
-        self.major.sweep = self
-            .nursery
-            .objects
-            .iter()
-            .filter_map(|(reference, object)| {
-                (object.generation == CollectorGeneration::Mature
-                    && !self.major.marked_mature.contains(reference))
-                .then_some(*reference)
-            })
-            .collect();
         self.major.phase = MajorCyclePhase::Sweeping;
+        self.major.sweep_cursor = None;
+        self.major.sweep_complete = false;
     }
 }

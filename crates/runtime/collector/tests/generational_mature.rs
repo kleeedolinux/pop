@@ -286,3 +286,57 @@ fn pin_admission_does_not_assist_before_registering_a_mature_target() {
     finish_major(&mut runtime, &mut roots);
     assert!(!runtime.contains(mature));
 }
+
+#[test]
+fn mature_sweep_reclaims_only_the_configured_lazy_slice() {
+    let mut runtime = GenerationalRuntime::with_config(MajorCollectorConfig::new(1));
+    for _ in 0..32 {
+        runtime
+            .allocate_object(&object(0, &[]))
+            .expect("unreachable mature object");
+    }
+    let mut roots = no_stack_roots(10);
+
+    runtime.request_major_collection();
+    let outcome = runtime
+        .safe_point(&mut roots)
+        .expect("first lazy sweep slice");
+
+    assert!(outcome.collection().is_none());
+    assert_eq!(runtime.major_phase(), MajorCyclePhase::Sweeping);
+    assert_eq!(runtime.object_count(), 31);
+    assert_eq!(runtime.major_sweep_entries_examined(), 1);
+    finish_major(&mut runtime, &mut roots);
+    assert_eq!(runtime.object_count(), 0);
+}
+
+#[test]
+fn mature_allocations_during_lazy_sweep_are_live_for_the_active_cycle() {
+    let mut runtime = GenerationalRuntime::with_config(MajorCollectorConfig::new(1));
+    runtime
+        .allocate_object(&object(0, &[]))
+        .expect("first unreachable object");
+    runtime
+        .allocate_object(&object(0, &[]))
+        .expect("second unreachable object");
+    let mut roots = no_stack_roots(11);
+    runtime.request_major_collection();
+    assert!(
+        runtime
+            .safe_point(&mut roots)
+            .expect("enter sweeping")
+            .collection()
+            .is_none()
+    );
+    assert_eq!(runtime.major_phase(), MajorCyclePhase::Sweeping);
+
+    let allocated = runtime
+        .allocate_object(&object(0, &[]))
+        .expect("allocation during sweeping");
+    finish_major(&mut runtime, &mut roots);
+    assert!(runtime.contains(allocated));
+
+    runtime.request_major_collection();
+    finish_major(&mut runtime, &mut roots);
+    assert!(!runtime.contains(allocated));
+}

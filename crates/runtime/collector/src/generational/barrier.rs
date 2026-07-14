@@ -45,11 +45,17 @@ impl GenerationalRuntime {
     }
 
     pub(crate) fn mark_new_allocation(&mut self, reference: ManagedReference) {
-        if self.major.phase == MajorCyclePhase::Marking
-            && self.nursery.generation(reference) == Some(CollectorGeneration::Mature)
-        {
-            self.major.marked_mature.insert(reference);
-            self.major.pending.push(reference);
+        if self.nursery.generation(reference) == Some(CollectorGeneration::Mature) {
+            match self.major.phase {
+                MajorCyclePhase::Marking => {
+                    self.major.marked_mature.insert(reference);
+                    self.major.pending.push(reference);
+                }
+                MajorCyclePhase::Sweeping => {
+                    self.major.marked_mature.insert(reference);
+                }
+                MajorCyclePhase::Idle => {}
+            }
         }
     }
 

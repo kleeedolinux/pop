@@ -129,7 +129,8 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - FFI;
 - opt-in retained metadata and generated typed adapters where justified;
 - production concurrent mature GC and latency/benchmark gates, building on the
-  implemented cooperative SATB mark/sweep, page/TLAB allocation, hard-limit
+  implemented cooperative SATB marking and ordered lazy sweeping without a
+  full-heap transition inventory, page/TLAB allocation, hard-limit
   accounting, adaptive pacing, bounded assists, logical memory telemetry, the
   standalone typed bounded-epoch coordinator, and opt-in bounded host-worker
   mark/card/sweep dispatch awaiting scheduler/runtime integration;

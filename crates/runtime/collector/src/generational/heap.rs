@@ -59,7 +59,9 @@ pub(crate) struct MajorCycle {
     pub(crate) satb: Vec<ManagedReference>,
     pub(crate) seen: BTreeSet<ManagedReference>,
     pub(crate) marked_mature: BTreeSet<ManagedReference>,
-    pub(crate) sweep: Vec<ManagedReference>,
+    pub(crate) sweep_cursor: Option<ManagedReference>,
+    pub(crate) sweep_complete: bool,
+    pub(crate) sweep_entries_examined: u64,
     pub(crate) reclaimed: u64,
     pub(crate) scanned: u64,
 }
@@ -72,7 +74,9 @@ impl MajorCycle {
             satb: Vec::new(),
             seen: BTreeSet::new(),
             marked_mature: BTreeSet::new(),
-            sweep: Vec::new(),
+            sweep_cursor: None,
+            sweep_complete: false,
+            sweep_entries_examined: 0,
             reclaimed: 0,
             scanned: 0,
         }
@@ -166,6 +170,11 @@ impl GenerationalRuntime {
     #[must_use]
     pub const fn major_cycle_active(&self) -> bool {
         !matches!(self.major.phase, MajorCyclePhase::Idle)
+    }
+
+    #[must_use]
+    pub const fn major_sweep_entries_examined(&self) -> u64 {
+        self.major.sweep_entries_examined
     }
 
     #[must_use]

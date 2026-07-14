@@ -18,8 +18,10 @@ threads receive immutable object snapshots through bounded per-worker queues,
 scan exact object maps and remembered cards in parallel, and return
 sequence-ordered results for collector-owned mutation. Refined cards become
 precise young roots immediately inside the collecting safe point, where no
-mutator store can invalidate the snapshot. It preserves snapshot edges, shades
-roots, pins, and
+mutator store can invalidate the snapshot. Mature sweeping advances through the
+ordered heap by a bounded cursor; the mark/sweep transition builds no heap-sized
+unreachable-object inventory, and allocations during sweeping are live for that
+cycle. It preserves snapshot edges, shades roots, pins, and
 new mature objects, and defers nursery relocation while a major snapshot still
 contains physical tokens. The implementation deliberately continues to report
 `RelocationConformance`: epochs/workers are not yet integrated with native
