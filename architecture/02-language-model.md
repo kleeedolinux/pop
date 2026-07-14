@@ -316,7 +316,7 @@ The source is evaluated once, `iterator()` is acquired once when required, and
 each iteration performs one `next()` returning `Iteration.Item(value)` or
 `Iteration.End`. Multiple bindings destructure one fixed tuple item exactly.
 No member name is looked up dynamically and no iterator is closed implicitly;
-resource-backed iteration uses explicit lexical `defer`. See ADR 0032, ADR
+resource-backed iteration uses explicit lexical `defer`. See ADR 0060, ADR
 0042, and ADR 0053.
 
 ## Namespaces, using directives, Modules, and Bubbles

@@ -4,7 +4,7 @@
 - Date: 2026-07-11
 - Supersedes: none
 - Superseded in part by: ADR 0025 canonical native entry and process arguments
-- Superseded in part by: ADR 0030 typed string output overload
+- Superseded in part by: ADR 0058 typed string output overload
 
 ## Context
 
@@ -50,7 +50,7 @@ source syntax or introduces dynamic values.
 
 Until complete `.poplib` reference loading is available, the verified
 `Pop.Standard` bootstrap metadata publishes the first prelude function identity:
-`print(Int) -> ()`. ADR 0030 extends this bootstrap surface with the typed
+`print(Int) -> ()`. ADR 0058 extends this bootstrap surface with the typed
 `print(String) -> ()` overload while preserving the integer identity. Name
 lookup selects these identities only at prelude priority; ordinary lexical and
 declaration bindings still shadow the overload set. Typed AST, HIR, and MIR

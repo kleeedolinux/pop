@@ -22,7 +22,9 @@ fn documentation_attaches_through_attributes_to_the_next_declaration() {
     let analysis = analyze(
         "namespace Saves\n\
          \n\
-         --- <summary>Represents a saved player.</summary>\n\
+         --- <summary>\n\
+         --- Represents a saved player.\n\
+         --- </summary>\n\
          @Serializable(version = 1)\n\
          public record PlayerSave\n\
              name: String\n\
@@ -35,19 +37,26 @@ fn documentation_attaches_through_attributes_to_the_next_declaration() {
     assert_eq!(target.kind(), NodeKind::RecordDeclaration);
     assert_eq!(
         block.xml_text(),
-        "<summary>Represents a saved player.</summary>"
+        "<summary>\nRepresents a saved player.\n</summary>"
     );
-    assert!(matches!(
-        block.xml().expect("safe XML").children()[0],
-        XmlNode::Element { ref name, .. } if name == "summary"
-    ));
+    let XmlNode::Element { name, children, .. } = &block.xml().expect("safe XML").children()[0]
+    else {
+        panic!("summary element");
+    };
+    assert_eq!(name, "summary");
+    assert_eq!(
+        children,
+        &[XmlNode::Text("Represents a saved player.".to_owned())]
+    );
 }
 
 #[test]
 fn documentation_attaches_to_nominal_error_declarations() {
     let analysis = analyze(
         "namespace Io\n\
-         --- <summary>Describes failures while loading a file.</summary>\n\
+         --- <summary>\n\
+         --- Describes failures while loading a file.\n\
+         --- </summary>\n\
          public error LoadError\n\
              Missing(path: String)\n\
          end\n",
@@ -64,14 +73,18 @@ fn documentation_attaches_to_nominal_error_declarations() {
 fn blank_lines_and_ordinary_comments_break_attachment() {
     let blank = analyze(
         "namespace Saves\n\
-         --- <summary>Detached.</summary>\n\
+         --- <summary>\n\
+         --- Detached.\n\
+         --- </summary>\n\
          \n\
          public record Save\n\
          end\n",
     );
     let ordinary = analyze(
         "namespace Saves\n\
-         --- <summary>Detached.</summary>\n\
+         --- <summary>\n\
+         --- Detached.\n\
+         --- </summary>\n\
          -- ordinary comment\n\
          public record Save\n\
          end\n",
@@ -85,9 +98,17 @@ fn blank_lines_and_ordinary_comments_break_attachment() {
 fn consecutive_lines_form_one_checked_xml_fragment() {
     let analysis = analyze(
         "namespace Saves\n\
-         --- <summary>Loads a save.</summary>\n\
-         --- <param name=\"path\">The path.</param>\n\
-         --- <returns>The save.</returns>\n\
+         --- <summary>\n\
+         --- Loads a save.\n\
+         --- </summary>\n\
+         ---\n\
+         --- <param name=\"path\">\n\
+         --- The path.\n\
+         --- </param>\n\
+         ---\n\
+         --- <returns>\n\
+         --- The save.\n\
+         --- </returns>\n\
          public function load(path: String): String\n\
              return path\n\
          end\n",
@@ -96,6 +117,55 @@ fn consecutive_lines_form_one_checked_xml_fragment() {
     assert_eq!(analysis.blocks().len(), 1);
     assert_eq!(analysis.blocks()[0].xml().expect("XML").children().len(), 3);
     assert!(analysis.diagnostics().is_empty());
+}
+
+#[test]
+fn canonical_lines_preserve_inline_spacing_and_literal_code_whitespace() {
+    let analysis = analyze(
+        "namespace Saves\n\
+         --- <summary>\n\
+         --- Returns a <see cref=\"Player\"/> value.\n\
+         --- </summary>\n\
+         ---\n\
+         --- <example>\n\
+         --- <code>\n\
+         ---     local value = 1\n\
+         --- </code>\n\
+         --- </example>\n\
+         public record Save\n\
+         end\n",
+    );
+    let xml = analysis.blocks()[0].xml().expect("checked XML");
+    let XmlNode::Element {
+        children: summary_children,
+        ..
+    } = &xml.children()[0]
+    else {
+        panic!("summary element");
+    };
+    assert!(matches!(&summary_children[0], XmlNode::Text(text) if text == "Returns a "));
+    assert!(matches!(&summary_children[2], XmlNode::Text(text) if text == " value."));
+
+    let XmlNode::Element {
+        children: example_children,
+        ..
+    } = &xml.children()[1]
+    else {
+        panic!("example element");
+    };
+    let XmlNode::Element {
+        name,
+        children: code_children,
+        ..
+    } = &example_children[0]
+    else {
+        panic!("code element");
+    };
+    assert_eq!(name, "code");
+    assert_eq!(
+        code_children,
+        &[XmlNode::Text("\n    local value = 1\n".to_owned())]
+    );
 }
 
 #[test]
@@ -124,12 +194,14 @@ fn dtds_entities_and_processing_instructions_are_rejected() {
 fn malformed_xml_has_a_deterministic_diagnostic() {
     let analysis = analyze(
         "namespace Saves\n\
-         --- <summary>Broken</remarks>\n\
+         --- <summary>\n\
+         --- Broken\n\
+         --- </remarks>\n\
          public record Save\n\
          end\n",
     );
 
-    assert_eq!(analysis.diagnostic_snapshot(), "POP6401@16..45\n");
+    assert_eq!(analysis.diagnostic_snapshot(), "POP6401@16..55\n");
     assert_eq!(
         analysis.diagnostics()[0].severity(),
         DiagnosticSeverity::Warning
@@ -144,9 +216,17 @@ fn malformed_xml_has_a_deterministic_diagnostic() {
 fn typed_error_tags_require_exact_nominal_cases_and_complete_public_coverage() {
     let mut analysis = analyze(
         "namespace Io\n\
-         --- <summary>Loads a file.</summary>\n\
-         --- <error type=\"LoadError.Missing\">No file exists.</error>\n\
-         --- <error type=\"OtherError\">Wrong identity.</error>\n\
+         --- <summary>\n\
+         --- Loads a file.\n\
+         --- </summary>\n\
+         ---\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- No file exists.\n\
+         --- </error>\n\
+         ---\n\
+         --- <error type=\"OtherError\">\n\
+         --- Wrong identity.\n\
+         --- </error>\n\
          public function load(path: String): Int\n\
              return 0\n\
          end\n",
@@ -174,7 +254,9 @@ fn typed_error_tags_require_exact_nominal_cases_and_complete_public_coverage() {
 fn error_tags_are_rejected_without_a_result_error_type() {
     let mut analysis = analyze(
         "namespace Io\n\
-         --- <error type=\"LoadError\">Not a result.</error>\n\
+         --- <error type=\"LoadError\">\n\
+         --- Not a result.\n\
+         --- </error>\n\
          public function load(): Int\n\
              return 0\n\
          end\n",
@@ -185,16 +267,24 @@ fn error_tags_are_rejected_without_a_result_error_type() {
         .range();
     analysis.validate_typed_errors(&[TypedErrorDocumentationContract::without_result(target)]);
 
-    assert_eq!(analysis.diagnostic_snapshot(), "POP6402@13..62\n");
+    assert_eq!(analysis.diagnostic_snapshot(), "POP6402@13..72\n");
 }
 
 #[test]
 fn duplicate_error_tags_are_rejected_and_panic_does_not_cover_typed_errors() {
     let mut analysis = analyze(
         "namespace Io\n\
-         --- <error type=\"LoadError.Missing\">Missing.</error>\n\
-         --- <error type=\"LoadError.Missing\">Duplicate.</error>\n\
-         --- <panic condition=\"denied\">Invariant failure.</panic>\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- Missing.\n\
+         --- </error>\n\
+         ---\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- Duplicate.\n\
+         --- </error>\n\
+         ---\n\
+         --- <panic condition=\"denied\">\n\
+         --- Invariant failure.\n\
+         --- </panic>\n\
          public function load(): Int\n\
              return 0\n\
          end\n",
@@ -224,11 +314,18 @@ fn duplicate_error_tags_are_rejected_and_panic_does_not_cover_typed_errors() {
 fn public_error_declarations_and_cases_require_exactly_one_summary() {
     let mut analysis = analyze(
         "namespace Io\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
              Missing(path: String)\n\
-             --- <summary>Access was denied.</summary>\n\
-             --- <summary>Duplicate summary.</summary>\n\
+             --- <summary>\n\
+             --- Access was denied.\n\
+             --- </summary>\n\
+             ---\n\
+             --- <summary>\n\
+             --- Duplicate summary.\n\
+             --- </summary>\n\
              Denied\n\
          end\n",
     );
@@ -244,11 +341,18 @@ fn public_error_declarations_and_cases_require_exactly_one_summary() {
         .range();
     let missing_case_start = missing.end();
     let source = "namespace Io\n\
-                  --- <summary>Describes loading failures.</summary>\n\
+                  --- <summary>\n\
+                  --- Describes loading failures.\n\
+                  --- </summary>\n\
                   public error LoadError\n\
                       Missing(path: String)\n\
-                      --- <summary>Access was denied.</summary>\n\
-                      --- <summary>Duplicate summary.</summary>\n\
+                      --- <summary>\n\
+                      --- Access was denied.\n\
+                      --- </summary>\n\
+                      ---\n\
+                      --- <summary>\n\
+                      --- Duplicate summary.\n\
+                      --- </summary>\n\
                       Denied\n\
                   end\n";
     let missing_range = pop_foundation::TextRange::new(
@@ -294,7 +398,9 @@ fn public_error_declarations_and_cases_require_exactly_one_summary() {
 fn returns_tags_follow_the_typed_result_contract() {
     let mut no_result = analyze(
         "namespace Io\n\
-         --- <returns>Invalid.</returns>\n\
+         --- <returns>\n\
+         --- Invalid.\n\
+         --- </returns>\n\
          public function close()\n\
          end\n",
     );
@@ -305,11 +411,13 @@ fn returns_tags_follow_the_typed_result_contract() {
     no_result.validate_typed_returns(&[TypedReturnsDocumentationContract::without_result(
         no_result_target,
     )]);
-    assert_eq!(no_result.diagnostic_snapshot(), "POP6408@13..44\n");
+    assert_eq!(no_result.diagnostic_snapshot(), "POP6408@13..54\n");
 
     let mut result = analyze(
         "namespace Io\n\
-         --- <returns>The successful value.</returns>\n\
+         --- <returns>\n\
+         --- The successful value.\n\
+         --- </returns>\n\
          public function load(): Result<Int, LoadError>\n\
              return Result.Error(LoadError.Failed())\n\
          end\n",
@@ -323,8 +431,13 @@ fn returns_tags_follow_the_typed_result_contract() {
 
     let mut duplicate = analyze(
         "namespace Io\n\
-         --- <returns>First.</returns>\n\
-         --- <returns>Second.</returns>\n\
+         --- <returns>\n\
+         --- First.\n\
+         --- </returns>\n\
+         ---\n\
+         --- <returns>\n\
+         --- Second.\n\
+         --- </returns>\n\
          public function load(): Result<Int, LoadError>\n\
              return Result.Error(LoadError.Failed())\n\
          end\n",

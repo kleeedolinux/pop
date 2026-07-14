@@ -2212,15 +2212,21 @@ fn typed_results_errors_and_cleanup_lower_without_backend_semantic_fallback() {
         FileId::from_raw(0),
         "src/errors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>Loading failed.</summary>\n\
+             --- <summary>\n\
+             --- Loading failed.\n\
+             --- </summary>\n\
              Failed\n\
          end\n\
          private function fail(): Result<Int, LoadError>\n\
              return Result.Error(LoadError.Failed())\n\
          end\n\
-         --- <error type=\"LoadError.Failed\">Loading failed.</error>\n\
+         --- <error type=\"LoadError.Failed\">\n\
+         --- Loading failed.\n\
+         --- </error>\n\
          public function forward(): Result<Int, LoadError>\n\
              defer\n\
                  print(\"cleanup\")\n\

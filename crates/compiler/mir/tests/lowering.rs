@@ -76,11 +76,17 @@ fn typed_results_errors_and_defer_lower_to_explicit_verified_control_flow() {
         FileId::from_raw(0),
         "src/errors.pop",
         "namespace Main\n\
-         --- <summary>Describes loading failures.</summary>\n\
+         --- <summary>\n\
+         --- Describes loading failures.\n\
+         --- </summary>\n\
          public error LoadError\n\
-             --- <summary>No input exists.</summary>\n\
+             --- <summary>\n\
+             --- No input exists.\n\
+             --- </summary>\n\
              Missing(path: String)\n\
-             --- <summary>Access is denied.</summary>\n\
+             --- <summary>\n\
+             --- Access is denied.\n\
+             --- </summary>\n\
              Denied\n\
          end\n\
          private function load(path: String): Result<Int, LoadError>\n\
@@ -90,8 +96,13 @@ fn typed_results_errors_and_defer_lower_to_explicit_verified_control_flow() {
              local invoke = load\n\
              return invoke(path)\n\
          end\n\
-         --- <error type=\"LoadError.Missing\">No input exists.</error>\n\
-         --- <error type=\"LoadError.Denied\">Access is denied.</error>\n\
+         --- <error type=\"LoadError.Missing\">\n\
+         --- No input exists.\n\
+         --- </error>\n\
+         ---\n\
+         --- <error type=\"LoadError.Denied\">\n\
+         --- Access is denied.\n\
+         --- </error>\n\
          public function forward(path: String): Result<String, LoadError>\n\
              defer\n\
                  print(path)\n\
@@ -380,7 +391,7 @@ fn optional_control_lowers_to_typed_presence_cfg_without_backend_reconstruction(
 
 #[test]
 fn repeat_until_lowers_to_portable_body_condition_exit_and_backedge_cfg() {
-    // ADR 0032 deliberately keeps repeat-until out of the MIR instruction set.
+    // ADR 0060 deliberately keeps repeat-until out of the MIR instruction set.
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/repeat_until.pop",

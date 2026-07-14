@@ -9,8 +9,12 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+pop-documentation.workspace = true
 pop-source.workspace = true
 pop-syntax.workspace = true
+
+[dev-dependencies]
+pop-foundation.workspace = true
 
 [lints]
 workspace = true

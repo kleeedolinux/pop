@@ -112,7 +112,7 @@ The bootstrap driver exposes this experiment as `pop transpile <source.pop>
 --to c`. Successful output is C source on standard output; failure publishes no
 partial artifact. C text is disposable output and is not a stable ABI, cache,
 or semantic contract. See
-[ADR 0031](./decisions/0031-experimental-secure-c-transpilation-backend.md).
+[ADR 0059](./decisions/0059-experimental-secure-c-transpilation-backend.md).
 
 ## Future VM backend
 

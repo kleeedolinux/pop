@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-13
-- Supersedes: the first-slice loop-control deferral in ADR 0032
+- Supersedes: the first-slice loop-control deferral in ADR 0060
 
 ## Context
 

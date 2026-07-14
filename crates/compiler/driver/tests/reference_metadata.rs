@@ -25,9 +25,17 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
                 0,
                 "src/contribution.pop",
                 "namespace Pop.Math\n\
-                 --- <summary>Returns the supplied value.</summary>\n\
-                 --- <param name=\"value\">The value to return.</param>\n\
-                 --- <returns>The unchanged value.</returns>\n\
+                 --- <summary>\n\
+                 --- Returns the supplied value.\n\
+                 --- </summary>\n\
+                 ---\n\
+                 --- <param name=\"value\">\n\
+                 --- The value to return.\n\
+                 --- </param>\n\
+                 ---\n\
+                 --- <returns>\n\
+                 --- The unchanged value.\n\
+                 --- </returns>\n\
                  public function contributorIdentity(value: Int): Int\n\
                      return value\n\
                  end\n",

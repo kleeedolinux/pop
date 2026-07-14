@@ -536,7 +536,7 @@ fn mutable_locals_flow_through_loop_backedges_and_branch_joins() {
 
 #[test]
 fn repeat_until_executes_once_and_repeats_through_its_false_backedge() {
-    // ADR 0032: the body runs before the first condition check, and `false`
+    // ADR 0060: the body runs before the first condition check, and `false`
     // returns to the body while `true` exits.
     let (mir, types) = executable_source(
         "namespace Main\n\

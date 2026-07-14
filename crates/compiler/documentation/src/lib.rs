@@ -325,7 +325,7 @@ impl DocumentationAnalysis {
                     diagnostics.push(documentation_diagnostics::invalid_error_tag(span, tag));
                     continue;
                 }
-                if contract.error_names.iter().any(|name| tag == *name) {
+                if contract.error_names.contains(&tag) {
                     covers_all = true;
                     continue;
                 }
@@ -752,7 +752,10 @@ impl XmlParser<'_> {
             }
             if self.remaining().starts_with('>') {
                 self.cursor += 1;
-                let children = self.parse_children(Some(&name))?;
+                let mut children = self.parse_children(Some(&name))?;
+                if name != "code" {
+                    normalize_element_boundary_whitespace(&mut children);
+                }
                 return Ok(XmlNode::Element {
                     name,
                     attributes,
@@ -845,6 +848,15 @@ impl XmlParser<'_> {
 
     fn remaining(&self) -> &str {
         &self.text[self.cursor..]
+    }
+}
+
+fn normalize_element_boundary_whitespace(children: &mut [XmlNode]) {
+    if let Some(XmlNode::Text(text)) = children.first_mut() {
+        *text = text.trim_start().to_owned();
+    }
+    if let Some(XmlNode::Text(text)) = children.last_mut() {
+        *text = text.trim_end().to_owned();
     }
 }
 

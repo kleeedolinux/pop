@@ -82,10 +82,21 @@ For example:
 ```pop
 namespace Pop.Math
 
---- <summary>Returns the smaller of two integers.</summary>
---- <param name="left">The first value.</param>
---- <param name="right">The second value.</param>
---- <returns>The smaller value.</returns>
+--- <summary>
+--- Returns the smaller of two integers.
+--- </summary>
+---
+--- <param name="left">
+--- The first value.
+--- </param>
+---
+--- <param name="right">
+--- The second value.
+--- </param>
+---
+--- <returns>
+--- The smaller value.
+--- </returns>
 public function minimum(left: Int, right: Int): Int
     if left < right then
         return left
