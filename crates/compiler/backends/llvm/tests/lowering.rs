@@ -162,6 +162,47 @@ fn optional_presence_and_extraction_use_a_typed_private_llvm_representation() {
 }
 
 #[test]
+fn async_await_lowers_to_native_suspend_boundary() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/async.pop",
+        "namespace Main\n\
+         public async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function useTask(): Int\n\
+             local pending = load()\n\
+             return await pending\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM async lowering")
+    .to_string();
+
+    assert!(text.contains("declare i64 @pop_rt_suspend(i64)"), "{text}");
+    assert!(text.contains("call i64 @pop_rt_suspend(i64 %v"), "{text}");
+}
+
+#[test]
 fn optional_scalar_collection_reads_execute_without_a_zero_sentinel() {
     let source = SourceFile::new(
         FileId::from_raw(0),
