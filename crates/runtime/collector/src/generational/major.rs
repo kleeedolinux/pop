@@ -53,6 +53,7 @@ impl GenerationalRuntime {
                     if self.nursery.objects.remove(&reference).is_some() {
                         self.major.reclaimed = self.major.reclaimed.saturating_add(1);
                     }
+                    self.allocation.remove(reference);
                     self.nursery.dirty_cards.remove(&reference);
                     remaining -= 1;
                 }

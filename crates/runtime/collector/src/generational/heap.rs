@@ -8,6 +8,11 @@ use pop_runtime_interface::{
 
 use crate::relocation::RelocationRuntime;
 
+use super::allocation::{
+    AllocationInfrastructure, AllocationInfrastructureConfig, AllocationMetrics,
+    AllocationPlacement, PageDescriptor, PageId,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MajorCollectorConfig {
     work_budget: usize,
@@ -73,6 +78,7 @@ impl MajorCycle {
 
 pub struct GenerationalRuntime {
     pub(crate) nursery: RelocationRuntime,
+    pub(crate) allocation: AllocationInfrastructure,
     pub(crate) major: MajorCycle,
     pub(crate) config: MajorCollectorConfig,
     pub(crate) minor_requested: bool,
@@ -87,8 +93,17 @@ impl GenerationalRuntime {
 
     #[must_use]
     pub fn with_config(config: MajorCollectorConfig) -> Self {
+        Self::with_allocation_config(config, AllocationInfrastructureConfig::default())
+    }
+
+    #[must_use]
+    pub fn with_allocation_config(
+        config: MajorCollectorConfig,
+        allocation: AllocationInfrastructureConfig,
+    ) -> Self {
         Self {
             nursery: RelocationRuntime::new(),
+            allocation: AllocationInfrastructure::new(allocation),
             major: MajorCycle::idle(),
             config,
             minor_requested: false,
@@ -122,6 +137,21 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn object_count(&self) -> usize {
         self.nursery.object_count()
+    }
+
+    #[must_use]
+    pub fn placement(&self, reference: ManagedReference) -> Option<AllocationPlacement> {
+        self.allocation.placement(reference)
+    }
+
+    #[must_use]
+    pub fn page_descriptor(&self, page: PageId) -> Option<&PageDescriptor> {
+        self.allocation.page(page)
+    }
+
+    #[must_use]
+    pub const fn allocation_metrics(&self) -> AllocationMetrics {
+        self.allocation.metrics()
     }
 
     /// Establishes a precise snapshot and enables the SATB barrier.

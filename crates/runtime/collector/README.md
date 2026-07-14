@@ -17,6 +17,15 @@ tokens. The implementation deliberately continues to report
 the background-worker, page/TLAB, paced production collector required before
 `ProductionConcurrentGenerational` may be selected.
 
+The same conformance runtime now records concrete Stage-2 allocation placement:
+validated region/page/TLAB geometry, monomorphic page descriptors with precise
+pointer layouts, scheduler-local Eden pointer bumps, separate mature/large/
+pinned domains, survivor-copy placement, deterministic promotion, and immediate
+pinned-space placement. These logical descriptors validate ownership and
+allocation transitions without exposing a raw address through PLRI. Parallel
+per-scheduler TLAB ownership, virtual-memory reservation, size-class reuse, and
+measured production fast paths remain required before the production profile.
+
 This crate is reusable by native execution, the MIR interpreter, and a future
 VM. It contains no C exports, native symbol mapping, platform process adapters,
 linker policy, or process-global singleton. See
@@ -25,8 +34,10 @@ linker policy, or process-global singleton. See
 The bootstrap implementation is divided into `heap`, `access`, `trace`, and
 `adapter` modules. The `relocation` directory separately groups its heap,
 collection, and adapter ownership; `generational` groups mature-cycle state,
-mark/sweep work, barriers, and its adapter. These are static Rust partitions
-behind the same PLRI dependency, not runtime plugins or dynamic dispatch.
+mark/sweep work, barriers, page/TLAB allocation, and its adapter. The allocation
+submodules separate public typed descriptors from mutable placement state.
+These are static Rust partitions behind the same PLRI dependency, not runtime
+plugins or dynamic dispatch.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and
