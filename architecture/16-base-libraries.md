@@ -212,8 +212,11 @@ Portable Pop bodies live under the crate's separate `pop/` source root. Adding
 a `.pop` Module relies on deterministic conventional discovery and requires no
 Rust `mod` declaration or compiler registry entry. Repository conformance proves
 complete source discovery, verified HIR/MIR lowering, and logical public
-reference-metadata consumption by a dependent Bubble. Deterministic on-disk
-`.poplib` encoding and linked execution remain later artifact/runtime slices.
+reference-metadata consumption by a dependent Bubble. `pop build` emits and
+immediately verifies deterministic on-disk `.poplib` artifacts with checked
+documentation and selected native implementations. Resolving dependencies from
+those loaded artifacts and linking their selected implementations remains a
+later loader slice.
 
 Rust-native foundation adapters use the typed `#[poplib(...)]` contract from
 [ADR 0037](./decisions/0037-typed-rust-foundation-adapter-attribute.md). The

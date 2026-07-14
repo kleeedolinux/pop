@@ -119,6 +119,9 @@ and does not define the work remaining for `0.1.0`.
     reject malformed, missing, extra, traversal, and corrupted content.
   - [x] Emit deterministic schema-versioned `documentation.xml` from checked
     symbol-owned XML fragments.
+  - [x] Make `pop build` emit and immediately verify each discovered library
+    Bubble's `.poplib` with exact identity, source/API hashes, dependencies,
+    checked documentation, and the selected native target implementation.
 - [ ] Complete checked public XML documentation, compiled examples, allocation
   and cost notes, and interpreter/LLVM differential tests for every stabilized
   API.

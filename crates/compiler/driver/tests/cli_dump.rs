@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use pop_driver::load_poplib;
+
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -476,6 +478,16 @@ fn package_check_and_build_use_manifest_selected_bubbles() {
     );
     let executable = package.join("target/debug/Studio.Entry");
     assert!(executable.is_file());
+    let artifact = package.join("target/debug/deps/Studio.Entry.poplib");
+    let loaded = load_poplib(&artifact).expect("build emits one verified library artifact");
+    assert_eq!(loaded.package(), "Studio.Entry");
+    assert_eq!(loaded.version(), "0.1.0");
+    assert_eq!(loaded.bubble(), "Studio.Entry");
+    assert!(loaded.documentation().is_some());
+    assert_eq!(
+        loaded.target_implementation().map(|(target, _)| target),
+        Some("x86_64-unknown-linux-gnu")
+    );
     let status = Command::new(executable)
         .status()
         .expect("manifest-built executable runs");
@@ -500,7 +512,7 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
     std::fs::write(
         data.join("src/lib.pop"),
         "namespace Studio.Data\n\
-         public function identity<T>(value: T): T\n\
+         public function identity(value: Int): Int\n\
              return value\n\
          end\n",
     )
@@ -516,10 +528,18 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
     )
     .expect("write application manifest");
     std::fs::write(
+        application.join("src/lib.pop"),
+        "namespace Studio.Application\n\
+         public function dependencyIdentity(value: Int): Int\n\
+             return Studio.Data.identity(value)\n\
+         end\n",
+    )
+    .expect("write application library");
+    std::fs::write(
         application.join("src/main.pop"),
         "namespace Studio.Application\n\
          function main()\n\
-             print(Studio.Data.identity(41))\n\
+             print(Studio.Application.dependencyIdentity(41))\n\
              print(42)\n\
          end\n",
     )
@@ -536,6 +556,22 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
         output_text(&run.stderr)
     );
     assert_eq!(output_text(&run.stdout), "41\n42\n");
+    let dependency_artifact = application.join("target/debug/deps/Studio.Data.poplib");
+    let loaded = load_poplib(&dependency_artifact)
+        .expect("dependency build emits its verified library artifact");
+    assert_eq!(loaded.package(), "Studio.Data");
+    assert_eq!(loaded.version(), "2.1.0");
+    assert_eq!(loaded.bubble(), "Studio.Data");
+    assert!(loaded.dependencies().is_empty());
+    let application_artifact = application.join("target/debug/deps/Studio.Application.poplib");
+    let loaded = load_poplib(&application_artifact)
+        .expect("root library artifact records its exact dependency");
+    let [dependency] = loaded.dependencies() else {
+        panic!("one exact artifact dependency");
+    };
+    assert_eq!(dependency.package(), "Studio.Data");
+    assert_eq!(dependency.version(), "2.1.0");
+    assert_eq!(dependency.bubble(), "Studio.Data");
 
     std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
 }

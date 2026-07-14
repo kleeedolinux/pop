@@ -11,8 +11,9 @@ use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
-    CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, ReferenceFunction,
-    ReferenceMetadata, ReferenceType, analyze_bubble,
+    CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, PoplibDependency, PoplibEmission,
+    ReferenceFunction, ReferenceMetadata, ReferenceType, analyze_bubble, emit_poplib,
+    encode_reference_metadata,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{lower_hir_bubble, optimize_mir};
@@ -578,9 +579,14 @@ struct LoweredPackage {
 
 struct LoweredPackageBubble {
     bubble: BubbleId,
+    package: String,
+    version: String,
+    source_sha256: String,
+    edition: String,
     name: String,
     kind: BubbleKind,
     root_package: bool,
+    dependencies: Vec<PoplibDependency>,
     program: NativeProgram,
 }
 
@@ -604,9 +610,25 @@ fn lower_package(manifest_path: &Path) -> Option<LoweredPackage> {
 
 #[derive(Clone)]
 struct ResolvedPackageLibrary {
-    name: String,
+    package: String,
     version: String,
+    source_sha256: String,
+    bubble: String,
+    public_api_sha256: String,
     metadata: ReferenceMetadata,
+}
+
+impl ResolvedPackageLibrary {
+    fn artifact_dependency(&self) -> PoplibDependency {
+        PoplibDependency::new(
+            &self.package,
+            &self.version,
+            &self.source_sha256,
+            &self.bubble,
+            BubbleKind::Library,
+            &self.public_api_sha256,
+        )
+    }
 }
 
 #[derive(Default)]
@@ -642,7 +664,7 @@ fn lower_package_recursive(
         .map_err(|error| eprintln!("pop: {error}"))
         .ok()?;
 
-    let mut external_metadata = Vec::new();
+    let mut external_libraries = Vec::new();
     for requirement in manifest.dependencies() {
         let dependency_manifest = match requirement.source() {
             DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
@@ -698,20 +720,29 @@ fn lower_package_recursive(
         }
         if requirement
             .bubble()
-            .is_some_and(|selected| selected != library.name)
+            .is_some_and(|selected| selected != library.bubble)
         {
             eprintln!(
                 "pop: dependency `{}` selects Bubble {}, but the Package publishes {}",
                 requirement.alias(),
                 requirement.bubble().unwrap_or(""),
-                library.name
+                library.bubble
             );
             return None;
         }
-        external_metadata.push(library.metadata);
+        external_libraries.push(library);
     }
 
     let source_paths = collect_package_sources(package_root).ok()?;
+    let source_sha256 = package_content_hash(manifest_path, &source_paths)?;
+    let external_metadata = external_libraries
+        .iter()
+        .map(|library| library.metadata.clone())
+        .collect::<Vec<_>>();
+    let artifact_dependencies = external_libraries
+        .iter()
+        .map(ResolvedPackageLibrary::artifact_dependency)
+        .collect::<Vec<_>>();
     let relative_paths: Vec<_> = source_paths.keys().map(String::as_str).collect();
     let bubbles = discover_conventional_bubbles(&manifest, &relative_paths)
         .map_err(|error| eprintln!("pop: {error}"))
@@ -728,7 +759,7 @@ fn lower_package_recursive(
         return None;
     }
 
-    let mut library_metadata = None;
+    let mut library = None;
     for bubble in selected {
         let bubble_id = BubbleId::from_raw(state.next_bubble);
         state.next_bubble = state.next_bubble.checked_add(1)?;
@@ -746,8 +777,9 @@ fn lower_package_recursive(
         let mut dependency_metadata = external_metadata.clone();
         if bubble.depends_on_library() {
             dependency_metadata.push(
-                library_metadata
-                    .clone()
+                library
+                    .as_ref()
+                    .map(|library: &ResolvedPackageLibrary| library.metadata.clone())
                     .expect("sorted conventional discovery lowers the library first"),
             );
         }
@@ -758,22 +790,32 @@ fn lower_package_recursive(
             dependency_metadata,
         )?;
         if bubble.kind() == BubbleKind::Library {
-            library_metadata = Some(program.reference_metadata.clone());
+            let reference = encode_reference_metadata(&program.reference_metadata)
+                .map_err(|error| eprintln!("pop: reference metadata encoding failed: {error}"))
+                .ok()?;
+            library = Some(ResolvedPackageLibrary {
+                package: manifest.name().to_owned(),
+                version: manifest.version().to_owned(),
+                source_sha256: source_sha256.clone(),
+                bubble: bubble.name().to_owned(),
+                public_api_sha256: sha256_hex(&reference),
+                metadata: program.reference_metadata.clone(),
+            });
         }
         state.bubbles.push(LoweredPackageBubble {
             bubble: bubble_id,
+            package: manifest.name().to_owned(),
+            version: manifest.version().to_owned(),
+            source_sha256: source_sha256.clone(),
+            edition: manifest.edition().to_owned(),
             name: bubble.name().to_owned(),
             kind: bubble.kind(),
             root_package,
+            dependencies: artifact_dependencies.clone(),
             program,
         });
     }
 
-    let library = library_metadata.map(|metadata| ResolvedPackageLibrary {
-        name: manifest.name().to_owned(),
-        version: manifest.version().to_owned(),
-        metadata,
-    });
     state.visiting.remove(manifest_path);
     state
         .resolved
@@ -1006,6 +1048,29 @@ fn build_package_to(
         ));
         emit_native_object(&bubble.program, &object)?;
         if bubble.kind == BubbleKind::Library {
+            let documentation = render_xml(&bubble.name, &documentation_members(&bubble.program))
+                .map_err(|error| eprintln!("pop: documentation output failed: {error}"))
+                .ok()?;
+            let implementation = fs::read(&object)
+                .map_err(|error| eprintln!("pop: could not read native object: {error}"))
+                .ok()?;
+            let target = native_target();
+            let emission = PoplibEmission::new(
+                &bubble.package,
+                &bubble.version,
+                &bubble.source_sha256,
+                &bubble.name,
+                bubble.kind,
+                &bubble.edition,
+                bubble.program.reference_metadata.clone(),
+            )
+            .with_dependencies(bubble.dependencies.clone())
+            .with_documentation(documentation.into_bytes())
+            .with_target_implementation(target.triple(), implementation);
+            let artifact = dependency_root.join(format!("{}.poplib", bubble.name));
+            emit_poplib(&artifact, &emission)
+                .map_err(|error| eprintln!("pop: library artifact emission failed: {error}"))
+                .ok()?;
             library_objects.push(object);
         } else if bubble.root_package {
             binary_objects.push((bubble, object));
