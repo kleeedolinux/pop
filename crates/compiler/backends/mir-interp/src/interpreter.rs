@@ -8,8 +8,8 @@ use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
 use pop_foundation::{NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
 use pop_mir::{
-    MirBubble, MirInstruction, MirInstructionKind, MirTerminator, MirVerificationError,
-    verify_mir_bubble,
+    MirBubble, MirInstruction, MirInstructionKind, MirSuspendOperation, MirTaskDispatch,
+    MirTerminator, MirUnwindAction, MirVerificationError, verify_mir_bubble,
 };
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, ObjectAllocationRequest, ObjectMap,
@@ -73,7 +73,6 @@ pub enum ExecutionError {
     CallDepthLimit,
     ReachedUnreachable,
     InvalidControlFlow,
-    UnsupportedAsync,
 }
 
 pub struct MirInterpreter<'mir, R = ReferenceRuntimeAdapter> {
@@ -197,6 +196,27 @@ enum PrivateValue {
         range_current: Option<pop_types::IntegerValue>,
         range_started: bool,
     },
+    Task(Rc<RefCell<TaskState>>),
+}
+
+#[derive(Clone)]
+enum TaskTarget {
+    Direct(SymbolId),
+    Referenced(SymbolIdentity),
+    Indirect(RuntimeValue),
+}
+
+#[derive(Clone)]
+enum TaskState {
+    Created {
+        target: TaskTarget,
+        arguments: Vec<RuntimeValue>,
+        completion_type: TypeId,
+        owner: pop_runtime_interface::ManagedReference,
+        completion_slot: ObjectSlot,
+    },
+    Running,
+    Completed(Result<RuntimeValue, ExecutionError>),
 }
 
 impl<R: RuntimeAdapter> Engine<'_, '_, R> {
@@ -417,11 +437,191 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                         .ok_or(ExecutionError::InvalidControlFlow)?;
                     return Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason)));
                 }
-                MirTerminator::Suspend { .. } => return Err(ExecutionError::UnsupportedAsync),
+                MirTerminator::Suspend {
+                    operation: MirSuspendOperation::Task { task, result_type },
+                    resume,
+                    cancellation,
+                    unwind,
+                    live_frame,
+                    ..
+                } => {
+                    self.publish_suspend_frame(live_frame, &mut values)?;
+                    let task = value(&values, *task)?.clone();
+                    match self.await_task(&task, *result_type) {
+                        Ok(completion) => {
+                            let resume_block = blocks
+                                .get(resume.raw() as usize)
+                                .ok_or(ExecutionError::InvalidControlFlow)?;
+                            let [argument] = resume_block.arguments() else {
+                                return Err(ExecutionError::WrongArity);
+                            };
+                            values.insert(argument.value(), completion);
+                            block_index = resume.raw() as usize;
+                        }
+                        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason)))
+                            if reason == pop_runtime_interface::UnwindReason::Cancellation =>
+                        {
+                            pending_unwind = None;
+                            block_index = cancellation.raw() as usize;
+                        }
+                        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason))) => {
+                            if let MirUnwindAction::Cleanup(target) = unwind {
+                                pending_unwind = Some(reason);
+                                block_index = target.raw() as usize;
+                            } else {
+                                return Err(ExecutionError::Runtime(RuntimeFailure::Unwind(
+                                    reason,
+                                )));
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 MirTerminator::Unreachable => return Err(ExecutionError::ReachedUnreachable),
                 MirTerminator::Missing => return Err(ExecutionError::InvalidControlFlow),
             }
         }
+    }
+
+    fn publish_suspend_frame(
+        &mut self,
+        frame: &pop_mir::MirLiveFrame,
+        values: &mut BTreeMap<ValueId, RuntimeValue>,
+    ) -> Result<(), ExecutionError> {
+        let roots = frame
+            .stack_map()
+            .root_slots()
+            .iter()
+            .map(|root| {
+                frame
+                    .slots()
+                    .get(root.raw() as usize)
+                    .ok_or(ExecutionError::InvalidControlFlow)
+                    .and_then(|slot| value(values, slot.value()).map(|value| value.reference))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut publication = RootPublication::new(frame.stack_map().clone(), roots)
+            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        self.runtime
+            .safe_point(&mut publication)
+            .map_err(ExecutionError::Runtime)?;
+        for (root, (_, relocated)) in frame
+            .stack_map()
+            .root_slots()
+            .iter()
+            .zip(publication.root_values())
+        {
+            let slot = frame
+                .slots()
+                .get(root.raw() as usize)
+                .ok_or(ExecutionError::InvalidControlFlow)?;
+            values
+                .get_mut(&slot.value())
+                .ok_or(ExecutionError::MissingValue(slot.value()))?
+                .install_relocated_reference(relocated)?;
+        }
+        Ok(())
+    }
+
+    fn await_task(
+        &mut self,
+        task: &RuntimeValue,
+        expected_completion_type: TypeId,
+    ) -> Result<RuntimeValue, ExecutionError> {
+        let MirValue::Task(task) = &task.visible else {
+            return Err(ExecutionError::TypeMismatch);
+        };
+        let state = match self.private_values.get(task) {
+            Some(PrivateValue::Task(state)) => state.clone(),
+            _ => return Err(ExecutionError::InvalidControlFlow),
+        };
+        let (target, arguments, completion_type, owner, completion_slot) = {
+            let mut state = state.borrow_mut();
+            match &*state {
+                TaskState::Completed(result) => return result.clone(),
+                TaskState::Running => return Err(ExecutionError::InvalidControlFlow),
+                TaskState::Created {
+                    target,
+                    arguments,
+                    completion_type,
+                    owner,
+                    completion_slot,
+                } => {
+                    let created = (
+                        target.clone(),
+                        arguments.clone(),
+                        *completion_type,
+                        *owner,
+                        *completion_slot,
+                    );
+                    *state = TaskState::Running;
+                    created
+                }
+            }
+        };
+        if completion_type != expected_completion_type {
+            let result = Err(ExecutionError::TypeMismatch);
+            *state.borrow_mut() = TaskState::Completed(result.clone());
+            return result;
+        }
+        let mut result = match target {
+            TaskTarget::Direct(function) => self.call(function, &arguments),
+            TaskTarget::Referenced(function) => {
+                Err(ExecutionError::UnknownReferencedFunction(function))
+            }
+            TaskTarget::Indirect(callee) => self.execute_indirect_value(&callee, &arguments),
+        }
+        .and_then(|returned| self.task_completion(completion_type, returned));
+        if let Ok(completion) = &result
+            && let Some(reference) = completion.reference
+            && let Err(failure) = self.runtime.write_barrier(WriteBarrier::new(
+                BarrierKind::CombinedSatbGenerational,
+                owner,
+                completion_slot,
+                None,
+                Some(reference),
+            ))
+        {
+            result = Err(ExecutionError::Runtime(failure));
+        }
+        *state.borrow_mut() = TaskState::Completed(result.clone());
+        result
+    }
+
+    fn task_completion(
+        &mut self,
+        result_type: TypeId,
+        mut returned: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, ExecutionError> {
+        if returned.len() == 1 {
+            return Ok(returned.remove(0));
+        }
+        let reference_slots = returned
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                value
+                    .reference
+                    .map(|_| ObjectSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+            })
+            .collect();
+        let object_map = ObjectMap::new(
+            u32::try_from(returned.len()).unwrap_or(u32::MAX),
+            reference_slots,
+        )
+        .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        let reference = self
+            .runtime
+            .allocate_object(&ObjectAllocationRequest::new(
+                RuntimeTypeId::new(result_type.raw()),
+                AllocationClass::NurseryEligible,
+                object_map,
+            ))
+            .map_err(ExecutionError::Runtime)?;
+        Ok(RuntimeValue::managed(
+            MirValue::Tuple(returned.into_iter().map(|value| value.visible).collect()),
+            reference,
+        ))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -456,8 +656,61 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             Err(error) => return Err(error),
         }
         let result = match instruction.kind() {
-            MirInstructionKind::TaskCreate { .. } => {
-                return Err(ExecutionError::UnsupportedAsync);
+            MirInstructionKind::TaskCreate {
+                dispatch,
+                arguments,
+                completion_type,
+                object_map,
+            } => {
+                let arguments = evaluated_arguments(arguments, values)?;
+                let target = match dispatch {
+                    MirTaskDispatch::Direct(function) => TaskTarget::Direct(*function),
+                    MirTaskDispatch::Referenced(function) => TaskTarget::Referenced(*function),
+                    MirTaskDispatch::Indirect(callee) => {
+                        let callee = value(values, *callee)?.clone();
+                        if !matches!(callee.visible, MirValue::Function(_)) {
+                            return Err(ExecutionError::TypeMismatch);
+                        }
+                        TaskTarget::Indirect(callee)
+                    }
+                };
+                let mut stored = arguments.clone();
+                if let TaskTarget::Indirect(callee) = &target {
+                    stored.insert(0, callee.clone());
+                }
+                if stored.iter().enumerate().any(|(index, value)| {
+                    value.reference.is_some()
+                        && !object_map.is_reference_slot(ObjectSlot::new(
+                            u32::try_from(index).unwrap_or(u32::MAX),
+                        ))
+                }) {
+                    return Err(ExecutionError::InvalidControlFlow);
+                }
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map.clone(),
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                let completion_slot = object_map
+                    .slot_count()
+                    .checked_sub(1)
+                    .map(ObjectSlot::new)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let task = self.fresh_private_symbol();
+                self.private_values.insert(
+                    task,
+                    PrivateValue::Task(Rc::new(RefCell::new(TaskState::Created {
+                        target,
+                        arguments,
+                        completion_type: *completion_type,
+                        owner: reference,
+                        completion_slot,
+                    }))),
+                );
+                return Ok(RuntimeValue::managed(MirValue::Task(task), reference));
             }
             MirInstructionKind::StringConstant(value) => MirValue::String(value.clone()),
             MirInstructionKind::StringConcat { left, right } => {
@@ -1508,6 +1761,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     Some(PrivateValue::Closure { .. } | PrivateValue::Iterator { .. }) => {
                         Ok(captured)
                     }
+                    Some(PrivateValue::Task(_)) => Err(ExecutionError::TypeMismatch),
                     None => Err(ExecutionError::TypeMismatch),
                 }
             }
@@ -1875,10 +2129,19 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         arguments: &[ValueId],
         values: &BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<Vec<RuntimeValue>, ExecutionError> {
-        let MirValue::Function(function) = &value(values, callee)?.visible else {
+        let callee = value(values, callee)?.clone();
+        let arguments = evaluated_arguments(arguments, values)?;
+        self.execute_indirect_value(&callee, &arguments)
+    }
+
+    fn execute_indirect_value(
+        &mut self,
+        callee: &RuntimeValue,
+        arguments: &[RuntimeValue],
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        let MirValue::Function(function) = &callee.visible else {
             return Err(ExecutionError::TypeMismatch);
         };
-        let arguments = evaluated_arguments(arguments, values)?;
         let closure = match self.private_values.get(function) {
             Some(PrivateValue::Closure { function, captures }) => {
                 Some((*function, captures.clone()))
@@ -1903,13 +2166,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 nested.parameters(),
                 nested.results(),
                 nested.blocks(),
-                &arguments,
+                arguments,
                 Some(captures),
             );
             self.depth -= 1;
             result
         } else {
-            self.call(*function, &arguments)
+            self.call(*function, arguments)
         }
     }
 
