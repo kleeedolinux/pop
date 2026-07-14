@@ -1163,6 +1163,10 @@ fn portable_sequence_algorithms_have_one_pop_implementation() {
         "append",
         "prepend",
         "scan",
+        "elementAtOr",
+        "findLastOr",
+        "indexLastOr",
+        "reduceOr",
     ] {
         assert!(
             sequence.contains(&format!("public function {function}<")),

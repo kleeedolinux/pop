@@ -655,7 +655,10 @@ fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
         "namespace Daily.Use\n\
          function main(): Int\n\
              local values: {Int} = {1, 2, 3}\n\
-             return Sequence.sum(values) + Pop.Math.gcd(54, 24)\n\
+             local reduced = Sequence.reduceOr(values, function(left: Int, right: Int): Int\n\
+                 return left + right\n\
+             end, 0)\n\
+             return Sequence.sum(values) + Sequence.elementAtOr(values, 2, 0) + reduced + Pop.Math.gcd(54, 24)\n\
          end\n",
     )
     .expect("write source");
@@ -676,7 +679,7 @@ fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
             .status()
             .expect("Standard consumer runs")
             .code(),
-        Some(12)
+        Some(20)
     );
 
     let artifact = package.join("target/debug/deps/Pop.Standard.poplib");
@@ -692,6 +695,65 @@ fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
     );
 
     std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn single_source_build_executes_with_implicit_standard() {
+    let root = std::env::temp_dir().join(format!("pop-direct-standard-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create direct-source directory");
+    let source = root.join("main.pop");
+    let executable = root.join("main");
+    std::fs::write(
+        &source,
+        "namespace Daily.Source\n\
+         function main(): Int\n\
+             local values: {Int} = {1, 2, 3}\n\
+             return Sequence.sum(values) + Pop.Math.gcd(54, 24)\n\
+         end\n",
+    )
+    .expect("write direct source");
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(&executable)
+        .output()
+        .expect("build direct source with implicit Standard");
+    assert!(build.status.success(), "{}", output_text(&build.stderr));
+    assert_eq!(
+        Command::new(&executable)
+            .status()
+            .expect("run direct source")
+            .code(),
+        Some(12)
+    );
+    std::fs::remove_dir_all(root).expect("remove direct-source directory");
+}
+
+#[test]
+fn package_build_rejects_reserved_standard_identity() {
+    let package =
+        std::env::temp_dir().join(format!("pop-reserved-standard-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create Package");
+    std::fs::write(
+        package.join("bubble.toml"),
+        "[package]\nname = \"Pop.Standard\"\nversion = \"9.9.9\"\nedition = \"2026\"\n",
+    )
+    .expect("write reserved manifest");
+    std::fs::write(
+        package.join("src/lib.pop"),
+        "namespace Pop.Standard\npublic function counterfeit(): Int return 1 end\n",
+    )
+    .expect("write counterfeit source");
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("reject reserved Standard Package");
+    assert!(!build.status.success());
+    assert!(output_text(&build.stderr).contains("reserved foundation identity"));
+    assert!(!package.join("target").exists());
+    std::fs::remove_dir_all(package).expect("remove reserved Package");
 }
 
 #[test]

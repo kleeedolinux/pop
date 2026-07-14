@@ -254,6 +254,10 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
         "append",
         "prepend",
         "scan",
+        "elementAtOr",
+        "findLastOr",
+        "indexLastOr",
+        "reduceOr",
     ] {
         let function = standard_hir
             .functions()
@@ -284,7 +288,7 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
     let documentation = standard.checked_documentation();
     assert_eq!(
         documentation.len(),
-        38,
+        42,
         "every portable public API is documented"
     );
     let mut examples = Vec::new();
@@ -398,13 +402,23 @@ fn verify_sequence_consumer(standard: &FrontEndResult) {
              local selected = countWhere(values, function(value: Int): Boolean\n\
                  return value > 1\n\
              end)\n\
+             local requested = elementAtOr(values, 2, 0)\n\
+             local lastMatch = findLastOr(values, function(value: Int): Boolean\n\
+                 return value > 1\n\
+             end, 0)\n\
+             local lastPosition = indexLastOr(values, function(value: Int): Boolean\n\
+                 return value > 1\n\
+             end, 0)\n\
+             local reduced = reduceOr(values, function(state: Int, value: Int): Int\n\
+                 return state + value\n\
+             end, 0)\n\
              local window = collect(take(drop(values, 1), 1))\n\
              local joined = collect(concat(window, values))\n\
              local numeric = sum(values) + product(values) + minOr(values, 0) + maxOr(values, 0)\n\
              if not hasLarge or not allPositive or not noHuge then\n\
                  return -1\n\
              end\n\
-             return total + List.length(collected) + List.length(collectedLabels) + List.length(joined) + count(values) + visits + selected + firstOr(values, 0) + lastOr(values, 0) + numeric\n\
+             return total + List.length(collected) + List.length(collectedLabels) + List.length(joined) + count(values) + visits + selected + requested + lastMatch + lastPosition + reduced + firstOr(values, 0) + lastOr(values, 0) + numeric\n\
          end\n",
     )
     .expect("consumer source");
@@ -519,6 +533,25 @@ fn foundation_sequence_rejects_invalid_callbacks() {
              return scan(values, 0, function(state: String, value: Int): Int\n\
                  return value\n\
              end)\n\
+         end\n",
+        "namespace Pop.Sequence.Contribution\n\
+         using Pop.Sequence\n\
+         public function broken(values: {Int}): Int\n\
+             return elementAtOr(values, \"second\", 0)\n\
+         end\n",
+        "namespace Pop.Sequence.Contribution\n\
+         using Pop.Sequence\n\
+         public function broken(values: {Int}): Int\n\
+             return findLastOr(values, function(value: Int): Int\n\
+                 return value\n\
+             end, 0)\n\
+         end\n",
+        "namespace Pop.Sequence.Contribution\n\
+         using Pop.Sequence\n\
+         public function broken(values: {Int}): Int\n\
+             return reduceOr(values, function(left: Int, right: Int): String\n\
+                 return \"wrong\"\n\
+             end, 0)\n\
          end\n",
     ] {
         let result = analyze_foundation(

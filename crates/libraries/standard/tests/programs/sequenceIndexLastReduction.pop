@@ -1,0 +1,119 @@
+namespace Main
+
+using Pop.Sequence
+
+private record Candidate
+    id: Int
+    selected: Boolean
+end
+
+private class CountingIterator implements Iterator<Int>
+    private current: Int
+    private calls: Int
+
+    public function CountingIterator.new(start: Int): CountingIterator
+        return CountingIterator { current = start, calls = 0 }
+    end
+
+    public function CountingIterator:iterator(): Iterator<Int>
+        return self
+    end
+
+    public function CountingIterator:next(): Iteration<Int>
+        self.calls += 1
+        if self.current >= 3 then
+            return Iteration.End
+        end
+        self.current += 1
+        return Iteration.Item(self.current)
+    end
+
+    public function CountingIterator:callCount(): Int
+        return self.calls
+    end
+end
+
+private function main(): Int
+    local invalidCounter = CountingIterator.new(0)
+    local invalidSource: Iterator<Int> = invalidCounter
+    if elementAtOr(invalidSource, 0, 9) ~= 9 or invalidCounter:callCount() ~= 0 then
+        return 1
+    end
+
+    local indexedCounter = CountingIterator.new(0)
+    local indexedSource: Iterator<Int> = indexedCounter
+    if elementAtOr(indexedSource, 2, 9) ~= 2 or indexedCounter:callCount() ~= 2 then
+        return 2
+    end
+
+    local first: Candidate = { id = 1, selected = true }
+    local second: Candidate = { id = 2, selected = false }
+    local third: Candidate = { id = 3, selected = true }
+    local fourth: Candidate = { id = 4, selected = false }
+    local fallback: Candidate = { id = 9, selected = false }
+    local candidates: {Candidate} = {first, second, third, fourth}
+    local emptyCandidates: {Candidate} = {}
+    local singleCandidate: {Candidate} = {first}
+    local emptyResult = elementAtOr(emptyCandidates, 1, fallback)
+    local singleResult = elementAtOr(singleCandidate, 1, fallback)
+    if emptyResult.id ~= 9 or singleResult.id ~= 1 then
+        return 3
+    end
+
+    local findCalls = 0
+    local found = findLastOr(candidates, function(value: Candidate): Boolean
+        findCalls += 1
+        return value.selected
+    end, fallback)
+    local indexCalls = 0
+    local foundIndex = indexLastOr(candidates, function(value: Candidate): Boolean
+        indexCalls += 1
+        return value.selected
+    end, 0)
+    if found.id ~= 3 or foundIndex ~= 3 or findCalls ~= 4 or indexCalls ~= 4 then
+        return 4
+    end
+
+    local missingFindCalls = 0
+    local missing = findLastOr(candidates, function(value: Candidate): Boolean
+        missingFindCalls += 1
+        return value.id == 8
+    end, fallback)
+    local missingIndexCalls = 0
+    local missingIndex = indexLastOr(candidates, function(value: Candidate): Boolean
+        missingIndexCalls += 1
+        return value.id == 8
+    end, -1)
+    if missing.id ~= 9 or missingIndex ~= -1 or missingFindCalls ~= 4 or missingIndexCalls ~= 4 then
+        return 5
+    end
+
+    local secondCandidate = elementAtOr(candidates, 2, fallback)
+    local missingCandidate = elementAtOr(candidates, 8, fallback)
+    if secondCandidate.id ~= 2 or missingCandidate.id ~= 9 then
+        return 6
+    end
+
+    local combineCalls = 0
+    local words: {String} = {"a", "b", "c"}
+    local reduced = reduceOr(words, function(left: String, right: String): String
+        combineCalls += 1
+        return left .. right
+    end, "fallback")
+    local empty: {String} = {}
+    local single: {String} = {"only"}
+    if reduced ~= "abc" or combineCalls ~= 2 then
+        return 7
+    end
+    if reduceOr(empty, function(left: String, right: String): String
+        return left .. right
+    end, "empty") ~= "empty" then
+        return 8
+    end
+    if reduceOr(single, function(left: String, right: String): String
+        return left .. right
+    end, "fallback") ~= "only" then
+        return 9
+    end
+    return 0
+end
