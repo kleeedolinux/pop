@@ -79,6 +79,11 @@ impl RuntimeAdapter for RelocationRuntime {
 
     fn pin(&mut self, reference: ManagedReference) -> Result<PinHandle, RuntimeFailure> {
         self.validate_reference(reference)?;
+        let object = self
+            .objects
+            .get_mut(&reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        object.generation = super::heap::CollectorGeneration::Mature;
         let handle = PinHandle::new(self.next_pin);
         self.next_pin = self
             .next_pin
