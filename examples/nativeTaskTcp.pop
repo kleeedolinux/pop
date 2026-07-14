@@ -1,0 +1,17 @@
+namespace NativeTaskTcp
+
+function main()
+    local listener = Net.Tcp.listenLoopback(0, 16, true)
+    local cancelled = Task.CancelSource.cancel(listener)
+    local requested = Task.CancelSource.cancellationRequested(listener)
+    local closed = Net.Tcp.close(listener)
+
+    print("listener")
+    print(listener)
+    print("cancelled")
+    print(cancelled)
+    print("cancellation requested")
+    print(requested)
+    print("closed")
+    print(closed)
+end

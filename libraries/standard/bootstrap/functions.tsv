@@ -9,3 +9,5 @@ functionId	sourceName	ownerBubble	parameterTypes	resultTypes	effects	prelude
 6	Net.Tcp.receiveRaw	Pop.Standard	UInt64,UInt64,UInt64	UInt64	AmbientIo,Suspends	true
 7	Net.Tcp.sendAllRaw	Pop.Standard	UInt64,UInt64,UInt64	Boolean	AmbientIo,Suspends	true
 8	Net.Tcp.close	Pop.Standard	UInt64	Boolean	AmbientIo	true
+9	print	Pop.Standard	UInt64	-	AmbientIo	true
+10	print	Pop.Standard	Boolean	-	AmbientIo	true

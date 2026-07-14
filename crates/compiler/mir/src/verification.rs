@@ -3096,6 +3096,8 @@ fn verify_callable_instruction(
                     type_ids(arena, &["Boolean"]),
                 ),
                 8 => (type_ids(arena, &["UInt64"]), type_ids(arena, &["Boolean"])),
+                9 => (type_ids(arena, &["UInt64"]), Some(Vec::new())),
+                10 => (type_ids(arena, &["Boolean"]), Some(Vec::new())),
                 _ => {
                     errors.push(MirVerificationError::UnknownStandardFunction(*function));
                     return true;

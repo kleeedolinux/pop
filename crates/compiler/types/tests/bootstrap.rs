@@ -68,11 +68,15 @@ fn standard_print_overloads_have_stable_typed_prelude_identities() {
         .filter(|entry| entry.source_name() == "print")
         .collect();
 
-    assert_eq!(print.len(), 2);
+    assert_eq!(print.len(), 4);
     assert_eq!(print[0].id().raw(), 0);
     assert_eq!(print[0].parameter_types(), ["Int"]);
     assert_eq!(print[1].id().raw(), 1);
     assert_eq!(print[1].parameter_types(), ["String"]);
+    assert_eq!(print[2].id().raw(), 9);
+    assert_eq!(print[2].parameter_types(), ["UInt64"]);
+    assert_eq!(print[3].id().raw(), 10);
+    assert_eq!(print[3].parameter_types(), ["Boolean"]);
     assert!(print.iter().all(|entry| {
         entry.owner_bubble() == "Pop.Standard"
             && entry.result_types().is_empty()

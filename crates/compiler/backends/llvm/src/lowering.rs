@@ -197,6 +197,8 @@ pub fn lower_mir_to_llvm_ir(
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
+    declarations.push("declare void @pop_std_print_uint64(i64)".to_owned());
+    declarations.push("declare void @pop_std_print_boolean(i1)".to_owned());
     declarations.push("declare i1 @pop_std_task_cancel_source_cancel(i64)".to_owned());
     declarations
         .push("declare i1 @pop_std_task_cancel_source_cancellation_requested(i64)".to_owned());

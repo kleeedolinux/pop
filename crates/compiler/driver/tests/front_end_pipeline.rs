@@ -461,7 +461,7 @@ fn standard_print_overloads_are_identity_bound_and_survive_hir_and_mir() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/main.pop",
-        "namespace Main\npublic function run(): Int\n    print(42)\n    print(\"teste\")\n    return 0\nend\n",
+        "namespace Main\npublic function run(): Int\n    local listener = Net.Tcp.listenLoopback(0, 16, true)\n    print(42)\n    print(\"teste\")\n    print(listener)\n    print(true)\n    return 0\nend\n",
     )
     .expect("source");
     let result = analyze_bubble(FrontEndBubbleInput::new(
@@ -478,10 +478,14 @@ fn standard_print_overloads_are_identity_bound_and_survive_hir_and_mir() {
     let hir = result.hir().expect("HIR");
     assert!(hir.dump(result.types()).contains("call.standard sf0"));
     assert!(hir.dump(result.types()).contains("call.standard sf1"));
+    assert!(hir.dump(result.types()).contains("call.standard sf9"));
+    assert!(hir.dump(result.types()).contains("call.standard sf10"));
     let mir = lower_hir_bubble(hir, result.types()).expect("verified MIR");
     let dump = mir.dump();
     assert!(dump.contains("callStandard sf0"));
     assert!(dump.contains("callStandard sf1"));
+    assert!(dump.contains("callStandard sf9"));
+    assert!(dump.contains("callStandard sf10"));
     assert!(!dump.contains("pop_std_print_int"));
     assert!(!dump.contains("pop_std_print_string"));
     let parsed = pop_mir::parse_mir_dump(&dump).expect("round trip");
