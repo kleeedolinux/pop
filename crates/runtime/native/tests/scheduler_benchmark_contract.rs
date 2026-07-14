@@ -26,12 +26,18 @@ fn scheduler_benchmark_inventory_is_closed_and_typed() {
         [
             "task_control",
             "ready_polls",
+            "local_wake",
+            "foreign_wake",
             "burst_injection",
             "hot_queue_steal",
+            "ping_pong",
+            "steal_storm",
             "suspended_frames",
             "timer_fan_out",
             "external_event_fan_out",
+            "continuous_event_fairness",
             "blocking_saturation",
+            "scheduler_gc_interaction",
         ]
     );
     for name in names {
@@ -41,6 +47,34 @@ fn scheduler_benchmark_inventory_is_closed_and_typed() {
         );
     }
     assert!(SchedulerWorkload::parse("unknown").is_none());
+}
+
+#[test]
+fn specialized_scheduler_profiles_preserve_their_typed_work() {
+    let configuration = representative_configuration();
+    let local = run_scheduler_workload(SchedulerWorkload::LocalWake, configuration)
+        .expect("local wake profile");
+    assert_eq!(local.polls, local.operations);
+    assert_eq!(local.ready_delay_samples, local.polls);
+
+    let foreign = run_scheduler_workload(SchedulerWorkload::ForeignWake, configuration)
+        .expect("foreign wake profile");
+    assert_eq!(foreign.wake_requests, foreign.tasks);
+
+    let ping_pong = run_scheduler_workload(SchedulerWorkload::PingPong, configuration)
+        .expect("ping-pong profile");
+    assert!(ping_pong.polls >= ping_pong.operations);
+    assert_eq!(ping_pong.completions, ping_pong.tasks);
+
+    let events = run_scheduler_workload(SchedulerWorkload::ContinuousEventFairness, configuration)
+        .expect("continuous event fairness profile");
+    assert!(events.external_events_delivered > 0);
+    assert_eq!(events.completions, events.tasks);
+
+    let gc = run_scheduler_workload(SchedulerWorkload::SchedulerGcInteraction, configuration)
+        .expect("scheduler/GC interaction profile");
+    assert_eq!(gc.completions, gc.tasks);
+    assert_eq!(gc.polls, gc.operations);
 }
 
 #[test]

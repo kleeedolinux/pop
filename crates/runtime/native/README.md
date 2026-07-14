@@ -56,5 +56,23 @@ workload, worker profile, logical work, initial dispatch latency scope, queue
 depths and high-water marks, steal outcomes, worker lifecycle, bounded
 scheduler-work delay percentiles, and labelled operating-system memory and
 context-switch observations. The default run is local optimization evidence,
-not a portable performance claim or a substitute for the pending GC-coupled
-profiles.
+not a portable performance claim; scale and GC-coupled evidence must use the
+explicit profiles below.
+
+The scale and collector profiles are explicit rather than implied by the
+default run:
+
+```text
+cargo bench -p pop-runtime-native --bench scheduler -- \
+  --samples 1 --tasks 1000000 --polls-per-task 1 --workers available \
+  --workload suspended_frames --profile million-suspended-minimal-frames
+
+cargo bench -p pop-runtime-native --bench scheduler -- \
+  --samples 5 --tasks 8192 --polls-per-task 16 --workers available \
+  --workload scheduler_gc_interaction --profile scheduler-gc-interaction
+```
+
+`local_wake`, `foreign_wake`, `ping_pong`, `steal_storm`, and
+`continuous_event_fairness` select the corresponding typed latency/fairness
+workloads. `task_control` includes the park/unpark path, while
+`burst_injection` is the global-injection profile.

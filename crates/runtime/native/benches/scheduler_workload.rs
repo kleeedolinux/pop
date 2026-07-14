@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,7 @@ use pop_runtime_native::{
     SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
     SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskId,
     SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry,
+    abi_safe_point, pop_rt_allocate_object, request_abi_collection,
 };
 
 const WAIT_TIMEOUT: Duration = Duration::from_mins(5);
@@ -47,24 +48,36 @@ impl From<SchedulerError> for SchedulerBenchmarkError {
 pub enum SchedulerWorkload {
     TaskControl,
     ReadyPolls,
+    LocalWake,
+    ForeignWake,
     BurstInjection,
     HotQueueSteal,
+    PingPong,
+    StealStorm,
     SuspendedFrames,
     TimerFanOut,
     ExternalEventFanOut,
+    ContinuousEventFairness,
     BlockingSaturation,
+    SchedulerGcInteraction,
 }
 
 impl SchedulerWorkload {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 14] = [
         Self::TaskControl,
         Self::ReadyPolls,
+        Self::LocalWake,
+        Self::ForeignWake,
         Self::BurstInjection,
         Self::HotQueueSteal,
+        Self::PingPong,
+        Self::StealStorm,
         Self::SuspendedFrames,
         Self::TimerFanOut,
         Self::ExternalEventFanOut,
+        Self::ContinuousEventFairness,
         Self::BlockingSaturation,
+        Self::SchedulerGcInteraction,
     ];
 
     #[must_use]
@@ -72,12 +85,18 @@ impl SchedulerWorkload {
         match self {
             Self::TaskControl => "task_control",
             Self::ReadyPolls => "ready_polls",
+            Self::LocalWake => "local_wake",
+            Self::ForeignWake => "foreign_wake",
             Self::BurstInjection => "burst_injection",
             Self::HotQueueSteal => "hot_queue_steal",
+            Self::PingPong => "ping_pong",
+            Self::StealStorm => "steal_storm",
             Self::SuspendedFrames => "suspended_frames",
             Self::TimerFanOut => "timer_fan_out",
             Self::ExternalEventFanOut => "external_event_fan_out",
+            Self::ContinuousEventFairness => "continuous_event_fairness",
             Self::BlockingSaturation => "blocking_saturation",
+            Self::SchedulerGcInteraction => "scheduler_gc_interaction",
         }
     }
 
@@ -91,7 +110,8 @@ impl SchedulerWorkload {
     const fn suspends(self) -> bool {
         matches!(
             self,
-            Self::SuspendedFrames
+            Self::ForeignWake
+                | Self::SuspendedFrames
                 | Self::TimerFanOut
                 | Self::ExternalEventFanOut
                 | Self::BlockingSaturation
@@ -101,7 +121,7 @@ impl SchedulerWorkload {
     const fn task_polls(self, configuration: SchedulerBenchmarkConfiguration) -> usize {
         if self.suspends() {
             2
-        } else if matches!(self, Self::TaskControl) {
+        } else if matches!(self, Self::TaskControl | Self::StealStorm) {
             1
         } else {
             configuration.polls_per_task
@@ -301,6 +321,7 @@ struct BenchmarkTask {
     latencies: Arc<Latencies>,
     ready_at: Instant,
     first_poll: bool,
+    gc_interaction: bool,
 }
 
 impl SchedulerTaskFrame for BenchmarkTask {
@@ -326,10 +347,19 @@ impl SchedulerTaskFrame for BenchmarkTask {
 }
 
 impl SchedulerTask for BenchmarkTask {
-    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+    fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll {
         if self.first_poll {
             self.first_poll = false;
             self.latencies.record(self.ready_at);
+        }
+        if self.gc_interaction {
+            assert_ne!(pop_rt_allocate_object(4), 0, "managed benchmark allocation");
+            assert!(request_abi_collection(), "request benchmark collection");
+            assert_ne!(
+                abi_safe_point(u32::try_from(context.task().raw()).unwrap_or(u32::MAX), &[],),
+                0,
+                "benchmark collection safe point"
+            );
         }
         self.checksum.fetch_add(self.token, Ordering::Relaxed);
         if self.suspend_once {
@@ -340,6 +370,64 @@ impl SchedulerTask for BenchmarkTask {
             SchedulerTaskPoll::Complete
         } else {
             self.remaining_polls -= 1;
+            SchedulerTaskPoll::Ready
+        }
+    }
+}
+
+struct PingPongTask {
+    participant: usize,
+    participants: usize,
+    token: u64,
+    remaining_turns: usize,
+    turn: Arc<AtomicUsize>,
+    checksum: Arc<AtomicU64>,
+    latencies: Arc<Latencies>,
+    ready_at: Instant,
+    first_poll: bool,
+}
+
+impl SchedulerTaskFrame for PingPongTask {
+    fn frame_stack_map(&self) -> StackMap {
+        StackMap::new(SafePointId::new(2), Vec::new()).expect("ping-pong empty frame map")
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        RootPublication::new(self.frame_stack_map(), Vec::new())
+            .map_err(|_| SchedulerTaskFrameError::PublicationRejected)
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() == &self.frame_stack_map() {
+            Ok(())
+        } else {
+            Err(SchedulerTaskFrameError::RestorationRejected)
+        }
+    }
+}
+
+impl SchedulerTask for PingPongTask {
+    fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        if self.first_poll {
+            self.first_poll = false;
+            self.latencies.record(self.ready_at);
+        }
+        let _ = context.consume_work(1);
+        if self.turn.load(Ordering::Acquire) != self.participant {
+            return SchedulerTaskPoll::Ready;
+        }
+        self.checksum.fetch_add(self.token, Ordering::Relaxed);
+        self.remaining_turns -= 1;
+        self.turn.store(
+            (self.participant + 1) % self.participants,
+            Ordering::Release,
+        );
+        if self.remaining_turns == 0 {
+            SchedulerTaskPoll::Complete
+        } else {
             SchedulerTaskPoll::Ready
         }
     }
@@ -361,6 +449,8 @@ struct WorkloadState {
     workers: usize,
     checksum: Arc<AtomicU64>,
     latencies: Arc<Latencies>,
+    maximum_resident_memory_bytes: AtomicU64,
+    maximum_virtual_memory_bytes: AtomicU64,
 }
 
 impl WorkloadState {
@@ -391,6 +481,7 @@ impl WorkloadState {
         } else {
             NativeScheduler::new(scheduler_configuration)?
         };
+        let resources = read_resource_snapshot();
         Ok(Self {
             scheduler,
             workers: configuration.workers,
@@ -398,6 +489,8 @@ impl WorkloadState {
             latencies: Arc::new(Latencies(Mutex::new(Vec::with_capacity(
                 configuration.tasks,
             )))),
+            maximum_resident_memory_bytes: AtomicU64::new(resources.resident_memory_bytes),
+            maximum_virtual_memory_bytes: AtomicU64::new(resources.virtual_memory_bytes),
         })
     }
 
@@ -410,6 +503,24 @@ impl WorkloadState {
             latencies: Arc::clone(&self.latencies),
             ready_at: Instant::now(),
             first_poll: true,
+            gc_interaction: false,
+        }
+    }
+
+    fn gc_task(&self, token: u64, polls: usize) -> BenchmarkTask {
+        BenchmarkTask {
+            gc_interaction: true,
+            ..self.task(token, polls, false)
+        }
+    }
+
+    fn observe_resources(&self) {
+        let resources = read_resource_snapshot();
+        if resources.source != "unavailable" {
+            self.maximum_resident_memory_bytes
+                .fetch_max(resources.resident_memory_bytes, Ordering::Relaxed);
+            self.maximum_virtual_memory_bytes
+                .fetch_max(resources.virtual_memory_bytes, Ordering::Relaxed);
         }
     }
 }
@@ -440,36 +551,57 @@ pub fn run_scheduler_workload(
     let task_polls = workload.task_polls(configuration);
     let state = WorkloadState::new(
         configuration,
-        matches!(workload, SchedulerWorkload::HotQueueSteal),
+        matches!(
+            workload,
+            SchedulerWorkload::HotQueueSteal | SchedulerWorkload::StealStorm
+        ),
     )?;
     let task_ids = match workload {
         SchedulerWorkload::TaskControl => run_task_control(&state, configuration.tasks)?,
-        SchedulerWorkload::ReadyPolls => {
+        SchedulerWorkload::ReadyPolls | SchedulerWorkload::LocalWake => {
             run_balanced_ready(&state, configuration.tasks, task_polls)?
+        }
+        SchedulerWorkload::ForeignWake | SchedulerWorkload::SuspendedFrames => {
+            run_suspended(&state, configuration.tasks, ResumeSource::Wake)?
         }
         SchedulerWorkload::BurstInjection => {
             run_burst_injection(&state, configuration.tasks, task_polls)?
         }
-        SchedulerWorkload::HotQueueSteal => run_hot_queue(&state, configuration.tasks, task_polls)?,
-        SchedulerWorkload::SuspendedFrames => {
-            run_suspended(&state, configuration.tasks, ResumeSource::Wake)?
+        SchedulerWorkload::HotQueueSteal | SchedulerWorkload::StealStorm => {
+            run_hot_queue(&state, configuration.tasks, task_polls)?
         }
+        SchedulerWorkload::PingPong => run_ping_pong(&state, configuration.tasks, task_polls)?,
         SchedulerWorkload::TimerFanOut => {
             run_suspended(&state, configuration.tasks, ResumeSource::Timer)?
         }
         SchedulerWorkload::ExternalEventFanOut => {
             run_suspended(&state, configuration.tasks, ResumeSource::ExternalEvent)?
         }
+        SchedulerWorkload::ContinuousEventFairness => {
+            run_continuous_event_fairness(&state, configuration)?
+        }
         SchedulerWorkload::BlockingSaturation => {
             run_suspended(&state, configuration.tasks, ResumeSource::Blocking)?
+        }
+        SchedulerWorkload::SchedulerGcInteraction => {
+            run_scheduler_gc_interaction(&state, configuration.tasks, task_polls)?
         }
     };
     state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
     let telemetry = state.scheduler.telemetry();
     let checksum = state.checksum.load(Ordering::Relaxed);
-    let operations = expected_operations(configuration.tasks, task_polls)?;
-    let expected_checksum = expected_checksum(configuration.tasks, task_polls)?;
-    if telemetry.polls() != operations
+    let default_operations = expected_operations(configuration.tasks, task_polls)?;
+    let default_checksum = expected_checksum(configuration.tasks, task_polls)?;
+    let (operations, expected_checksum) = match workload {
+        SchedulerWorkload::ContinuousEventFairness => continuous_event_expectations(configuration)?,
+        _ => (default_operations, default_checksum),
+    };
+    let poll_count_valid = if matches!(workload, SchedulerWorkload::PingPong) {
+        telemetry.polls() >= operations
+    } else {
+        telemetry.polls() == operations
+    };
+    if !poll_count_valid
         || telemetry.completions() != u64::try_from(configuration.tasks).unwrap_or(u64::MAX)
         || checksum != expected_checksum
         || telemetry.stale_ready_entries() != 0
@@ -480,8 +612,19 @@ pub fn run_scheduler_workload(
         state.scheduler.release_terminal_task(task)?;
     }
     let latencies = state.latencies.percentiles();
+    state.observe_resources();
+    let maximum_resident_memory_bytes = state.maximum_resident_memory_bytes.load(Ordering::Relaxed);
+    let maximum_virtual_memory_bytes = state.maximum_virtual_memory_bytes.load(Ordering::Relaxed);
     let final_telemetry = state.scheduler.shutdown_with_telemetry()?;
-    let resources = read_resource_snapshot().observation_since(resource_start);
+    let mut resources = read_resource_snapshot().observation_since(resource_start);
+    if resources.source != "unavailable" {
+        resources.resident_memory_bytes = resources
+            .resident_memory_bytes
+            .max(maximum_resident_memory_bytes);
+        resources.virtual_memory_bytes = resources
+            .virtual_memory_bytes
+            .max(maximum_virtual_memory_bytes);
+    }
     Ok(counters(
         workload,
         configuration,
@@ -489,6 +632,7 @@ pub fn run_scheduler_workload(
         checksum,
         latencies,
         resources,
+        operations,
     ))
 }
 
@@ -557,6 +701,131 @@ fn run_hot_queue(
     )?)
 }
 
+fn run_ping_pong(
+    state: &WorkloadState,
+    tasks: usize,
+    turns: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let turn = Arc::new(AtomicUsize::new(0));
+    let mut task_ids = Vec::with_capacity(tasks);
+    for participant in 0..tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(participant % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            PingPongTask {
+                participant,
+                participants: tasks,
+                token: token(participant)?,
+                remaining_turns: turns,
+                turn: Arc::clone(&turn),
+                checksum: Arc::clone(&state.checksum),
+                latencies: Arc::clone(&state.latencies),
+                ready_at: Instant::now(),
+                first_poll: true,
+            },
+        )?);
+    }
+    Ok(task_ids)
+}
+
+fn run_scheduler_gc_interaction(
+    state: &WorkloadState,
+    tasks: usize,
+    polls: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let mut task_ids = Vec::with_capacity(tasks);
+    for index in 0..tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(index % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            state.gc_task(token(index)?, polls),
+        )?);
+    }
+    Ok(task_ids)
+}
+
+fn run_continuous_event_fairness(
+    state: &WorkloadState,
+    configuration: SchedulerBenchmarkConfiguration,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let event_tasks = (configuration.tasks / 2).max(1);
+    let continuous_polls = configuration
+        .polls_per_task
+        .checked_mul(event_tasks)
+        .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+    let mut task_ids = Vec::with_capacity(configuration.tasks);
+    for index in 0..event_tasks {
+        task_ids.push(
+            state
+                .scheduler
+                .schedule(state.task(token(index)?, 1, true))?,
+        );
+    }
+    state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
+    let mut events = Vec::with_capacity(event_tasks);
+    for task in &task_ids {
+        events.push(state.scheduler.register_external_event(*task)?);
+    }
+    for index in event_tasks..configuration.tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(index % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            state.task(token(index)?, continuous_polls, false),
+        )?);
+    }
+    for event in &events {
+        state.scheduler.signal_external_event(*event)?;
+    }
+    wait_until_terminal(&state.scheduler, &task_ids)?;
+    for event in events {
+        state.scheduler.release_external_event(event)?;
+    }
+    Ok(task_ids)
+}
+
+fn continuous_event_expectations(
+    configuration: SchedulerBenchmarkConfiguration,
+) -> Result<(u64, u64), SchedulerBenchmarkError> {
+    let event_tasks = (configuration.tasks / 2).max(1);
+    let continuous_polls = configuration
+        .polls_per_task
+        .checked_mul(event_tasks)
+        .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+    let mut operations = 0_u64;
+    let mut checksum = 0_u64;
+    for index in 0..configuration.tasks {
+        let polls = if index < event_tasks {
+            2
+        } else {
+            continuous_polls
+        };
+        let polls = u64::try_from(polls).map_err(|_| SchedulerBenchmarkError::CounterOverflow)?;
+        operations = operations
+            .checked_add(polls)
+            .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+        checksum = checksum
+            .checked_add(
+                token(index)?
+                    .checked_mul(polls)
+                    .ok_or(SchedulerBenchmarkError::CounterOverflow)?,
+            )
+            .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+    }
+    Ok((operations, checksum))
+}
+
 #[derive(Clone, Copy)]
 enum ResumeSource {
     Wake,
@@ -579,6 +848,7 @@ fn run_suspended(
         })
         .collect::<Result<_, SchedulerBenchmarkError>>()?;
     state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
+    state.observe_resources();
     match source {
         ResumeSource::Wake => {
             for task in &task_ids {
@@ -677,6 +947,7 @@ fn counters(
     checksum: u64,
     latencies: (u64, u64, u64, u64, u64),
     resources: ResourceSnapshot,
+    operations: u64,
 ) -> SchedulerWorkloadCounters {
     let ready_delay = telemetry.ready_to_run_delay();
     let timer_delay = telemetry.timer_delivery_delay();
@@ -686,7 +957,7 @@ fn counters(
         workload: workload.name(),
         workers: configuration.workers,
         tasks: u64::try_from(configuration.tasks).unwrap_or(u64::MAX),
-        operations: telemetry.polls(),
+        operations,
         checksum,
         polls: telemetry.polls(),
         completions: telemetry.completions(),
