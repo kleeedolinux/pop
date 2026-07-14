@@ -143,7 +143,8 @@ fn checked_range_add(
         if result < minimum || result > maximum {
             return Err(IterationStatus::IntegerOverflow);
         }
-        Ok((result as u64) & width_mask(bit_width))
+        let result = i64::try_from(result).map_err(|_| IterationStatus::IntegerOverflow)?;
+        Ok(u64::from_ne_bytes(result.to_ne_bytes()) & width_mask(bit_width))
     } else {
         let result = u128::from(current)
             .checked_add(u128::from(step))
@@ -151,6 +152,6 @@ fn checked_range_add(
         if result > u128::from(width_mask(bit_width)) {
             return Err(IterationStatus::IntegerOverflow);
         }
-        Ok(result as u64)
+        u64::try_from(result).map_err(|_| IterationStatus::IntegerOverflow)
     }
 }

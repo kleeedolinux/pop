@@ -362,6 +362,32 @@ fn integer_range_abi_iterates_without_materializing_items() {
     // SAFETY: `value` is live and writable for the complete call.
     let status = unsafe { pop_rt_iteration_next(iterator, &raw mut value) };
     assert_eq!(status, IterationStatus::End as u8);
+
+    for (first, last, step, signed, expected) in [
+        (
+            u64::from_ne_bytes(i64::MIN.to_ne_bytes()),
+            u64::from_ne_bytes((i64::MIN + 1).to_ne_bytes()),
+            1,
+            true,
+            [
+                u64::from_ne_bytes(i64::MIN.to_ne_bytes()),
+                u64::from_ne_bytes((i64::MIN + 1).to_ne_bytes()),
+            ],
+        ),
+        (u64::MAX - 1, u64::MAX, 1, false, [u64::MAX - 1, u64::MAX]),
+    ] {
+        let range = pop_rt_range_create(first, last, step, signed, 64);
+        let iterator = pop_rt_iteration_acquire(range, IterationCollectionKind::Range as u8);
+        for expected in expected {
+            // SAFETY: `value` is live and writable for the complete call.
+            let status = unsafe { pop_rt_iteration_next(iterator, &raw mut value) };
+            assert_eq!(status, IterationStatus::Item as u8);
+            assert_eq!(value, expected);
+        }
+        // SAFETY: `value` is live and writable for the complete call.
+        let status = unsafe { pop_rt_iteration_next(iterator, &raw mut value) };
+        assert_eq!(status, IterationStatus::End as u8);
+    }
 }
 
 #[test]
