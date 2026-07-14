@@ -402,6 +402,56 @@ fn task_panics_are_terminal_without_destroying_the_worker() {
 }
 
 #[test]
+fn a_task_panic_storm_does_not_destroy_any_logical_scheduler_worker() {
+    let scheduler = NativeScheduler::new(configuration(4, 128)).expect("native scheduler");
+    let mut panicked_tasks = Vec::new();
+    for _ in 0..64 {
+        panicked_tasks.push(scheduler.schedule(PanicTask).expect("schedule panic task"));
+    }
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("panic storm remains contained");
+    for task in &panicked_tasks {
+        assert_eq!(
+            scheduler.task_state(*task),
+            Ok(SchedulerTaskState::Panicked)
+        );
+    }
+    assert_eq!(scheduler.telemetry().panics(), 64);
+    for task in panicked_tasks {
+        scheduler
+            .release_terminal_task(task)
+            .expect("release panicked task state");
+    }
+
+    let completions = Arc::new(Mutex::new(0));
+    let mut continuation_tasks = Vec::new();
+    for scheduler_raw in 1..=4 {
+        continuation_tasks.push(
+            scheduler
+                .schedule_on(
+                    SchedulerId::new(scheduler_raw),
+                    SchedulerTaskMobility::Affine,
+                    CompleteTask {
+                        completions: Arc::clone(&completions),
+                    },
+                )
+                .expect("schedule exact-worker continuation"),
+        );
+    }
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("every logical scheduler worker remains usable");
+    for task in continuation_tasks {
+        assert_eq!(
+            scheduler.task_state(task),
+            Ok(SchedulerTaskState::Completed)
+        );
+    }
+    assert_eq!(*completions.lock().expect("completion count"), 4);
+}
+
+#[test]
 fn task_capacity_is_bounded_until_retained_terminal_state_is_released() {
     let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
     let first = scheduler
