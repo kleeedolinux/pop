@@ -615,6 +615,15 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let map = array_element_map_name(*element_map);
             let _ = write!(output, "listAdd {map} v{} v{}", list.raw(), value.raw());
         }
+        MirInstructionKind::RangeCreate { first, last, step } => {
+            let _ = write!(
+                output,
+                "rangeCreate v{} v{} v{}",
+                first.raw(),
+                last.raw(),
+                step.raw()
+            );
+        }
         binary @ (MirInstructionKind::BooleanAnd { .. }
         | MirInstructionKind::BooleanOr { .. }
         | MirInstructionKind::CompareEqual { .. }

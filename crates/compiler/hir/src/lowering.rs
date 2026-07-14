@@ -434,6 +434,7 @@ fn lower_statement(
                 iterable: protocol.iterable(),
                 iterator: protocol.iterator(),
                 list: protocol.list(),
+                range: protocol.range(),
                 item_case: protocol.item_case(),
                 end_case: protocol.end_case(),
                 iterator_method: protocol.iterator_method(),
@@ -442,6 +443,7 @@ fn lower_statement(
             source: match source {
                 TypedIterationSource::Array => HirIterationSource::Array,
                 TypedIterationSource::List => HirIterationSource::List,
+                TypedIterationSource::Range => HirIterationSource::Range,
                 TypedIterationSource::Table => HirIterationSource::Table,
                 TypedIterationSource::Iterable => HirIterationSource::Iterable,
                 TypedIterationSource::Iterator => HirIterationSource::Iterator,
@@ -839,6 +841,11 @@ fn lower_expression(
         TypedExpressionKind::ListAdd { list, value } => HirExpressionKind::ListAdd {
             list: Box::new(lower_expression(list, interface_slots)),
             value: Box::new(lower_expression(value, interface_slots)),
+        },
+        TypedExpressionKind::RangeCreate { first, last, step } => HirExpressionKind::RangeCreate {
+            first: Box::new(lower_expression(first, interface_slots)),
+            last: Box::new(lower_expression(last, interface_slots)),
+            step: Box::new(lower_expression(step, interface_slots)),
         },
         TypedExpressionKind::Record { record, fields } => HirExpressionKind::Record {
             record: *record,
@@ -1505,6 +1512,11 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(list, slots)
                 .or_else(|| first_unknown_interface_expression(value, slots))
         }
+        TypedExpressionKind::RangeCreate { first, last, step } => {
+            first_unknown_interface_expression(first, slots)
+                .or_else(|| first_unknown_interface_expression(last, slots))
+                .or_else(|| first_unknown_interface_expression(step, slots))
+        }
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             first_unknown_interface_expression(base, slots).or_else(|| {
                 fields
@@ -1804,6 +1816,11 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::ListLength { list } => first_compile_time_only_expression(list),
         TypedExpressionKind::ListAdd { list, value } => first_compile_time_only_expression(list)
             .or_else(|| first_compile_time_only_expression(value)),
+        TypedExpressionKind::RangeCreate { first, last, step } => {
+            first_compile_time_only_expression(first)
+                .or_else(|| first_compile_time_only_expression(last))
+                .or_else(|| first_compile_time_only_expression(step))
+        }
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             first_compile_time_only_expression(base).or_else(|| {
                 fields

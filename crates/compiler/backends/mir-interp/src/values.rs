@@ -23,6 +23,11 @@ pub enum MirValue {
     Tuple(Vec<Self>),
     Array(Vec<Self>),
     List(Vec<Self>),
+    Range {
+        first: IntegerValue,
+        last: IntegerValue,
+        step: IntegerValue,
+    },
     Table(Vec<(Self, Self)>),
     Function(SymbolId),
     Enum {

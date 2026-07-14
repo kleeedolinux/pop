@@ -2089,6 +2089,27 @@ fn verify_instruction_types(
                 errors,
             );
         }
+        MirInstructionKind::RangeCreate { first, last, step } => {
+            let Some(first_type) = values.get(first).copied() else {
+                return;
+            };
+            let valid_result = range_element_type(arena, instruction.result_type())
+                .is_some_and(|element| element == first_type)
+                && matches!(
+                    arena.get(first_type),
+                    Some(SemanticType::Primitive(pop_types::PrimitiveType::Integer(
+                        _
+                    )))
+                );
+            if !valid_result {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+            verify_operand_type(instruction.result(), *last, first_type, values, errors);
+            verify_operand_type(instruction.result(), *step, first_type, values, errors);
+        }
         _ => {}
     }
 }
@@ -2103,6 +2124,20 @@ fn list_element_type(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
             definition,
             arguments,
         } if *definition == list && arguments.len() == 1 => Some(arguments[0]),
+        _ => None,
+    }
+}
+
+fn range_element_type(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    let range = embedded_bootstrap_schema()
+        .ok()?
+        .iteration_protocol()?
+        .range();
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == range && arguments.len() == 1 => Some(arguments[0]),
         _ => None,
     }
 }
@@ -2259,6 +2294,7 @@ fn iteration_source_item(
             arguments,
         }) if arguments.len() == 1
             && (*definition == protocol.list()
+                || *definition == protocol.range()
                 || *definition == protocol.iterable()
                 || *definition == protocol.iterator()) =>
         {
@@ -3515,6 +3551,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             ..
         } => vec![*length, *initial_value],
         MirInstructionKind::ListCreate { capacity, .. } => capacity.iter().copied().collect(),
+        MirInstructionKind::RangeCreate { first, last, step } => vec![*first, *last, *step],
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
         } => std::iter::once(*callee)

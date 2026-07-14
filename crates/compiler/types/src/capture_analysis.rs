@@ -277,6 +277,11 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
                 finalize_expression_captures(capacity, written);
             }
         }
+        TypedExpressionKind::RangeCreate { first, last, step } => {
+            finalize_expression_captures(first, written);
+            finalize_expression_captures(last, written);
+            finalize_expression_captures(step, written);
+        }
         TypedExpressionKind::ListLength { list } => {
             finalize_expression_captures(list, written);
         }

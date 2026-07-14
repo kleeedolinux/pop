@@ -272,6 +272,10 @@ pub(crate) fn runtime_declarations() -> Vec<String> {
             native_runtime_symbol(RuntimeOperation::ListAdd)
         ),
         format!(
+            "declare i64 @{}(i64, i64, i64, i1, i8) nounwind",
+            native_runtime_symbol(RuntimeOperation::RangeCreate)
+        ),
+        format!(
             "declare i64 @{}(i64, i8) nounwind",
             native_runtime_symbol(RuntimeOperation::IterationAcquire)
         ),

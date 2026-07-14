@@ -962,6 +962,261 @@ fn growable_lists_execute_with_stable_order_and_generalized_iteration() {
 }
 
 #[test]
+fn first_class_integer_ranges_execute_in_both_directions() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function ranges(): Int\n\
+             local total = 0\n\
+             for value in Range.create(1, 5, 2) do\n\
+                 total += value\n\
+             end\n\
+             for value in Range.create(5, 1, -2) do\n\
+                 total += value\n\
+             end\n\
+             for value in Range.create(5, 1) do\n\
+                 total += 100\n\
+             end\n\
+             return total\n\
+         end\n",
+    );
+    let function = mir.functions()[0].symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified range MIR")
+            .call(function, &[])
+            .expect("range execution"),
+        vec![int(18)]
+    );
+}
+
+#[test]
+fn first_class_ranges_are_repeatable_and_preserve_traps() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         public function repeatRange(): Int\n\
+             local values = Range.create(1, 3)\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total += value\n\
+             end\n\
+             for value in values do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n\
+         public function dynamicZero(step: Int): Int\n\
+             for value in Range.create(1, 3, step) do\n\
+                 return value\n\
+             end\n\
+             return 0\n\
+         end\n\
+         public function overflow(first: Int8, last: Int8, step: Int8): Int\n\
+             local total = 0\n\
+             for value in Range.create(first, last, step) do\n\
+                 total += Int(value)\n\
+             end\n\
+             return total\n\
+         end\n\
+         public function breakBeforeOverflow(first: Int8, last: Int8, step: Int8): Int\n\
+             local total = 0\n\
+             for value in Range.create(first, last, step) do\n\
+                 total += Int(value)\n\
+                 break\n\
+             end\n\
+             return total\n\
+         end\n\
+         public function evaluateRangeArgumentsOnce(): Int\n\
+             local calls = 0\n\
+             local nextValue = function(): Int\n\
+                 calls += 1\n\
+                 return calls\n\
+             end\n\
+             local total = 0\n\
+             for value in Range.create(nextValue(), nextValue(), nextValue()) do\n\
+                 total += value\n\
+             end\n\
+             return calls * 10 + total\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified range traps MIR");
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[0].symbol(), &[])
+            .expect("independent range iterators"),
+        vec![int(12)]
+    );
+    assert_eq!(
+        interpreter.call(mir.functions()[1].symbol(), &[int(0)]),
+        Err(trap(TrapKind::InvalidRangeStep))
+    );
+    assert_eq!(
+        interpreter.call(
+            mir.functions()[2].symbol(),
+            &[
+                integer("126", IntegerKind::Int8),
+                integer("127", IntegerKind::Int8),
+                integer("2", IntegerKind::Int8),
+            ],
+        ),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    let int8_arguments = [
+        integer("126", IntegerKind::Int8),
+        integer("127", IntegerKind::Int8),
+        integer("2", IntegerKind::Int8),
+    ];
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[3].symbol(), &int8_arguments)
+            .expect("break avoids unused advancement"),
+        vec![int(126)]
+    );
+    assert_eq!(
+        interpreter
+            .call(mir.functions()[4].symbol(), &[])
+            .expect("range arguments evaluate once"),
+        vec![int(31)]
+    );
+}
+
+#[test]
+fn generalized_iteration_cleanup_is_explicit_and_lexical() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         private class ResourceIterator implements Iterator<Int>\n\
+             private current: Int\n\
+             private closed: Boolean\n\
+             public function ResourceIterator.new(): ResourceIterator\n\
+                 return ResourceIterator { current = 1, closed = false }\n\
+             end\n\
+             public function ResourceIterator:iterator(): Iterator<Int>\n\
+                 return self\n\
+             end\n\
+             public function ResourceIterator:next(): Iteration<Int>\n\
+                 if self.current > 2 then\n\
+                     return Iteration.End\n\
+                 end\n\
+                 local value = self.current\n\
+                 self.current += 1\n\
+                 return Iteration.Item(value)\n\
+             end\n\
+             public function ResourceIterator:close()\n\
+                 self.closed = true\n\
+             end\n\
+             public function ResourceIterator:isClosed(): Boolean\n\
+                 return self.closed\n\
+             end\n\
+         end\n\
+         private function consumeWithCleanup(iterator: ResourceIterator): Boolean\n\
+             defer\n\
+                 iterator:close()\n\
+             end\n\
+             for value in iterator do\n\
+                 break\n\
+             end\n\
+             return iterator:isClosed()\n\
+         end\n\
+         public function cleanupContract(): (Boolean, Boolean, Boolean)\n\
+             local withoutCleanup = ResourceIterator.new()\n\
+             for value in withoutCleanup do\n\
+                 break\n\
+             end\n\
+             local withCleanup = ResourceIterator.new()\n\
+             local closedBeforeReturn = consumeWithCleanup(withCleanup)\n\
+             return (withoutCleanup:isClosed(), closedBeforeReturn, withCleanup:isClosed())\n\
+         end\n",
+    );
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("cleanup contract")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified explicit cleanup MIR")
+            .call(function, &[])
+            .expect("explicit cleanup execution"),
+        vec![MirValue::Tuple(vec![
+            MirValue::Boolean(false),
+            MirValue::Boolean(false),
+            MirValue::Boolean(true),
+        ])]
+    );
+}
+
+#[test]
+fn generalized_iteration_acquires_and_steps_exactly_once() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         private class CountingIterator implements Iterator<Int>\n\
+             private current: Int\n\
+             private limit: Int\n\
+             private acquisitions: Int\n\
+             private nextCalls: Int\n\
+             public function CountingIterator.new(limit: Int): CountingIterator\n\
+                 return CountingIterator { current = 1, limit = limit, acquisitions = 0, nextCalls = 0 }\n\
+             end\n\
+             public function CountingIterator:iterator(): Iterator<Int>\n\
+                 self.acquisitions += 1\n\
+                 return self\n\
+             end\n\
+             public function CountingIterator:next(): Iteration<Int>\n\
+                 self.nextCalls += 1\n\
+                 if self.current > self.limit then\n\
+                     return Iteration.End\n\
+                 end\n\
+                 local value = self.current\n\
+                 self.current += 1\n\
+                 return Iteration.Item(value)\n\
+             end\n\
+             public function CountingIterator:code(total: Int): Int\n\
+                 return self.acquisitions * 100 + self.nextCalls * 10 + total\n\
+             end\n\
+         end\n\
+         public function iterationCounts(): (Int, Int, Int, Int)\n\
+             local empty = CountingIterator.new(0)\n\
+             for value in empty do\n\
+             end\n\
+             local single = CountingIterator.new(3)\n\
+             local singleTotal = 0\n\
+             for value in single do\n\
+                 singleTotal += value\n\
+                 break\n\
+             end\n\
+             local multiple = CountingIterator.new(2)\n\
+             local multipleTotal = 0\n\
+             for value in multiple do\n\
+                 multipleTotal += value\n\
+             end\n\
+             local nestedTotal = 0\n\
+             for outer in Range.create(1, 2) do\n\
+                 for inner in Range.create(1, 2) do\n\
+                     if inner == 1 then\n\
+                         continue\n\
+                     end\n\
+                     nestedTotal += outer * inner\n\
+                 end\n\
+             end\n\
+             return (empty:code(0), single:code(singleTotal), multiple:code(multipleTotal), nestedTotal)\n\
+         end\n",
+    );
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("iteration counts")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified iteration count MIR")
+            .call(function, &[])
+            .expect("iteration call counts"),
+        vec![MirValue::Tuple(vec![int(110), int(111), int(133), int(6)])]
+    );
+}
+
+#[test]
 fn growable_list_negative_capacity_and_checked_bounds_trap() {
     for source in [
         "namespace Main\npublic function fail(): Int\nlocal values = List.withCapacity<<Int>>(-1)\nreturn 0\nend\n",

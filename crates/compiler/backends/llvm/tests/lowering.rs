@@ -709,6 +709,117 @@ end\n",
 }
 
 #[test]
+fn emitted_llvm_executes_first_class_integer_ranges() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local total = 0\n\
+    for value in Range.create(1, 5, 2) do\n\
+        total += value\n\
+    end\n\
+    for value in Range.create(5, 1, -2) do\n\
+        total += value\n\
+    end\n\
+    for value in Range.create(5, 1) do\n\
+        total += 100\n\
+    end\n\
+    return total\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "first-class-ranges");
+    assert_eq!(
+        result.status.code(),
+        Some(18),
+        "native executable misexecuted first-class ranges: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_does_not_advance_a_broken_range() {
+    let module = native_module(
+        "namespace Main\n\
+private function main(): Int\n\
+    local first = Int8(126)\n\
+    local last = Int8(127)\n\
+    local step = Int8(2)\n\
+    for value in Range.create(first, last, step) do\n\
+        return Int(value)\n\
+    end\n\
+    return 0\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "range-break-before-overflow");
+    assert_eq!(
+        result.status.code(),
+        Some(126),
+        "native executable advanced a broken range: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_keeps_iterator_cleanup_explicit() {
+    let module = native_module(
+        "namespace Main\n\
+private class ResourceIterator implements Iterator<Int>\n\
+    private current: Int\n\
+    private closed: Boolean\n\
+    public function ResourceIterator.new(): ResourceIterator\n\
+        return ResourceIterator { current = 1, closed = false }\n\
+    end\n\
+    public function ResourceIterator:iterator(): Iterator<Int>\n\
+        return self\n\
+    end\n\
+    public function ResourceIterator:next(): Iteration<Int>\n\
+        if self.current > 1 then\n\
+            return Iteration.End\n\
+        end\n\
+        self.current += 1\n\
+        return Iteration.Item(1)\n\
+    end\n\
+    public function ResourceIterator:close()\n\
+        self.closed = true\n\
+    end\n\
+    public function ResourceIterator:isClosed(): Boolean\n\
+        return self.closed\n\
+    end\n\
+end\n\
+private function consumeWithCleanup(iterator: ResourceIterator): Boolean\n\
+    defer\n\
+        iterator:close()\n\
+    end\n\
+    for value in iterator do\n\
+        break\n\
+    end\n\
+    return iterator:isClosed()\n\
+end\n\
+private function main(): Int\n\
+    local withoutCleanup = ResourceIterator.new()\n\
+    for value in withoutCleanup do\n\
+        break\n\
+    end\n\
+    local withCleanup = ResourceIterator.new()\n\
+    local closedBeforeReturn = consumeWithCleanup(withCleanup)\n\
+    if not withoutCleanup:isClosed() and not closedBeforeReturn and withCleanup:isClosed() then\n\
+        return 42\n\
+    end\n\
+    return 1\n\
+end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "explicit-iterator-cleanup");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable changed explicit iterator cleanup: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn emitted_llvm_executes_growable_list_core_and_iteration() {
     let module = native_module(
         "namespace Main\n\

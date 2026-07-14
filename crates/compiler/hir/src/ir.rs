@@ -2269,6 +2269,11 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             remap_aggregate_expression(list, instances);
             remap_aggregate_expression(value, instances);
         }
+        HirExpressionKind::RangeCreate { first, last, step } => {
+            remap_aggregate_expression(first, instances);
+            remap_aggregate_expression(last, instances);
+            remap_aggregate_expression(step, instances);
+        }
         HirExpressionKind::OptionalDefault { optional, fallback } => {
             remap_aggregate_expression(optional, instances);
             remap_aggregate_expression(fallback, instances);
@@ -2703,6 +2708,11 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             collect_expression_calls(list, calls);
             collect_expression_calls(value, calls);
         }
+        HirExpressionKind::RangeCreate { first, last, step } => {
+            collect_expression_calls(first, calls);
+            collect_expression_calls(last, calls);
+            collect_expression_calls(step, calls);
+        }
         HirExpressionKind::OptionalDefault { optional, fallback } => {
             collect_expression_calls(optional, calls);
             collect_expression_calls(fallback, calls);
@@ -2931,6 +2941,11 @@ fn specialize_statement(
                         if *definition == protocol.list() =>
                     {
                         HirIterationSource::List
+                    }
+                    pop_types::SemanticType::Builtin { definition, .. }
+                        if *definition == protocol.range() =>
+                    {
+                        HirIterationSource::Range
                     }
                     pop_types::SemanticType::Builtin { definition, .. }
                         if *definition == protocol.iterable() =>
@@ -3186,6 +3201,11 @@ fn specialize_expression(
         HirExpressionKind::ListAdd { list, value } => {
             specialize_expression(list, substitutions, instances, arena)?;
             specialize_expression(value, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::RangeCreate { first, last, step } => {
+            specialize_expression(first, substitutions, instances, arena)?;
+            specialize_expression(last, substitutions, instances, arena)?;
+            specialize_expression(step, substitutions, instances, arena)?;
         }
         HirExpressionKind::OptionalDefault { optional, fallback } => {
             specialize_expression(optional, substitutions, instances, arena)?;
@@ -3553,6 +3573,7 @@ pub enum HirStatementKind {
 pub enum HirIterationSource {
     Array,
     List,
+    Range,
     Table,
     Iterable,
     Iterator,
@@ -3573,6 +3594,7 @@ pub struct HirIterationProtocol {
     pub(crate) iterable: BuiltinTypeId,
     pub(crate) iterator: BuiltinTypeId,
     pub(crate) list: BuiltinTypeId,
+    pub(crate) range: BuiltinTypeId,
     pub(crate) item_case: IterationCaseId,
     pub(crate) end_case: IterationCaseId,
     pub(crate) iterator_method: IterationProtocolMethodId,
@@ -3598,6 +3620,11 @@ impl HirIterationProtocol {
     #[must_use]
     pub const fn list(self) -> BuiltinTypeId {
         self.list
+    }
+
+    #[must_use]
+    pub const fn range(self) -> BuiltinTypeId {
+        self.range
     }
 
     #[must_use]
@@ -3928,6 +3955,11 @@ pub enum HirExpressionKind {
     ListAdd {
         list: Box<HirExpression>,
         value: Box<HirExpression>,
+    },
+    RangeCreate {
+        first: Box<HirExpression>,
+        last: Box<HirExpression>,
+        step: Box<HirExpression>,
     },
     Record {
         record: SymbolId,

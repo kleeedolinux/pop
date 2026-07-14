@@ -229,6 +229,7 @@ pub struct BootstrapIterationProtocol {
     iterable: BuiltinTypeId,
     iterator: BuiltinTypeId,
     list: BuiltinTypeId,
+    range: BuiltinTypeId,
 }
 
 impl BootstrapIterationProtocol {
@@ -250,6 +251,11 @@ impl BootstrapIterationProtocol {
     #[must_use]
     pub const fn list(self) -> BuiltinTypeId {
         self.list
+    }
+
+    #[must_use]
+    pub const fn range(self) -> BuiltinTypeId {
+        self.range
     }
 
     #[must_use]
@@ -350,6 +356,7 @@ impl BootstrapSchema {
         let iterable = self.type_by_source_name("Iterable")?;
         let iterator = self.type_by_source_name("Iterator")?;
         let list = self.type_by_source_name("List")?;
+        let range = self.type_by_source_name("Range")?;
         (iteration.arity == 1
             && iteration.role == BootstrapTypeRole::Nominal
             && iterable.arity == 1
@@ -357,12 +364,15 @@ impl BootstrapSchema {
             && iterator.arity == 1
             && iterator.role == BootstrapTypeRole::Interface
             && list.arity == 1
-            && list.role == BootstrapTypeRole::Nominal)
+            && list.role == BootstrapTypeRole::Nominal
+            && range.arity == 1
+            && range.role == BootstrapTypeRole::Nominal)
             .then_some(BootstrapIterationProtocol {
                 iteration: iteration.id,
                 iterable: iterable.id,
                 iterator: iterator.id,
                 list: list.id,
+                range: range.id,
             })
     }
 

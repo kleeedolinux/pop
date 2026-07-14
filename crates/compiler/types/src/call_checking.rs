@@ -136,6 +136,13 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .check_list_invocation(path, arguments, span)
                     .map(CheckedInvocation::Value);
             }
+            if matches!(path.as_slice(), [range, create]
+                if range == "Range" && create == "create")
+            {
+                return self
+                    .check_range_create(arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if let Some(checked) = self.check_standard_invocation(path, arguments, span) {
                 return Some(CheckedInvocation::Call(checked));
             }
@@ -993,6 +1000,89 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(TypedExpression {
             kind: TypedExpressionKind::ListCreate { capacity },
             type_id: list_type,
+            span,
+        })
+    }
+
+    pub(crate) fn check_range_create(
+        &mut self,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if !matches!(arguments.len(), 2 | 3) {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "Range.create",
+                2,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let first = self.check_expression(&arguments[0])?;
+        let integer_type = first.type_id();
+        let Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) =
+            self.resolver.arena().get(integer_type).cloned()
+        else {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                first.span(),
+                "Range.create",
+                self.type_name(integer_type),
+            ));
+            return None;
+        };
+        let last = self.check_expression_expected(
+            &arguments[1],
+            Some(ExpectedExpressionType::plain(integer_type)),
+        )?;
+        self.require_same_type(
+            integer_type,
+            last.type_id(),
+            last.span(),
+            arguments[1].span(),
+        );
+        let step = if let Some(argument) = arguments.get(2) {
+            let step = self.check_expression_expected(
+                argument,
+                Some(ExpectedExpressionType::plain(integer_type)),
+            )?;
+            self.require_same_type(integer_type, step.type_id(), step.span(), argument.span());
+            step
+        } else {
+            TypedExpression {
+                kind: TypedExpressionKind::Integer(
+                    crate::IntegerValue::parse_decimal("1", kind)
+                        .expect("one fits every integer range"),
+                ),
+                type_id: integer_type,
+                span,
+            }
+        };
+        if matches!(step.kind(), TypedExpressionKind::Integer(value)
+            if value.signed() == Some(0) || value.unsigned() == Some(0))
+        {
+            self.diagnostics.push(type_diagnostics::invalid_operator(
+                step.span(),
+                "Range.create step",
+                "zero",
+            ));
+            return None;
+        }
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        let range_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.range(),
+                arguments: vec![integer_type],
+            })
+            .ok()?;
+        Some(TypedExpression {
+            kind: TypedExpressionKind::RangeCreate {
+                first: Box::new(first),
+                last: Box::new(last),
+                step: Box::new(step),
+            },
+            type_id: range_type,
             span,
         })
     }

@@ -193,6 +193,8 @@ enum PrivateValue {
         source: RuntimeValue,
         expected_length: usize,
         position: usize,
+        range_current: Option<pop_types::IntegerValue>,
+        range_started: bool,
     },
 }
 
@@ -924,6 +926,37 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .map_err(ExecutionError::Runtime)?;
                 return Ok(RuntimeValue::managed(MirValue::List(Vec::new()), reference));
             }
+            MirInstructionKind::RangeCreate { first, last, step } => {
+                let MirValue::Integer(first) = value(values, *first)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let MirValue::Integer(last) = value(values, *last)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let MirValue::Integer(step) = value(values, *step)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                if step.signed() == Some(0) || step.unsigned() == Some(0) {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::InvalidRangeStep)),
+                    ));
+                }
+                let object_map = ObjectMap::new(3, Vec::new())
+                    .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map,
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                return Ok(RuntimeValue::managed(
+                    MirValue::Range { first, last, step },
+                    reference,
+                ));
+            }
             MirInstructionKind::ListLength { list } => {
                 let MirValue::List(elements) = &value(values, *list)?.visible else {
                     return Err(ExecutionError::TypeMismatch);
@@ -1417,17 +1450,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     {
                         Ok(receiver)
                     } else {
-                        let expected_length = match &receiver.visible {
-                            MirValue::Array(elements) => elements.len(),
-                            MirValue::List(elements) => elements.len(),
-                            MirValue::Table(entries) => entries.len(),
-                            _ => return Err(ExecutionError::TypeMismatch),
-                        };
-                        self.allocate_iteration_session(
-                            instruction.result_type(),
-                            receiver,
-                            expected_length,
-                        )
+                        self.allocate_iteration_session(instruction.result_type(), receiver)
                     }
                 } else if method.raw() == 1 {
                     self.advance_iteration_session(instruction.result_type(), &receiver, values)
@@ -1637,8 +1660,14 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         &mut self,
         iterator_type: TypeId,
         source: RuntimeValue,
-        expected_length: usize,
     ) -> Result<RuntimeValue, ExecutionError> {
+        let (expected_length, range_current) = match &source.visible {
+            MirValue::Array(elements) => (elements.len(), None),
+            MirValue::List(elements) => (elements.len(), None),
+            MirValue::Table(entries) => (entries.len(), None),
+            MirValue::Range { first, .. } => (0, Some(*first)),
+            _ => return Err(ExecutionError::TypeMismatch),
+        };
         let reference_slots = source
             .reference
             .map(|_| vec![ObjectSlot::new(0)])
@@ -1660,6 +1689,8 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 source,
                 expected_length,
                 position: 0,
+                range_current,
+                range_started: false,
             },
         );
         Ok(RuntimeValue::managed(MirValue::Function(symbol), reference))
@@ -1674,14 +1705,23 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         let MirValue::Function(symbol) = iterator.visible else {
             return Err(ExecutionError::TypeMismatch);
         };
-        let (source, expected_length, position) = match self.private_values.get(&symbol) {
-            Some(PrivateValue::Iterator {
-                source,
-                expected_length,
-                position,
-            }) => (source.clone(), *expected_length, *position),
-            _ => return Err(ExecutionError::TypeMismatch),
-        };
+        let (source, expected_length, position, range_current, range_started) =
+            match self.private_values.get(&symbol) {
+                Some(PrivateValue::Iterator {
+                    source,
+                    expected_length,
+                    position,
+                    range_current,
+                    range_started,
+                }) => (
+                    source.clone(),
+                    *expected_length,
+                    *position,
+                    *range_current,
+                    *range_started,
+                ),
+                _ => return Err(ExecutionError::TypeMismatch),
+            };
         let current = source.reference.and_then(|owner| {
             values
                 .values()
@@ -1689,29 +1729,85 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 .cloned()
         });
         let current = current.as_ref().unwrap_or(&source);
-        let (length, item) = match &current.visible {
-            MirValue::Array(elements) => (elements.len(), elements.get(position).cloned()),
-            MirValue::List(elements) => (elements.len(), elements.get(position).cloned()),
+        let (length, item, next_range) = match &current.visible {
+            MirValue::Array(elements) => (elements.len(), elements.get(position).cloned(), None),
+            MirValue::List(elements) => (elements.len(), elements.get(position).cloned(), None),
             MirValue::Table(entries) => (
                 entries.len(),
                 entries
                     .get(position)
                     .map(|(key, value)| MirValue::Tuple(vec![key.clone(), value.clone()])),
+                None,
             ),
+            MirValue::Range { last, step, .. } => {
+                let Some(current) = range_current else {
+                    return self.iteration_result(iteration_type, None);
+                };
+                let next = if range_started {
+                    current.checked_add(*step).map_err(|error| match error {
+                        pop_types::NumericError::KindMismatch => ExecutionError::TypeMismatch,
+                        _ => ExecutionError::Runtime(
+                            self.runtime
+                                .raise_trap(Trap::new(TrapKind::IntegerOverflow)),
+                        ),
+                    })?
+                } else {
+                    current
+                };
+                let ordering = next
+                    .compare(*last)
+                    .map_err(|_| ExecutionError::TypeMismatch)?;
+                let positive = step.signed().map_or_else(
+                    || step.unsigned().is_some_and(|value| value > 0),
+                    |value| value > 0,
+                );
+                let in_range = if positive {
+                    !ordering.is_gt()
+                } else {
+                    !ordering.is_lt()
+                };
+                if !in_range {
+                    if let Some(PrivateValue::Iterator { range_current, .. }) =
+                        self.private_values.get_mut(&symbol)
+                    {
+                        *range_current = None;
+                    }
+                    return self.iteration_result(iteration_type, None);
+                }
+                let following = (!ordering.is_eq()).then_some(next);
+                (0, Some(MirValue::Integer(next)), following)
+            }
             _ => return Err(ExecutionError::TypeMismatch),
         };
-        if length != expected_length {
+        if !matches!(current.visible, MirValue::Range { .. }) && length != expected_length {
             return Err(ExecutionError::Runtime(
                 self.runtime
                     .raise_trap(Trap::new(TrapKind::ConcurrentModification)),
             ));
         }
         if item.is_some()
-            && let Some(PrivateValue::Iterator { position, .. }) =
-                self.private_values.get_mut(&symbol)
+            && let Some(PrivateValue::Iterator {
+                position,
+                range_current,
+                range_started,
+                ..
+            }) = self.private_values.get_mut(&symbol)
         {
-            *position = position.saturating_add(1);
+            if matches!(current.visible, MirValue::Range { .. }) {
+                *range_current = next_range;
+                *range_started = true;
+            } else {
+                *position = position.saturating_add(1);
+            }
         }
+        self.iteration_result(iteration_type, item)
+    }
+
+    fn iteration_result(
+        &self,
+        iteration_type: TypeId,
+        item: Option<MirValue>,
+    ) -> Result<RuntimeValue, ExecutionError> {
         let definition = match self.arena.get(iteration_type) {
             Some(SemanticType::Builtin { definition, .. }) => *definition,
             _ => return Err(ExecutionError::TypeMismatch),
