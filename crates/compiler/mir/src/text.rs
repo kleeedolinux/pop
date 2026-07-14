@@ -554,6 +554,7 @@ fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), 
         MirFunction {
             function: FunctionId::from_raw(function),
             symbol: SymbolId::from_raw(symbol),
+            is_async: false,
             parameters,
             results,
             effects,

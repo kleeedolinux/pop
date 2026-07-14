@@ -773,6 +773,7 @@ enum LoweredAssignmentTarget {
 
 struct FunctionBuilder<'hir> {
     owner: SymbolId,
+    is_async: bool,
     parameters_schema: Vec<TypeId>,
     results: Vec<TypeId>,
     body: &'hir [HirStatement],
@@ -924,7 +925,7 @@ fn visit_statement_closures(
                 }
             }
         }
-        HirStatementKind::Defer { body } => {
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
             for nested in body {
                 visit_statement_closures(nested, parameters, locals);
             }
@@ -1025,7 +1026,9 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         HirStatementKind::ResultMatch { arms, .. } => arms
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
-        HirStatementKind::Defer { body } => contains_continue_for_current_loop(body),
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+            contains_continue_for_current_loop(body)
+        }
         HirStatementKind::While { .. }
         | HirStatementKind::OptionalWhile { .. }
         | HirStatementKind::RepeatUntil { .. }
@@ -1076,7 +1079,8 @@ fn visit_expression_closures(
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
         | HirExpressionKind::NumericConvert { value: base, .. }
-        | HirExpressionKind::StringFormat { value: base, .. } => {
+        | HirExpressionKind::StringFormat { value: base, .. }
+        | HirExpressionKind::Await { task: base } => {
             visit_expression_closures(base, parameters, locals);
         }
         HirExpressionKind::TableGet { table, key } => {
@@ -1227,6 +1231,7 @@ impl<'hir> FunctionBuilder<'hir> {
             .collect();
         Self::from_parts(
             hir.symbol(),
+            hir.is_async(),
             parameter_specs,
             hir.results().to_vec(),
             hir.body(),
@@ -1275,6 +1280,7 @@ impl<'hir> FunctionBuilder<'hir> {
             .collect();
         Self::from_parts(
             owner,
+            false,
             parameter_specs,
             closure.results().to_vec(),
             closure.body(),
@@ -1290,6 +1296,7 @@ impl<'hir> FunctionBuilder<'hir> {
     #[allow(clippy::too_many_arguments)]
     fn from_parts(
         owner: SymbolId,
+        is_async: bool,
         parameter_specs: Vec<(ValueParameterId, TypeId, SourceSpan)>,
         results: Vec<TypeId>,
         body: &'hir [HirStatement],
@@ -1314,6 +1321,7 @@ impl<'hir> FunctionBuilder<'hir> {
         let (cell_parameters, cell_locals) = collect_cell_sources(body);
         Self {
             owner,
+            is_async,
             parameters_schema: parameter_specs
                 .iter()
                 .map(|(_, type_id, _)| *type_id)
@@ -1375,6 +1383,7 @@ impl<'hir> FunctionBuilder<'hir> {
         let function = MirFunction {
             function: FunctionId::from_raw(0),
             symbol: self.owner,
+            is_async: self.is_async,
             parameters: self.parameters_schema,
             results: self.results,
             effects: MirEffectSummary::empty(),
@@ -1611,7 +1620,7 @@ impl<'hir> FunctionBuilder<'hir> {
                     result_type,
                     arms,
                 } => self.lower_result_match(scrutinee, *result, *result_type, arms),
-                HirStatementKind::Defer { body } => {
+                HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
                     self.active_cleanups.push(ActiveCleanup { scope, body });
@@ -2905,6 +2914,9 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::Function(function) => {
                 MirInstructionKind::FunctionReference(*function)
             }
+            HirExpressionKind::Await { task } => MirInstructionKind::Await {
+                task: self.lower_expression(task),
+            },
             HirExpressionKind::Tuple(elements) => MirInstructionKind::TupleMake(
                 elements
                     .iter()
@@ -4367,6 +4379,9 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::CallIndirect {
             declared_effects, ..
         } => *declared_effects,
+        MirInstructionKind::Await { .. } => {
+            MirEffectSummary::from_effects([MirEffect::Suspends, MirEffect::GcSafePoint])
+        }
         MirInstructionKind::IntegerConstant(_)
         | MirInstructionKind::FloatConstant(_)
         | MirInstructionKind::StringConstant(_)

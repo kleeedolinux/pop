@@ -262,10 +262,12 @@ fn reference_type_with_parameters(
                 .collect::<Result<_, _>>()?,
         )),
         Some(SemanticType::Function {
+            is_async,
             parameters,
             results,
             effects,
         }) => Ok(ReferenceType::Function {
+            is_async: *is_async,
             parameters: parameters
                 .iter()
                 .map(|parameter| {
@@ -862,10 +864,12 @@ fn import_capsule_type(
                 .collect::<Option<_>>()?,
         ),
         SemanticType::Function {
+            is_async,
             parameters,
             results,
             effects,
         } => SemanticType::Function {
+            is_async,
             parameters: parameters
                 .into_iter()
                 .map(&mut import)
@@ -1007,6 +1011,7 @@ pub(crate) fn reference_type_id(
                 .expect("verified tuple metadata")
         }
         ReferenceType::Function {
+            is_async,
             parameters,
             results,
             effects,
@@ -1021,6 +1026,7 @@ pub(crate) fn reference_type_id(
                 .collect();
             arena
                 .intern(SemanticType::Function {
+                    is_async: *is_async,
                     parameters,
                     results,
                     effects: *effects,

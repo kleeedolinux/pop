@@ -127,6 +127,7 @@ pub enum ReferenceType {
     TypeParameter(u16),
     Tuple(Vec<ReferenceType>),
     Function {
+        is_async: bool,
         parameters: Vec<ReferenceType>,
         results: Vec<ReferenceType>,
         effects: pop_types::EffectSummary,

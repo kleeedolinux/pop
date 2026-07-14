@@ -1407,6 +1407,7 @@ pub struct HirFunction {
     pub(crate) bubble: BubbleId,
     pub(crate) visibility: Visibility,
     pub(crate) name: String,
+    pub(crate) is_async: bool,
     pub(crate) type_parameters: Vec<TypeId>,
     pub(crate) type_parameter_names: Vec<String>,
     pub(crate) type_parameter_bounds: Vec<Option<TypeId>>,
@@ -1446,6 +1447,11 @@ impl HirFunction {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -2078,7 +2084,9 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
-            HirStatementKind::Defer { body } => remap_aggregate_statements(body, instances),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                remap_aggregate_statements(body, instances);
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 remap_aggregate_expression(base, instances);
                 *field = instances.field(base.type_id(), *field);
@@ -2228,6 +2236,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::Await { task: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
@@ -2608,7 +2617,9 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
                     collect_statement_calls(&arm.body, calls);
                 }
             }
-            HirStatementKind::Defer { body } => collect_statement_calls(body, calls),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                collect_statement_calls(body, calls);
+            }
             HirStatementKind::FieldSet { base, value, .. }
             | HirStatementKind::CompoundFieldSet { base, value, .. } => {
                 collect_expression_calls(base, calls);
@@ -2699,6 +2710,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::Await { task: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TableGet { table, key } => {
@@ -3044,7 +3056,7 @@ fn specialize_statement(
                 specialize_statements(&mut arm.body, substitutions, instances, arena)?;
             }
         }
-        HirStatementKind::Defer { body } => {
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
             specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::FieldSet { base, value, .. } => {
@@ -3202,6 +3214,7 @@ fn specialize_expression(
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::Await { task: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
@@ -3569,6 +3582,9 @@ pub enum HirStatementKind {
         arms: Vec<HirResultMatchArm>,
     },
     Defer {
+        body: Vec<HirStatement>,
+    },
+    AsyncDefer {
         body: Vec<HirStatement>,
     },
     FieldSet {
@@ -4078,6 +4094,9 @@ pub enum HirExpressionKind {
         success_type: TypeId,
         error_type: TypeId,
         enclosing_result: TypeId,
+    },
+    Await {
+        task: Box<HirExpression>,
     },
     OptionalNarrow {
         optional: Box<HirExpression>,

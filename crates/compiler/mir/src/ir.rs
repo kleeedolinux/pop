@@ -714,6 +714,7 @@ impl MirMethod {
 pub struct MirFunction {
     pub(crate) function: FunctionId,
     pub(crate) symbol: SymbolId,
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: MirEffectSummary,
@@ -730,6 +731,11 @@ impl MirFunction {
     #[must_use]
     pub const fn symbol(&self) -> SymbolId {
         self.symbol
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -1231,6 +1237,9 @@ pub enum MirInstructionKind {
         arguments: Vec<ValueId>,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
+    },
+    Await {
+        task: ValueId,
     },
     RecordMake {
         record: SymbolId,

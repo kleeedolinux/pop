@@ -354,6 +354,12 @@ pub(crate) fn lower_instruction(
                 }
             }
         }
+        MirInstructionKind::Await { .. } => {
+            return Err(LlvmLoweringError::UnsupportedInstruction {
+                function: FunctionId::from_raw(u32::MAX),
+                value: instruction.result(),
+            });
+        }
         MirInstructionKind::GcSafePoint {
             safe_point, roots, ..
         } => lower_gc_safe_point(&result, safe_point.raw(), roots, direct_scalar_arrays),

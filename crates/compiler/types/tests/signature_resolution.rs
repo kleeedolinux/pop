@@ -82,6 +82,53 @@ fn foundational_and_generic_types_resolve_to_canonical_ids() {
 }
 
 #[test]
+fn async_function_types_resolve_as_distinct_function_types() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/async_signature.pop",
+        "namespace Main\n\
+         public function schedule(callback: async function(): Int)\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let parsed = function_signature(&source, &syntax);
+    let indexed = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(0),
+        &source,
+        &syntax,
+    )]);
+    let function = indexed
+        .index()
+        .declaration_by_qualified_name("Main.schedule", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let result = resolver.resolve(ModuleId::from_raw(0), function, &parsed);
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let callback = result.signature().expect("signature").parameters()[0]
+        .parameter_type()
+        .type_id()
+        .expect("callback type");
+    assert!(matches!(
+        resolver.arena().get(callback),
+        Some(SemanticType::Function {
+            is_async: true,
+            parameters,
+            results,
+            ..
+        }) if parameters.is_empty() && results.len() == 1
+    ));
+}
+
+#[test]
 fn nominal_generic_bounds_resolve_against_only_earlier_parameters() {
     let source = SourceFile::new(
         FileId::from_raw(0),

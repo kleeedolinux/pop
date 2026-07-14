@@ -145,6 +145,9 @@ pub enum TypedStatementKind {
     Defer {
         body: Vec<TypedStatement>,
     },
+    AsyncDefer {
+        body: Vec<TypedStatement>,
+    },
     FieldSet {
         base: TypedExpression,
         field: FieldId,
@@ -522,6 +525,9 @@ pub enum TypedExpressionKind {
         success_type: TypeId,
         error_type: TypeId,
         enclosing_result: TypeId,
+    },
+    Await {
+        task: Box<TypedExpression>,
     },
     OptionalNarrow {
         optional: Box<TypedExpression>,

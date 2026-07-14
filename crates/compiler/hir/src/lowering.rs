@@ -199,6 +199,7 @@ pub fn build_hir_function_with_known_callables_and_attributes(
         bubble: context.bubble,
         visibility: context.visibility,
         name: signature.name().to_owned(),
+        is_async: signature.is_async(),
         type_parameters: signature
             .type_parameters()
             .iter()
@@ -541,6 +542,12 @@ fn lower_statement(
                 .collect(),
         },
         TypedStatementKind::Defer { body } => HirStatementKind::Defer {
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
+        TypedStatementKind::AsyncDefer { body } => HirStatementKind::AsyncDefer {
             body: body
                 .iter()
                 .map(|statement| lower_statement(statement, interface_slots))
@@ -1000,6 +1007,9 @@ fn lower_expression(
             error_type: *error_type,
             enclosing_result: *enclosing_result,
         },
+        TypedExpressionKind::Await { task } => HirExpressionKind::Await {
+            task: Box::new(lower_expression(task, interface_slots)),
+        },
         TypedExpressionKind::OptionalNarrow { optional } => HirExpressionKind::OptionalNarrow {
             optional: Box::new(lower_expression(optional, interface_slots)),
         },
@@ -1336,7 +1346,9 @@ fn first_unknown_interface_call(
                 arms.iter()
                     .find_map(|arm| first_unknown_interface_call(arm.body(), slots))
             }),
-            TypedStatementKind::Defer { body } => first_unknown_interface_call(body, slots),
+            TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
+                first_unknown_interface_call(body, slots)
+            }
             TypedStatementKind::FieldSet { base, value, .. } => {
                 first_unknown_interface_expression(base, slots)
                     .or_else(|| first_unknown_interface_expression(value, slots))
@@ -1558,6 +1570,7 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::ResultPropagate { result, .. } => {
             first_unknown_interface_expression(result, slots)
         }
+        TypedExpressionKind::Await { task } => first_unknown_interface_expression(task, slots),
         TypedExpressionKind::Conditional {
             condition,
             when_true,
@@ -1688,7 +1701,9 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 arms.iter()
                     .find_map(|arm| first_compile_time_only_statement(arm.body()))
             }),
-            TypedStatementKind::Defer { body } => first_compile_time_only_statement(body),
+            TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
+                first_compile_time_only_statement(body)
+            }
             TypedStatementKind::FieldSet { base, value, .. } => {
                 first_compile_time_only_expression(base)
                     .or_else(|| first_compile_time_only_expression(value))
@@ -1858,6 +1873,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::ResultPropagate { result, .. } => {
             first_compile_time_only_expression(result)
         }
+        TypedExpressionKind::Await { task } => first_compile_time_only_expression(task),
         TypedExpressionKind::Conditional {
             condition,
             when_true,
