@@ -87,9 +87,20 @@ and does not define the work remaining for `0.1.0`.
     tier/status boundaries, bootstrap cross-checks, and fail-closed loading.
   - [x] Resolve `Sequence` as the sole trusted low-priority prelude namespace
     root while preserving nearer declarations and explicit aliases.
-- [ ] Make `Option`, `Result`, essential collections, `Iterable<T>`,
+- [ ] Make optional `T?` values, `Result`, essential collections, `Iterable<T>`,
   `Iterator<T>`, `Sequence`, `String`/text, bytes, numeric helpers, and required
   resource/task primitives usable as native Pop APIs.
+  - [x] Make optional `T?` values and the reserved `Result<T, TError>` workflow
+    usable without a dynamic carrier or duplicate nominal `Option<T>` wrapper.
+  - [x] Execute fixed arrays, typed tables, growable `List<T>`, integer ranges,
+    nominal iteration, and portable `Sequence` algorithms through the MIR
+    interpreter and LLVM.
+  - [x] Execute immutable UTF-8 `String` literals, concatenation,
+    interpolation, closed primitive formatting, and value equality through the
+    shared runtime contract.
+  - [ ] Finish the accepted lifetime/effect contracts and implementations for
+    byte/text views, numeric helpers, explicit resources, and task/cancellation
+    APIs before marking this foundation surface stable.
 - [ ] Move portable implementations into ordinary `.pop` Modules so adding an
   algorithm does not require compiler or backend changes.
   - [x] Move deterministic `Sequence` adapters into the conventionally
