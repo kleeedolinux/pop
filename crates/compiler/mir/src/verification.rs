@@ -17,7 +17,7 @@ use crate::ir::*;
 use crate::lowering::{
     array_element_map, expected_safe_point_roots, expected_suspend_frame_slots,
     is_managed_reference_type_id, list_element_map, local_instruction_effects, table_element_maps,
-    terminator_effects,
+    task_object_map, terminator_effects,
 };
 use crate::render::{float_kind_text, integer_kind_text};
 
@@ -834,6 +834,26 @@ fn verify_gc_contracts(
                 } => {
                     if schema.classes.get(class).is_some_and(|declaration| {
                         expected_class_object_map(declaration, arena) != *object_map
+                    }) {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::TaskCreate {
+                    dispatch,
+                    arguments,
+                    completion_type,
+                    object_map,
+                    ..
+                } => {
+                    let argument_types = arguments
+                        .iter()
+                        .map(|argument| facts.values.get(argument).copied())
+                        .collect::<Option<Vec<_>>>();
+                    if argument_types.is_some_and(|argument_types| {
+                        task_object_map(dispatch, &argument_types, *completion_type, arena)
+                            != *object_map
                     }) {
                         errors.push(MirVerificationError::InvalidObjectMap {
                             instruction: instruction.result(),
@@ -3101,6 +3121,7 @@ fn verify_callable_instruction(
             dispatch,
             arguments,
             completion_type,
+            ..
         } => {
             let signature = match dispatch {
                 MirTaskDispatch::Direct(function) => signatures

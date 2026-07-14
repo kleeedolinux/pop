@@ -3719,12 +3719,18 @@ impl<'hir> FunctionBuilder<'hir> {
         let arguments = arguments
             .iter()
             .map(|argument| self.lower_expression(argument))
-            .collect();
+            .collect::<Vec<_>>();
+        let argument_types = arguments
+            .iter()
+            .map(|argument| self.value_type(*argument))
+            .collect::<Vec<_>>();
+        let object_map = task_object_map(&dispatch, &argument_types, completion_type, self.arena);
         self.emit(
             MirInstructionKind::TaskCreate {
                 dispatch,
                 arguments,
                 completion_type,
+                object_map,
             },
             task_type,
             span,
@@ -4398,6 +4404,41 @@ pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeA
                 | SemanticType::ErrorUnion { .. }
         )
     )
+}
+
+pub(crate) fn task_object_map(
+    dispatch: &MirTaskDispatch,
+    argument_types: &[TypeId],
+    completion_type: TypeId,
+    arena: &TypeArena,
+) -> ObjectMap {
+    let indirect_offset = u32::from(matches!(dispatch, MirTaskDispatch::Indirect(_)));
+    let mut references = Vec::new();
+    if indirect_offset != 0 {
+        references.push(ObjectSlot::new(0));
+    }
+    references.extend(
+        argument_types
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument_type)| {
+                is_managed_reference_type_id(*argument_type, Some(arena)).then(|| {
+                    ObjectSlot::new(
+                        u32::try_from(index)
+                            .unwrap_or(u32::MAX)
+                            .saturating_add(indirect_offset),
+                    )
+                })
+            }),
+    );
+    let completion_slot = u32::try_from(argument_types.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(indirect_offset);
+    if is_managed_reference_type_id(completion_type, Some(arena)) {
+        references.push(ObjectSlot::new(completion_slot));
+    }
+    ObjectMap::new(completion_slot.saturating_add(1), references)
+        .expect("verified task captures form a canonical logical object map")
 }
 
 pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {

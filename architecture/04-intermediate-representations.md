@@ -226,6 +226,9 @@ MIR invariants:
   contract;
 - stack maps contain exactly the live managed values at each safe point and
   logical object maps contain exactly the managed fields of allocations;
+- cold task creation carries the exact logical object map for its captured
+  dispatch environment, arguments, and retained completion slot; the map is
+  derived from verified static types and never from current runtime values;
 - a collecting safe point may change the physical token for every live managed
   value; backends/VMs install the typed `RootSlot` updates before subsequent
   uses without adding backend relocation instructions to canonical MIR;

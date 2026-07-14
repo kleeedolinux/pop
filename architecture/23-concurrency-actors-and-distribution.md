@@ -64,7 +64,10 @@ local page = try await task
 
 The call evaluates arguments once and allocates the task/frame, but the body
 does not begin until direct `await` or `Task.start(group, task)` takes
-ownership. Async and synchronous function types never convert implicitly.
+ownership. The task/frame allocation carries an exact compiler-proven object
+map for its captured dispatch environment, arguments, and retained completion
+slot according to their verified MIR representation. Async and synchronous
+function types never convert implicitly.
 
 `await` accepts exactly `Task<T>`, is valid only in async code, and yields
 exactly `T`. It is a suspension, cancellation, scheduling, flow-fact, and GC

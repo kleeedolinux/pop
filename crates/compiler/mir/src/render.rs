@@ -500,6 +500,7 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             dispatch,
             arguments,
             completion_type,
+            object_map,
         } => {
             output.push_str("task.create ");
             match dispatch {
@@ -518,7 +519,9 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
                     let _ = write!(output, "indirect:v{}", callee.raw());
                 }
             }
-            let _ = write!(output, " completion:t{} args ", completion_type.raw());
+            let _ = write!(output, " completion:t{} ", completion_type.raw());
+            dump_object_map(output, object_map);
+            output.push_str(" args ");
             dump_value_list(output, arguments);
         }
         MirInstructionKind::TupleMake(values) => dump_values(output, "tupleMake", values),

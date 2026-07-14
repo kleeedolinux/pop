@@ -891,7 +891,10 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         let (dispatch, rest) = rest
             .split_once(" completion:t")
             .ok_or_else(|| error(line, "task creation dispatch"))?;
-        let (completion_type, arguments) = rest
+        let (completion_type, rest) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "task creation completion type"))?;
+        let (object_map, arguments) = rest
             .split_once(" args ")
             .ok_or_else(|| error(line, "task creation arguments"))?;
         let dispatch = if let Some(function) = dispatch.strip_prefix("direct:s") {
@@ -913,6 +916,7 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             dispatch,
             arguments: parse_values(arguments, line)?,
             completion_type: TypeId::from_raw(parse_u32(completion_type, line)?),
+            object_map: parse_object_map(object_map, line)?,
         });
     }
     if let Some(operands) = text.strip_prefix("string.concat ") {

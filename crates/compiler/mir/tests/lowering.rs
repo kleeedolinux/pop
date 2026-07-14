@@ -8,6 +8,90 @@ use pop_mir::{
 use pop_source::SourceFile;
 
 #[test]
+fn cold_task_frames_carry_static_capture_maps() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/taskMaps.pop",
+        "namespace Main\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         private async function relay(task: Task<Int>): Int\n\
+             return await task\n\
+         end\n\
+         public async function consume(): Int\n\
+             local inner = load(42)\n\
+             return await relay(inner)\n\
+         end\n\
+         public async function consumeIndirect(): Int\n\
+             local operation = async function(): Int\n\
+                 return 42\n\
+             end\n\
+             return await operation()\n\
+         end\n\
+         private async function text(): String\n\
+             return \"retained\"\n\
+         end\n\
+         public async function consumeText(): String\n\
+             return await text()\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("async HIR"), front_end.types())
+        .expect("verified async MIR");
+    let maps = mir
+        .functions()
+        .iter()
+        .flat_map(|function| function.blocks())
+        .flat_map(|block| block.instructions())
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::TaskCreate { object_map, .. } => Some(object_map.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(maps.len(), 4);
+    assert_eq!(maps[0].slot_count(), 2);
+    assert!(maps[0].reference_slots().is_empty());
+    assert_eq!(maps[1].slot_count(), 2);
+    assert_eq!(
+        maps[1].reference_slots(),
+        &[pop_runtime_interface::ObjectSlot::new(0)]
+    );
+    assert_eq!(maps[2].slot_count(), 2);
+    assert_eq!(
+        maps[2].reference_slots(),
+        &[pop_runtime_interface::ObjectSlot::new(0)]
+    );
+    assert!(maps.iter().any(|map| {
+        map.slot_count() == 1
+            && map.reference_slots() == &[pop_runtime_interface::ObjectSlot::new(0)]
+    }));
+
+    let dump = mir.dump();
+    let invalid = parse_mir_dump(&dump.replacen("map[2:0]", "map[2:]", 1))
+        .expect("structurally valid stale task map");
+    assert!(matches!(
+        verify_mir_bubble(&invalid, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidObjectMap { .. }
+        ))
+    ));
+}
+
+#[test]
 fn async_await_lowers_to_cold_task_and_verified_suspend_frame() {
     let source = SourceFile::new(
         FileId::from_raw(0),

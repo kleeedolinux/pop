@@ -991,6 +991,7 @@ pub enum MirInstructionKind {
         dispatch: MirTaskDispatch,
         arguments: Vec<ValueId>,
         completion_type: TypeId,
+        object_map: ObjectMap,
     },
     TupleMake(Vec<ValueId>),
     TupleGet {
