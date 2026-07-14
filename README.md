@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A statically typed, general-purpose language with the lightweight feel of Luau.</strong>
+  <strong>Simple by nature. Powerful by design.</strong>
 </p>
 
 <p align="center">
