@@ -5,9 +5,7 @@
 //! language or a universal object layer.
 
 mod baseline;
-pub mod math;
 mod native_output;
-pub mod sequence;
 pub mod text;
 
 pub use baseline::{

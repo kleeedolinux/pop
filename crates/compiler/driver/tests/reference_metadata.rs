@@ -305,6 +305,9 @@ fn portable_generic_capsules_specialize_private_helpers_without_widening_visibil
             0,
             "src/generics.pop",
             "namespace Pop.Sequence\n\
+             private class UnusedBox<T>\n\
+                 private value: T\n\
+             end\n\
              private function privateIdentity<T>(value: T): T\n\
                  return value\n\
              end\n\
@@ -334,6 +337,10 @@ fn portable_generic_capsules_specialize_private_helpers_without_widening_visibil
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
     assert_eq!(capsule.function_count(), 2);
+    assert!(
+        !format!("{capsule:?}").contains("UnusedBox"),
+        "portable capsules must exclude unrelated private declarations"
+    );
 
     let application = analyze_bubble(
         FrontEndBubbleInput::new(

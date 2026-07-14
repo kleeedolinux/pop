@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-07-14
 - Depends on: ADRs 0030, 0031, 0032, 0035, 0037, 0051, 0052, 0053,
-  and 0057
+  and 0068
 - Supersedes: the unresolved exact-prelude decision in ADR 0031 and the public
   library implementation plan
 

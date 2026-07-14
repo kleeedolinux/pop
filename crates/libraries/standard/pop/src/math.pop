@@ -1,0 +1,195 @@
+namespace Pop.Math
+
+--- <summary>
+--- Returns the smaller of two integers.
+--- </summary>
+---
+--- <param name="left">
+--- The first value.
+--- </param>
+---
+--- <param name="right">
+--- The second value.
+--- </param>
+---
+--- <returns>
+--- The smaller value.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function min(left: Int, right: Int): Int
+    if left < right then
+        return left
+    end
+    return right
+end
+
+--- <summary>
+--- Returns the larger of two integers.
+--- </summary>
+---
+--- <param name="left">
+--- The first value.
+--- </param>
+---
+--- <param name="right">
+--- The second value.
+--- </param>
+---
+--- <returns>
+--- The larger value.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function max(left: Int, right: Int): Int
+    if left > right then
+        return left
+    end
+    return right
+end
+
+--- <summary>
+--- Returns the nonnegative magnitude of an integer.
+--- </summary>
+---
+--- <param name="value">
+--- The value whose magnitude is returned.
+--- </param>
+---
+--- <returns>
+--- The nonnegative magnitude.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function abs(value: Int): Int
+    if value < 0 then
+        return -value
+    end
+    return value
+end
+
+--- <summary>
+--- Returns the greatest common divisor of two integers.
+--- </summary>
+---
+--- <param name="left">
+--- The first value.
+--- </param>
+---
+--- <param name="right">
+--- The second value.
+--- </param>
+---
+--- <returns>
+--- The nonnegative greatest common divisor.
+--- </returns>
+---
+--- <complexity time="O(log n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function gcd(left: Int, right: Int): Int
+    local leftMagnitude = abs(left)
+    local rightMagnitude = abs(right)
+    while rightMagnitude ~= 0 do
+        local remainder = leftMagnitude % rightMagnitude
+        leftMagnitude = rightMagnitude
+        rightMagnitude = remainder
+    end
+    return leftMagnitude
+end
+
+--- <summary>
+--- Returns the mathematical sign of an integer.
+--- </summary>
+---
+--- <param name="value">
+--- The value whose sign is returned.
+--- </param>
+---
+--- <returns>
+--- Negative one, zero, or one.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function sign(value: Int): Int
+    if value < 0 then
+        return -1
+    end
+    if value > 0 then
+        return 1
+    end
+    return 0
+end
+
+--- <summary>
+--- Returns the nonnegative least common multiple of two integers.
+--- </summary>
+---
+--- <param name="left">
+--- The first value.
+--- </param>
+---
+--- <param name="right">
+--- The second value.
+--- </param>
+---
+--- <returns>
+--- The least common multiple, or zero when either value is zero.
+--- </returns>
+---
+--- <complexity time="O(log n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function lcm(left: Int, right: Int): Int
+    if left == 0 or right == 0 then
+        return 0
+    end
+    local leftMagnitude = abs(left)
+    local rightMagnitude = abs(right)
+    return (leftMagnitude / gcd(leftMagnitude, rightMagnitude)) * rightMagnitude
+end
+
+--- <summary>
+--- Tests whether two integers have no common factor greater than one.
+--- </summary>
+---
+--- <param name="left">
+--- The first value.
+--- </param>
+---
+--- <param name="right">
+--- The second value.
+--- </param>
+---
+--- <returns>
+--- True when the greatest common divisor is one.
+--- </returns>
+---
+--- <complexity time="O(log n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function coprime(left: Int, right: Int): Boolean
+    return gcd(left, right) == 1
+end

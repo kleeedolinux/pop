@@ -2154,6 +2154,9 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                 remap_aggregate_expression(value, instances);
             }
             HirStatementKind::Call(call) => {
+                if let HirCallDispatch::Indirect { callee } = &mut call.dispatch {
+                    remap_aggregate_expression(callee, instances);
+                }
                 for type_argument in &mut call.type_arguments {
                     *type_argument = instances.type_id(*type_argument);
                 }
@@ -2454,7 +2457,7 @@ pub fn hir_direct_call_instances(function: &HirFunction) -> Vec<(SymbolId, Vec<T
         .into_iter()
         .filter_map(|call| match call.target {
             HirCollectedCallTarget::Direct(function) => Some((function, call.arguments)),
-            HirCollectedCallTarget::Referenced(_) => None,
+            _ => None,
         })
         .collect::<Vec<_>>();
     direct.sort();
@@ -2470,12 +2473,37 @@ pub fn hir_referenced_call_instances(function: &HirFunction) -> Vec<(SymbolIdent
         .into_iter()
         .filter_map(|call| match call.target {
             HirCollectedCallTarget::Referenced(function) => Some((function, call.arguments)),
-            HirCollectedCallTarget::Direct(_) => None,
+            _ => None,
         })
         .collect::<Vec<_>>();
     referenced.sort();
     referenced.dedup();
     referenced
+}
+
+#[must_use]
+pub fn hir_direct_data_references(function: &HirFunction) -> (Vec<ClassId>, Vec<MethodId>) {
+    let mut calls = Vec::new();
+    collect_statement_calls(&function.body, &mut calls);
+    let mut classes = calls
+        .iter()
+        .filter_map(|call| match call.target {
+            HirCollectedCallTarget::Class(class) => Some(class),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut methods = calls
+        .into_iter()
+        .filter_map(|call| match call.target {
+            HirCollectedCallTarget::DirectMethod(method) => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    classes.sort();
+    classes.dedup();
+    methods.sort();
+    methods.dedup();
+    (classes, methods)
 }
 
 struct HirCollectedCall {
@@ -2486,6 +2514,8 @@ struct HirCollectedCall {
 enum HirCollectedCallTarget {
     Direct(SymbolId),
     Referenced(SymbolIdentity),
+    DirectMethod(MethodId),
+    Class(ClassId),
 }
 
 fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirCollectedCall>) {
@@ -2641,6 +2671,9 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
                     HirCallDispatch::Referenced { function } => {
                         Some(HirCollectedCallTarget::Referenced(*function))
                     }
+                    HirCallDispatch::DirectMethod { method } => {
+                        Some(HirCollectedCallTarget::DirectMethod(*method))
+                    }
                     _ => None,
                 };
                 if let Some(target) = target {
@@ -2721,8 +2754,16 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::OptionalNarrow { optional } => {
             collect_expression_calls(optional, calls);
         }
-        HirExpressionKind::Record { fields, .. }
-        | HirExpressionKind::ClassConstruct { fields, .. } => {
+        HirExpressionKind::Record { fields, .. } => {
+            for field in fields {
+                collect_expression_calls(field.value(), calls);
+            }
+        }
+        HirExpressionKind::ClassConstruct { class, fields, .. } => {
+            calls.push(HirCollectedCall {
+                target: HirCollectedCallTarget::Class(*class),
+                arguments: Vec::new(),
+            });
             for field in fields {
                 collect_expression_calls(field.value(), calls);
             }
@@ -2780,6 +2821,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
                 }
                 HirCallDispatch::Referenced { function } => {
                     Some(HirCollectedCallTarget::Referenced(*function))
+                }
+                HirCallDispatch::DirectMethod { method } => {
+                    Some(HirCollectedCallTarget::DirectMethod(*method))
                 }
                 _ => None,
             };

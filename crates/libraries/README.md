@@ -97,7 +97,7 @@ namespace Pop.Math
 --- <returns>
 --- The smaller value.
 --- </returns>
-public function minimum(left: Int, right: Int): Int
+public function min(left: Int, right: Int): Int
     if left < right then
         return left
     end
@@ -246,9 +246,8 @@ For an ordinary Standard contribution, start with:
 
 ```text
 cargo test -p pop-test-runner --test foundation_sources
-cargo test -p pop-standard --test math
 cargo test -p pop-standard --test text
-cargo test -p pop-standard --test sequence
+cargo test -p pop-standard --test api_baseline
 cargo test -p pop-architecture-tests
 cargo fmt --all -- --check
 ```
