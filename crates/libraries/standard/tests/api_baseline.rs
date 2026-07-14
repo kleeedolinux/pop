@@ -9,7 +9,7 @@ use pop_types::embedded_bootstrap_schema;
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 70);
+    assert_eq!(baseline.entries().len(), 79);
 
     let prelude_names = baseline
         .entries()
@@ -29,12 +29,12 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .filter(|entry| entry.status() == ApiStatus::Prototype)
         .map(|entry| entry.identity())
         .collect::<Vec<_>>();
-    assert_eq!(prototypes.len(), 33);
+    assert_eq!(prototypes.len(), 42);
     assert_eq!(
         &prototypes[..4],
         ["namespace:0", "namespace:1", "function:0", "function:1"]
     );
-    assert_eq!(prototypes.last(), Some(&"api:28"));
+    assert_eq!(prototypes.last(), Some(&"api:37"));
 
     let portable_names = baseline
         .entries()
@@ -74,6 +74,15 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
             ("Pop.Sequence", "product"),
             ("Pop.Sequence", "minOr"),
             ("Pop.Sequence", "maxOr"),
+            ("Pop.Sequence", "findOr"),
+            ("Pop.Sequence", "indexOr"),
+            ("Pop.Sequence", "sumBy"),
+            ("Pop.Sequence", "productBy"),
+            ("Pop.Sequence", "minByOr"),
+            ("Pop.Sequence", "maxByOr"),
+            ("Pop.Sequence", "append"),
+            ("Pop.Sequence", "prepend"),
+            ("Pop.Sequence", "scan"),
         ]
     );
 }

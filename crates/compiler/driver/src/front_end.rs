@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_diagnostics::compile_time as compile_time_diagnostics;
 use pop_diagnostics::documentation as documentation_diagnostics;
 use pop_diagnostics::syntax as syntax_diagnostics;
+use pop_diagnostics::types as type_diagnostics;
 use pop_documentation::{
     DocumentationAnalysis, PublicErrorDocumentationContract, TypedErrorDocumentationContract,
     TypedReturnsDocumentationContract,
@@ -1382,6 +1383,22 @@ fn resolve_functions(
 ) -> Vec<FunctionWork> {
     let mut functions = Vec::new();
     for module in modules {
+        let function_symbols = database
+            .index()
+            .module(module.module)
+            .into_iter()
+            .flat_map(pop_resolve::ModuleIndex::declarations)
+            .filter(|symbol| {
+                database
+                    .index()
+                    .declaration(**symbol)
+                    .is_some_and(|declaration| {
+                        declaration.kind() == pop_resolve::DeclarationKind::Function
+                    })
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let mut function_symbols = function_symbols.into_iter();
         let mut pending_attributes = Vec::new();
         for node in module.syntax.root().children() {
             if node.kind() == NodeKind::AttributeUse {
@@ -1397,32 +1414,105 @@ fn resolve_functions(
                 pending_attributes.clear();
                 continue;
             }
+            let Some(symbol) = function_symbols.next() else {
+                diagnostics.push(syntax_error(
+                    SourceSpan::new(module.source.id(), node.range()),
+                    "indexed function declaration",
+                ));
+                continue;
+            };
             if let Some(function) = resolve_function(
                 module,
                 node,
+                PendingFunctionDeclaration {
+                    symbol,
+                    attribute_uses: std::mem::take(&mut pending_attributes),
+                },
                 database,
                 bootstrap,
                 resolver,
                 diagnostics,
-                std::mem::take(&mut pending_attributes),
             ) {
                 functions.push(function);
             }
         }
     }
+    validate_source_overload_sets(&functions, database, diagnostics);
     functions.sort_by_key(|function| function.signature.symbol());
     functions
+}
+
+fn validate_source_overload_sets(
+    functions: &[FunctionWork],
+    database: &ResolutionDatabase,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut groups: BTreeMap<(String, String), Vec<&FunctionWork>> = BTreeMap::new();
+    for function in functions {
+        let Some(declaration) = database.index().declaration(function.signature.symbol()) else {
+            continue;
+        };
+        groups
+            .entry((
+                declaration.namespace().to_owned(),
+                function.signature.name().to_owned(),
+            ))
+            .or_default()
+            .push(function);
+    }
+    for ((_, name), group) in groups.into_iter().filter(|(_, group)| group.len() > 1) {
+        let first = group[0];
+        if let Some(generic) = group
+            .iter()
+            .copied()
+            .find(|function| !function.signature.type_parameters().is_empty())
+        {
+            diagnostics.push(type_diagnostics::invalid_overload_set(
+                generic.span,
+                name,
+                "generic candidates are not supported",
+                first.span,
+            ));
+            continue;
+        }
+        let mut parameter_packs = BTreeMap::new();
+        for function in group {
+            let pack = function
+                .signature
+                .parameters()
+                .iter()
+                .filter_map(|parameter| parameter.parameter_type().type_id())
+                .collect::<Vec<_>>();
+            if let Some(original) = parameter_packs.insert(pack, function.span) {
+                diagnostics.push(type_diagnostics::invalid_overload_set(
+                    function.span,
+                    &name,
+                    "parameter types duplicate another overload",
+                    original,
+                ));
+            }
+        }
+    }
+}
+
+struct PendingFunctionDeclaration {
+    symbol: SymbolId,
+    attribute_uses: Vec<AttributeUseSyntax>,
 }
 
 fn resolve_function(
     module: &ParsedModule,
     node: &pop_syntax::SyntaxNode,
+    pending: PendingFunctionDeclaration,
     database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
-    attribute_uses: Vec<AttributeUseSyntax>,
 ) -> Option<FunctionWork> {
+    let PendingFunctionDeclaration {
+        symbol,
+        attribute_uses,
+    } = pending;
     let syntax_signature = parse_function_signature(&module.source, &module.syntax, node)
         .map_err(|error| syntax_error(error.span(), error.expectation()))
         .map_err(|diagnostic| diagnostics.push(diagnostic))
@@ -1432,14 +1522,6 @@ fn resolve_function(
         .map_err(|diagnostic| diagnostics.push(diagnostic))
         .ok()?;
     let span = SourceSpan::new(module.source.id(), syntax_signature.range());
-    let symbol = resolve_symbol(
-        database,
-        module.module,
-        syntax_signature.name(),
-        SymbolSpace::Value,
-        span,
-        diagnostics,
-    )?;
     let declaration = database.index().declaration(symbol)?;
     let result = resolver.resolve(module.module, symbol, &syntax_signature);
     diagnostics.extend(result.diagnostics().iter().cloned());

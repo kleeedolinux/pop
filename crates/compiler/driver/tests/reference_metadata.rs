@@ -133,6 +133,63 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
 }
 
 #[test]
+fn public_overloads_round_trip_and_select_exact_referenced_symbols() {
+    let library_bubble = BubbleId::from_raw(5);
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(5),
+        Vec::new(),
+        vec![module(
+            0,
+            "src/choose.pop",
+            "namespace Library\n\
+             public function choose(value: Int): Int return value + 1 end\n\
+             public function choose(value: String): String return value .. \"!\" end\n",
+        )],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let encoded = encode_reference_metadata(
+        library
+            .reference_metadata()
+            .expect("overload reference metadata"),
+    )
+    .expect("encode overload reference metadata");
+    let metadata = decode_reference_metadata(&encoded).expect("decode overload reference metadata");
+    assert_eq!(metadata.functions().len(), 2);
+
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Library\n\
+                 public function number(): Int return choose(41) end\n\
+                 public function text(): String return choose(\"pop\") end\n",
+            )],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let hir = consumer.hir().expect("referenced overload HIR");
+    let dump = hir.dump(consumer.types());
+    assert!(dump.contains("call.reference b5:s0"), "{dump}");
+    assert!(dump.contains("call.reference b5:s1"), "{dump}");
+    lower_hir_bubble(hir, consumer.types()).expect("verified referenced overload MIR");
+}
+
+#[test]
 fn dependency_metadata_keeps_visibility_types_and_edges_closed() {
     let standard_bubble = BubbleId::from_raw(2);
     let producer = analyze_bubble(FrontEndBubbleInput::new(

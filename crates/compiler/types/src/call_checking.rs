@@ -176,6 +176,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 SymbolSpace::Value,
                 callee.span(),
             );
+            if resolution.symbols().len() > 1 {
+                return self
+                    .check_exact_source_overload(&name, resolution.symbols(), arguments, span)
+                    .map(CheckedInvocation::Call);
+            }
             if let Some(symbol) = resolution.symbol()
                 && let Some(signature) = self.signatures.get(&symbol).cloned()
                 && !signature.type_parameters().is_empty()
@@ -245,6 +250,89 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn check_exact_source_overload(
+        &mut self,
+        name: &str,
+        symbols: &[pop_foundation::SymbolId],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<CheckedCall> {
+        let candidates = symbols
+            .iter()
+            .filter_map(|symbol| {
+                self.signatures
+                    .get(symbol)
+                    .cloned()
+                    .map(|signature| (*symbol, signature))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != symbols.len()
+            || candidates
+                .iter()
+                .any(|(_, signature)| !signature.type_parameters().is_empty())
+        {
+            return None;
+        }
+        let mut typed_arguments = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            typed_arguments.push(self.check_expression(argument)?);
+        }
+        let argument_types = typed_arguments
+            .iter()
+            .map(TypedExpression::type_id)
+            .collect::<Vec<_>>();
+        let matching = candidates
+            .iter()
+            .filter(|(_, signature)| {
+                signature.parameters().len() == argument_types.len()
+                    && signature
+                        .parameters()
+                        .iter()
+                        .filter_map(|parameter| parameter.parameter_type().type_id())
+                        .eq(argument_types.iter().copied())
+            })
+            .collect::<Vec<_>>();
+        let [(symbol, signature)] = matching.as_slice() else {
+            self.diagnostics
+                .push(type_diagnostics::no_matching_overload(
+                    span,
+                    name,
+                    symbols.iter().filter_map(|symbol| {
+                        self.resolver
+                            .database()
+                            .index()
+                            .declaration(*symbol)
+                            .map(pop_resolve::Declaration::span)
+                    }),
+                ));
+            return None;
+        };
+        let results = signature
+            .results()
+            .iter()
+            .map(crate::ResolvedType::type_id)
+            .collect::<Option<Vec<_>>>()?;
+        let dispatch = self
+            .resolver
+            .database()
+            .index()
+            .declaration(*symbol)
+            .and_then(pop_resolve::Declaration::reference_identity)
+            .map_or(
+                TypedCallDispatch::Direct { function: *symbol },
+                |function| TypedCallDispatch::Referenced { function },
+            );
+        Some(CheckedCall {
+            call: TypedCall {
+                dispatch,
+                type_arguments: Vec::new(),
+                arguments: typed_arguments,
+                span,
+            },
+            results,
+        })
     }
 
     fn check_inferred_generic_call(
@@ -1270,12 +1358,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         if self.binding_by_name(name).is_some() {
             return None;
         }
-        if self
+        if !self
             .resolver
             .database()
             .resolve(self.module, name, SymbolSpace::Value, span)
-            .symbol()
-            .is_some()
+            .symbols()
+            .is_empty()
         {
             return None;
         }

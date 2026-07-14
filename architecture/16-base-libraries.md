@@ -156,6 +156,14 @@ Every normal project receives one implicit reference to the toolchain-compatible
 declarations. `@Prelude` is accepted only from the verified reserved identity;
 user Packages cannot inject global names by copying its spelling.
 
+ADR 0073 makes that reference executable in the ordinary CLI path. The
+toolchain discovers the reserved Standard source Modules conventionally,
+injects their verified public metadata as a direct Bubble dependency, emits a
+`.poplib`, reloads it, and links only its exact selected target implementation.
+The fixed trust-root selection is not Package-name discovery or runtime
+registration. Source-free dependency caches remain gated on deterministic
+remapping of independently serialized session-local Bubble IDs.
+
 The prelude is deliberately smaller than the catalog. ADR 0058 freezes its
 exact initial type, function, attribute, and namespace-root bindings. Optional
 values use `T?` rather than a duplicate nominal `Option<T>`. `Sequence` is the
@@ -185,6 +193,10 @@ prelude. `Sequence` now also owns predicate aggregates, explicit-fallback
 inspection, visitation, lazy bounds, concatenation, and checked integer
 aggregation. `Math` owns seven portable `Int` functions. These remain prototype
 APIs until the complete ADR 0058 evidence gate advances their status.
+
+ADR 0075 appends predicate search, indexed search, projected integer
+aggregation/extrema, lazy append/prepend, and running accumulation. These are
+ordinary portable functions and typed iterator state, not compiler operations.
 
 The former Rust-only Math and eager Sequence helpers have been removed rather
 than retained as competing implementations. UTF-8 slicing helpers remain an

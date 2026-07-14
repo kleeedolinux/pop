@@ -24,7 +24,7 @@ use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, PoplibDependency, PoplibEmission,
     ReferenceFunction, ReferenceMetadata, ReferenceType, analyze_bubble, emit_poplib,
-    encode_reference_metadata,
+    encode_reference_metadata, load_poplib,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{lower_hir_bubble, optimize_mir};
@@ -38,6 +38,10 @@ use pop_resolve::Visibility;
 use pop_source::SourceFile;
 use pop_target::TargetSpec;
 use pop_types::SemanticType;
+
+const INTERNAL_BUBBLE: BubbleId = BubbleId::from_raw(1);
+const STANDARD_BUBBLE: BubbleId = BubbleId::from_raw(2);
+const FIRST_PACKAGE_BUBBLE: u32 = 3;
 
 const USAGE: &str = "\
 Usage:
@@ -513,12 +517,18 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = analyze_bubble(FrontEndBubbleInput::new(
-        BubbleId::from_raw(0),
-        NamespaceId::from_raw(0),
-        Vec::new(),
-        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
-    ));
+    let Some((standard, _)) = lower_toolchain_standard() else {
+        return ExitCode::FAILURE;
+    };
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
+            NamespaceId::from_raw(FIRST_PACKAGE_BUBBLE),
+            vec![STANDARD_BUBBLE],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_reference_metadata(vec![standard.metadata]),
+    );
     if !result.diagnostics().is_empty() {
         return write_diagnostics(&result.diagnostic_snapshot());
     }
@@ -598,6 +608,9 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let Some(program) = lower_native_source(source_path) else {
         return ExitCode::FAILURE;
     };
+    let Some((_, standard)) = lower_toolchain_standard() else {
+        return ExitCode::FAILURE;
+    };
     let target = native_target();
     let module = match lower_mir_to_llvm_ir(
         &program.mir,
@@ -616,12 +629,22 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
         }
     };
     let object_path = std::env::temp_dir().join(format!("pop-native-{}.o", std::process::id()));
+    let standard_object_path =
+        std::env::temp_dir().join(format!("pop-standard-{}.o", std::process::id()));
     if let Err(error) = module.emit_object(&object_path) {
         eprintln!("pop: {error}");
         return ExitCode::FAILURE;
     }
-    let result = link_native_executable(std::slice::from_ref(&object_path), output_path);
+    if emit_native_object(&standard.program, &standard_object_path).is_none() {
+        let _ = fs::remove_file(&object_path);
+        return ExitCode::FAILURE;
+    }
+    let result = link_native_executable(
+        &[object_path.clone(), standard_object_path.clone()],
+        output_path,
+    );
     let _ = fs::remove_file(object_path);
+    let _ = fs::remove_file(standard_object_path);
     result
 }
 
@@ -734,7 +757,14 @@ fn lower_package(manifest_path: &Path) -> Option<LoweredPackage> {
         })
         .ok()?;
     let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut state = PackageLoweringState::default();
+    let (standard, standard_bubble) = lower_toolchain_standard()?;
+    let mut state = PackageLoweringState {
+        next_bubble: FIRST_PACKAGE_BUBBLE,
+        visiting: BTreeSet::new(),
+        resolved: BTreeMap::new(),
+        bubbles: vec![standard_bubble],
+        standard,
+    };
     lower_package_recursive(&manifest_path, true, &mut state)?;
     Some(LoweredPackage {
         root: package_root.to_path_buf(),
@@ -765,12 +795,12 @@ impl ResolvedPackageLibrary {
     }
 }
 
-#[derive(Default)]
 struct PackageLoweringState {
     next_bubble: u32,
     visiting: BTreeSet<PathBuf>,
     resolved: BTreeMap<PathBuf, Option<ResolvedPackageLibrary>>,
     bubbles: Vec<LoweredPackageBubble>,
+    standard: ResolvedPackageLibrary,
 }
 
 fn lower_package_recursive(
@@ -798,7 +828,7 @@ fn lower_package_recursive(
         .map_err(|error| eprintln!("pop: {error}"))
         .ok()?;
 
-    let mut external_libraries = Vec::new();
+    let mut external_libraries = vec![state.standard.clone()];
     for requirement in manifest.dependencies() {
         let dependency_manifest = match requirement.source() {
             DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
@@ -922,6 +952,7 @@ fn lower_package_recursive(
             &modules,
             bubble.kind() == BubbleKind::Binary,
             dependency_metadata,
+            Vec::new(),
         )?;
         if bubble.kind() == BubbleKind::Library {
             let reference = encode_reference_metadata(&program.reference_metadata)
@@ -1180,12 +1211,23 @@ fn build_package_to(
             bubble.bubble.raw(),
             suffix
         ));
-        emit_native_object(&bubble.program, &object)?;
+        let emission_object = dependency_root.join(format!(
+            "{}.b{}.{}.emission.o",
+            bubble.name,
+            bubble.bubble.raw(),
+            suffix
+        ));
+        let lowering_output = if bubble.kind == BubbleKind::Library {
+            &emission_object
+        } else {
+            &object
+        };
+        emit_native_object(&bubble.program, lowering_output)?;
         if bubble.kind == BubbleKind::Library {
             let documentation = render_xml(&bubble.name, &documentation_members(&bubble.program))
                 .map_err(|error| eprintln!("pop: documentation output failed: {error}"))
                 .ok()?;
-            let implementation = fs::read(&object)
+            let implementation = fs::read(&emission_object)
                 .map_err(|error| eprintln!("pop: could not read native object: {error}"))
                 .ok()?;
             let target = native_target();
@@ -1205,6 +1247,25 @@ fn build_package_to(
             emit_poplib(&artifact, &emission)
                 .map_err(|error| eprintln!("pop: library artifact emission failed: {error}"))
                 .ok()?;
+            let loaded = load_poplib(&artifact)
+                .map_err(|error| eprintln!("pop: emitted library verification failed: {error:?}"))
+                .ok()?;
+            let (selected_target, selected_implementation) =
+                loaded.target_implementation().or_else(|| {
+                    eprintln!("pop: library artifact has no target implementation");
+                    None
+                })?;
+            if selected_target != target.triple() {
+                eprintln!(
+                    "pop: library target mismatch: expected {}, found {selected_target}",
+                    target.triple()
+                );
+                return None;
+            }
+            fs::write(&object, selected_implementation)
+                .map_err(|error| eprintln!("pop: could not select library object: {error}"))
+                .ok()?;
+            let _ = fs::remove_file(&emission_object);
             library_objects.push(object);
         } else if bubble.root_package {
             binary_objects.push((bubble, object));
@@ -1641,12 +1702,92 @@ struct NativeProgram {
 }
 
 fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
+    let (standard, _) = lower_toolchain_standard()?;
     lower_native_bubble(
-        BubbleId::from_raw(0),
+        BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
         &[(source_path.to_path_buf(), source_path.to_path_buf())],
         true,
+        vec![standard.metadata],
         Vec::new(),
     )
+}
+
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is below repository root")
+        .to_path_buf()
+}
+
+fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageBubble)> {
+    let package_root = repository_root().join("crates/libraries/standard/pop");
+    let manifest_path = package_root.join("bubble.toml");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|error| eprintln!("pop: could not read reserved Standard manifest: {error}"))
+        .ok()?;
+    let manifest = parse_package_manifest(&manifest_text)
+        .map_err(|error| eprintln!("pop: invalid reserved Standard manifest: {error}"))
+        .ok()?;
+    if manifest.name() != "Pop.Standard" {
+        eprintln!("pop: reserved Standard manifest has the wrong identity");
+        return None;
+    }
+    let source_paths = collect_package_sources(&package_root).ok()?;
+    let relative_paths = source_paths.keys().map(String::as_str).collect::<Vec<_>>();
+    let discovered = discover_conventional_bubbles(&manifest, &relative_paths)
+        .map_err(|error| eprintln!("pop: could not discover reserved Standard: {error}"))
+        .ok()?;
+    let [bubble] = discovered.as_slice() else {
+        eprintln!("pop: reserved Standard must contain exactly one library Bubble");
+        return None;
+    };
+    if bubble.kind() != BubbleKind::Library {
+        eprintln!("pop: reserved Standard must be a library Bubble");
+        return None;
+    }
+    let modules = bubble
+        .modules()
+        .iter()
+        .map(|relative| {
+            source_paths
+                .get(relative)
+                .cloned()
+                .map(|source| (PathBuf::from(relative), source))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let program = lower_native_bubble(
+        STANDARD_BUBBLE,
+        &modules,
+        false,
+        Vec::new(),
+        vec![INTERNAL_BUBBLE],
+    )?;
+    let reference = encode_reference_metadata(&program.reference_metadata)
+        .map_err(|error| eprintln!("pop: Standard metadata encoding failed: {error}"))
+        .ok()?;
+    let source_sha256 = package_content_hash(&manifest_path, &source_paths)?;
+    let library = ResolvedPackageLibrary {
+        package: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        source_sha256: source_sha256.clone(),
+        bubble: bubble.name().to_owned(),
+        public_api_sha256: sha256_hex(&reference),
+        metadata: program.reference_metadata.clone(),
+    };
+    let lowered = LoweredPackageBubble {
+        bubble: STANDARD_BUBBLE,
+        package: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        source_sha256,
+        edition: manifest.edition().to_owned(),
+        name: bubble.name().to_owned(),
+        kind: BubbleKind::Library,
+        root_package: false,
+        dependencies: Vec::new(),
+        program,
+    };
+    Some((library, lowered))
 }
 
 fn lower_native_bubble(
@@ -1654,6 +1795,7 @@ fn lower_native_bubble(
     modules: &[(PathBuf, PathBuf)],
     requires_entry: bool,
     dependency_metadata: Vec<ReferenceMetadata>,
+    additional_dependencies: Vec<BubbleId>,
 ) -> Option<NativeProgram> {
     let modules = modules
         .iter()
@@ -1677,10 +1819,13 @@ fn lower_native_bubble(
         })
         .collect::<Result<Vec<_>, ()>>()
         .ok()?;
-    let dependencies = dependency_metadata
+    let mut dependencies = dependency_metadata
         .iter()
         .map(ReferenceMetadata::bubble)
-        .collect();
+        .collect::<Vec<_>>();
+    dependencies.extend(additional_dependencies);
+    dependencies.sort();
+    dependencies.dedup();
     let input = FrontEndBubbleInput::new(
         bubble,
         NamespaceId::from_raw(bubble.raw()),

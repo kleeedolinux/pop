@@ -1154,6 +1154,15 @@ fn portable_sequence_algorithms_have_one_pop_implementation() {
         "product",
         "minOr",
         "maxOr",
+        "findOr",
+        "indexOr",
+        "sumBy",
+        "productBy",
+        "minByOr",
+        "maxByOr",
+        "append",
+        "prepend",
+        "scan",
     ] {
         assert!(
             sequence.contains(&format!("public function {function}<")),
