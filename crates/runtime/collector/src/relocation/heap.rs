@@ -30,6 +30,7 @@ pub struct RelocationRuntime {
     pub(crate) roots: BTreeMap<RootHandle, ManagedReference>,
     pub(crate) pins: BTreeMap<PinHandle, ManagedReference>,
     pub(crate) dirty_cards: BTreeSet<ManagedReference>,
+    pub(crate) refined_cards: Option<BTreeMap<ManagedReference, Vec<ManagedReference>>>,
     pub(super) next_reference: u64,
     pub(super) next_identity: u64,
     pub(super) next_root: u64,
@@ -46,6 +47,7 @@ impl RelocationRuntime {
             roots: BTreeMap::new(),
             pins: BTreeMap::new(),
             dirty_cards: BTreeSet::new(),
+            refined_cards: None,
             next_reference: 1,
             next_identity: 1,
             next_root: 1,
@@ -72,6 +74,33 @@ impl RelocationRuntime {
     #[must_use]
     pub fn dirty_card_count(&self) -> usize {
         self.dirty_cards.len()
+    }
+
+    pub(crate) fn install_refined_cards(
+        &mut self,
+        refined: BTreeMap<ManagedReference, Vec<ManagedReference>>,
+    ) -> Result<(), RuntimeFailure> {
+        if refined.len() != self.dirty_cards.len()
+            || refined
+                .keys()
+                .any(|owner| !self.dirty_cards.contains(owner))
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        for (owner, children) in &refined {
+            if self.generation(*owner) != Some(CollectorGeneration::Mature)
+                || children.iter().any(|child| {
+                    !matches!(
+                        self.generation(*child),
+                        Some(CollectorGeneration::Nursery { .. })
+                    )
+                })
+            {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+        }
+        self.refined_cards = Some(refined);
+        Ok(())
     }
 
     #[must_use]

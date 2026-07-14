@@ -15,8 +15,11 @@ workers. The bounded coordinator registers managed and foreign execution
 states, collects exact once-only root/TLAB/barrier publications, and completes
 protocol epochs without heap tracing in the handshake. Persistent named worker
 threads receive immutable object snapshots through bounded per-worker queues,
-scan exact object maps in parallel, and return sequence-ordered results for
-collector-owned mutation. It preserves snapshot edges, shades roots, pins, and
+scan exact object maps and remembered cards in parallel, and return
+sequence-ordered results for collector-owned mutation. Refined cards become
+precise young roots immediately inside the collecting safe point, where no
+mutator store can invalidate the snapshot. It preserves snapshot edges, shades
+roots, pins, and
 new mature objects, and defers nursery relocation while a major snapshot still
 contains physical tokens. The implementation deliberately continues to report
 `RelocationConformance`: epochs/workers are not yet integrated with native
@@ -62,9 +65,10 @@ scheduler handshakes are complete.
 
 The `generational::workers` partition owns persistent host threads, bounded
 per-worker queues, immutable mark snapshots, deterministic result ordering,
-telemetry, and joined shutdown. It performs parallel marking work and sweep
-dispatch only when explicitly configured; it does not claim adaptive sizing,
-work stealing, mutator-concurrent tracing, or concurrent heap mutation.
+telemetry, and joined shutdown. It performs parallel marking, remembered-card
+refinement, and sweep dispatch only when explicitly configured; it does not
+claim adaptive sizing, work stealing, mutator-concurrent tracing/refinement, or
+concurrent heap mutation.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and

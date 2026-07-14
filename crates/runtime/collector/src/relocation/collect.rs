@@ -85,6 +85,7 @@ impl RelocationRuntime {
         self.roots = next_roots;
         self.pins = next_pins;
         self.dirty_cards = next_dirty_cards;
+        self.refined_cards = None;
         for ((_, value), update) in publication.root_values_mut().zip(stack_updates) {
             *value = update;
         }
@@ -107,13 +108,24 @@ impl RelocationRuntime {
         let mut pending = stack_roots;
         pending.extend(handle_roots);
         pending.extend(pin_roots);
-        for owner in &self.dirty_cards {
-            let object = self
-                .objects
-                .get(owner)
-                .filter(|object| object.generation == CollectorGeneration::Mature)
-                .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            append_references(object, &mut pending)?;
+        if let Some(refined) = &self.refined_cards {
+            if refined.len() != self.dirty_cards.len()
+                || refined
+                    .keys()
+                    .any(|owner| !self.dirty_cards.contains(owner))
+            {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+            pending.extend(refined.values().flatten().copied());
+        } else {
+            for owner in &self.dirty_cards {
+                let object = self
+                    .objects
+                    .get(owner)
+                    .filter(|object| object.generation == CollectorGeneration::Mature)
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                append_references(object, &mut pending)?;
+            }
         }
         Ok(pending)
     }

@@ -1,6 +1,7 @@
 //! PLRI adapter for incremental generational conformance.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use pop_runtime_interface::{
     ArrayAllocationRequest, ArrayElementMap, GarbageCollectorContract, ManagedReference,
@@ -9,8 +10,10 @@ use pop_runtime_interface::{
 };
 
 use crate::heap::BootstrapRuntime;
+use crate::relocation::CollectorGeneration;
 
 use super::heap::GenerationalRuntime;
+use super::workers::CardRefinementTask;
 
 impl GenerationalRuntime {
     fn prepare_allocation(
@@ -106,6 +109,45 @@ impl GenerationalRuntime {
         };
         ObjectMap::new(request.length(), references)
             .map_err(|_| RuntimeFailure::runtime_invariant())
+    }
+
+    fn refine_cards_for_minor(&mut self) -> Result<(), RuntimeFailure> {
+        if self.workers.is_none() || self.nursery.dirty_cards.is_empty() {
+            return Ok(());
+        }
+        let young = Arc::new(
+            self.nursery
+                .objects
+                .iter()
+                .filter_map(|(reference, object)| {
+                    matches!(object.generation, CollectorGeneration::Nursery { .. })
+                        .then_some(*reference)
+                })
+                .collect::<BTreeSet<_>>(),
+        );
+        let tasks = self
+            .nursery
+            .dirty_cards
+            .iter()
+            .map(|owner| {
+                let object = self
+                    .nursery
+                    .objects
+                    .get(owner)
+                    .filter(|object| object.generation == CollectorGeneration::Mature)
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                Ok(CardRefinementTask {
+                    owner: *owner,
+                    allocation: object.allocation.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeFailure>>()?;
+        let refined = self
+            .workers
+            .as_mut()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?
+            .refine_cards(tasks, &young)?;
+        self.nursery.install_refined_cards(refined)
     }
 }
 
@@ -235,6 +277,7 @@ impl RuntimeAdapter for GenerationalRuntime {
             BTreeMap::new()
         };
         if servicing_minor {
+            self.refine_cards_for_minor()?;
             self.nursery.request_minor_collection();
             self.minor_requested = false;
         }

@@ -1,6 +1,7 @@
 //! Per-worker bounded queues and deterministic result collection.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 
@@ -17,10 +18,20 @@ pub(crate) struct MarkTask {
     pub(crate) allocation: Allocation,
 }
 
+pub(crate) struct CardRefinementTask {
+    pub(crate) owner: ManagedReference,
+    pub(crate) allocation: Allocation,
+}
+
 enum WorkerCommand {
     Mark {
         sequence: u64,
         task: MarkTask,
+    },
+    RefineCard {
+        sequence: u64,
+        task: CardRefinementTask,
+        young: Arc<BTreeSet<ManagedReference>>,
     },
     Sweep {
         sequence: u64,
@@ -33,6 +44,10 @@ enum WorkerOutcome {
     Mark {
         reference: ManagedReference,
         mature: bool,
+        children: Result<Vec<ManagedReference>, ()>,
+    },
+    RefinedCard {
+        owner: ManagedReference,
         children: Result<Vec<ManagedReference>, ()>,
     },
     Sweep(ManagedReference),
@@ -121,11 +136,55 @@ impl BackgroundWorkerPool {
                     self.telemetry.mark_jobs_completed =
                         self.telemetry.mark_jobs_completed.saturating_add(1);
                 }
-                WorkerOutcome::Sweep(_) => return Err(RuntimeFailure::runtime_invariant()),
+                WorkerOutcome::RefinedCard { .. } | WorkerOutcome::Sweep(_) => {
+                    return Err(RuntimeFailure::runtime_invariant());
+                }
             }
         }
         self.complete_batch(count);
         Ok(marked)
+    }
+
+    pub(crate) fn refine_cards(
+        &mut self,
+        tasks: Vec<CardRefinementTask>,
+        young: &Arc<BTreeSet<ManagedReference>>,
+    ) -> Result<BTreeMap<ManagedReference, Vec<ManagedReference>>, RuntimeFailure> {
+        let count = tasks.len();
+        for task in tasks {
+            let sequence = self.next_sequence()?;
+            self.submit(WorkerCommand::RefineCard {
+                sequence,
+                task,
+                young: Arc::clone(young),
+            })?;
+        }
+        let results = self.collect(count)?;
+        let mut refined = BTreeMap::new();
+        for result in results {
+            match result.outcome {
+                WorkerOutcome::RefinedCard { owner, children } => {
+                    if refined
+                        .insert(
+                            owner,
+                            children.map_err(|()| RuntimeFailure::runtime_invariant())?,
+                        )
+                        .is_some()
+                    {
+                        return Err(RuntimeFailure::runtime_invariant());
+                    }
+                    self.telemetry.card_refinement_jobs_completed = self
+                        .telemetry
+                        .card_refinement_jobs_completed
+                        .saturating_add(1);
+                }
+                WorkerOutcome::Mark { .. } | WorkerOutcome::Sweep(_) => {
+                    return Err(RuntimeFailure::runtime_invariant());
+                }
+            }
+        }
+        self.complete_batch(count);
+        Ok(refined)
     }
 
     pub(crate) fn sweep(
@@ -149,7 +208,9 @@ impl BackgroundWorkerPool {
                     self.telemetry.sweep_jobs_completed =
                         self.telemetry.sweep_jobs_completed.saturating_add(1);
                 }
-                WorkerOutcome::Mark { .. } => return Err(RuntimeFailure::runtime_invariant()),
+                WorkerOutcome::Mark { .. } | WorkerOutcome::RefinedCard { .. } => {
+                    return Err(RuntimeFailure::runtime_invariant());
+                }
             }
         }
         self.complete_batch(count);
@@ -232,6 +293,15 @@ fn worker_loop(
                 worker,
                 outcome: scan(&task),
             },
+            WorkerCommand::RefineCard {
+                sequence,
+                task,
+                young,
+            } => WorkerResult {
+                sequence,
+                worker,
+                outcome: refine_card(&task, &young),
+            },
             WorkerCommand::Sweep {
                 sequence,
                 reference,
@@ -245,6 +315,28 @@ fn worker_loop(
         if results.send(result).is_err() {
             break;
         }
+    }
+}
+
+fn refine_card(task: &CardRefinementTask, young: &BTreeSet<ManagedReference>) -> WorkerOutcome {
+    let mut children = Vec::new();
+    for slot in task.allocation.object_map.reference_slots() {
+        match task.allocation.slots.get(slot.raw() as usize) {
+            Some(SlotValue::Reference(Some(reference))) if young.contains(reference) => {
+                children.push(*reference);
+            }
+            Some(SlotValue::Reference(_)) => {}
+            Some(SlotValue::Scalar(_)) | None => {
+                return WorkerOutcome::RefinedCard {
+                    owner: task.owner,
+                    children: Err(()),
+                };
+            }
+        }
+    }
+    WorkerOutcome::RefinedCard {
+        owner: task.owner,
+        children: Ok(children),
     }
 }
 
