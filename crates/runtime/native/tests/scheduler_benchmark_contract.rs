@@ -16,7 +16,7 @@ fn representative_configuration() -> SchedulerBenchmarkConfiguration {
 
 #[test]
 fn scheduler_benchmark_inventory_is_closed_and_typed() {
-    assert_eq!(SCHEDULER_BENCHMARK_SCHEMA, "pop-scheduler-benchmark-v2");
+    assert_eq!(SCHEDULER_BENCHMARK_SCHEMA, "pop-scheduler-benchmark-v3");
     let names: Vec<_> = SchedulerWorkload::ALL
         .into_iter()
         .map(SchedulerWorkload::name)
@@ -63,6 +63,13 @@ fn ready_poll_benchmark_preserves_exact_logical_work_and_checksum() {
     assert_eq!(counters.worker_starts, 2);
     assert_eq!(counters.worker_stops, 2);
     assert_eq!(counters.stale_ready_entries, 0);
+    assert_eq!(counters.ready_delay_samples, counters.polls);
+    assert!(counters.ready_delay_p50_work_units <= counters.ready_delay_p99_work_units);
+    assert!(counters.ready_delay_p99_work_units <= counters.ready_delay_max_work_units);
+    assert!(matches!(
+        counters.resource_counter_source,
+        "linux-procfs" | "unavailable"
+    ));
 }
 
 #[test]

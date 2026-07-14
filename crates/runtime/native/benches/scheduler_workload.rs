@@ -13,7 +13,7 @@ use pop_runtime_native::{
 };
 
 const WAIT_TIMEOUT: Duration = Duration::from_mins(5);
-pub const SCHEDULER_BENCHMARK_SCHEMA: &str = "pop-scheduler-benchmark-v2";
+pub const SCHEDULER_BENCHMARK_SCHEMA: &str = "pop-scheduler-benchmark-v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerBenchmarkConfiguration {
@@ -142,11 +142,73 @@ pub struct SchedulerWorkloadCounters {
     pub worker_unparks: u64,
     pub worker_stops: u64,
     pub stale_ready_entries: u64,
+    pub work_budget_exhaustions: u64,
+    pub scheduler_migrations: u64,
+    pub gc_delayed_migrations: u64,
+    pub ready_delay_samples: u64,
+    pub ready_delay_p50_work_units: u64,
+    pub ready_delay_p95_work_units: u64,
+    pub ready_delay_p99_work_units: u64,
+    pub ready_delay_p999_work_units: u64,
+    pub ready_delay_max_work_units: u64,
+    pub timer_delay_samples: u64,
+    pub timer_delay_p99_work_units: u64,
+    pub timer_delay_max_work_units: u64,
+    pub external_event_delay_samples: u64,
+    pub external_event_delay_p99_work_units: u64,
+    pub external_event_delay_max_work_units: u64,
+    pub blocking_shutdown_delay_samples: u64,
+    pub blocking_shutdown_delay_max_work_units: u64,
+    pub resource_counter_source: &'static str,
+    pub resident_memory_bytes: u64,
+    pub virtual_memory_bytes: u64,
+    pub voluntary_context_switches: u64,
+    pub involuntary_context_switches: u64,
     pub first_poll_latency_p50_nanoseconds: u64,
     pub first_poll_latency_p95_nanoseconds: u64,
     pub first_poll_latency_p99_nanoseconds: u64,
     pub first_poll_latency_p999_nanoseconds: u64,
     pub first_poll_latency_max_nanoseconds: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ResourceSnapshot {
+    source: &'static str,
+    resident_memory_bytes: u64,
+    virtual_memory_bytes: u64,
+    voluntary_context_switches: u64,
+    involuntary_context_switches: u64,
+}
+
+impl ResourceSnapshot {
+    const fn unavailable() -> Self {
+        Self {
+            source: "unavailable",
+            resident_memory_bytes: 0,
+            virtual_memory_bytes: 0,
+            voluntary_context_switches: 0,
+            involuntary_context_switches: 0,
+        }
+    }
+
+    fn observation_since(self, earlier: Self) -> Self {
+        if self.source != earlier.source || self.source == "unavailable" {
+            return Self::unavailable();
+        }
+        Self {
+            source: self.source,
+            resident_memory_bytes: self
+                .resident_memory_bytes
+                .max(earlier.resident_memory_bytes),
+            virtual_memory_bytes: self.virtual_memory_bytes.max(earlier.virtual_memory_bytes),
+            voluntary_context_switches: self
+                .voluntary_context_switches
+                .saturating_sub(earlier.voluntary_context_switches),
+            involuntary_context_switches: self
+                .involuntary_context_switches
+                .saturating_sub(earlier.involuntary_context_switches),
+        }
+    }
 }
 
 struct Latencies(Mutex<Vec<u64>>);
@@ -179,6 +241,56 @@ fn percentile(samples: &[u64], per_thousand: usize) -> u64 {
     }
     let index = (samples.len() - 1).saturating_mul(per_thousand) / 1_000;
     samples[index]
+}
+
+#[cfg(target_os = "linux")]
+fn read_resource_snapshot() -> ResourceSnapshot {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(resident_memory_bytes) = linux_status_kib(&status, "VmRSS:") else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(virtual_memory_bytes) = linux_status_kib(&status, "VmSize:") else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(voluntary_context_switches) = linux_status_count(&status, "voluntary_ctxt_switches:")
+    else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(involuntary_context_switches) =
+        linux_status_count(&status, "nonvoluntary_ctxt_switches:")
+    else {
+        return ResourceSnapshot::unavailable();
+    };
+    ResourceSnapshot {
+        source: "linux-procfs",
+        resident_memory_bytes,
+        virtual_memory_bytes,
+        voluntary_context_switches,
+        involuntary_context_switches,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_resource_snapshot() -> ResourceSnapshot {
+    ResourceSnapshot::unavailable()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status_kib(status: &str, label: &str) -> Option<u64> {
+    linux_status_count(status, label)?.checked_mul(1_024)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status_count(status: &str, label: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(label))?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 struct BenchmarkTask {
@@ -324,6 +436,7 @@ pub fn run_scheduler_workload(
     workload: SchedulerWorkload,
     configuration: SchedulerBenchmarkConfiguration,
 ) -> Result<SchedulerWorkloadCounters, SchedulerBenchmarkError> {
+    let resource_start = read_resource_snapshot();
     let task_polls = workload.task_polls(configuration);
     let state = WorkloadState::new(
         configuration,
@@ -368,12 +481,14 @@ pub fn run_scheduler_workload(
     }
     let latencies = state.latencies.percentiles();
     let final_telemetry = state.scheduler.shutdown_with_telemetry()?;
+    let resources = read_resource_snapshot().observation_since(resource_start);
     Ok(counters(
         workload,
         configuration,
         &final_telemetry,
         checksum,
         latencies,
+        resources,
     ))
 }
 
@@ -561,7 +676,12 @@ fn counters(
     telemetry: &SchedulerTelemetry,
     checksum: u64,
     latencies: (u64, u64, u64, u64, u64),
+    resources: ResourceSnapshot,
 ) -> SchedulerWorkloadCounters {
+    let ready_delay = telemetry.ready_to_run_delay();
+    let timer_delay = telemetry.timer_delivery_delay();
+    let external_event_delay = telemetry.external_event_delivery_delay();
+    let blocking_shutdown_delay = telemetry.blocking_shutdown_delay();
     SchedulerWorkloadCounters {
         workload: workload.name(),
         workers: configuration.workers,
@@ -594,6 +714,28 @@ fn counters(
         worker_unparks: telemetry.worker_unparks(),
         worker_stops: telemetry.worker_stops(),
         stale_ready_entries: telemetry.stale_ready_entries(),
+        work_budget_exhaustions: telemetry.work_budget_exhaustions(),
+        scheduler_migrations: telemetry.scheduler_migrations(),
+        gc_delayed_migrations: telemetry.gc_delayed_migrations(),
+        ready_delay_samples: ready_delay.samples(),
+        ready_delay_p50_work_units: ready_delay.p50_work_units(),
+        ready_delay_p95_work_units: ready_delay.p95_work_units(),
+        ready_delay_p99_work_units: ready_delay.p99_work_units(),
+        ready_delay_p999_work_units: ready_delay.p999_work_units(),
+        ready_delay_max_work_units: ready_delay.maximum_work_units(),
+        timer_delay_samples: timer_delay.samples(),
+        timer_delay_p99_work_units: timer_delay.p99_work_units(),
+        timer_delay_max_work_units: timer_delay.maximum_work_units(),
+        external_event_delay_samples: external_event_delay.samples(),
+        external_event_delay_p99_work_units: external_event_delay.p99_work_units(),
+        external_event_delay_max_work_units: external_event_delay.maximum_work_units(),
+        blocking_shutdown_delay_samples: blocking_shutdown_delay.samples(),
+        blocking_shutdown_delay_max_work_units: blocking_shutdown_delay.maximum_work_units(),
+        resource_counter_source: resources.source,
+        resident_memory_bytes: resources.resident_memory_bytes,
+        virtual_memory_bytes: resources.virtual_memory_bytes,
+        voluntary_context_switches: resources.voluntary_context_switches,
+        involuntary_context_switches: resources.involuntary_context_switches,
         first_poll_latency_p50_nanoseconds: latencies.0,
         first_poll_latency_p95_nanoseconds: latencies.1,
         first_poll_latency_p99_nanoseconds: latencies.2,

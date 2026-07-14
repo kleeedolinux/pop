@@ -105,7 +105,7 @@ fn main() {
                     (elapsed_nanoseconds % operations).saturating_mul(1_000) / operations;
 
                 println!(
-                    "schema={}\tprofile={profile}\ttarget_architecture={}\ttarget_operating_system={}\tbuild_profile=bench-optimized\tscheduler_stage=bounded-synchronized-reference\tworkload={}\tworkers={}\tavailable_parallelism={available_parallelism}\tsamples={samples}\tsample={sample}\ttasks={}\tpolls_per_task={polls_per_task}\toperations={}\tchecksum={}\telapsed_nanoseconds={elapsed_nanoseconds}\tnanoseconds_per_operation={nanoseconds_per_operation}.{fractional_nanoseconds:03}\tlatency_scope=initial-ready-to-first-poll\tlatency_p50_nanoseconds={}\tlatency_p95_nanoseconds={}\tlatency_p99_nanoseconds={}\tlatency_p999_nanoseconds={}\tlatency_max_nanoseconds={}\tpolls={}\tcompletions={}\tsuspensions={}\twake_requests={}\ttasks_stolen={}\tblocking_submissions={}\ttimers_delivered={}\texternal_events_delivered={}\tlocal_queue_depth={}\tmaximum_local_queue_depth={}\tinjection_queue_depth={}\tmaximum_injection_queue_depth={}\tblocking_queue_depth={}\tmaximum_blocking_queue_depth={}\tactive_blocking_operations={}\tmaximum_active_blocking_operations={}\tsteal_searches={}\tsteal_victims_examined={}\tsteal_successes={}\tsteal_failures={}\tmaximum_stolen_batch={}\tworker_starts={}\tworker_parks={}\tworker_unparks={}\tworker_stops={}\tstale_ready_entries={}",
+                    "schema={}\tprofile={profile}\ttarget_architecture={}\ttarget_operating_system={}\tbuild_profile=bench-optimized\tscheduler_stage=bounded-synchronized-reference\tworkload={}\tworkers={}\tavailable_parallelism={available_parallelism}\tsamples={samples}\tsample={sample}\ttasks={}\tpolls_per_task={polls_per_task}\toperations={}\tchecksum={}\telapsed_nanoseconds={elapsed_nanoseconds}\tnanoseconds_per_operation={nanoseconds_per_operation}.{fractional_nanoseconds:03}\tlatency_scope=initial-ready-to-first-poll\tlatency_p50_nanoseconds={}\tlatency_p95_nanoseconds={}\tlatency_p99_nanoseconds={}\tlatency_p999_nanoseconds={}\tlatency_max_nanoseconds={}\tpolls={}\tcompletions={}\tsuspensions={}\twake_requests={}\ttasks_stolen={}\tblocking_submissions={}\ttimers_delivered={}\texternal_events_delivered={}\tlocal_queue_depth={}\tmaximum_local_queue_depth={}\tinjection_queue_depth={}\tmaximum_injection_queue_depth={}\tblocking_queue_depth={}\tmaximum_blocking_queue_depth={}\tactive_blocking_operations={}\tmaximum_active_blocking_operations={}\tsteal_searches={}\tsteal_victims_examined={}\tsteal_successes={}\tsteal_failures={}\tmaximum_stolen_batch={}\tworker_starts={}\tworker_parks={}\tworker_unparks={}\tworker_stops={}\tstale_ready_entries={}\twork_budget_exhaustions={}\tscheduler_migrations={}\tgc_delayed_migrations={}\tready_delay_samples={}\tready_delay_p50_work_units={}\tready_delay_p95_work_units={}\tready_delay_p99_work_units={}\tready_delay_p999_work_units={}\tready_delay_max_work_units={}\ttimer_delay_samples={}\ttimer_delay_p99_work_units={}\ttimer_delay_max_work_units={}\texternal_event_delay_samples={}\texternal_event_delay_p99_work_units={}\texternal_event_delay_max_work_units={}\tblocking_shutdown_delay_samples={}\tblocking_shutdown_delay_max_work_units={}\tresource_counter_source={}\tresident_memory_bytes={}\tvirtual_memory_bytes={}\tvoluntary_context_switches={}\tinvoluntary_context_switches={}",
                     SCHEDULER_BENCHMARK_SCHEMA,
                     std::env::consts::ARCH,
                     std::env::consts::OS,
@@ -145,6 +145,28 @@ fn main() {
                     counters.worker_unparks,
                     counters.worker_stops,
                     counters.stale_ready_entries,
+                    counters.work_budget_exhaustions,
+                    counters.scheduler_migrations,
+                    counters.gc_delayed_migrations,
+                    counters.ready_delay_samples,
+                    counters.ready_delay_p50_work_units,
+                    counters.ready_delay_p95_work_units,
+                    counters.ready_delay_p99_work_units,
+                    counters.ready_delay_p999_work_units,
+                    counters.ready_delay_max_work_units,
+                    counters.timer_delay_samples,
+                    counters.timer_delay_p99_work_units,
+                    counters.timer_delay_max_work_units,
+                    counters.external_event_delay_samples,
+                    counters.external_event_delay_p99_work_units,
+                    counters.external_event_delay_max_work_units,
+                    counters.blocking_shutdown_delay_samples,
+                    counters.blocking_shutdown_delay_max_work_units,
+                    counters.resource_counter_source,
+                    counters.resident_memory_bytes,
+                    counters.virtual_memory_bytes,
+                    counters.voluntary_context_switches,
+                    counters.involuntary_context_switches,
                 );
             }
         }
