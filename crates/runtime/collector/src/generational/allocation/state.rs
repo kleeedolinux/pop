@@ -21,6 +21,7 @@ struct LayoutKey {
     reference_slots: Vec<ObjectSlot>,
 }
 
+#[derive(Clone)]
 struct Tlab {
     page: PageId,
     layout: LayoutKey,
@@ -28,6 +29,7 @@ struct Tlab {
     limit: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct AllocationInfrastructure {
     config: AllocationInfrastructureConfig,
     pages: BTreeMap<PageId, PageDescriptor>,
@@ -239,6 +241,29 @@ impl AllocationInfrastructure {
         let layout = layout(type_id, object_map);
         let size = object_size(layout.slot_count)?;
         let placement = self.place_on_new_page(&layout, size, HeapDomain::Pinned)?;
+        self.placements.insert(reference, placement);
+        self.reclaim_empty_pages();
+        Ok(())
+    }
+
+    pub(crate) fn move_to_shared(
+        &mut self,
+        reference: ManagedReference,
+        type_id: RuntimeTypeId,
+        object_map: &ObjectMap,
+    ) -> Result<(), RuntimeFailure> {
+        let Some(previous) = self.placements.get(&reference).copied() else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        if matches!(
+            previous.domain,
+            HeapDomain::Shared | HeapDomain::LargeObject | HeapDomain::Pinned
+        ) {
+            return Ok(());
+        }
+        let layout = layout(type_id, object_map);
+        let size = object_size(layout.slot_count)?;
+        let placement = self.place_on_new_page(&layout, size, HeapDomain::Shared)?;
         self.placements.insert(reference, placement);
         self.reclaim_empty_pages();
         Ok(())

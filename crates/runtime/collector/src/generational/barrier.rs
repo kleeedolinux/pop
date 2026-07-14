@@ -22,6 +22,7 @@ impl GenerationalRuntime {
         if value.is_some_and(|reference| !self.nursery.contains(reference)) {
             return Err(RuntimeFailure::runtime_invariant());
         }
+        self.validate_ownership_edge(owner, value)?;
         self.record_satb(previous);
         self.record_post_scan_edge(owner, value);
         self.nursery.store_reference(owner, slot, value)

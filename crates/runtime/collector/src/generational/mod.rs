@@ -7,6 +7,7 @@ mod coordination;
 mod heap;
 mod major;
 mod memory;
+mod ownership;
 mod workers;
 
 pub use allocation::{

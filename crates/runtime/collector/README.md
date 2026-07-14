@@ -11,7 +11,11 @@ promotes deterministically, and maintains remembered cards.
 mature-heap conformance slice. Its `generational` modules separate PLRI
 adaptation, SATB/publication barriers, cycle state, bounded mark/sweep work,
 page/TLAB allocation, memory control, typed epoch coordination, and opt-in host
-workers. The bounded coordinator registers managed and foreign execution
+workers. Typed object ownership is stored separately from generation, page
+placement, allocation class, and pin state. Explicit publication walks a
+complete scheduler-local graph, prepares shared placements transactionally,
+then changes ownership; shared-to-local stores fail before any SATB/card or heap
+mutation. The bounded coordinator registers managed and foreign execution
 states, collects exact once-only root/TLAB/barrier publications, and completes
 protocol epochs without heap tracing in the handshake. Persistent named worker
 threads receive immutable object snapshots through bounded per-worker queues,
@@ -21,8 +25,8 @@ precise young roots immediately inside the collecting safe point, where no
 mutator store can invalidate the snapshot. Mature sweeping advances through the
 ordered heap by a bounded cursor; the mark/sweep transition builds no heap-sized
 unreachable-object inventory, and allocations during sweeping are live for that
-cycle. It preserves snapshot edges, shades roots, pins, and
-new mature objects, and defers nursery relocation while a major snapshot still
+cycle. It preserves snapshot edges, shades roots, pins, and new mature objects,
+and defers nursery relocation while a major snapshot still
 contains physical tokens. The implementation deliberately continues to report
 `RelocationConformance`: epochs/workers are not yet integrated with native
 scheduler transitions, and worker batches currently join each bounded collector
@@ -71,6 +75,12 @@ telemetry, and joined shutdown. It performs parallel marking, remembered-card
 refinement, and sweep dispatch only when explicitly configured; it does not
 claim adaptive sizing, work stealing, mutator-concurrent tracing/refinement, or
 concurrent heap mutation.
+
+The ownership foundation currently implements scheduler-local and shared graph
+publication. Isolated-region construction/transfer, scheduler-indexed local
+heaps, scoped arenas, borrowing integration, and compiler-proved barrier
+elimination remain separate required work; they are not simulated through the
+shared publication path.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and

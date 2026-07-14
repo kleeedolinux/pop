@@ -8,6 +8,7 @@ use pop_runtime_interface::{
 };
 
 use crate::heap::{Allocation, AllocationKind, CollectorMetrics, SlotValue};
+use crate::ownership::ObjectOwnership;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectorGeneration {
@@ -23,6 +24,7 @@ pub(crate) struct RelocationAllocation {
     pub(crate) identity: CollectorObjectId,
     pub(crate) generation: CollectorGeneration,
     pub(crate) allocation: Allocation,
+    pub(crate) ownership: ObjectOwnership,
 }
 
 pub struct RelocationRuntime {
@@ -229,6 +231,7 @@ impl RelocationRuntime {
                     object_map,
                     slots,
                 },
+                ownership: ObjectOwnership::default(),
             },
         );
         self.metrics.record_allocation();

@@ -155,6 +155,12 @@ Package for the first release.
   - [x] Implement the single-mutator moving nursery, exact root/edge/handle/pin
     relocation, remembered cards, deterministic promotion, and page-described
     allocation conformance path.
+  - [x] Keep ownership separate from placement/generation/pinning, publish
+    complete scheduler-local graphs explicitly into shared ownership/pages, and
+    reject shared-to-local edges before mutation.
+  - [ ] Add isolated-region construction/transfer, scheduler-indexed local heaps,
+    scoped arenas, shared immutability proofs, and capability-driven barrier
+    elimination.
   - [ ] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.
 - [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,

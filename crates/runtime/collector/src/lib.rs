@@ -4,6 +4,7 @@ mod access;
 mod adapter;
 mod generational;
 mod heap;
+mod ownership;
 mod relocation;
 mod table;
 mod trace;
@@ -19,4 +20,5 @@ pub use generational::{
     NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor, PageId, RegionId,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
+pub use ownership::{IsolatedRegionId, ObjectOwnership, PublicationStatistics, SchedulerId};
 pub use relocation::{CollectorGeneration, CollectorObjectId, RelocationRuntime};

@@ -133,7 +133,9 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   full-heap transition inventory, page/TLAB allocation, hard-limit
   accounting, adaptive pacing, bounded assists, logical memory telemetry, the
   standalone typed bounded-epoch coordinator, and opt-in bounded host-worker
-  mark/card/sweep dispatch awaiting scheduler/runtime integration;
+  mark/card/sweep dispatch; the runtime also has distinct ownership metadata,
+  whole-graph local-to-shared publication, and ownership barrier enforcement,
+  while isolated transfer and scheduler/runtime integration remain open;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.
