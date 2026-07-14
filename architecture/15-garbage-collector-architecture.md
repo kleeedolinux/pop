@@ -1024,6 +1024,12 @@ A foreign call may not hide a managed pointer in untyped memory across a safepoi
 
 Suspended coroutines should not require resumption for scanning.
 
+Ready coroutine frames waiting in scheduler queues have the same precise-root
+requirement. ADR 0061 requires every non-running retained task frame to own one
+collector-visible root container; the active worker stack assumes root
+responsibility only after dispatch restores the container's current `RootSlot`
+values.
+
 Coroutine stacks are represented as stacklets or chunks:
 
 ```text

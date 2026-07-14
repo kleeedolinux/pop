@@ -254,6 +254,13 @@ fails without exposing a partial relocation. Bootstrap adapters leave tokens
 unchanged; relocating adapters invalidate evacuated tokens after rewriting all
 live locations.
 
+Under ADR 0061, the scheduler retains the same canonical publications for every
+non-running task frame, including ready frames. Collector-owned typed root
+containers keep those slots live and relocation-updatable; dispatch restores
+the current tokens before polling. Worker mutator identity and scheduler
+selection are bound atomically to each native runtime operation, never inferred
+from one process-global semantic scheduler.
+
 Collector implementation stages are explicit. `RelocationConformance` provides
 the first single-mutator moving nursery and generational card barrier, but no
 mature-heap collection, concurrent marking, or SATB barrier; mature objects are

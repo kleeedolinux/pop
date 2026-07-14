@@ -31,6 +31,12 @@ specified by the
 This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.
 
+[ADR 0061](../../../architecture/decisions/0061-scheduler-mutator-and-task-root-binding.md)
+defines the next integration boundary: one detached mutator registration per
+normal worker and one collector-visible precise root container for every ready
+or suspended task frame. The current transition hooks do not yet claim that
+collector binding.
+
 The checksum-validated synchronized-reference benchmark is available with:
 
 ```text

@@ -51,6 +51,13 @@ array/object/table access required by the native facade, and reports
 `NativeStableGenerationalConformance`. Exact-layout mature allocations use a
 scheduler-keyed active-page index with one mutator-local authoritative cursor;
 central page metadata changes only when that active page switches or fills.
+
+ADR 0061 requires scheduler integration to retain canonical root publications
+for every non-running task frame and bind each managed native operation to one
+exact worker mutator and logical scheduler. The existing coordinator and
+selected-scheduler surface are foundations, not proof that this binding is
+complete.
+
 Atomic object construction and scalar or managed-array bulk construction write
 the complete precise payload before publication. Two-slot payloads stay inline,
 use exactly one physical machine word per logical slot, and are interpreted

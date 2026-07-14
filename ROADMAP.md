@@ -276,6 +276,17 @@ Post-baseline library work has begun without widening the release foundation:
     - [ ] Bind scheduler transition events to native mutator registration,
       precise suspended-frame root publication, collector epochs, and the ABI 2
       writable-root transition before claiming production GC integration.
+      ADR 0061 requires the stronger ready-and-suspended task-frame root
+      lifecycle rather than rooting only explicit suspension.
+      - [ ] Move canonical `SchedulerId` ownership into PLRI and add typed,
+        bounded retained task-root container identities.
+      - [ ] Retain exact initial/nonterminal frame roots before queue
+        publication and restore relocated `RootSlot` values before dispatch.
+      - [ ] Register each normal worker as a detached mutator, bind managed
+        native entries per dispatch, and make safe points acknowledge epochs
+        exactly once.
+      - [ ] Prove scheduler-local allocation ownership, root-container
+        migration/refusal, and exact cleanup under forced minor/major GC.
     - [ ] Extend declared benchmark profiles with local/foreign wake and
       ping-pong latency, continuous I/O fairness, steal-storm and million-frame
       memory evidence, operating-system resource counters, and scheduler/GC
