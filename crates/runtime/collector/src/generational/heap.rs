@@ -13,6 +13,7 @@ use super::allocation::{
     AllocationInfrastructure, AllocationInfrastructureConfig, AllocationMetrics,
     AllocationPlacement, PageDescriptor, PageId,
 };
+use super::arena::ArenaState;
 use super::memory::{
     GenerationalMemoryConfig, GenerationalMemoryTelemetry, MemoryController, NonHeapMemoryUsage,
 };
@@ -98,6 +99,7 @@ pub struct GenerationalRuntime {
     pub(crate) workers: Option<BackgroundWorkerPool>,
     pub(crate) isolation: IsolationState,
     pub(crate) scheduler: SchedulerId,
+    pub(crate) arenas: ArenaState,
     pub(crate) minor_requested: BTreeSet<SchedulerId>,
     pub(crate) major_requested: bool,
 }
@@ -136,6 +138,7 @@ impl GenerationalRuntime {
             workers: None,
             isolation: IsolationState::new(),
             scheduler: SchedulerId::new(1),
+            arenas: ArenaState::new(),
             minor_requested: BTreeSet::new(),
             major_requested: false,
         }

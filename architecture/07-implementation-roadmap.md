@@ -137,6 +137,7 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   whole-graph local-to-shared publication, ownership barrier enforcement, and
   exact-one-owner isolated-region construction/transfer/dissolution, while
   scheduler-indexed TLABs/local collection now preserve heap independence;
+  typed scoped bump arenas provide precise external roots and bulk reclamation;
   parallel scheduler execution and scheduler/runtime integration remain open;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;

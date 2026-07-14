@@ -82,8 +82,15 @@ isolated regions as separate mechanisms. Isolation verifies a unique registered
 owner and rejects other handles, pins, stack roots, or outside incoming edges
 before transactionally assigning a distinct region and placement. Transfer
 changes only the owner scheduler; dissolution returns the graph to local mature
-ownership. Scheduler-indexed local heaps, scoped arenas, borrowing integration,
-and compiler-proved barrier elimination remain separate required work.
+ownership. Borrowing integration, shared immutability proofs, and
+compiler-proved barrier elimination remain separate required work.
+
+Scoped arenas use typed `ArenaReference` tokens rather than managed references.
+Their layouts distinguish scalar, same-arena, and managed-reference slots;
+managed targets use precise internal roots that follow nursery relocation, while
+arena edges never enter tracing. Bump allocation observes both arena capacity
+and the global hard limit before mutation. Closing an arena releases all managed
+roots and reclaims every arena object and byte as one deterministic operation.
 
 Scheduler-local allocation records the owning scheduler in object ownership and
 page metadata. Each scheduler retains an independent TLAB cursor and minor

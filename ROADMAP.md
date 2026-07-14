@@ -164,8 +164,10 @@ Package for the first release.
   - [x] Add scheduler-indexed object/page ownership, independent TLAB cursors,
     per-scheduler minor requests and evacuation scope, and cross-scheduler local
     edge rejection.
-  - [ ] Add scoped arenas, shared immutability proofs, and capability-driven
-    barrier elimination.
+  - [x] Add scheduler-owned scoped bump arenas with disjoint typed managed/arena
+    slots, precise relocating managed roots, same-arena edge enforcement,
+    hard-limit accounting, stale-token checks, and bulk reclamation.
+  - [ ] Add shared immutability proofs and capability-driven barrier elimination.
   - [ ] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.
 - [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,

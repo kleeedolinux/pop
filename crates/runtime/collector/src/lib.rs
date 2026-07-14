@@ -2,6 +2,7 @@
 
 mod access;
 mod adapter;
+mod arena;
 mod generational;
 mod heap;
 mod ownership;
@@ -9,6 +10,10 @@ mod relocation;
 mod table;
 mod trace;
 
+pub use arena::{
+    ArenaAllocationRequest, ArenaCloseStatistics, ArenaConfig, ArenaConfigError, ArenaId,
+    ArenaLayoutError, ArenaReference, ArenaSlotValue, ArenaTelemetry,
+};
 pub use generational::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
     AllocationPlacement, BackgroundWorkerConfig, BackgroundWorkerConfigError,

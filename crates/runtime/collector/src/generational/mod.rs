@@ -2,6 +2,7 @@
 
 mod adapter;
 mod allocation;
+mod arena;
 mod barrier;
 mod coordination;
 mod heap;

@@ -15,6 +15,7 @@ pub(crate) struct MemoryController {
     allocation_debt_bytes: usize,
     peak_committed_bytes: usize,
     non_heap: NonHeapMemoryUsage,
+    arena_bytes: usize,
 }
 
 impl MemoryController {
@@ -33,6 +34,7 @@ impl MemoryController {
             allocation_debt_bytes: 0,
             peak_committed_bytes: 0,
             non_heap: NonHeapMemoryUsage::default(),
+            arena_bytes: 0,
         }
     }
 
@@ -60,13 +62,29 @@ impl MemoryController {
         committed_after <= self.ordinary_limit_bytes()
     }
 
+    pub(crate) fn admits_arena_bytes(&self, arena_after: usize, heap_committed: usize) -> bool {
+        self.non_heap
+            .total_bytes()
+            .checked_add(arena_after)
+            .and_then(|total| total.checked_add(heap_committed))
+            .is_some_and(|total| total <= self.config.ordinary_limit_bytes())
+    }
+
+    pub(crate) fn set_arena_bytes(&mut self, arena_bytes: usize) {
+        self.arena_bytes = arena_bytes;
+    }
+
     pub(crate) fn set_non_heap_usage(
         &mut self,
         usage: NonHeapMemoryUsage,
         live_bytes: usize,
         committed_bytes: usize,
     ) -> bool {
-        let Some(total) = usage.total_bytes().checked_add(committed_bytes) else {
+        let Some(total) = usage
+            .total_bytes()
+            .checked_add(self.arena_bytes)
+            .and_then(|total| total.checked_add(committed_bytes))
+        else {
             return false;
         };
         if total > self.config.ordinary_limit_bytes() {
@@ -81,6 +99,7 @@ impl MemoryController {
         self.config
             .ordinary_limit_bytes()
             .saturating_sub(self.non_heap.total_bytes())
+            .saturating_sub(self.arena_bytes)
     }
 
     pub(crate) fn record_minor_request(&mut self) {
@@ -131,12 +150,12 @@ impl MemoryController {
             shared_bytes: allocation.bytes_in_domains(&[HeapDomain::Shared]),
             large_object_bytes: allocation.bytes_in_domains(&[HeapDomain::LargeObject]),
             pinned_bytes: allocation.bytes_in_domains(&[HeapDomain::Pinned]),
-            non_heap_bytes: self.non_heap.total_bytes(),
+            non_heap_bytes: self.non_heap.total_bytes().saturating_add(self.arena_bytes),
             stack_bytes: self.non_heap.stack_bytes(),
             code_bytes: self.non_heap.code_bytes(),
             metadata_bytes: self.non_heap.metadata_bytes(),
             native_runtime_bytes: self.non_heap.native_runtime_bytes(),
-            arena_bytes: self.non_heap.arena_bytes(),
+            arena_bytes: self.non_heap.arena_bytes().saturating_add(self.arena_bytes),
             isolated_region_bytes: self
                 .non_heap
                 .isolated_region_bytes()
