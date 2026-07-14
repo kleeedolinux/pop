@@ -46,6 +46,11 @@ pub enum RuntimeOperation {
     Resume,
     TaskCancel,
     TaskCancellationRequested,
+    NetTcpListenLoopback,
+    NetTcpAccept,
+    NetTcpReceive,
+    NetTcpSendAll,
+    NetTcpClose,
     InitializeModule,
     InitializeBubble,
 }

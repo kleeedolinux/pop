@@ -48,6 +48,11 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::Resume => Some("pop_rt_resume"),
         RuntimeOperation::TaskCancel => Some("pop_rt_task_cancel"),
         RuntimeOperation::TaskCancellationRequested => Some("pop_rt_task_cancellation_requested"),
+        RuntimeOperation::NetTcpListenLoopback => Some("pop_rt_net_tcp_listen_loopback"),
+        RuntimeOperation::NetTcpAccept => Some("pop_rt_net_tcp_accept"),
+        RuntimeOperation::NetTcpReceive => Some("pop_rt_net_tcp_receive"),
+        RuntimeOperation::NetTcpSendAll => Some("pop_rt_net_tcp_send_all"),
+        RuntimeOperation::NetTcpClose => Some("pop_rt_net_tcp_close"),
         RuntimeOperation::RecordUpdate
         | RuntimeOperation::UnionMake
         | RuntimeOperation::CaptureLoad

@@ -51,6 +51,11 @@ fn supported_symbols_are_unique_and_native() {
         RuntimeOperation::Resume,
         RuntimeOperation::TaskCancel,
         RuntimeOperation::TaskCancellationRequested,
+        RuntimeOperation::NetTcpListenLoopback,
+        RuntimeOperation::NetTcpAccept,
+        RuntimeOperation::NetTcpReceive,
+        RuntimeOperation::NetTcpSendAll,
+        RuntimeOperation::NetTcpClose,
     ];
     let symbols: BTreeSet<_> = operations
         .into_iter()

@@ -1,20 +1,25 @@
 use pop_runtime_native::{
-    abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
+    WOULD_BLOCK, abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
     allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
     pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_initialized_object,
     pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get,
     pop_rt_array_get_checked, pop_rt_array_length, pop_rt_array_set, pop_rt_field_get,
     pop_rt_field_set, pop_rt_gc_stage, pop_rt_iteration_acquire, pop_rt_iteration_next,
     pop_rt_list_add, pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked,
-    pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_range_create, pop_rt_release_root,
-    pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_suspend, pop_rt_table_get,
-    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_task_cancel,
-    pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
+    pop_rt_list_length, pop_rt_list_set, pop_rt_net_tcp_accept, pop_rt_net_tcp_close,
+    pop_rt_net_tcp_listen_loopback, pop_rt_net_tcp_receive, pop_rt_net_tcp_send_all, pop_rt_pin,
+    pop_rt_range_create, pop_rt_release_root, pop_rt_resume, pop_rt_retain_root,
+    pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read,
+    pop_rt_suspend, pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set,
+    pop_rt_task_cancel, pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
+    tcp_listener_port_for_tests,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
 use std::ffi::CString;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 fn abi_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -39,6 +44,68 @@ fn native_task_abi_preserves_scalar_completion_tokens() {
     assert_eq!(pop_rt_task_cancel(1), 1);
     assert_eq!(pop_rt_task_cancel(0), 0);
     assert_eq!(pop_rt_task_cancellation_requested(1), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn native_tcp_abi_accepts_receives_sends_and_closes_loopback_connections() {
+    let _guard = abi_test_lock();
+    let listener = pop_rt_net_tcp_listen_loopback(0, 16, 1);
+    assert_ne!(listener, 0);
+
+    let port = tcp_listener_port_for_tests(listener).expect("listener port");
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("client connects");
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let accepted = wait_for_accept(listener);
+    assert_ne!(accepted, 0);
+    assert_ne!(accepted, WOULD_BLOCK);
+
+    client.write_all(b"ping").expect("client write");
+    let mut buffer = [0_u8; 4];
+    let received = wait_for_receive(accepted, &mut buffer);
+    assert_eq!(received, 4);
+    assert_eq!(&buffer, b"ping");
+
+    // SAFETY: The source slice is valid for the declared length.
+    let sent = unsafe { pop_rt_net_tcp_send_all(accepted, b"pong".as_ptr(), 4) };
+    assert_eq!(sent, 1);
+    let mut response = [0_u8; 4];
+    client.read_exact(&mut response).expect("client read");
+    assert_eq!(&response, b"pong");
+
+    assert_eq!(pop_rt_net_tcp_close(accepted), 1);
+    assert_eq!(pop_rt_net_tcp_close(listener), 1);
+    assert_eq!(pop_rt_net_tcp_close(listener), 0);
+}
+
+fn wait_for_accept(listener: u64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let accepted = pop_rt_net_tcp_accept(listener);
+        if accepted != WOULD_BLOCK {
+            return accepted;
+        }
+        assert!(Instant::now() < deadline, "accept timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[allow(unsafe_code)]
+fn wait_for_receive(connection: u64, buffer: &mut [u8]) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        // SAFETY: The buffer is valid for its length and remains borrowed for
+        // the duration of this call.
+        let received =
+            unsafe { pop_rt_net_tcp_receive(connection, buffer.as_mut_ptr(), buffer.len() as u64) };
+        if received != WOULD_BLOCK {
+            return received;
+        }
+        assert!(Instant::now() < deadline, "receive timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
