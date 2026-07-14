@@ -1,8 +1,8 @@
-# ADR 0060: Atomic Initialized Object Allocation
+# ADR 0071: Atomic Initialized Object Allocation
 
 - Status: accepted
 - Date: 2026-07-14
-- Depends on: ADR 0022, ADR 0024, ADR 0038, ADR 0039, and ADR 0059
+- Depends on: ADR 0022, ADR 0024, ADR 0038, ADR 0039, and ADR 0070
 - Supersedes: none
 
 ## Context

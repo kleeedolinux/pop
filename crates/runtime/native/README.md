@@ -17,9 +17,9 @@ Heap storage, reachability, roots, pins, and collection policy remain in
 `pop-runtime-native-abi`. See
 [ADR 0038](../../../architecture/decisions/0038-modular-portable-runtime-implementation.md).
 The native collector transition is specified by
-[ADR 0059](../../../architecture/decisions/0059-native-stable-generational-transition.md).
+[ADR 0070](../../../architecture/decisions/0070-native-stable-generational-transition.md).
 Atomic initialized publication is specified by
-[ADR 0060](../../../architecture/decisions/0060-atomic-initialized-object-allocation.md).
+[ADR 0071](../../../architecture/decisions/0071-atomic-initialized-object-allocation.md).
 
 The facade is divided into `identity`, `allocation`, `storage`, `text`, `roots`,
 `failure`, `scheduler`, and private `state` modules. The scheduler provides the
@@ -31,7 +31,7 @@ specified by the
 This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.
 
-[ADR 0061](../../../architecture/decisions/0061-scheduler-mutator-and-task-root-binding.md)
+[ADR 0072](../../../architecture/decisions/0072-scheduler-mutator-and-task-root-binding.md)
 defines the next integration boundary: one detached mutator registration per
 normal worker and one collector-visible precise root container for every ready
 or suspended task frame. The current transition hooks do not yet claim that

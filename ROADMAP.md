@@ -276,7 +276,7 @@ Post-baseline library work has begun without widening the release foundation:
     - [ ] Bind scheduler transition events to native mutator registration,
       precise suspended-frame root publication, collector epochs, and the ABI 2
       writable-root transition before claiming production GC integration.
-      ADR 0061 requires the stronger ready-and-suspended task-frame root
+      ADR 0072 requires the stronger ready-and-suspended task-frame root
       lifecycle rather than rooting only explicit suspension.
       - [x] Move canonical `SchedulerId` ownership into PLRI and add typed,
         bounded retained task-root container identities.

@@ -49,7 +49,7 @@ a backend with verified relocating-root support. ABI 1.x, immutable root spills,
 or a target capability alone cannot satisfy the production profile. Profile/
 ABI mismatch fails before link or load; there is no silent bootstrap fallback.
 
-Under ADR 0059, ABI 1 native execution no longer uses `BootstrapRuntime`.
+Under ADR 0070, ABI 1 native execution no longer uses `BootstrapRuntime`.
 Instead it composes the generational allocator and incremental SATB mature
 collector in a `NativeStableGenerationalConformance` stage that places every
 native allocation in a non-moving domain. This stage preserves ABI 1 stable
@@ -130,7 +130,7 @@ and capacity private, grows storage without changing the list handle, and
 applies precise barriers for managed elements. MIR retains distinct typed list
 operations; no backend may reinterpret them as array or table operations.
 
-ADR 0060 advances native ABI 1 to version 1.11 with atomic initialized object
+ADR 0071 advances native ABI 1 to version 1.11 with atomic initialized object
 allocation. LLVM passes the exact pointer map and one physical initializer per
 logical slot in a single native transition. The runtime validates every managed
 initializer before publication and returns either a completely initialized
@@ -254,7 +254,7 @@ fails without exposing a partial relocation. Bootstrap adapters leave tokens
 unchanged; relocating adapters invalidate evacuated tokens after rewriting all
 live locations.
 
-Under ADR 0061, the scheduler retains the same canonical publications for every
+Under ADR 0072, the scheduler retains the same canonical publications for every
 non-running task frame, including ready frames. Collector-owned typed root
 containers keep those slots live and relocation-updatable; dispatch restores
 the current tokens before polling. Worker mutator identity and scheduler
@@ -275,7 +275,7 @@ allocation assists, deterministic byte-limit OOM, empty-page return, and
 domain/debt telemetry. It still reports the lower relocation contract because
 cooperative work is not concurrent production marking, the native backend does
 not yet provide writable relocating roots, and no profile may infer production
-capability from implementation experiments. ADR 0059 permits a closed native
+capability from implementation experiments. ADR 0070 permits a closed native
 stable-token wrapper to use its mature allocator, SATB marking, and sweeping
 without exposing nursery relocation; this does not select the production
 profile.

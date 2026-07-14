@@ -1,8 +1,8 @@
-# ADR 0061: Scheduler Mutator and Task-Root Binding
+# ADR 0072: Scheduler Mutator and Task-Root Binding
 
 - Status: accepted
 - Date: 2026-07-14
-- Depends on: ADR 0008, ADR 0022, ADR 0038, ADR 0039, ADR 0057, and ADR 0059
+- Depends on: ADR 0008, ADR 0022, ADR 0038, ADR 0039, ADR 0068, and ADR 0070
 - Supersedes: none
 
 ## Context
@@ -173,7 +173,7 @@ architecture/runtime incident as an ordinary task panic.
 
 ### Runtime profiles and backend boundary
 
-ADR 0059's `NativeStableGenerationalConformance` composition implements this
+ADR 0070's `NativeStableGenerationalConformance` composition implements this
 binding while keeping every ABI 1 allocation non-moving. It must still retain
 precise queued/suspended roots, use exact scheduler ownership, and participate
 in epochs; stable physical tokens do not waive those requirements.

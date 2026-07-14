@@ -45,14 +45,14 @@ scheduler transitions, and worker batches currently join each bounded collector
 slice rather than tracing concurrently with mutator execution, so
 `ProductionConcurrentGenerational` cannot yet be selected.
 
-`StableGenerationalRuntime` is the closed ADR 0059 native composition. It maps
+`StableGenerationalRuntime` is the closed ADR 0070 native composition. It maps
 ABI 1 nursery-eligible requests into stable mature placement, exposes the typed
 array/object/table access required by the native facade, and reports
 `NativeStableGenerationalConformance`. Exact-layout mature allocations use a
 scheduler-keyed active-page index with one mutator-local authoritative cursor;
 central page metadata changes only when that active page switches or fills.
 
-ADR 0061 requires scheduler integration to retain canonical root publications
+ADR 0072 requires scheduler integration to retain canonical root publications
 for every non-running task frame and bind each managed native operation to one
 exact worker mutator and logical scheduler. The existing coordinator and
 selected-scheduler surface are foundations, not proof that this binding is
