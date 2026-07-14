@@ -58,13 +58,9 @@ pub extern "C" fn pop_rt_allocate_array_filled(
     let Ok(mut runtime) = abi_runtime().lock() else {
         return 0;
     };
-    let Ok(reference) = runtime.allocate_array(&request) else {
-        return 0;
-    };
-    if runtime.fill_array_value(reference, initial_value).is_err() {
-        return 0;
-    }
-    reference.raw()
+    runtime
+        .allocate_array_filled(&request, initial_value)
+        .map_or(0, ManagedReference::raw)
 }
 
 #[allow(unsafe_code)]

@@ -8,6 +8,32 @@ use pop_runtime_interface::{
 
 use crate::heap::{AllocationKind, BootstrapRuntime, SlotValue};
 
+impl BootstrapRuntime {
+    /// Allocates and initializes one fixed array before publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed allocation failure or rejects an invalid managed
+    /// initial value without exposing a partial array.
+    pub fn allocate_array_filled(
+        &mut self,
+        request: &ArrayAllocationRequest,
+        initial_value: u64,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        let object_map = array_object_map(request)?;
+        if request.element_map() == ArrayElementMap::ManagedReference && initial_value != 0 {
+            self.validate_reference(ManagedReference::new(initial_value))?;
+        }
+        self.allocate_filled(
+            request.type_id(),
+            request.allocation_class(),
+            AllocationKind::Array(request.element_map()),
+            object_map,
+            initial_value,
+        )
+    }
+}
+
 impl RuntimeAdapter for BootstrapRuntime {
     fn contract(&self) -> GarbageCollectorContract {
         GarbageCollectorContract::bootstrap_stage1()
@@ -29,27 +55,7 @@ impl RuntimeAdapter for BootstrapRuntime {
         &mut self,
         request: &ArrayAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        let reference_slots = match request.element_map() {
-            ArrayElementMap::Scalar => Vec::new(),
-            ArrayElementMap::ManagedReference => {
-                let length = usize::try_from(request.length())
-                    .map_err(|_| Self::out_of_memory(1, usize::MAX))?;
-                let mut slots = Vec::new();
-                slots
-                    .try_reserve_exact(length)
-                    .map_err(|_| Self::out_of_memory(1, length))?;
-                slots.extend((0..request.length()).map(ObjectSlot::new));
-                slots
-            }
-        };
-        let object_map = ObjectMap::new(request.length(), reference_slots)
-            .map_err(|_| RuntimeFailure::runtime_invariant())?;
-        self.allocate(
-            request.type_id(),
-            request.allocation_class(),
-            AllocationKind::Array(request.element_map()),
-            object_map,
-        )
+        self.allocate_array_filled(request, 0)
     }
 
     fn allocate_table(
@@ -132,4 +138,22 @@ impl RuntimeAdapter for BootstrapRuntime {
         }
         Ok(())
     }
+}
+
+fn array_object_map(request: &ArrayAllocationRequest) -> Result<ObjectMap, RuntimeFailure> {
+    let reference_slots = match request.element_map() {
+        ArrayElementMap::Scalar => Vec::new(),
+        ArrayElementMap::ManagedReference => {
+            let length = usize::try_from(request.length())
+                .map_err(|_| BootstrapRuntime::out_of_memory(1, usize::MAX))?;
+            let mut slots = Vec::new();
+            slots
+                .try_reserve_exact(length)
+                .map_err(|_| BootstrapRuntime::out_of_memory(1, length))?;
+            slots.extend((0..request.length()).map(ObjectSlot::new));
+            slots
+        }
+    };
+    ObjectMap::new(request.length(), reference_slots)
+        .map_err(|_| RuntimeFailure::runtime_invariant())
 }

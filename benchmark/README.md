@@ -37,6 +37,22 @@ selectors:
   --workload allocationChurn --workload objectArray
 ```
 
+For a host-only GC diagnostic without provisioning or Docker, compare the two
+checksum-equivalent allocation workloads directly:
+
+```bash
+benchmark/bin/benchmark run \
+  --runtime poplang --runtime go \
+  --workload allocationChurn --workload objectArray \
+  --samples 15 --warmups 4 --output /tmp/poplang-gc.json
+```
+
+`allocationChurn` fills 20,000 short-lived 256-element numeric arrays and reads
+one value from each. `objectArray` retains 200,000 objects in a managed-reference
+array and then reads every element and field. The exact checksum gate runs
+before warmups and timing, so a miscompiled or non-equivalent result is excluded
+rather than ranked.
+
 The default outputs are `results/latest.json` and `results/latest.html`.
 `run` writes JSON only, while `render` can regenerate HTML from an existing
 result:

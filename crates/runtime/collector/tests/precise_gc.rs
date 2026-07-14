@@ -132,6 +132,40 @@ fn reference_arrays_trace_elements_and_scalar_slots_never_become_conservative_ro
 }
 
 #[test]
+fn bulk_initialized_array_allocation_materializes_each_value_once() {
+    let mut runtime = BootstrapRuntime::new();
+    let request = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(30),
+        AllocationClass::Mature,
+        4,
+        ArrayElementMap::Scalar,
+    );
+
+    let array = runtime
+        .allocate_array_filled(&request, 41)
+        .expect("filled array");
+
+    assert_eq!(runtime.metrics().allocations(), 1);
+    assert_eq!(
+        runtime
+            .scalar_array_values(array, RuntimeTypeId::new(30))
+            .expect("scalar values")
+            .collect::<Vec<_>>(),
+        vec![41, 41, 41, 41]
+    );
+
+    let managed = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(31),
+        AllocationClass::Mature,
+        2,
+        ArrayElementMap::ManagedReference,
+    );
+    assert!(runtime.allocate_array_filled(&managed, u64::MAX).is_err());
+    assert_eq!(runtime.metrics().allocations(), 1);
+    assert_eq!(runtime.object_count(), 1);
+}
+
+#[test]
 fn requested_collection_runs_at_a_safe_point_with_published_stack_roots() {
     let mut runtime = BootstrapRuntime::new();
     let stack_live = runtime

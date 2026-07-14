@@ -219,6 +219,20 @@ Package for the first release.
 - [ ] Meet named correctness, throughput, memory, and latency gates on declared
   supported target profiles. Report bootstrap, relocation-conformance, and
   production collector results separately.
+  - [x] Establish checksum-validated host workloads for 20,000 short-lived
+    256-element arrays and a retained 200,000-object array, then record the
+    first 15-sample Pop/Go execution-only baseline on the local i5-1235U host.
+    Current medians are 44.468 ms versus 4.715 ms for allocation churn and
+    139.161 ms versus 4.828 ms for the retained object array; these are local
+    optimization evidence, not portable performance claims.
+  - [x] Remove root-publication allocation from bootstrap safe points when no
+    collection is pending, and materialize bulk-initialized arrays in one pass.
+    Same-binary A/B runs show about 2% improvement from one-pass initialization;
+    safepoint allocation removal is neutral for zero-root churn and about 3%
+    better for the retained-root workload under noisy 25-run host sampling.
+  - [ ] Reduce repeated native ABI locking/handle lookups for verified managed
+    array and field access, then repeat the same host workloads and add
+    production-collector throughput/tail-latency gates once selectable.
 - [ ] Prove representative programs behave the same through canonical MIR, the
   MIR interpreter, optimized MIR, and LLVM native execution.
 

@@ -38,9 +38,42 @@ impl BootstrapRuntime {
         kind: AllocationKind,
         object_map: ObjectMap,
     ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate_with_initial(type_id, allocation_class, kind, object_map, None)
+    }
+
+    pub(crate) fn allocate_filled(
+        &mut self,
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        kind: AllocationKind,
+        object_map: ObjectMap,
+        initial_value: u64,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate_with_initial(
+            type_id,
+            allocation_class,
+            kind,
+            object_map,
+            Some(initial_value),
+        )
+    }
+
+    fn allocate_with_initial(
+        &mut self,
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        kind: AllocationKind,
+        object_map: ObjectMap,
+        initial_value: Option<u64>,
+    ) -> Result<ManagedReference, RuntimeFailure> {
         let requested_slots = usize::try_from(object_map.slot_count())
             .map_err(|_| Self::out_of_memory(1, usize::MAX))?;
         self.ensure_capacity(requested_slots)?;
+        if !object_map.reference_slots().is_empty()
+            && let Some(value) = initial_value.filter(|value| *value != 0)
+        {
+            self.validate_reference(ManagedReference::new(value))?;
+        }
         let reference = ManagedReference::new(self.next_reference);
         self.next_reference = self
             .next_reference
@@ -52,9 +85,13 @@ impl BootstrapRuntime {
             .map_err(|_| Self::out_of_memory(1, requested_slots))?;
         for index in 0..object_map.slot_count() {
             slots.push(if object_map.is_reference_slot(ObjectSlot::new(index)) {
-                SlotValue::Reference(None)
+                SlotValue::Reference(
+                    initial_value
+                        .filter(|value| *value != 0)
+                        .map(ManagedReference::new),
+                )
             } else {
-                SlotValue::Scalar(0)
+                SlotValue::Scalar(initial_value.unwrap_or(0))
             });
         }
         self.objects.insert(

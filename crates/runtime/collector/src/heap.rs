@@ -172,6 +172,11 @@ impl BootstrapRuntime {
     }
 
     #[must_use]
+    pub const fn collection_requested(&self) -> bool {
+        self.collection_requested
+    }
+
+    #[must_use]
     pub fn contains(&self, reference: ManagedReference) -> bool {
         self.objects.contains_key(&reference)
     }
