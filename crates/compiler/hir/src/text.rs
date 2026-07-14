@@ -1026,10 +1026,16 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, when_false, arena);
             output.push(')');
         }
+        HirExpressionKind::Await { task } => {
+            output.push_str("await(");
+            dump_expression(output, task, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             dump_call(output, dispatch, type_arguments, arguments, arena);
         }

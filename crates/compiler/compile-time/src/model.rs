@@ -520,6 +520,7 @@ pub enum UnsupportedCompileTimeConstruct {
     StringComposition,
     OptionalFlow,
     TypedFailure,
+    Suspension,
 }
 
 /// A deterministic failure to translate accepted typed syntax into restricted

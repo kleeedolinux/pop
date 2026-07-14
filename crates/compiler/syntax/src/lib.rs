@@ -250,7 +250,9 @@ impl Parser<'_, '_> {
                     };
                     (index, declaration)
                 }
-                kind if self.declaration_node_kind(index).is_some() || kind == TokenKind::Open => {
+                kind if self.declaration_node_kind(index).is_some()
+                    || matches!(kind, TokenKind::Open | TokenKind::Async) =>
+                {
                     (index, index)
                 }
                 _ => {
@@ -259,6 +261,28 @@ impl Parser<'_, '_> {
                     continue;
                 }
             };
+
+            if self.tokens[declaration].kind() == TokenKind::Async {
+                let Some(function) = self.next_significant(declaration + 1) else {
+                    children.push(self.error_line(start));
+                    break;
+                };
+                if self.tokens[function].kind() != TokenKind::Function {
+                    self.diagnostics.push(syntax_diagnostics::unexpected_token(
+                        self.span(function),
+                        "`function` after `async`",
+                        self.tokens[function].text(self.source).to_owned(),
+                    ));
+                    children.push(self.node_for_tokens(
+                        NodeKind::Error,
+                        start,
+                        self.line_end(start),
+                    ));
+                    cursor = self.line_end(start);
+                    continue;
+                }
+                declaration = function;
+            }
 
             if self.tokens[declaration].kind() == TokenKind::Open {
                 let Some(class) = self.next_significant(declaration + 1) else {
@@ -355,11 +379,17 @@ impl Parser<'_, '_> {
     }
 
     fn function_opens_block(&self, index: usize) -> bool {
-        self.tokens[..index]
+        let mut preceding = self.tokens[..index]
             .iter()
             .rev()
-            .find(|token| !token.kind().is_trivia())
-            .is_none_or(|token| token.kind() != TokenKind::Colon)
+            .filter(|token| !token.kind().is_trivia());
+        let first = preceding.next();
+        let before_modifier = if first.is_some_and(|token| token.kind() == TokenKind::Async) {
+            preceding.next()
+        } else {
+            first
+        };
+        before_modifier.is_none_or(|token| token.kind() != TokenKind::Colon)
     }
 
     fn if_opens_block(&self, index: usize) -> bool {

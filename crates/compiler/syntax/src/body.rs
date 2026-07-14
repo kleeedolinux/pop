@@ -168,6 +168,9 @@ pub enum ExpressionSyntaxKind {
     Boolean(bool),
     Nil,
     Function(CaptureFunctionSyntax),
+    Await {
+        operand: Box<ExpressionSyntax>,
+    },
     Name(Vec<String>),
     Call {
         callee: Box<ExpressionSyntax>,
@@ -248,6 +251,7 @@ pub enum StringSegmentSyntaxKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureFunctionSyntax {
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<CaptureFunctionParameterSyntax>,
     pub(crate) results: Vec<TypeSyntax>,
     pub(crate) body: Vec<StatementSyntax>,
@@ -255,6 +259,11 @@ pub struct CaptureFunctionSyntax {
 }
 
 impl CaptureFunctionSyntax {
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
+    }
+
     #[must_use]
     pub fn parameters(&self) -> &[CaptureFunctionParameterSyntax] {
         &self.parameters
@@ -653,10 +662,17 @@ impl BodyParser<'_> {
 
     fn parse_local(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::Local, "`local`")?.range().start();
-        if let Some(function_token) = self.consume(TokenKind::Function) {
+        let async_token = self.consume(TokenKind::Async);
+        if async_token.is_some() || self.current_kind() == Some(TokenKind::Function) {
+            let function_token = self.expect(TokenKind::Function, "`function`")?;
             let name = self.expect(TokenKind::Identifier, "local function name")?;
             let name = name.text(self.source).to_owned();
-            let function = self.parse_capture_function(function_token.range().start())?;
+            let function = self.parse_capture_function(
+                async_token.map_or(function_token.range().start(), |token| {
+                    token.range().start()
+                }),
+                async_token.is_some(),
+            )?;
             let end = function.span().range().end();
             return Ok(StatementSyntax {
                 kind: StatementSyntaxKind::LocalFunction { name, function },

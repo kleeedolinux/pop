@@ -292,12 +292,18 @@ impl TypedAssignmentTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedCall {
     pub(crate) dispatch: TypedCallDispatch,
+    pub(crate) is_async: bool,
     pub(crate) type_arguments: Vec<TypeId>,
     pub(crate) arguments: Vec<TypedExpression>,
     pub(crate) span: SourceSpan,
 }
 
 impl TypedCall {
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
+    }
+
     #[must_use]
     pub const fn dispatch(&self) -> &TypedCallDispatch {
         &self.dispatch
@@ -531,13 +537,18 @@ pub enum TypedExpressionKind {
         when_true: Box<TypedExpression>,
         when_false: Box<TypedExpression>,
     },
+    Await {
+        task: Box<TypedExpression>,
+    },
     DirectCall {
         function: SymbolId,
+        is_async: bool,
         type_arguments: Vec<TypeId>,
         arguments: Vec<TypedExpression>,
     },
     ReferencedCall {
         function: SymbolIdentity,
+        is_async: bool,
         type_arguments: Vec<TypeId>,
         arguments: Vec<TypedExpression>,
     },
@@ -547,6 +558,7 @@ pub enum TypedExpressionKind {
     },
     IndirectCall {
         callee: Box<TypedExpression>,
+        is_async: bool,
         arguments: Vec<TypedExpression>,
     },
     DirectMethodCall {
@@ -664,6 +676,7 @@ impl TypedClosureParameter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TypedClosure {
     pub(crate) function: NestedFunctionId,
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<TypedClosureParameter>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) captures: Vec<TypedCapture>,
@@ -675,6 +688,11 @@ impl TypedClosure {
     #[must_use]
     pub const fn function(&self) -> NestedFunctionId {
         self.function
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]

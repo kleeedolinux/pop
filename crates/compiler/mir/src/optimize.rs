@@ -728,6 +728,18 @@ fn remap_terminator(terminator: &mut MirTerminator, mapping: &BTreeMap<BlockId, 
                 arm.target = mapping[&arm.target];
             }
         }
+        MirTerminator::Suspend {
+            resume,
+            cancellation,
+            unwind,
+            ..
+        } => {
+            *resume = mapping[resume];
+            *cancellation = mapping[cancellation];
+            if let super::MirUnwindAction::Cleanup(target) = unwind {
+                *target = mapping[target];
+            }
+        }
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
@@ -783,6 +795,18 @@ fn used_values(function: &super::MirFunction) -> BTreeSet<ValueId> {
             }
             MirTerminator::ErrorSwitch { scrutinee, .. } => {
                 used.insert(*scrutinee);
+            }
+            MirTerminator::Suspend {
+                operation,
+                live_frame,
+                ..
+            } => {
+                match operation {
+                    super::MirSuspendOperation::Task { task, .. } => {
+                        used.insert(*task);
+                    }
+                }
+                used.extend(live_frame.slots.iter().map(|slot| slot.value));
             }
             MirTerminator::Missing
             | MirTerminator::Trap(_)

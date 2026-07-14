@@ -211,6 +211,7 @@ pub enum LlvmLoweringError {
     InvalidFieldLayout(FieldId),
     InvalidEntryPoint(SymbolId),
     UnsupportedEntryPointSignature(SymbolId),
+    UnsupportedAsync,
 }
 
 impl fmt::Display for LlvmLoweringError {
@@ -245,6 +246,10 @@ impl fmt::Display for LlvmLoweringError {
                 formatter,
                 "entry point s{} must accept () or (Array<String>) and return () or Int",
                 symbol.raw()
+            ),
+            Self::UnsupportedAsync => write!(
+                formatter,
+                "LLVM backend does not yet support async task state machines"
             ),
         }
     }

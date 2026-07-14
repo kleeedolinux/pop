@@ -290,6 +290,7 @@ pub enum HirBubbleError {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirFunctionReference {
     pub(crate) identity: SymbolIdentity,
+    pub(crate) is_async: bool,
     pub(crate) type_parameters: Vec<TypeId>,
     pub(crate) type_parameter_bounds: Vec<Option<TypeId>>,
     pub(crate) parameters: Vec<TypeId>,
@@ -302,6 +303,7 @@ impl HirFunctionReference {
     #[must_use]
     pub fn new(
         identity: SymbolIdentity,
+        is_async: bool,
         type_parameters: Vec<TypeId>,
         type_parameter_bounds: Vec<Option<TypeId>>,
         parameters: Vec<TypeId>,
@@ -310,6 +312,7 @@ impl HirFunctionReference {
     ) -> Self {
         Self {
             identity,
+            is_async,
             type_parameters,
             type_parameter_bounds,
             parameters,
@@ -317,6 +320,11 @@ impl HirFunctionReference {
             effects,
             specialization_capsule: None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -1407,6 +1415,7 @@ pub struct HirFunction {
     pub(crate) bubble: BubbleId,
     pub(crate) visibility: Visibility,
     pub(crate) name: String,
+    pub(crate) is_async: bool,
     pub(crate) type_parameters: Vec<TypeId>,
     pub(crate) type_parameter_names: Vec<String>,
     pub(crate) type_parameter_bounds: Vec<Option<TypeId>>,
@@ -1446,6 +1455,11 @@ impl HirFunction {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -2228,6 +2242,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::Await { task: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
@@ -2382,6 +2397,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             if let HirCallDispatch::Indirect { callee } = dispatch {
                 remap_aggregate_expression(callee, instances);
@@ -2699,6 +2715,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::Await { task: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TableGet { table, key } => {
@@ -2814,6 +2831,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             let target = match dispatch {
                 HirCallDispatch::Direct { function } => {
@@ -3202,6 +3220,7 @@ fn specialize_expression(
         | HirExpressionKind::NumericConvert { value: base, .. }
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
+        | HirExpressionKind::Await { task: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
@@ -3326,6 +3345,7 @@ fn specialize_expression(
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             for argument in type_arguments.iter_mut() {
                 specialize_type(argument, substitutions, arena)?;
@@ -3888,12 +3908,18 @@ impl HirMatchBinding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirCall {
     pub(crate) dispatch: HirCallDispatch,
+    pub(crate) is_async: bool,
     pub(crate) type_arguments: Vec<TypeId>,
     pub(crate) arguments: Vec<HirExpression>,
     pub(crate) span: SourceSpan,
 }
 
 impl HirCall {
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
+    }
+
     #[must_use]
     pub const fn dispatch(&self) -> &HirCallDispatch {
         &self.dispatch
@@ -4087,8 +4113,12 @@ pub enum HirExpressionKind {
         when_true: Box<HirExpression>,
         when_false: Box<HirExpression>,
     },
+    Await {
+        task: Box<HirExpression>,
+    },
     Call {
         dispatch: HirCallDispatch,
+        is_async: bool,
         type_arguments: Vec<TypeId>,
         arguments: Vec<HirExpression>,
     },
@@ -4105,6 +4135,7 @@ pub enum HirExpressionKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClosure {
     pub(crate) function: NestedFunctionId,
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<HirClosureParameter>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) captures: Vec<HirCapture>,
@@ -4117,6 +4148,11 @@ impl HirClosure {
     #[must_use]
     pub const fn function(&self) -> NestedFunctionId {
         self.function
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]

@@ -890,6 +890,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .resolver
             .arena_mut()
             .intern(SemanticType::Function {
+                is_async: function.is_async(),
                 parameters: parameters.iter().map(|(_, type_id, _)| *type_id).collect(),
                 results: results.iter().map(|(type_id, _)| *type_id).collect(),
                 effects: crate::EffectSummary::empty(),
@@ -952,7 +953,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             format!("{}$closure{}", outer.name(), nested.raw()),
             shape.parameters.clone(),
             shape.results.clone(),
-        );
+        )
+        .with_async(function.is_async());
         self.signature_stack.push(nested_signature.clone());
         let enclosing_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let mut statements = Vec::new();
@@ -995,6 +997,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(TypedExpression {
             kind: TypedExpressionKind::Closure(TypedClosure {
                 function: nested,
+                is_async: function.is_async(),
                 parameters: typed_parameters,
                 results: shape.results.iter().map(|(type_id, _)| *type_id).collect(),
                 captures,
@@ -2354,7 +2357,8 @@ fn expression_contains_result_propagation(expression: &ExpressionSyntax) -> bool
             elements.iter().any(expression_contains_result_propagation)
         }
         ExpressionSyntaxKind::Unary { operand, .. }
-        | ExpressionSyntaxKind::OptionalPropagate { operand } => {
+        | ExpressionSyntaxKind::OptionalPropagate { operand }
+        | ExpressionSyntaxKind::Await { operand } => {
             expression_contains_result_propagation(operand)
         }
         ExpressionSyntaxKind::Binary { left, right, .. } => {

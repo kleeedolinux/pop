@@ -109,8 +109,30 @@ fn function_types_remain_fully_typed() {
 
     assert!(matches!(
         signature.parameters()[0].parameter_type().kind(),
-        TypeSyntaxKind::Function { parameters, results }
+        TypeSyntaxKind::Function { parameters, results, .. }
             if parameters.len() == 1 && results.len() == 1
+    ));
+}
+
+#[test]
+fn async_declarations_and_function_types_retain_async_identity() {
+    let signature = signature(
+        "namespace Values\n\
+         public async function transform(\n\
+             operation: async function(value: String): Int\n\
+         ): Int\n\
+             return await operation(\"42\")\n\
+         end\n",
+    );
+
+    assert!(signature.is_async());
+    assert!(matches!(
+        signature.parameters()[0].parameter_type().kind(),
+        TypeSyntaxKind::Function {
+            is_async: true,
+            parameters,
+            results,
+        } if parameters.len() == 1 && results.len() == 1
     ));
 }
 

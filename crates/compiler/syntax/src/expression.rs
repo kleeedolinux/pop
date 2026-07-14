@@ -18,6 +18,7 @@ impl BodyParser<'_> {
     pub(crate) fn parse_capture_function(
         &mut self,
         start: TextSize,
+        is_async: bool,
     ) -> Result<CaptureFunctionSyntax, FunctionBodyError> {
         self.expect(TokenKind::LeftParenthesis, "`(`")?;
         let mut parameters = Vec::new();
@@ -44,6 +45,7 @@ impl BodyParser<'_> {
         let body = self.parse_statement_list(&[TokenKind::End])?;
         let end = self.expect(TokenKind::End, "function `end`")?.range().end();
         Ok(CaptureFunctionSyntax {
+            is_async,
             parameters,
             results,
             body,
@@ -100,6 +102,17 @@ impl BodyParser<'_> {
             let end = operand.span().range().end();
             return Ok(self.expression(
                 ExpressionSyntaxKind::ResultPropagate {
+                    operand: Box::new(operand),
+                },
+                keyword.range().start(),
+                end,
+            ));
+        }
+        if let Some(keyword) = self.consume(TokenKind::Await) {
+            let operand = self.parse_unary()?;
+            let end = operand.span().range().end();
+            return Ok(self.expression(
+                ExpressionSyntaxKind::Await {
                     operand: Box::new(operand),
                 },
                 keyword.range().start(),
@@ -307,8 +320,14 @@ impl BodyParser<'_> {
                 end,
             )),
             TokenKind::Nil => Ok(self.expression(ExpressionSyntaxKind::Nil, start, end)),
+            TokenKind::Async => {
+                self.expect(TokenKind::Function, "`function` after `async`")?;
+                let function = self.parse_capture_function(start, true)?;
+                let end = function.span().range().end();
+                Ok(self.expression(ExpressionSyntaxKind::Function(function), start, end))
+            }
             TokenKind::Function => {
-                let function = self.parse_capture_function(start)?;
+                let function = self.parse_capture_function(start, false)?;
                 let end = function.span().range().end();
                 Ok(self.expression(ExpressionSyntaxKind::Function(function), start, end))
             }

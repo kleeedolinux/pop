@@ -49,6 +49,25 @@ pub fn lower_mir_to_llvm_ir(
     options: LlvmLoweringOptions,
 ) -> Result<LlvmModule, LlvmLoweringError> {
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
+    if bubble
+        .functions()
+        .iter()
+        .any(pop_mir::MirFunction::is_async)
+        || bubble
+            .methods()
+            .iter()
+            .any(|method| method.function().is_async())
+        || bubble
+            .nested_functions()
+            .iter()
+            .any(pop_mir::MirNestedFunction::is_async)
+        || bubble
+            .function_references()
+            .iter()
+            .any(pop_mir::MirFunctionReference::is_async)
+    {
+        return Err(LlvmLoweringError::UnsupportedAsync);
+    }
     let field_layout = collect_field_layout(bubble);
     let record_fields = collect_record_fields(bubble);
     let record_field_types = collect_record_field_types(bubble);
@@ -650,6 +669,20 @@ impl DirectScalarArrays {
                         rejected.insert(*origin);
                     }
                 }
+                MirTerminator::Suspend {
+                    operation,
+                    live_frame,
+                    ..
+                } => {
+                    let pop_mir::MirSuspendOperation::Task { task, .. } = operation;
+                    rejected.extend(aliases.get(task).copied());
+                    rejected.extend(
+                        live_frame
+                            .slots()
+                            .iter()
+                            .filter_map(|slot| aliases.get(&slot.value()).copied()),
+                    );
+                }
                 MirTerminator::Missing
                 | MirTerminator::Trap(_)
                 | MirTerminator::Panic(_)
@@ -979,6 +1012,16 @@ fn terminator_values(terminator: &MirTerminator) -> Vec<ValueId> {
         MirTerminator::UnionSwitch { scrutinee, .. }
         | MirTerminator::ErrorSwitch { scrutinee, .. } => vec![*scrutinee],
         MirTerminator::Return { values } => values.clone(),
+        MirTerminator::Suspend {
+            operation,
+            live_frame,
+            ..
+        } => {
+            let pop_mir::MirSuspendOperation::Task { task, .. } = operation;
+            std::iter::once(*task)
+                .chain(live_frame.slots().iter().map(|slot| slot.value()))
+                .collect()
+        }
         MirTerminator::Missing
         | MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
@@ -1197,6 +1240,17 @@ pub(crate) fn can_reach_block(
             }
             MirTerminator::ErrorSwitch { arms, .. } => {
                 pending.extend(arms.iter().map(|arm| arm.target()));
+            }
+            MirTerminator::Suspend {
+                resume,
+                cancellation,
+                unwind,
+                ..
+            } => {
+                pending.extend([*resume, *cancellation]);
+                if let pop_mir::MirUnwindAction::Cleanup(target) = unwind {
+                    pending.push(*target);
+                }
             }
             MirTerminator::Missing
             | MirTerminator::Return { .. }

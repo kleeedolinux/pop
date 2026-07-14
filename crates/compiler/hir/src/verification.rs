@@ -91,6 +91,13 @@ pub enum HirVerificationError {
         type_id: TypeId,
         span: SourceSpan,
     },
+    AwaitOutsideAsync {
+        span: SourceSpan,
+    },
+    InvalidAwaitTask {
+        type_id: TypeId,
+        span: SourceSpan,
+    },
     ExpressionTypeMismatch {
         expected: TypeId,
         found: TypeId,
@@ -367,6 +374,7 @@ pub type HirBuildError = HirVerificationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HirCallableSignature {
+    is_async: bool,
     type_parameters: Vec<TypeId>,
     type_parameter_bounds: Vec<Option<TypeId>>,
     parameters: Vec<TypeId>,
@@ -376,6 +384,7 @@ struct HirCallableSignature {
 impl HirCallableSignature {
     fn from_function(function: &HirFunction) -> Self {
         Self {
+            is_async: function.is_async,
             type_parameters: function.type_parameters().to_vec(),
             type_parameter_bounds: function.type_parameter_bounds().to_vec(),
             parameters: function
@@ -501,6 +510,7 @@ impl HirSchema {
             schema.function_references.insert(
                 reference.identity(),
                 HirCallableSignature {
+                    is_async: reference.is_async(),
                     type_parameters: reference.type_parameters().to_vec(),
                     type_parameter_bounds: reference.type_parameter_bounds().to_vec(),
                     parameters: reference.parameters().to_vec(),
@@ -743,6 +753,7 @@ impl HirSchema {
                                 HirInterfaceMethodSchema {
                                     slot: method.slot,
                                     signature: HirCallableSignature {
+                                        is_async: false,
                                         type_parameters: Vec::new(),
                                         type_parameter_bounds: Vec::new(),
                                         parameters: method
@@ -865,6 +876,7 @@ impl HirSchema {
                 class: class.class,
                 definition,
                 signature: HirCallableSignature {
+                    is_async: false,
                     type_parameters: Vec::new(),
                     type_parameter_bounds: Vec::new(),
                     parameters,
@@ -1244,6 +1256,7 @@ fn verify_hir_callable_with_schema(
         cell_bindings,
         loop_depth: 0,
         cleanup_depth: 0,
+        is_async: function.is_async,
         errors: Vec::new(),
     };
     for parameter in &function.parameters {
@@ -1297,6 +1310,7 @@ struct Verifier<'arena> {
     cell_bindings: BTreeSet<BindingId>,
     loop_depth: u32,
     cleanup_depth: u32,
+    is_async: bool,
     errors: Vec<HirVerificationError>,
 }
 
@@ -1927,6 +1941,7 @@ impl Verifier<'_> {
                 HirStatementKind::Call(call) => {
                     self.verify_call(
                         call.dispatch(),
+                        call.is_async(),
                         call.type_arguments(),
                         call.arguments(),
                         None,
@@ -2484,13 +2499,44 @@ impl Verifier<'_> {
                 self.verify_expression_type(expression.type_id(), when_true);
                 self.verify_expression_type(expression.type_id(), when_false);
             }
+            HirExpressionKind::Await { task } => {
+                self.verify_expression(task, visible);
+                if !self.is_async {
+                    self.errors.push(HirVerificationError::AwaitOutsideAsync {
+                        span: expression.span(),
+                    });
+                }
+                let task_definition = embedded_bootstrap_schema()
+                    .ok()
+                    .and_then(|schema| schema.type_by_source_name("Task").copied())
+                    .map(|entry| entry.id());
+                let valid = matches!(
+                    (task_definition, self.arena.get(task.type_id())),
+                    (
+                        Some(expected),
+                        Some(SemanticType::Builtin {
+                            definition,
+                            arguments,
+                        })
+                    ) if *definition == expected
+                        && arguments.as_slice() == [expression.type_id()]
+                );
+                if !valid {
+                    self.errors.push(HirVerificationError::InvalidAwaitTask {
+                        type_id: task.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
             HirExpressionKind::Call {
                 dispatch,
+                is_async,
                 type_arguments,
                 arguments,
             } => {
                 self.verify_call(
                     dispatch,
+                    *is_async,
                     type_arguments,
                     arguments,
                     Some(expression.type_id()),
@@ -2644,6 +2690,7 @@ impl Verifier<'_> {
                 ));
         }
         let expected_function = SemanticType::Function {
+            is_async: closure.is_async,
             parameters: closure
                 .parameters
                 .iter()
@@ -2781,6 +2828,7 @@ impl Verifier<'_> {
         let saved_cell_bindings = std::mem::replace(&mut self.cell_bindings, nested_cell_bindings);
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_cleanup_depth = std::mem::replace(&mut self.cleanup_depth, 0);
+        let saved_is_async = std::mem::replace(&mut self.is_async, closure.is_async);
         for parameter in &closure.parameters {
             self.verify_type(parameter.type_id, parameter.span);
             if !self.bindings.insert(parameter.binding) {
@@ -2798,6 +2846,7 @@ impl Verifier<'_> {
         self.cell_bindings = saved_cell_bindings;
         self.loop_depth = saved_loop_depth;
         self.cleanup_depth = saved_cleanup_depth;
+        self.is_async = saved_is_async;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3438,6 +3487,7 @@ impl Verifier<'_> {
     fn verify_call(
         &mut self,
         dispatch: &HirCallDispatch,
+        is_async: bool,
         type_arguments: &[TypeId],
         arguments: &[HirExpression],
         result: Option<TypeId>,
@@ -3450,6 +3500,7 @@ impl Verifier<'_> {
                     self.arena
                         .source_type("Int")
                         .map(|int| HirCallableSignature {
+                            is_async: false,
                             type_parameters: Vec::new(),
                             type_parameter_bounds: Vec::new(),
                             parameters: vec![int],
@@ -3522,6 +3573,7 @@ impl Verifier<'_> {
                     }
                     parameters.extend(method_schema.signature.parameters);
                     Some(HirCallableSignature {
+                        is_async: false,
                         type_parameters: Vec::new(),
                         type_parameter_bounds: Vec::new(),
                         parameters,
@@ -3577,6 +3629,7 @@ impl Verifier<'_> {
                         arguments: vec![*item_type],
                     })?;
                     Some(HirCallableSignature {
+                        is_async: false,
                         type_parameters: Vec::new(),
                         type_parameter_bounds: Vec::new(),
                         parameters: vec![receiver.type_id()],
@@ -3595,12 +3648,14 @@ impl Verifier<'_> {
             HirCallDispatch::Indirect { callee } => {
                 self.verify_expression(callee, visible);
                 if let Some(SemanticType::Function {
+                    is_async,
                     parameters,
                     results,
                     ..
                 }) = self.arena.get(callee.type_id()).cloned()
                 {
                     Some(HirCallableSignature {
+                        is_async,
                         type_parameters: Vec::new(),
                         type_parameter_bounds: Vec::new(),
                         parameters,
@@ -3621,6 +3676,16 @@ impl Verifier<'_> {
         if self.schema.is_some()
             && let Some(mut signature) = signature
         {
+            if signature.is_async != is_async {
+                self.errors
+                    .push(HirVerificationError::InvalidCallSignature {
+                        expected_arguments: signature.parameters.len(),
+                        found_arguments: arguments.len(),
+                        expected_results: usize::from(signature.is_async),
+                        found_results: usize::from(is_async),
+                        span,
+                    });
+            }
             if signature.type_parameters.len() == type_arguments.len() && !type_arguments.is_empty()
             {
                 let substitutions = signature
@@ -3668,19 +3733,20 @@ impl Verifier<'_> {
                     });
             }
         }
+        let expected_results = self.call_result_types(signature);
         let found_results = usize::from(result.is_some());
-        if arguments.len() != signature.parameters.len() || signature.results.len() != found_results
+        if arguments.len() != signature.parameters.len() || expected_results.len() != found_results
         {
             self.errors
                 .push(HirVerificationError::InvalidCallSignature {
                     expected_arguments: signature.parameters.len(),
                     found_arguments: arguments.len(),
-                    expected_results: signature.results.len(),
+                    expected_results: expected_results.len(),
                     found_results,
                     span,
                 });
         }
-        if let ([expected], Some(found)) = (signature.results.as_slice(), result)
+        if let ([expected], Some(found)) = (expected_results.as_slice(), result)
             && *expected != found
         {
             self.errors
@@ -3692,6 +3758,30 @@ impl Verifier<'_> {
         }
     }
 
+    fn call_result_types(&self, signature: &HirCallableSignature) -> Vec<TypeId> {
+        if !signature.is_async {
+            return signature.results.clone();
+        }
+        let completion = match signature.results.as_slice() {
+            [completion] => Some(*completion),
+            results => self.arena.find(&SemanticType::Tuple(results.to_vec())),
+        };
+        let task = embedded_bootstrap_schema()
+            .ok()
+            .and_then(|schema| schema.type_by_source_name("Task").copied())
+            .map(|entry| entry.id());
+        completion
+            .zip(task)
+            .and_then(|(completion, definition)| {
+                self.arena.find(&SemanticType::Builtin {
+                    definition,
+                    arguments: vec![completion],
+                })
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn verify_function_reference(&mut self, function: SymbolId, expression: &HirExpression) {
         let Some(signature) = self
             .schema
@@ -3701,6 +3791,7 @@ impl Verifier<'_> {
             return;
         };
         let expected = SemanticType::Function {
+            is_async: signature.is_async,
             parameters: signature.parameters,
             results: signature.results,
             effects: pop_types::EffectSummary::empty(),
@@ -4771,7 +4862,9 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
                 collect_cell_captures(callee, written);
             }
         }
-        HirExpressionKind::Unary { operand, .. } => collect_cell_captures(operand, written),
+        HirExpressionKind::Unary { operand, .. } | HirExpressionKind::Await { task: operand } => {
+            collect_cell_captures(operand, written)
+        }
         HirExpressionKind::Binary { left, right, .. } => {
             collect_cell_captures(left, written);
             collect_cell_captures(right, written);

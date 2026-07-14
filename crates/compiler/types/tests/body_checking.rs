@@ -137,6 +137,106 @@ fn infers_locals_and_resolves_direct_calls_with_canonical_types() {
 }
 
 #[test]
+fn async_calls_produce_cold_exact_task_values_and_await_yields_completion() {
+    let cold = check_function(
+        "namespace Example\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public function create(): Task<Int>\n\
+             return load(41)\n\
+         end\n",
+        "create",
+    );
+    assert!(
+        cold.result.diagnostics().is_empty(),
+        "{}",
+        cold.result.diagnostic_snapshot()
+    );
+    let cold_body = cold.result.body().expect("typed cold-task body");
+    let TypedStatementKind::Return { values } = cold_body.statements()[0].kind() else {
+        panic!("cold task return");
+    };
+    assert!(matches!(
+        cold.arena.get(values[0].type_id()),
+        Some(SemanticType::Builtin { arguments, .. })
+            if arguments == &[cold.arena.source_type("Int").expect("Int")]
+    ));
+
+    let awaited = check_function(
+        "namespace Example\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public async function consume(): Int\n\
+             return await load(41)\n\
+         end\n",
+        "consume",
+    );
+    assert!(
+        awaited.result.diagnostics().is_empty(),
+        "{}",
+        awaited.result.diagnostic_snapshot()
+    );
+    let awaited_body = awaited.result.body().expect("typed awaited body");
+    let TypedStatementKind::Return { values } = awaited_body.statements()[0].kind() else {
+        panic!("awaited return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        TypedExpressionKind::Await { task }
+            if matches!(task.kind(), TypedExpressionKind::DirectCall { .. })
+    ));
+    assert_eq!(
+        values[0].type_id(),
+        awaited.arena.source_type("Int").expect("Int")
+    );
+}
+
+#[test]
+fn await_requires_async_context_and_exact_task_operand() {
+    let outside = check_function(
+        "namespace Example\n\
+         private async function load(): Int\n\
+             return 1\n\
+         end\n\
+         public function invalid(): Int\n\
+             return await load()\n\
+         end\n",
+        "invalid",
+    );
+    assert!(outside.result.body().is_none());
+    assert!(outside.result.diagnostic_snapshot().starts_with("POP2030"));
+
+    let non_task = check_function(
+        "namespace Example\n\
+         public async function invalid(): Int\n\
+             return await 1\n\
+         end\n",
+        "invalid",
+    );
+    assert!(non_task.result.body().is_none());
+    assert!(non_task.result.diagnostic_snapshot().starts_with("POP2031"));
+}
+
+#[test]
+fn synchronous_and_async_function_values_do_not_convert_implicitly() {
+    let fixture = check_function(
+        "namespace Example\n\
+         private async function later(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public function invalid(): function(value: Int): Int\n\
+             return later\n\
+         end\n",
+        "invalid",
+    );
+
+    assert!(fixture.result.body().is_none());
+    assert!(fixture.result.diagnostic_snapshot().starts_with("POP2003"));
+}
+
+#[test]
 fn reports_annotation_and_return_type_mismatches_without_dynamic_fallback() {
     for (source, expected_code) in [
         (

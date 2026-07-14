@@ -128,6 +128,7 @@ pub(crate) fn emit_reference_metadata(
             module: function.module(),
             namespace: declaration.namespace().to_owned(),
             name: function.name().to_owned(),
+            is_async: function.is_async(),
             type_parameters,
             parameters,
             results,
@@ -262,10 +263,12 @@ fn reference_type_with_parameters(
                 .collect::<Result<_, _>>()?,
         )),
         Some(SemanticType::Function {
+            is_async,
             parameters,
             results,
             effects,
         }) => Ok(ReferenceType::Function {
+            is_async: *is_async,
             parameters: parameters
                 .iter()
                 .map(|parameter| {
@@ -378,6 +381,7 @@ pub(crate) fn reference_signatures(
                 ResolvedFunctionSignature::referenced_generic(
                     declaration.symbol(),
                     function.name(),
+                    function.is_async(),
                     type_parameters,
                     parameters,
                     results,
@@ -416,6 +420,7 @@ pub(crate) fn hir_function_references(
             let signature = signatures.get(&symbol).expect("referenced signature");
             let reference = pop_hir::HirFunctionReference::new(
                 function.identity(),
+                function.is_async(),
                 signature
                     .type_parameters()
                     .iter()
@@ -862,10 +867,12 @@ fn import_capsule_type(
                 .collect::<Option<_>>()?,
         ),
         SemanticType::Function {
+            is_async,
             parameters,
             results,
             effects,
         } => SemanticType::Function {
+            is_async,
             parameters: parameters
                 .into_iter()
                 .map(&mut import)
@@ -1007,6 +1014,7 @@ pub(crate) fn reference_type_id(
                 .expect("verified tuple metadata")
         }
         ReferenceType::Function {
+            is_async,
             parameters,
             results,
             effects,
@@ -1021,6 +1029,7 @@ pub(crate) fn reference_type_id(
                 .collect();
             arena
                 .intern(SemanticType::Function {
+                    is_async: *is_async,
                     parameters,
                     results,
                     effects: *effects,

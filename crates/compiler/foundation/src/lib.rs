@@ -63,6 +63,7 @@ typed_id!(
     AttributeId,
     FunctionId,
     CleanupScopeId,
+    CoroutineStateId,
     BlockId,
     ValueId,
 );

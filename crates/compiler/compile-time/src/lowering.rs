@@ -514,6 +514,7 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::ResultPropagate { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
+        TypedExpressionKind::Await { .. } => UnsupportedCompileTimeConstruct::Suspension,
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }

@@ -131,6 +131,70 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
 }
 
 #[test]
+fn async_identity_survives_reference_metadata_and_dependent_mir_lowering() {
+    let producer_bubble = BubbleId::from_raw(12);
+    let producer = analyze_bubble(FrontEndBubbleInput::new(
+        producer_bubble,
+        NamespaceId::from_raw(12),
+        Vec::new(),
+        vec![module(
+            0,
+            "src/load.pop",
+            "namespace Service\n\
+             public async function load(value: Int): Int\n\
+                 return value\n\
+             end\n",
+        )],
+    ));
+    assert!(
+        producer.diagnostics().is_empty(),
+        "{}",
+        producer.diagnostic_snapshot()
+    );
+    let metadata = producer
+        .reference_metadata()
+        .expect("async public metadata");
+    let [function] = metadata.functions() else {
+        panic!("one async public function");
+    };
+    assert!(function.is_async());
+    let encoded = encode_reference_metadata(metadata).expect("encode async metadata");
+    let decoded = decode_reference_metadata(&encoded).expect("decode async metadata");
+    assert!(decoded.functions()[0].is_async());
+
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(13),
+            NamespaceId::from_raw(13),
+            vec![producer_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Service\n\
+                 public async function consume(): Int\n\
+                     return await load(42)\n\
+                 end\n",
+            )],
+        )
+        .with_reference_metadata(vec![decoded]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let hir = consumer.hir().expect("async consumer HIR");
+    let [reference] = hir.function_references() else {
+        panic!("one async HIR reference");
+    };
+    assert!(reference.is_async());
+    let mir = lower_hir_bubble(hir, consumer.types()).expect("async consumer MIR");
+    assert!(mir.dump().contains("task.create reference:b12:s0"));
+    assert!(mir.function_references()[0].is_async());
+}
+
+#[test]
 fn dependency_metadata_keeps_visibility_types_and_edges_closed() {
     let standard_bubble = BubbleId::from_raw(2);
     let producer = analyze_bubble(FrontEndBubbleInput::new(

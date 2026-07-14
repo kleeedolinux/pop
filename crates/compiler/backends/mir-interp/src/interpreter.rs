@@ -73,6 +73,7 @@ pub enum ExecutionError {
     CallDepthLimit,
     ReachedUnreachable,
     InvalidControlFlow,
+    UnsupportedAsync,
 }
 
 pub struct MirInterpreter<'mir, R = ReferenceRuntimeAdapter> {
@@ -416,6 +417,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                         .ok_or(ExecutionError::InvalidControlFlow)?;
                     return Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason)));
                 }
+                MirTerminator::Suspend { .. } => return Err(ExecutionError::UnsupportedAsync),
                 MirTerminator::Unreachable => return Err(ExecutionError::ReachedUnreachable),
                 MirTerminator::Missing => return Err(ExecutionError::InvalidControlFlow),
             }
@@ -454,6 +456,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             Err(error) => return Err(error),
         }
         let result = match instruction.kind() {
+            MirInstructionKind::TaskCreate { .. } => {
+                return Err(ExecutionError::UnsupportedAsync);
+            }
             MirInstructionKind::StringConstant(value) => MirValue::String(value.clone()),
             MirInstructionKind::StringConcat { left, right } => {
                 let MirValue::String(left) = &value(values, *left)?.visible else {

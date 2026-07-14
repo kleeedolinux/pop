@@ -187,6 +187,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
         let callee = self.check_expression(callee)?;
         let Some(SemanticType::Function {
+            is_async,
             parameters,
             results,
             ..
@@ -236,9 +237,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             typed_arguments.push(typed);
         }
         let dispatch = self.call_dispatch(callee);
+        let results = self.call_result_types(is_async, results)?;
         Some(CheckedInvocation::Call(CheckedCall {
             call: TypedCall {
                 dispatch,
+                is_async,
                 type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
@@ -371,6 +374,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .substitute_type_parameters(result.type_id()?, &substitution_map)
             })
             .collect::<Option<Vec<_>>>()?;
+        let results = self.call_result_types(signature.is_async(), results)?;
         let dispatch = self
             .resolver
             .database()
@@ -383,6 +387,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(CheckedCall {
             call: TypedCall {
                 dispatch,
+                is_async: signature.is_async(),
                 type_arguments,
                 arguments: typed_arguments,
                 span,
@@ -436,17 +441,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             (
                 SemanticType::Function {
+                    is_async: left_async,
                     parameters: left_parameters,
                     results: left_results,
                     effects: left_effects,
                 },
                 SemanticType::Function {
+                    is_async: right_async,
                     parameters: right_parameters,
                     results: right_results,
                     effects: right_effects,
                 },
             ) => {
-                left_effects == right_effects
+                left_async == right_async
+                    && left_effects == right_effects
                     && self.infer_type_lists(&left_parameters, &right_parameters, substitutions)
                     && self.infer_type_lists(&left_results, &right_results, substitutions)
             }
@@ -1343,6 +1351,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 dispatch: TypedCallDispatch::Standard {
                     function: *function,
                 },
+                is_async: false,
                 type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
@@ -1417,6 +1426,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                             method: method.method(),
                             receiver: None,
                         },
+                        is_async: false,
                         type_arguments: Vec::new(),
                         arguments: inferred.call.arguments,
                         span,
@@ -1430,6 +1440,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                         method: instance_method.method(),
                         receiver: None,
                     },
+                    is_async: false,
                     type_arguments: Vec::new(),
                     arguments: inferred.call.arguments,
                     span,
@@ -1501,6 +1512,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                         method,
                         receiver: Box::new(receiver),
                     },
+                    is_async: false,
                     type_arguments: Vec::new(),
                     arguments: Vec::new(),
                     span,
@@ -1618,6 +1630,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     method: method.method(),
                     receiver: Box::new(receiver),
                 },
+                is_async: false,
                 type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
@@ -1664,6 +1677,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     method: method.method(),
                     receiver: receiver.map(Box::new),
                 },
+                is_async: false,
                 type_arguments: Vec::new(),
                 arguments: typed_arguments,
                 span,
@@ -1688,6 +1702,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let result_type = checked.results[0];
         let TypedCall {
             dispatch,
+            is_async,
             type_arguments,
             arguments,
             span,
@@ -1699,11 +1714,13 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             TypedCallDispatch::Direct { function } => TypedExpressionKind::DirectCall {
                 function,
+                is_async,
                 type_arguments,
                 arguments,
             },
             TypedCallDispatch::Referenced { function } => TypedExpressionKind::ReferencedCall {
                 function,
+                is_async,
                 type_arguments,
                 arguments,
             },
@@ -1734,9 +1751,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 receiver,
                 arguments,
             },
-            TypedCallDispatch::Indirect { callee } => {
-                TypedExpressionKind::IndirectCall { callee, arguments }
-            }
+            TypedCallDispatch::Indirect { callee } => TypedExpressionKind::IndirectCall {
+                callee,
+                is_async,
+                arguments,
+            },
         };
         Some(TypedExpression {
             kind,

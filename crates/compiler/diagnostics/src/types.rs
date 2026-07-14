@@ -513,3 +513,27 @@ pub fn generic_inference_failure(
         span,
     )
 }
+
+#[must_use]
+pub fn await_outside_async(span: SourceSpan) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2030"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.awaitOutsideAsync"),
+        Vec::new(),
+        span,
+    )
+}
+
+#[must_use]
+pub fn await_non_task(span: SourceSpan, found: impl Into<String>) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2031"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.awaitNonTask"),
+        vec![DiagnosticArgument::Identifier(found.into())],
+        span,
+    )
+}

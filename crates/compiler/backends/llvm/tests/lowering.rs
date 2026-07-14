@@ -1,5 +1,5 @@
 use pop_backend_api::RuntimeProfile;
-use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
+use pop_backend_llvm::{LlvmLoweringError, LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{lower_hir_bubble, parse_mir_dump};
@@ -64,6 +64,42 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
         !text.contains("pop_rt_semantic"),
         "runtime operations must use closed PLRI identities"
     );
+}
+
+#[test]
+fn llvm_rejects_async_functions_until_task_state_machine_lowering_exists() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/async.pop",
+        "namespace Main\n\
+         private async function work(): Int\n\
+             return 42\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+
+    assert!(matches!(
+        lower_mir_to_llvm_ir(
+            &mir,
+            front_end.types(),
+            &target(),
+            LlvmLoweringOptions::default(),
+        ),
+        Err(LlvmLoweringError::UnsupportedAsync)
+    ));
 }
 
 #[test]

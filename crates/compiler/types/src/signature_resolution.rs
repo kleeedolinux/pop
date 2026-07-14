@@ -74,6 +74,7 @@ pub enum ResolvedTypeKind {
     Union(Vec<ResolvedType>),
     Optional(Box<ResolvedType>),
     Function {
+        is_async: bool,
         parameters: Vec<ResolvedType>,
         results: Vec<ResolvedType>,
         effects: crate::EffectSummary,
@@ -144,6 +145,7 @@ impl ResolvedFunctionParameter {
 pub struct ResolvedFunctionSignature {
     symbol: SymbolId,
     name: String,
+    is_async: bool,
     type_parameters: Vec<ResolvedTypeParameter>,
     parameters: Vec<ResolvedFunctionParameter>,
     results: Vec<ResolvedType>,
@@ -170,6 +172,7 @@ impl ResolvedFunctionSignature {
         Self {
             symbol,
             name,
+            is_async: false,
             type_parameters,
             parameters: parameters
                 .into_iter()
@@ -185,6 +188,11 @@ impl ResolvedFunctionSignature {
                 .collect(),
             effects: crate::EffectSummary::empty(),
         }
+    }
+
+    pub(crate) const fn with_async(mut self, is_async: bool) -> Self {
+        self.is_async = is_async;
+        self
     }
 
     /// Rehydrates one already-verified public reference signature in the
@@ -207,12 +215,14 @@ impl ResolvedFunctionSignature {
     pub fn referenced_generic(
         symbol: SymbolId,
         name: impl Into<String>,
+        is_async: bool,
         type_parameters: Vec<ResolvedTypeParameter>,
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
         effects: crate::EffectSummary,
     ) -> Self {
         let mut signature = Self::canonical(symbol, name.into(), parameters, results);
+        signature.is_async = is_async;
         signature.type_parameters = type_parameters;
         signature.effects = effects;
         signature
@@ -226,6 +236,11 @@ impl ResolvedFunctionSignature {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -943,10 +958,12 @@ impl<'index> SignatureResolver<'index> {
                 SemanticType::Optional(self.substitute_type_parameters(element, substitutions)?)
             }
             SemanticType::Function {
+                is_async,
                 parameters,
                 results,
                 effects,
             } => SemanticType::Function {
+                is_async,
                 parameters: parameters
                     .into_iter()
                     .map(|parameter| self.substitute_type_parameters(parameter, substitutions))
@@ -1782,6 +1799,7 @@ impl<'index> SignatureResolver<'index> {
         let signature = diagnostics.is_empty().then(|| ResolvedFunctionSignature {
             symbol,
             name: syntax.name().to_owned(),
+            is_async: syntax.is_async(),
             type_parameters,
             parameters,
             results,
@@ -1934,11 +1952,13 @@ impl<'index> SignatureResolver<'index> {
                 ))
             }
             TypeSyntaxKind::Function {
+                is_async,
                 parameters,
                 results,
             } => self.resolve_function_type(
                 module,
                 syntax,
+                *is_async,
                 parameters,
                 results,
                 generics,
@@ -2331,6 +2351,7 @@ impl<'index> SignatureResolver<'index> {
         &mut self,
         module: ModuleId,
         syntax: &TypeSyntax,
+        is_async: bool,
         parameters: &[TypeSyntax],
         results: &[TypeSyntax],
         generics: &BTreeMap<String, (ParameterId, TypeId)>,
@@ -2345,6 +2366,7 @@ impl<'index> SignatureResolver<'index> {
             .and_then(|(parameters, results)| {
                 self.arena
                     .intern(SemanticType::Function {
+                        is_async,
                         parameters,
                         results,
                         effects: crate::EffectSummary::empty(),
@@ -2353,6 +2375,7 @@ impl<'index> SignatureResolver<'index> {
             });
         Some(resolved(
             ResolvedTypeKind::Function {
+                is_async,
                 parameters,
                 results,
                 effects: crate::EffectSummary::empty(),

@@ -38,6 +38,9 @@ pub(crate) fn validate_bubble(
 }
 
 fn validate_function(function: &MirFunction, types: &TypeArena) -> Result<(), CBackendError> {
+    if function.is_async() {
+        return Err(CBackendError::UnsupportedAsync(function.function()));
+    }
     if function.results().len() > 1 {
         return Err(CBackendError::UnsupportedFunctionSignature(
             function.symbol(),

@@ -63,6 +63,56 @@ fn lexer_reserves_typed_error_workflow_words() {
 }
 
 #[test]
+fn lexer_reserves_typed_async_workflow_words() {
+    let source = source("async await\n");
+    let result = lex(&source);
+
+    assert!(result.diagnostics().is_empty());
+    assert_eq!(result.reconstruct(&source), source.text());
+    let significant = result
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind().is_trivia())
+        .map(|token| token.kind())
+        .collect::<Vec<_>>();
+    assert_eq!(significant, [TokenKind::Async, TokenKind::Await]);
+}
+
+#[test]
+fn async_function_is_one_namespace_declaration() {
+    let source = source(
+        "namespace Example\n\
+         public async function load(): String\n\
+             return await fetch()\n\
+         end\n",
+    );
+    let syntax = parse_file(&source);
+
+    assert!(
+        syntax.diagnostics().is_empty(),
+        "{}",
+        syntax.diagnostic_snapshot()
+    );
+    assert_eq!(syntax.root().children().len(), 2);
+    assert_eq!(
+        syntax.root().children()[1].kind(),
+        NodeKind::FunctionDeclaration
+    );
+}
+
+#[test]
+fn async_cannot_modify_a_non_function_declaration() {
+    let source = source(
+        "namespace Example\n\
+         public async const LIMIT: Int = 1\n",
+    );
+    let syntax = parse_file(&source);
+
+    assert_eq!(syntax.root().children()[1].kind(), NodeKind::Error);
+    assert!(!syntax.diagnostics().is_empty());
+}
+
+#[test]
 fn lexer_keeps_decimal_exponents_complete_and_member_dots_separate() {
     // ADR 0040: decimal fractions and exponents are one lossless number token,
     // while a dot without a following digit remains member punctuation.

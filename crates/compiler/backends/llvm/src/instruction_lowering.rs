@@ -306,6 +306,9 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::FunctionReference(symbol) => {
             format!("{result} = add i64 0, {}", direct_function_tag(*symbol))
         }
+        MirInstructionKind::TaskCreate { .. } => {
+            return Err(LlvmLoweringError::UnsupportedAsync);
+        }
         MirInstructionKind::CallDirect {
             function: callee,
             arguments,
@@ -1078,6 +1081,7 @@ pub(crate) fn lower_terminator(
                 scrutinee.raw()
             )
         }
+        MirTerminator::Suspend { .. } => return Err(LlvmLoweringError::UnsupportedAsync),
     };
     if matches!(terminator, MirTerminator::Return { .. })
         && !direct_scalar_arrays.allocations.is_empty()

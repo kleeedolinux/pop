@@ -127,6 +127,7 @@ pub enum ReferenceType {
     TypeParameter(u16),
     Tuple(Vec<ReferenceType>),
     Function {
+        is_async: bool,
         parameters: Vec<ReferenceType>,
         results: Vec<ReferenceType>,
         effects: pop_types::EffectSummary,
@@ -186,6 +187,7 @@ pub struct ReferenceFunction {
     pub(crate) module: ModuleId,
     pub(crate) namespace: String,
     pub(crate) name: String,
+    pub(crate) is_async: bool,
     pub(crate) type_parameters: Vec<ReferenceTypeParameter>,
     pub(crate) parameters: Vec<ReferenceFunctionParameter>,
     pub(crate) results: Vec<ReferenceType>,
@@ -213,6 +215,11 @@ impl ReferenceFunction {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]

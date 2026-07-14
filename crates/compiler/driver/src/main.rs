@@ -973,11 +973,13 @@ fn reference_type_text(reference: &ReferenceType, type_parameters: &[&str]) -> S
                 .join(",")
         ),
         ReferenceType::Function {
+            is_async,
             parameters,
             results,
             ..
         } => format!(
-            "function({})->({})",
+            "{}function({})->({})",
+            if *is_async { "async " } else { "" },
             parameters
                 .iter()
                 .map(|parameter| reference_type_text(parameter, type_parameters))

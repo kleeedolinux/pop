@@ -144,6 +144,36 @@ fn parses_local_and_anonymous_functions_without_table_desugaring() {
     ));
 }
 
+#[test]
+fn parses_async_closures_and_prefix_await_without_dynamic_coroutines() {
+    let body = parse_body(
+        "namespace Example\n\
+         public async function make(): Int\n\
+             local operation = async function(value: Int): Int\n\
+                 return value\n\
+             end\n\
+             return await operation(42)\n\
+         end\n",
+    );
+
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
+        panic!("async closure local");
+    };
+    let ExpressionSyntaxKind::Function(function) = initializer.kind() else {
+        panic!("async function expression");
+    };
+    assert!(function.is_async());
+
+    let StatementSyntaxKind::Return { values } = body.statements()[1].kind() else {
+        panic!("awaited return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        ExpressionSyntaxKind::Await { operand }
+            if matches!(operand.kind(), ExpressionSyntaxKind::Call { .. })
+    ));
+}
+
 fn assert_function_signature(function: &CaptureFunctionSyntax) {
     assert_eq!(function.parameters().len(), 1);
     assert_eq!(function.parameters()[0].name(), "value");

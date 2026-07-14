@@ -245,6 +245,9 @@ fn dump_method_ids(output: &mut String, methods: &[MethodId]) {
 }
 
 pub(crate) fn dump_function(output: &mut String, function: &MirFunction) {
+    if function.is_async {
+        output.push_str("async ");
+    }
     let _ = write!(
         output,
         "function s{} f{}(",
@@ -271,6 +274,9 @@ pub(crate) fn dump_function(output: &mut String, function: &MirFunction) {
 }
 
 pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFunctionReference) {
+    if reference.is_async {
+        output.push_str("async ");
+    }
     let _ = write!(
         output,
         "reference b{}:s{} params(",
@@ -286,6 +292,9 @@ pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFuncti
 }
 
 pub(crate) fn dump_nested_function(output: &mut String, function: &MirNestedFunction) {
+    if function.is_async {
+        output.push_str("async ");
+    }
     let _ = write!(
         output,
         "nested s{} nf{} captures ",
@@ -486,6 +495,31 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         }
         MirInstructionKind::FunctionReference(function) => {
             let _ = write!(output, "functionReference s{}", function.raw());
+        }
+        MirInstructionKind::TaskCreate {
+            dispatch,
+            arguments,
+            completion_type,
+        } => {
+            output.push_str("task.create ");
+            match dispatch {
+                MirTaskDispatch::Direct(function) => {
+                    let _ = write!(output, "direct:s{}", function.raw());
+                }
+                MirTaskDispatch::Referenced(function) => {
+                    let _ = write!(
+                        output,
+                        "reference:b{}:s{}",
+                        function.bubble().raw(),
+                        function.symbol().raw()
+                    );
+                }
+                MirTaskDispatch::Indirect(callee) => {
+                    let _ = write!(output, "indirect:v{}", callee.raw());
+                }
+            }
+            let _ = write!(output, " completion:t{} args ", completion_type.raw());
+            dump_value_list(output, arguments);
         }
         MirInstructionKind::TupleMake(values) => dump_values(output, "tupleMake", values),
         MirInstructionKind::TupleGet { tuple, index } => {
@@ -1182,6 +1216,49 @@ fn dump_terminator(output: &mut String, terminator: &MirTerminator) {
                     output.push(',');
                 }
                 let _ = write!(output, "errorCase#{}:b{}", arm.case.raw(), arm.target.raw());
+            }
+            output.push(']');
+        }
+        MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { task, result_type },
+            resume,
+            cancellation,
+            unwind,
+            safe_point,
+            live_frame,
+        } => {
+            let _ = write!(
+                output,
+                "suspend.task v{} result:t{} resume:b{} cancellation:b{} unwind:",
+                task.raw(),
+                result_type.raw(),
+                resume.raw(),
+                cancellation.raw()
+            );
+            match unwind {
+                MirUnwindAction::Propagate => output.push_str("propagate"),
+                MirUnwindAction::Cleanup(target) => {
+                    let _ = write!(output, "cleanup:b{}", target.raw());
+                }
+            }
+            let _ = write!(
+                output,
+                " safePoint:sp{} state:cs{} frame[",
+                safe_point.raw(),
+                live_frame.state.raw()
+            );
+            for (index, slot) in live_frame.slots.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                let _ = write!(output, "v{}:t{}", slot.value.raw(), slot.type_id.raw());
+            }
+            output.push_str("] roots[");
+            for (index, root) in live_frame.stack_map.root_slots().iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                let _ = write!(output, "{}", root.raw());
             }
             output.push(']');
         }
