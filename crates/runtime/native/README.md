@@ -22,5 +22,10 @@ Atomic initialized publication is specified by
 [ADR 0060](../../../architecture/decisions/0060-atomic-initialized-object-allocation.md).
 
 The facade is divided into `identity`, `allocation`, `storage`, `text`, `roots`,
-`failure`, and private `state` modules. This keeps ABI exports grouped by the
-runtime service they adapt while retaining one static library and one native ABI.
+`failure`, `scheduler`, and private `state` modules. The scheduler provides the
+bounded synchronized M:N correctness implementation, deterministic
+record/replay, typed collector-transition hooks, and a separate bounded
+blocking pool specified by the
+[scheduler runtime design](../../../architecture/23.1-scheduler-runtime-implementation.md).
+This keeps ABI exports grouped by the runtime service they adapt while
+retaining one static library and one native ABI.
