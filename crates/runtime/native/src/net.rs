@@ -1,7 +1,7 @@
 //! Native nonblocking TCP runtime boundary.
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 
 use crate::state::{abi_tcp_listeners, abi_tcp_streams, allocate_net_handle};
 
@@ -14,17 +14,6 @@ pub fn tcp_listener_port_for_tests(handle: u64) -> Option<u16> {
         .get(&handle)
         .and_then(|listener| listener.local_addr().ok())
         .map(|address| address.port())
-}
-
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn pop_rt_net_tcp_listener_port(listener: u64) -> u64 {
-    abi_tcp_listeners()
-        .lock()
-        .expect("tcp listener state poisoned")
-        .get(&listener)
-        .and_then(|listener| listener.local_addr().ok())
-        .map_or(0, |address| u64::from(address.port()))
 }
 
 #[allow(unsafe_code)]
@@ -60,23 +49,6 @@ pub extern "C" fn pop_rt_net_tcp_accept(listener: u64) -> u64 {
         return 0;
     }
     drop(listeners);
-    let handle = allocate_net_handle();
-    abi_tcp_streams()
-        .lock()
-        .expect("tcp stream state poisoned")
-        .insert(handle, stream);
-    handle
-}
-
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn pop_rt_net_tcp_connect_loopback(port: u16) -> u64 {
-    let Ok(stream) = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))) else {
-        return 0;
-    };
-    if stream.set_nonblocking(true).is_err() {
-        return 0;
-    }
     let handle = allocate_net_handle();
     abi_tcp_streams()
         .lock()

@@ -206,8 +206,6 @@ fn rust_type(name: &str) -> Result<&'static str, String> {
     match name {
         "Int" | "Int64" => Ok("i64"),
         "UInt64" | "String" | "ManagedReference" => Ok("u64"),
-        "NetAddress" | "NetError" | "NetTcpListener" | "NetTcpConnection" | "Buffer"
-        | "MutableBuffer" => Ok("u64"),
         "Float" => Ok("f64"),
         "Boolean" => Ok("bool"),
         "Byte" => Ok("u8"),

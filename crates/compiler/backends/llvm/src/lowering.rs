@@ -207,21 +207,6 @@ pub fn lower_mir_to_llvm_ir(
     declarations.push("declare i64 @pop_std_net_tcp_receive_raw(i64, i64, i64)".to_owned());
     declarations.push("declare i1 @pop_std_net_tcp_send_all_raw(i64, i64, i64)".to_owned());
     declarations.push("declare i1 @pop_std_net_tcp_close(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_address_loopback(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_address_port(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_listen(i64, i64, i1)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_local_port(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_connect_loopback(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_accept_connection(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_buffer_from_string(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_mutable_buffer_create(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_buffer_length(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_receive(i64, i64)".to_owned());
-    declarations.push("declare i1 @pop_std_net_tcp_send_all(i64, i64)".to_owned());
-    declarations.push("declare i1 @pop_std_net_tcp_close_listener(i64)".to_owned());
-    declarations.push("declare i1 @pop_std_net_tcp_close_connection(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_error_last_code()".to_owned());
-    declarations.push("declare i64 @pop_std_net_error_code(i64)".to_owned());
     for reference in bubble.function_references() {
         let result = llvm_results(reference.results(), types)?;
         let parameters = reference

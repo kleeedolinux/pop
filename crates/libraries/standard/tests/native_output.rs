@@ -22,7 +22,7 @@ fn native_output_adapters_keep_the_bootstrap_signatures() {
     let _: extern "C" fn(u64) -> bool = pop_std_net_tcp_close;
     let _: fn(&str) = print_string;
 
-    assert_eq!(NATIVE_EXPORTS.len(), 26);
+    assert_eq!(NATIVE_EXPORTS.len(), 11);
     assert!(NATIVE_EXPORTS.iter().all(|export| {
         export.bubble() == FoundationBubble::Standard && export.namespace() == "Pop"
     }));

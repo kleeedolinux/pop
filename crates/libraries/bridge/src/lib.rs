@@ -105,12 +105,6 @@ pub enum PopAbiType {
     Byte,
     String,
     ManagedReference,
-    NetAddress,
-    NetError,
-    NetTcpListener,
-    NetTcpConnection,
-    Buffer,
-    MutableBuffer,
 }
 
 /// Effects that a native adapter must declare to typed bootstrap metadata.
