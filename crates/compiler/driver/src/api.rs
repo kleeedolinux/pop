@@ -443,6 +443,12 @@ const fn pop_abi_type_name(value: PopAbiType) -> &'static str {
         PopAbiType::Byte => "Byte",
         PopAbiType::String => "String",
         PopAbiType::ManagedReference => "ManagedReference",
+        PopAbiType::NetAddress => "Net.Address",
+        PopAbiType::NetError => "Net.Error",
+        PopAbiType::NetTcpListener => "Net.Tcp.Listener",
+        PopAbiType::NetTcpConnection => "Net.Tcp.Connection",
+        PopAbiType::Buffer => "Buffer",
+        PopAbiType::MutableBuffer => "MutableBuffer",
     }
 }
 

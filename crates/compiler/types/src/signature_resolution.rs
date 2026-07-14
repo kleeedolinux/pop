@@ -807,6 +807,22 @@ impl<'index> SignatureResolver<'index> {
         &self.schema
     }
 
+    pub(crate) fn builtin_type_by_source_name(&mut self, name: &str) -> Option<TypeId> {
+        if let Some(type_id) = self.arena.source_type(name) {
+            return Some(type_id);
+        }
+        let entry = self.schema.type_by_source_name(name)?;
+        if entry.arity() != 0 {
+            return None;
+        }
+        self.arena
+            .intern(SemanticType::Builtin {
+                definition: entry.id(),
+                arguments: Vec::new(),
+            })
+            .ok()
+    }
+
     #[must_use]
     pub fn result_parts(&self, type_id: TypeId) -> Option<(TypeId, TypeId)> {
         let result = self.schema.type_by_source_name("Result")?;
@@ -2057,13 +2073,15 @@ impl<'index> SignatureResolver<'index> {
                 syntax.span(),
             ));
         }
+        let qualified_name = path.join(".");
         if let Some(entry) = simple
             .and_then(|name| self.schema.type_by_source_name(name))
+            .or_else(|| self.schema.type_by_source_name(&qualified_name))
             .copied()
         {
             return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
         }
-        let name = path.join(".");
+        let name = qualified_name;
         let resolution = self
             .database
             .resolve(module, &name, SymbolSpace::Type, syntax.span());

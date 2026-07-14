@@ -1,0 +1,34 @@
+namespace NativeTypedTcp
+
+function main()
+    local address = Net.Address.loopback(0)
+    local listener = Net.Tcp.listen(address, 16, true)
+    local port = Net.Tcp.localPort(listener)
+
+    local client = Net.Tcp.connectLoopback(port)
+    local server = Net.Tcp.accept(listener)
+
+    local payload = Buffer.fromString("ping")
+    local sent = Net.Tcp.sendAll(client, payload)
+    local incoming = MutableBuffer.create(4)
+    local received = Net.Tcp.receive(server, incoming)
+
+    print("typed tcp loopback")
+    print("port")
+    print(port)
+    print("payload bytes")
+    print(Buffer.length(payload))
+    print("send ok")
+    print(sent)
+    print("received bytes")
+    print(received)
+    print("last net error")
+    print(Net.Error.code(Net.Error.lastCode()))
+
+    print("close client")
+    print(Net.Tcp.close(client))
+    print("close server")
+    print(Net.Tcp.close(server))
+    print("close listener")
+    print(Net.Tcp.close(listener))
+end

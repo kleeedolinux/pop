@@ -1262,6 +1262,36 @@ fn qualified_task_and_tcp_standard_functions_type_check_without_user_bindings() 
 }
 
 #[test]
+fn typed_network_foundation_functions_hide_raw_handles() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function useNetwork(): Int\n\
+             local address = Net.Address.loopback(0)\n\
+             local listener = Net.Tcp.listen(address, 16, true)\n\
+             local port = Net.Tcp.localPort(listener)\n\
+             local client = Net.Tcp.connectLoopback(port)\n\
+             local server = Net.Tcp.accept(listener)\n\
+             local payload = Buffer.fromString(\"ping\")\n\
+             local sent = Net.Tcp.sendAll(client, payload)\n\
+             local incoming = MutableBuffer.create(4)\n\
+             local received = Net.Tcp.receive(server, incoming)\n\
+             local clientClosed = Net.Tcp.close(client)\n\
+             local serverClosed = Net.Tcp.close(server)\n\
+             local listenerClosed = Net.Tcp.close(listener)\n\
+             local lastError = Net.Error.lastCode()\n\
+             return Net.Error.code(lastError) + received\n\
+         end\n",
+        "useNetwork",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
 fn captured_mutation_uses_one_typed_cell_and_shadowing_does_not_capture() {
     let fixture = check_function(
         "namespace Example\n\

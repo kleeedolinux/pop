@@ -3098,6 +3098,48 @@ fn verify_callable_instruction(
                 8 => (type_ids(arena, &["UInt64"]), type_ids(arena, &["Boolean"])),
                 9 => (type_ids(arena, &["UInt64"]), Some(Vec::new())),
                 10 => (type_ids(arena, &["Boolean"]), Some(Vec::new())),
+                11 => (type_ids(arena, &["Int"]), type_ids(arena, &["Net.Address"])),
+                12 => (type_ids(arena, &["Net.Address"]), type_ids(arena, &["Int"])),
+                13 => (
+                    type_ids(arena, &["Net.Address", "Int", "Boolean"]),
+                    type_ids(arena, &["Net.Tcp.Listener"]),
+                ),
+                14 => (
+                    type_ids(arena, &["Net.Tcp.Listener"]),
+                    type_ids(arena, &["Int"]),
+                ),
+                15 => (
+                    type_ids(arena, &["Int"]),
+                    type_ids(arena, &["Net.Tcp.Connection"]),
+                ),
+                16 => (
+                    type_ids(arena, &["Net.Tcp.Listener"]),
+                    type_ids(arena, &["Net.Tcp.Connection"]),
+                ),
+                17 => (type_ids(arena, &["String"]), type_ids(arena, &["Buffer"])),
+                18 => (
+                    type_ids(arena, &["Int"]),
+                    type_ids(arena, &["MutableBuffer"]),
+                ),
+                19 => (type_ids(arena, &["Buffer"]), type_ids(arena, &["Int"])),
+                20 => (
+                    type_ids(arena, &["Net.Tcp.Connection", "MutableBuffer"]),
+                    type_ids(arena, &["Int"]),
+                ),
+                21 => (
+                    type_ids(arena, &["Net.Tcp.Connection", "Buffer"]),
+                    type_ids(arena, &["Boolean"]),
+                ),
+                22 => (
+                    type_ids(arena, &["Net.Tcp.Listener"]),
+                    type_ids(arena, &["Boolean"]),
+                ),
+                23 => (
+                    type_ids(arena, &["Net.Tcp.Connection"]),
+                    type_ids(arena, &["Boolean"]),
+                ),
+                24 => (Some(Vec::new()), type_ids(arena, &["Net.Error"])),
+                25 => (type_ids(arena, &["Net.Error"]), type_ids(arena, &["Int"])),
                 _ => {
                     errors.push(MirVerificationError::UnknownStandardFunction(*function));
                     return true;
@@ -3211,7 +3253,23 @@ fn verify_callable_instruction(
 }
 
 fn type_ids(arena: &TypeArena, names: &[&str]) -> Option<Vec<TypeId>> {
-    names.iter().map(|name| arena.source_type(name)).collect()
+    names.iter().map(|name| type_id(arena, name)).collect()
+}
+
+fn type_id(arena: &TypeArena, name: &str) -> Option<TypeId> {
+    if let Some(type_id) = arena.source_type(name) {
+        return Some(type_id);
+    }
+    let entry = embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.type_by_source_name(name).copied())?;
+    if entry.arity() != 0 {
+        return None;
+    }
+    arena.find(&SemanticType::Builtin {
+        definition: entry.id(),
+        arguments: Vec::new(),
+    })
 }
 
 fn verify_indirect_call(

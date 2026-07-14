@@ -14,8 +14,13 @@ pub use baseline::{
     parse_standard_api_baseline, standard_api_baseline,
 };
 pub use native_async_net::{
-    pop_std_net_tcp_accept, pop_std_net_tcp_close, pop_std_net_tcp_listen_loopback,
-    pop_std_net_tcp_receive_raw, pop_std_net_tcp_send_all_raw, pop_std_task_cancel_source_cancel,
+    pop_std_buffer_from_string, pop_std_buffer_length, pop_std_mutable_buffer_create,
+    pop_std_net_address_loopback, pop_std_net_address_port, pop_std_net_error_code,
+    pop_std_net_error_last_code, pop_std_net_tcp_accept, pop_std_net_tcp_accept_connection,
+    pop_std_net_tcp_close, pop_std_net_tcp_close_connection, pop_std_net_tcp_close_listener,
+    pop_std_net_tcp_connect_loopback, pop_std_net_tcp_listen, pop_std_net_tcp_listen_loopback,
+    pop_std_net_tcp_local_port, pop_std_net_tcp_receive, pop_std_net_tcp_receive_raw,
+    pop_std_net_tcp_send_all, pop_std_net_tcp_send_all_raw, pop_std_task_cancel_source_cancel,
     pop_std_task_cancel_source_cancellation_requested,
 };
 pub use native_output::{
@@ -35,4 +40,19 @@ pub const NATIVE_EXPORTS: &[pop_library_bridge::NativeExport] = &[
     native_async_net::POP_STD_NET_TCP_CLOSE_POPLIB_EXPORT,
     native_output::POP_STD_PRINT_UINT64_POPLIB_EXPORT,
     native_output::POP_STD_PRINT_BOOLEAN_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_ADDRESS_LOOPBACK_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_ADDRESS_PORT_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_LISTEN_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_LOCAL_PORT_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_CONNECT_LOOPBACK_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_ACCEPT_CONNECTION_POPLIB_EXPORT,
+    native_async_net::POP_STD_BUFFER_FROM_STRING_POPLIB_EXPORT,
+    native_async_net::POP_STD_MUTABLE_BUFFER_CREATE_POPLIB_EXPORT,
+    native_async_net::POP_STD_BUFFER_LENGTH_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_RECEIVE_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_SEND_ALL_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_CLOSE_LISTENER_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_TCP_CLOSE_CONNECTION_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_ERROR_LAST_CODE_POPLIB_EXPORT,
+    native_async_net::POP_STD_NET_ERROR_CODE_POPLIB_EXPORT,
 ];

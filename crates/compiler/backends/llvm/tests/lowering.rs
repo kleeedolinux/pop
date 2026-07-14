@@ -256,6 +256,66 @@ fn qualified_task_and_tcp_standard_calls_lower_to_native_adapters() {
 }
 
 #[test]
+fn typed_network_foundation_calls_lower_to_native_adapters() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/typed-net.pop",
+        "namespace Main\n\
+         public function useNetwork(): Int\n\
+             local address = Net.Address.loopback(0)\n\
+             local listener = Net.Tcp.listen(address, 16, true)\n\
+             local port = Net.Tcp.localPort(listener)\n\
+             local client = Net.Tcp.connectLoopback(port)\n\
+             local server = Net.Tcp.accept(listener)\n\
+             local payload = Buffer.fromString(\"ping\")\n\
+             local sent = Net.Tcp.sendAll(client, payload)\n\
+             local incoming = MutableBuffer.create(4)\n\
+             local received = Net.Tcp.receive(server, incoming)\n\
+             local clientClosed = Net.Tcp.close(client)\n\
+             local serverClosed = Net.Tcp.close(server)\n\
+             local listenerClosed = Net.Tcp.close(listener)\n\
+             local lastError = Net.Error.lastCode()\n\
+             return Net.Error.code(lastError) + received\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM typed network lowering")
+    .to_string();
+
+    assert!(text.contains("@pop_std_net_address_loopback"), "{text}");
+    assert!(text.contains("@pop_std_net_tcp_listen"), "{text}");
+    assert!(text.contains("@pop_std_net_tcp_connect_loopback"), "{text}");
+    assert!(
+        text.contains("@pop_std_net_tcp_accept_connection"),
+        "{text}"
+    );
+    assert!(text.contains("@pop_std_buffer_from_string"), "{text}");
+    assert!(text.contains("@pop_std_mutable_buffer_create"), "{text}");
+    assert!(text.contains("@pop_std_net_tcp_send_all"), "{text}");
+    assert!(text.contains("@pop_std_net_tcp_receive"), "{text}");
+    assert!(text.contains("@pop_std_net_error_last_code"), "{text}");
+}
+
+#[test]
 fn optional_scalar_collection_reads_execute_without_a_zero_sentinel() {
     let source = SourceFile::new(
         FileId::from_raw(0),

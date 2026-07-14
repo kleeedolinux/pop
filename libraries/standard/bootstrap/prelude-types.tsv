@@ -15,3 +15,9 @@ typeId	sourceName	ownerBubble	arity	role	prelude
 112	AsyncClose	Pop.Standard	0	Interface	true
 113	Iteration	Pop.Standard	1	Nominal	true
 114	CancelToken	Pop.Standard	0	Nominal	true
+115	Net.Address	Pop.Standard	0	Nominal	true
+116	Net.Error	Pop.Standard	0	Nominal	true
+117	Net.Tcp.Listener	Pop.Standard	0	Nominal	true
+118	Net.Tcp.Connection	Pop.Standard	0	Nominal	true
+119	Buffer	Pop.Standard	0	Nominal	true
+120	MutableBuffer	Pop.Standard	0	Nominal	true

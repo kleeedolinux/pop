@@ -1349,11 +1349,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             .filter_map(|(function, parameter_names, result_names)| {
                 let parameter_types = parameter_names
                     .iter()
-                    .map(|name| self.resolver.arena().source_type(name))
+                    .map(|name| self.resolver.builtin_type_by_source_name(name))
                     .collect::<Option<Vec<_>>>()?;
                 let result_types = result_names
                     .iter()
-                    .map(|name| self.resolver.arena().source_type(name))
+                    .map(|name| self.resolver.builtin_type_by_source_name(name))
                     .collect::<Option<Vec<_>>>()?;
                 Some((*function, parameter_types, result_types))
             })

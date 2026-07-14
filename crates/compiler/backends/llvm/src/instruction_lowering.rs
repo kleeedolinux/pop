@@ -389,6 +389,69 @@ pub(crate) fn lower_instruction(
                     arguments[0].raw()
                 )
             }
+            11 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_address_loopback(i64 %v{})",
+                arguments[0].raw()
+            ),
+            12 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_address_port(i64 %v{})",
+                arguments[0].raw()
+            ),
+            13 if arguments.len() == 3 => format!(
+                "{result} = call i64 @pop_std_net_tcp_listen(i64 %v{}, i64 %v{}, i1 %v{})",
+                arguments[0].raw(),
+                arguments[1].raw(),
+                arguments[2].raw()
+            ),
+            14 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_tcp_local_port(i64 %v{})",
+                arguments[0].raw()
+            ),
+            15 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_tcp_connect_loopback(i64 %v{})",
+                arguments[0].raw()
+            ),
+            16 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_tcp_accept_connection(i64 %v{})",
+                arguments[0].raw()
+            ),
+            17 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_buffer_from_string(i64 %v{})",
+                arguments[0].raw()
+            ),
+            18 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_mutable_buffer_create(i64 %v{})",
+                arguments[0].raw()
+            ),
+            19 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_buffer_length(i64 %v{})",
+                arguments[0].raw()
+            ),
+            20 if arguments.len() == 2 => format!(
+                "{result} = call i64 @pop_std_net_tcp_receive(i64 %v{}, i64 %v{})",
+                arguments[0].raw(),
+                arguments[1].raw()
+            ),
+            21 if arguments.len() == 2 => format!(
+                "{result} = call i1 @pop_std_net_tcp_send_all(i64 %v{}, i64 %v{})",
+                arguments[0].raw(),
+                arguments[1].raw()
+            ),
+            22 if arguments.len() == 1 => format!(
+                "{result} = call i1 @pop_std_net_tcp_close_listener(i64 %v{})",
+                arguments[0].raw()
+            ),
+            23 if arguments.len() == 1 => format!(
+                "{result} = call i1 @pop_std_net_tcp_close_connection(i64 %v{})",
+                arguments[0].raw()
+            ),
+            24 if arguments.is_empty() => {
+                format!("{result} = call i64 @pop_std_net_error_last_code()")
+            }
+            25 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_error_code(i64 %v{})",
+                arguments[0].raw()
+            ),
             _ => {
                 return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
