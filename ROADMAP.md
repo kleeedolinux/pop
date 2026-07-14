@@ -231,6 +231,17 @@ Package for the first release.
     Current medians are 44.468 ms versus 4.715 ms for allocation churn and
     139.161 ms versus 4.828 ms for the retained object array; these are local
     optimization evidence, not portable performance claims.
+  - [x] Re-run the same host-only workloads after the stopped-mutator
+    evacuation worker slice. The 15-sample medians were 48.102 ms versus
+    5.640 ms for allocation churn and 139.667 ms versus 4.899 ms for the
+    retained object array. These bootstrap workloads do not exercise selective
+    shared-region evacuation, so the result is a sequencing checkpoint rather
+    than evacuation evidence.
+  - [x] Reject speculative bootstrap access-probe coalescing after an
+    interleaved 41-sample retained-object A/B measured 139.356 ms for the
+    candidate versus 137.202 ms for the committed baseline. The next retained
+    array optimization must target the native ABI/storage boundary and preserve
+    precise managed barriers instead of repeating this local refactor.
   - [x] Remove root-publication allocation from bootstrap safe points when no
     collection is pending, and materialize bulk-initialized arrays in one pass.
     Same-binary A/B runs show about 2% improvement from one-pass initialization;
