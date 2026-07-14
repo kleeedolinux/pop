@@ -11,7 +11,7 @@ use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::api::LlvmLoweringError;
+use crate::api::{LlvmLoweringError, LlvmLoweringOptions};
 use crate::lowering::*;
 
 pub(crate) fn lower_instruction(
@@ -26,7 +26,7 @@ pub(crate) fn lower_instruction(
     environment: Option<(&str, &BTreeSet<u32>)>,
     proven_non_overflow_adds: &BTreeSet<ValueId>,
     direct_scalar_arrays: &DirectScalarArrays,
-    writable_roots: bool,
+    options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
@@ -362,7 +362,11 @@ pub(crate) fn lower_instruction(
             safe_point.raw(),
             roots,
             direct_scalar_arrays,
-            writable_roots,
+            matches!(
+                options.runtime_profile,
+                pop_backend_api::RuntimeProfile::ProductionGenerational
+            ),
+            options.gc_poll_interval.get(),
         ),
         MirInstructionKind::RetainRoot { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
@@ -2421,6 +2425,7 @@ pub(crate) fn lower_gc_safe_point(
     roots: &[ValueId],
     direct_scalar_arrays: &DirectScalarArrays,
     writable_roots: bool,
+    poll_interval: u32,
 ) -> String {
     let roots = roots
         .iter()
@@ -2457,7 +2462,7 @@ pub(crate) fn lower_gc_safe_point(
         format!("{expected} = call i1 @llvm.expect.i1(i1 {expired}, i1 false)"),
         format!("br i1 {expected}, label %{slow}, label %{continuation}"),
         format!("{slow}:"),
-        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("store i32 {poll_interval}, ptr {GC_POLL_BUDGET}, align 4"),
     ]);
     let safe_point_symbol = if writable_roots {
         pop_runtime_native_abi::GC_SAFE_POINT_V2_SYMBOL

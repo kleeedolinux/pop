@@ -28,7 +28,6 @@ use crate::module_lowering::{
     render_string_literals, runtime_declarations,
 };
 
-pub(crate) const GC_POLL_INTERVAL: u32 = 16_384;
 pub(crate) const GC_POLL_BUDGET: &str = "%pop_gc_poll_budget";
 
 pub(crate) fn native_runtime_symbol(operation: RuntimeOperation) -> &'static str {
@@ -781,7 +780,8 @@ pub(crate) fn lower_function_parts(
             types,
         )?;
         if block_index == 0 {
-            let mut initialization = initialize_gc_poll(has_gc_safe_point);
+            let mut initialization =
+                initialize_gc_poll(has_gc_safe_point, options.gc_poll_interval.get());
             initialization.extend(initialize_array_outputs(
                 function_blocks,
                 &direct_scalar_arrays,
@@ -804,7 +804,7 @@ pub(crate) fn lower_function_parts(
                 environment,
                 &proven_non_overflow_adds,
                 &direct_scalar_arrays,
-                writable_roots,
+                options,
             )?;
             instructions.push(rewrite_relocated_value_uses(&lowered, &relocated_values));
             if writable_roots
@@ -1149,13 +1149,13 @@ pub(crate) fn llvm_memory_none_instruction(instruction: &MirInstructionKind) -> 
     )
 }
 
-pub(crate) fn initialize_gc_poll(has_gc_safe_point: bool) -> Vec<String> {
+pub(crate) fn initialize_gc_poll(has_gc_safe_point: bool, interval: u32) -> Vec<String> {
     if !has_gc_safe_point {
         return Vec::new();
     }
     vec![
         format!("{GC_POLL_BUDGET} = alloca i32, align 4"),
-        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("store i32 {interval}, ptr {GC_POLL_BUDGET}, align 4"),
     ]
 }
 

@@ -7,6 +7,7 @@ use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
 use std::fmt::Write as _;
 use std::fs;
+use std::num::NonZeroU32;
 use std::process::{Command, Output};
 
 fn target() -> TargetSpec {
@@ -631,6 +632,54 @@ fn abi_two_repeated_safe_points_chain_reloaded_roots() {
     assert!(
         text.contains("call i64 @pop_rt_retain_root(i64 %v1_after_v3)"),
         "later uses must consume the newest reload: {text}"
+    );
+}
+
+#[test]
+fn optimized_abi_two_execution_rejects_stale_tokens_after_forced_relocation() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 gcSafePoint sp1 roots (v1)\n    do v3 retainRoot v1\n    do v4 releaseRoot v3\n    v5:t{integer} = const.integer Int64 0\n    return (v5)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("forced relocation MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default()
+            .with_entry_point(mir.functions()[0].symbol())
+            .with_runtime_profile(RuntimeProfile::ProductionGenerational)
+            .with_gc_poll_interval(NonZeroU32::MIN),
+    )
+    .expect("forced relocation LLVM lowering");
+    module
+        .verify()
+        .expect("valid forced relocation LLVM module");
+
+    let text = module.to_string();
+    let result = link_with_forced_relocation_runtime_and_run(&text, "abi-two-relocation");
+    assert!(
+        result.status.success(),
+        "optimized native execution used a stale token: {}\n{module}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let stale = text.replacen(
+        "call i64 @pop_rt_retain_root(i64 %v1_after_v2)",
+        "call i64 @pop_rt_retain_root(i64 %v1)",
+        1,
+    );
+    assert_ne!(stale, text, "test mutation must restore the old SSA token");
+    let stale_result = link_with_forced_relocation_runtime_and_run(&stale, "abi-two-stale-token");
+    assert!(
+        !stale_result.status.success(),
+        "the forced-relocation runtime accepted an old token"
     );
 }
 
@@ -2570,6 +2619,61 @@ fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) 
         .output()
         .expect("native executable runs");
     let _ = fs::remove_file(input);
+    let _ = fs::remove_file(executable);
+    result
+}
+
+fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output {
+    let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
+    let runtime = std::env::temp_dir().join(format!("pop-backend-llvm-{name}-runtime.c"));
+    let executable = std::env::temp_dir().join(format!("pop-backend-llvm-{name}"));
+    fs::write(&input, llvm).expect("write forced-relocation LLVM input");
+    fs::write(
+        &runtime,
+        concat!(
+            "#include <stdint.h>\n",
+            "#include <stdlib.h>\n",
+            "static uint64_t current_token;\n",
+            "uint64_t pop_rt_allocate_array(uint64_t length, uint8_t references) {\n",
+            "  (void)length; (void)references; current_token = 41; return current_token;\n",
+            "}\n",
+            "uint8_t pop_rt_gc_safe_point_v2(uint32_t point, uint64_t *roots, uint64_t count) {\n",
+            "  (void)point;\n",
+            "  for (uint64_t index = 0; index < count; ++index) {\n",
+            "    if (roots[index] != current_token) abort();\n",
+            "    current_token += 100; roots[index] = current_token;\n",
+            "  }\n",
+            "  return 1;\n",
+            "}\n",
+            "uint64_t pop_rt_retain_root(uint64_t token) {\n",
+            "  if (token != current_token) abort(); return token;\n",
+            "}\n",
+            "uint8_t pop_rt_release_root(uint64_t token) {\n",
+            "  if (token != current_token) abort(); return 1;\n",
+            "}\n",
+            "void pop_rt_trap(void) { abort(); }\n",
+        ),
+    )
+    .expect("write forced-relocation native runtime");
+    let link = Command::new("clang")
+        .args(["-O3", "-Werror", "-Wno-override-module"])
+        .arg(&input)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang must be installed");
+    assert!(
+        link.status.success(),
+        "clang rejected forced-relocation LLVM: {}\n{}",
+        String::from_utf8_lossy(&link.stderr),
+        llvm
+    );
+    let result = Command::new(&executable)
+        .output()
+        .expect("forced-relocation executable runs");
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(runtime);
     let _ = fs::remove_file(executable);
     result
 }

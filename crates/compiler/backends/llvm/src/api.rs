@@ -4,6 +4,7 @@
 //! Inkwell values or the backend-private lowering representation.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use inkwell::OptimizationLevel;
@@ -22,12 +23,15 @@ use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
 use crate::lowering::PrivateModule;
 
 const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
+const DEFAULT_GC_POLL_INTERVAL: NonZeroU32 =
+    NonZeroU32::new(16_384).expect("the default GC poll interval is nonzero");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LlvmLoweringOptions {
     pub(crate) emit_comments: bool,
     pub(crate) entry_point: Option<SymbolId>,
     pub(crate) runtime_profile: RuntimeProfile,
+    pub(crate) gc_poll_interval: NonZeroU32,
 }
 
 impl Default for LlvmLoweringOptions {
@@ -36,6 +40,7 @@ impl Default for LlvmLoweringOptions {
             emit_comments: false,
             entry_point: None,
             runtime_profile: RuntimeProfile::BootstrapStableHandles,
+            gc_poll_interval: DEFAULT_GC_POLL_INTERVAL,
         }
     }
 }
@@ -56,6 +61,12 @@ impl LlvmLoweringOptions {
     #[must_use]
     pub const fn with_runtime_profile(mut self, profile: RuntimeProfile) -> Self {
         self.runtime_profile = profile;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_gc_poll_interval(mut self, interval: NonZeroU32) -> Self {
+        self.gc_poll_interval = interval;
         self
     }
 }

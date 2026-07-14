@@ -97,6 +97,12 @@ branch arguments, merges, and loop backedges. ABI 1 lowering remains unchanged.
 The presence of this path does not enable the relocation capability until old-
 SSA-use verification and forced native relocation both pass.
 
+The deterministic native ABI 2 conformance runtime now forces every published
+token to change, aborts on every stale token, and passes optimized straight-line
+LLVM execution. The relocation capability remains disabled: emitted old-SSA
+verification and forced branch, merge, loop, unwind, coroutine, and FFI
+execution proofs are still required.
+
 ## Experimental C backend
 
 The experimental C backend lowers optimized verified canonical MIR to one

@@ -370,6 +370,10 @@ Post-baseline library work has begun without widening the release foundation:
   native allocations into stable mature space. Fix this with ABI 2 writable
   roots, forced-relocation tests, stale-token rejection, and verified reloads
   for stacks, registers, coroutines, unwind paths, and FFI transitions.
+  ABI 2 straight-line native execution now forces a token change under LLVM
+  `-O3` and a negative mutation proves the conformance runtime rejects the old
+  token. Control-flow-wide emitted verification and the remaining transition
+  classes keep this item open.
 - [ ] **The production concurrent collector is not selectable.** Native
   scheduler integration, concurrent mature work, card refinement, lazy sweep,
   stack watermarks, bounded assists, and race/stress proof remain incomplete.
