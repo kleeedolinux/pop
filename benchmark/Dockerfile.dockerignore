@@ -1,0 +1,5 @@
+.git
+target
+benchmark/.tools
+benchmark/results
+**/.DS_Store

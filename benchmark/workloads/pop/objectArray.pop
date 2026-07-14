@@ -1,0 +1,27 @@
+namespace BenchmarkObjectArray
+
+class Box
+    value: Int
+
+    function Box.new(value: Int): Box
+        return Box { value = value }
+    end
+end
+
+function main()
+    local values = Array.create<<Box>>(200000, Box.new(0))
+    local index = 1
+    repeat
+        values[index] = Box.new(index)
+        index = index + 1
+    until index == 200001
+
+    local total = 0
+    index = 1
+    repeat
+        local box = Array.get(values, index)
+        total = total + box.value
+        index = index + 1
+    until index == 200001
+    print(total)
+end
