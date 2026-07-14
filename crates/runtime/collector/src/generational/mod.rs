@@ -5,6 +5,7 @@ mod allocation;
 mod arena;
 mod barrier;
 mod coordination;
+mod evacuation;
 mod heap;
 mod major;
 mod memory;
@@ -14,12 +15,16 @@ mod workers;
 
 pub use allocation::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
-    AllocationPlacement, HeapDomain, PageDescriptor, PageId, RegionId,
+    AllocationPlacement, HeapDomain, PageDescriptor, PageId, RegionId, RegionState,
+    RegionTelemetry,
 };
 pub use coordination::{
     CollectorEpoch, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
     EpochCoordinatorConfigError, EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress,
     MutatorExecutionState, MutatorId, MutatorPublication,
+};
+pub use evacuation::{
+    EvacuationCandidate, EvacuationSelectionConfig, EvacuationSelectionConfigError,
 };
 pub use heap::{
     GenerationalRuntime, MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase,

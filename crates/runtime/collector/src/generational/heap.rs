@@ -11,7 +11,7 @@ use crate::relocation::RelocationRuntime;
 
 use super::allocation::{
     AllocationInfrastructure, AllocationInfrastructureConfig, AllocationMetrics,
-    AllocationPlacement, PageDescriptor, PageId,
+    AllocationPlacement, PageDescriptor, PageId, RegionState,
 };
 use super::arena::ArenaState;
 use super::memory::{
@@ -385,6 +385,8 @@ impl GenerationalRuntime {
         self.nursery
             .metrics
             .record_collection(statistics.reclaimed_objects(), statistics.scanned_objects());
+        self.allocation
+            .transition_shared_regions(RegionState::SharedAllocating);
         self.major.reset();
         statistics
     }

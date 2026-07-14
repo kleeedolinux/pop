@@ -101,6 +101,8 @@ not table or runtime-name lookup.
 - moving nursery, card barriers, and GC stress tests;
 - bounded large-object pointer scanning with pointer-free field-scan elision;
 - scoped pin handle/object counting and deterministic long-lived-pin telemetry;
+- domain/scheduler-homogeneous regions with exact fragmentation telemetry and
+  bounded reserve-admitted selective-evacuation candidate selection;
 - mutable typed root updates, runtime-profile/backend capability negotiation,
   and a real single-mutator relocation conformance collector before production
   TLAB/parallel-evacuation claims (ADR 0039);
@@ -139,6 +141,9 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   whole-graph local-to-shared publication, ownership barrier enforcement, and
   exact-one-owner isolated-region construction/transfer/dissolution, while
   scheduler-indexed TLABs/local collection now preserve heap independence;
+  shared regions now expose exact fragmentation/pin/reference accounting and
+  deterministic reserve-bounded evacuation-set selection, while forwarding,
+  reference updates, quarantine, and actual selective relocation remain open;
   typed scoped bump arenas provide precise external roots and bulk reclamation;
   parallel scheduler execution and scheduler/runtime integration remain open;
 - the first public-library slices authorized by the section 22 implementation

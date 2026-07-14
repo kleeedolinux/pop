@@ -1,7 +1,6 @@
 //! Mutable page inventory, TLAB cursor, and relocation placement updates.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pop_runtime_interface::{
     AllocationClass, ManagedReference, ObjectMap, ObjectSlot, RuntimeFailure, RuntimeTypeId,
@@ -14,6 +13,7 @@ use super::model::{
     AllocationInfrastructureConfig, AllocationMetrics, AllocationPlacement, HeapDomain,
     PageDescriptor, PageId, RegionId,
 };
+use super::{RegionKey, RegionRecord, RegionState};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LayoutKey {
@@ -32,11 +32,15 @@ struct Tlab {
 
 #[derive(Clone)]
 pub(crate) struct AllocationInfrastructure {
-    config: AllocationInfrastructureConfig,
-    pages: BTreeMap<PageId, PageDescriptor>,
-    placements: BTreeMap<ManagedReference, AllocationPlacement>,
+    pub(super) config: AllocationInfrastructureConfig,
+    pub(super) pages: BTreeMap<PageId, PageDescriptor>,
+    pub(super) placements: BTreeMap<ManagedReference, AllocationPlacement>,
     tlabs: BTreeMap<SchedulerId, Tlab>,
+    pub(super) regions: BTreeMap<RegionId, RegionRecord>,
+    pub(super) active_regions: BTreeMap<RegionKey, BTreeSet<RegionId>>,
     next_page: u64,
+    pub(super) next_region: u64,
+    pub(super) shared_region_state: RegionState,
     metrics: AllocationMetrics,
 }
 
@@ -53,7 +57,11 @@ impl AllocationInfrastructure {
             pages: BTreeMap::new(),
             placements: BTreeMap::new(),
             tlabs: BTreeMap::new(),
+            regions: BTreeMap::new(),
+            active_regions: BTreeMap::new(),
             next_page: 1,
+            next_region: 1,
+            shared_region_state: RegionState::SharedAllocating,
             metrics: AllocationMetrics::default(),
         }
     }
@@ -176,13 +184,7 @@ impl AllocationInfrastructure {
             .next_page
             .checked_add(1)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        let pages_per_region = self.config.region_bytes / self.config.page_bytes;
-        let index = usize::try_from(id.0.saturating_sub(1)).unwrap_or(usize::MAX);
-        let region = RegionId(
-            u64::try_from(index / pages_per_region)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
-        );
+        let region = self.acquire_region(domain, scheduler, capacity_bytes)?;
         self.pages.insert(
             id,
             PageDescriptor {
@@ -196,6 +198,20 @@ impl AllocationInfrastructure {
                 capacity_bytes,
             },
         );
+        let (key, full) = {
+            let record = self
+                .regions
+                .get_mut(&region)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            record.committed_bytes = record
+                .committed_bytes
+                .checked_add(capacity_bytes)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            (record.key, record.committed_bytes >= record.capacity_bytes)
+        };
+        if full {
+            self.remove_active_region(key, region);
+        }
         self.metrics.pages_created = self.metrics.pages_created.saturating_add(1);
         Ok(id)
     }
@@ -410,6 +426,16 @@ impl AllocationInfrastructure {
             .saturating_add(u64::try_from(returned).unwrap_or(u64::MAX));
         self.tlabs
             .retain(|_, tlab| self.pages.contains_key(&tlab.page));
+        for region in self.regions.values_mut() {
+            region.committed_bytes = 0;
+        }
+        for page in self.pages.values() {
+            if let Some(region) = self.regions.get_mut(&page.region) {
+                region.committed_bytes = region.committed_bytes.saturating_add(page.capacity_bytes);
+            }
+        }
+        self.regions.retain(|_, region| region.committed_bytes != 0);
+        self.rebuild_active_regions();
     }
 }
 

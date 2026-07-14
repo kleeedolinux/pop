@@ -82,7 +82,14 @@ pub struct PageId(pub(super) u64);
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegionId(pub(super) u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl RegionId {
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HeapDomain {
     LocalEden,
     LocalSurvivor,

@@ -41,7 +41,17 @@ The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
 pointer layouts, scheduler-indexed Eden pointer bumps and TLAB cursors, separate
 mature, large, and pinned domains, survivor-copy placement, deterministic
-promotion, and immediate pinned-space placement. A separate memory controller
+promotion, and immediate pinned-space placement. Physical regions never mix
+allocation domains or scheduler-local owners. Their immutable telemetry reports
+capacity, committed/live/free/fragmented bytes, pages, objects, precise
+reference slots, pinned bytes, and pin density; shared regions follow explicit
+allocating/marking/sweeping states. Deterministic evacuation selection excludes
+pinned and large regions, rejects non-positive estimated benefit, counts
+already selected regions against its bound, and admits live-copy cost only when
+it fits the protected evacuation reserve. Selected regions leave allocation
+pools until evacuation or explicit cancellation; forwarding, reference update,
+quarantine, and physical relocation remain the next implementation slice. A
+separate memory controller
 enforces a byte hard limit before heap mutation, protects emergency and
 evacuation reserves, accounts
 typed stack/code/metadata/native/arena/isolated usage, adapts the collection

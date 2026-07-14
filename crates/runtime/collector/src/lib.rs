@@ -19,11 +19,12 @@ pub use generational::{
     AllocationPlacement, BackgroundWorkerConfig, BackgroundWorkerConfigError,
     BackgroundWorkerStartError, BackgroundWorkerTelemetry, CollectorEpoch, CollectorPhase,
     EpochCoordinator, EpochCoordinatorConfig, EpochCoordinatorConfigError, EpochCoordinatorError,
-    EpochCoordinatorTelemetry, EpochProgress, GenerationalMemoryConfig,
-    GenerationalMemoryConfigError, GenerationalMemoryTelemetry, GenerationalRuntime, HeapDomain,
-    MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase, MutatorExecutionState,
-    MutatorId, MutatorPublication, NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor,
-    PageId, PinningConfig, PinningTelemetry, RegionId,
+    EpochCoordinatorTelemetry, EpochProgress, EvacuationCandidate, EvacuationSelectionConfig,
+    EvacuationSelectionConfigError, GenerationalMemoryConfig, GenerationalMemoryConfigError,
+    GenerationalMemoryTelemetry, GenerationalRuntime, HeapDomain, MajorCollectionTelemetry,
+    MajorCollectorConfig, MajorCyclePhase, MutatorExecutionState, MutatorId, MutatorPublication,
+    NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor, PageId, PinningConfig,
+    PinningTelemetry, RegionId, RegionState, RegionTelemetry,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use ownership::{

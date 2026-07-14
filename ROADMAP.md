@@ -200,6 +200,10 @@ Package for the first release.
     precise-slot chunks with one continuation per object, skip field tracing for
     pointer-free large objects, and preserve SATB/post-scan mutation barriers in
     cooperative and worker modes.
+  - [x] Group pages into domain- and scheduler-homogeneous regions, expose exact
+    live/committed/fragmentation/pin/reference telemetry, drive shared-region
+    mark/sweep states, and select only bounded positive-benefit evacuation sets
+    that fit the protected reserve while excluding pinned and large regions.
   - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
     adaptive worker sizing/work stealing, concurrent card refinement and page
     reclamation, stack watermarks, race/stress proof, and latency measurements.

@@ -8,6 +8,7 @@ use pop_runtime_interface::{
 
 use crate::{heap::SlotValue, relocation::CollectorGeneration};
 
+use super::allocation::RegionState;
 use super::heap::{GenerationalRuntime, LargeObjectScanChunk, MajorCyclePhase};
 use super::workers::{MarkTask, scan_slots};
 
@@ -34,6 +35,8 @@ impl GenerationalRuntime {
             }
         }
         self.major.reset();
+        self.allocation
+            .transition_shared_regions(RegionState::SharedMarking);
         self.major.phase = MajorCyclePhase::Marking;
         self.major.pending = pending;
         self.major_requested = false;
@@ -354,6 +357,8 @@ impl GenerationalRuntime {
     }
 
     fn prepare_sweep(&mut self) {
+        self.allocation
+            .transition_shared_regions(RegionState::SharedSweeping);
         self.major.phase = MajorCyclePhase::Sweeping;
         self.major.sweep_cursor = None;
         self.major.sweep_complete = false;
