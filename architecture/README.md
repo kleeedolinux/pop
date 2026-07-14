@@ -55,6 +55,7 @@ compile-time evaluator, or portable optimizer.
 28. [Public library API examples](./22.5-standard-library-api-examples.md)
 29. [Public library implementation plan](./22.6-standard-library-implementation-plan.md)
 30. [Concurrency, actors, and distribution](./23-concurrency-actors-and-distribution.md)
+31. [Scheduler runtime implementation](./23.1-scheduler-runtime-implementation.md)
 
 The examples define the canonical syntax direction. The full grammar will grow
 with implementation, but `.pop`, the `pop` command, naming rules, namespace/

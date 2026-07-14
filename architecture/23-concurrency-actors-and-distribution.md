@@ -8,6 +8,10 @@ It defines Pop Lang's accepted concurrency, isolation, supervision, and
 distribution architecture. Exact library signatures may grow through normal
 API review, but they cannot weaken the semantic boundaries here.
 
+The private native scheduler design, research basis, GC transition boundaries,
+and implementation gates are detailed in
+[Scheduler runtime implementation](./23.1-scheduler-runtime-implementation.md).
+
 ## Product contract
 
 Pop Lang combines four properties:
