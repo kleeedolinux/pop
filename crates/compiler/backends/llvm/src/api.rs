@@ -16,16 +16,28 @@ use inkwell::targets::{
 
 use inkwell::targets::TargetTriple;
 
+use pop_backend_api::RuntimeProfile;
 use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
 
 use crate::lowering::PrivateModule;
 
 const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LlvmLoweringOptions {
     pub(crate) emit_comments: bool,
     pub(crate) entry_point: Option<SymbolId>,
+    pub(crate) runtime_profile: RuntimeProfile,
+}
+
+impl Default for LlvmLoweringOptions {
+    fn default() -> Self {
+        Self {
+            emit_comments: false,
+            entry_point: None,
+            runtime_profile: RuntimeProfile::BootstrapStableHandles,
+        }
+    }
 }
 
 impl LlvmLoweringOptions {
@@ -38,6 +50,12 @@ impl LlvmLoweringOptions {
     #[must_use]
     pub const fn with_entry_point(mut self, symbol: SymbolId) -> Self {
         self.entry_point = Some(symbol);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_runtime_profile(mut self, profile: RuntimeProfile) -> Self {
+        self.runtime_profile = profile;
         self
     }
 }

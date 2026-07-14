@@ -1,3 +1,4 @@
+use pop_backend_api::RuntimeProfile;
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
@@ -469,6 +470,167 @@ fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
         "native root-handle program failed: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
+    );
+}
+
+#[test]
+fn abi_two_safe_points_reload_roots_before_later_uses() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 gcSafePoint sp1 roots (v1)\n    do v3 retainRoot v1\n    do v4 releaseRoot v3\n    v5:t{integer} = const.integer Int64 0\n    return (v5)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("ABI 2 root reload MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_runtime_profile(RuntimeProfile::ProductionGenerational),
+    )
+    .expect("ABI 2 LLVM lowering");
+    module.verify().expect("valid ABI 2 LLVM module");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("%v2_gc_status = call i8 @pop_rt_gc_safe_point_v2(i32 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%v2_gc_accepted = icmp eq i8 %v2_gc_status, 1"),
+        "ABI 2 must inspect the closed publication status: {text}"
+    );
+    assert!(
+        text.contains("br i1 %v2_gc_accepted, label %v2_poll_continue, label %v2_gc_rejected"),
+        "ABI 2 rejection must leave the continuation path: {text}"
+    );
+    assert!(
+        text.contains("v2_gc_rejected:\ncall void @pop_rt_trap()\nunreachable"),
+        "ABI 2 rejection must terminate through runtime failure handling: {text}"
+    );
+    assert!(
+        text.contains("%v1_after_v2 = load i64"),
+        "root must reload into a new SSA value: {text}"
+    );
+    assert!(
+        text.contains("call i64 @pop_rt_retain_root(i64 %v1_after_v2)"),
+        "later managed use must consume the reloaded alias: {text}"
+    );
+    assert!(
+        !text.contains("call i64 @pop_rt_retain_root(i64 %v1)"),
+        "old root SSA value survived after the safe point: {text}"
+    );
+}
+
+#[test]
+fn abi_two_root_reload_flows_through_control_flow_arguments() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 gcSafePoint sp1 roots (v1)\n    branch b1 (v1)\n  b1(v3:t{array}):\n    do v4 retainRoot v3\n    do v5 releaseRoot v4\n    v6:t{integer} = const.integer Int64 0\n    return (v6)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("ABI 2 branch reload MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_runtime_profile(RuntimeProfile::ProductionGenerational),
+    )
+    .expect("ABI 2 branch LLVM lowering");
+    module.verify().expect("valid ABI 2 branch LLVM module");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("%v3 = phi i64 [ %v1_after_v2,"),
+        "control-flow merge must receive the reloaded token: {text}"
+    );
+    assert!(
+        !text.contains("%v3 = phi i64 [ %v1,"),
+        "control-flow merge retained an old root token: {text}"
+    );
+    assert!(text.contains("call i64 @pop_rt_retain_root(i64 %v3)"));
+}
+
+#[test]
+fn abi_two_root_reload_flows_through_loop_backedges() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let boolean = types.source_type("Boolean").expect("Boolean");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    branch b1 (v1)\n  b1(v2:t{array}):\n    v3:t{boolean} = const.boolean true\n    condBranch v3 b2 b3\n  b2():\n    do v4 gcSafePoint sp1 roots (v2)\n    branch b1 (v2)\n  b3():\n    do v5 retainRoot v2\n    do v6 releaseRoot v5\n    v7:t{integer} = const.integer Int64 0\n    return (v7)\n",
+        integer = integer.raw(),
+        boolean = boolean.raw(),
+        array = array.raw(),
+    ))
+    .expect("ABI 2 loop reload MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_runtime_profile(RuntimeProfile::ProductionGenerational),
+    )
+    .expect("ABI 2 loop LLVM lowering");
+    module.verify().expect("valid ABI 2 loop LLVM module");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("[ %v2_after_v4, %v4_poll_continue ]"),
+        "loop backedge must carry the latest relocated token: {text}"
+    );
+    assert!(
+        !text.contains("[ %v2, %v4_poll_continue ]"),
+        "loop backedge retained an old root token: {text}"
+    );
+}
+
+#[test]
+fn abi_two_repeated_safe_points_chain_reloaded_roots() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 gcSafePoint sp1 roots (v1)\n    do v3 gcSafePoint sp2 roots (v1)\n    do v4 retainRoot v1\n    do v5 releaseRoot v4\n    v6:t{integer} = const.integer Int64 0\n    return (v6)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+    ))
+    .expect("ABI 2 repeated safe-point MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_runtime_profile(RuntimeProfile::ProductionGenerational),
+    )
+    .expect("ABI 2 repeated safe-point LLVM lowering");
+    module
+        .verify()
+        .expect("valid ABI 2 repeated safe-point LLVM module");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("store i64 %v1_after_v2, ptr %v3_roots_0"),
+        "the second publication must spill the first reload: {text}"
+    );
+    assert!(
+        text.contains("%v1_after_v3 = load i64"),
+        "the second safe point must define a fresh reload: {text}"
+    );
+    assert!(
+        text.contains("call i64 @pop_rt_retain_root(i64 %v1_after_v3)"),
+        "later uses must consume the newest reload: {text}"
     );
 }
 
