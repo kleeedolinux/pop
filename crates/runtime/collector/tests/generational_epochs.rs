@@ -1,8 +1,12 @@
 use pop_runtime_collector::{
-    CollectorPhase, EpochCoordinator, EpochCoordinatorConfig, EpochCoordinatorConfigError,
-    EpochCoordinatorError, MutatorExecutionState, MutatorPublication,
+    BackgroundWorkerConfig, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
+    EpochCoordinatorConfigError, EpochCoordinatorError, GenerationalRuntime,
+    MajorCollectionHandshakeError, MajorCyclePhase, MutatorExecutionState, MutatorPublication,
 };
-use pop_runtime_interface::{ManagedReference, RootPublication, RootSlot, SafePointId, StackMap};
+use pop_runtime_interface::{
+    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, RootPublication,
+    RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
+};
 
 fn roots(id: u32, count: u32) -> RootPublication {
     RootPublication::new(
@@ -20,6 +24,40 @@ fn roots(id: u32, count: u32) -> RootPublication {
 
 fn publication(id: u32, roots: u32) -> MutatorPublication {
     MutatorPublication::new(&self::roots(id, roots), 128, 3, 2)
+}
+
+fn one_root(id: u32, reference: ManagedReference) -> RootPublication {
+    RootPublication::new(
+        StackMap::new(SafePointId::new(id), vec![RootSlot::new(0)]).expect("stack map"),
+        vec![Some(reference)],
+    )
+    .expect("root publication")
+}
+
+fn empty_roots(id: u32) -> RootPublication {
+    roots(id, 0)
+}
+
+fn mature_object() -> ObjectAllocationRequest {
+    ObjectAllocationRequest::new(
+        RuntimeTypeId::new(71),
+        AllocationClass::Mature,
+        ObjectMap::new(0, Vec::new()).expect("object map"),
+    )
+}
+
+fn finish_major(runtime: &mut GenerationalRuntime, roots: &mut RootPublication) {
+    for _ in 0..64 {
+        if runtime
+            .safe_point(roots)
+            .expect("major collection slice")
+            .collection()
+            .is_some()
+        {
+            return;
+        }
+    }
+    panic!("major collection did not finish within its deterministic work bound");
 }
 
 #[test]
@@ -182,4 +220,104 @@ fn epoch_ids_phases_and_telemetry_advance_deterministically() {
     assert_eq!(telemetry.acknowledgements(), 2);
     assert_eq!(telemetry.maximum_pending_acknowledgements(), 1);
     assert_eq!(telemetry.stale_epoch_polls(), 1);
+}
+
+#[test]
+fn registered_mutators_gate_major_workers_until_every_root_snapshot_is_published() {
+    let mut runtime = GenerationalRuntime::with_background_workers(
+        BackgroundWorkerConfig::new(2, 2).expect("worker configuration"),
+    )
+    .expect("background workers");
+    let first_object = runtime
+        .allocate_object(&mature_object())
+        .expect("first mature object");
+    let second_object = runtime
+        .allocate_object(&mature_object())
+        .expect("second mature object");
+    let first = runtime
+        .register_mutator(MutatorExecutionState::Managed)
+        .expect("first mutator");
+    let second = runtime
+        .register_mutator(MutatorExecutionState::Managed)
+        .expect("second mutator");
+    runtime.request_major_collection();
+
+    let epoch = runtime
+        .begin_major_collection_handshake()
+        .expect("begin major handshake");
+    assert_eq!(runtime.active_major_collection_epoch(), Some(epoch));
+    assert_eq!(runtime.pending_major_acknowledgements(), 2);
+    assert_eq!(runtime.major_phase(), MajorCyclePhase::Idle);
+
+    let progress = runtime
+        .acknowledge_major_collection_handshake(first, epoch, &one_root(20, first_object))
+        .expect("first mutator acknowledgement");
+    assert_eq!(progress.pending(), 1);
+    assert_eq!(runtime.major_phase(), MajorCyclePhase::Idle);
+    assert_eq!(
+        runtime
+            .background_worker_telemetry()
+            .expect("worker telemetry")
+            .jobs_submitted(),
+        0
+    );
+
+    let progress = runtime
+        .acknowledge_major_collection_handshake(second, epoch, &one_root(21, second_object))
+        .expect("second mutator acknowledgement");
+    assert!(progress.complete());
+    assert_eq!(runtime.active_major_collection_epoch(), None);
+    assert_eq!(runtime.major_phase(), MajorCyclePhase::Marking);
+    assert_eq!(
+        runtime
+            .mutator_publication(first)
+            .expect("first publication")
+            .managed_roots(),
+        1
+    );
+
+    finish_major(&mut runtime, &mut empty_roots(22));
+    assert!(runtime.contains(first_object));
+    assert!(runtime.contains(second_object));
+    let telemetry = runtime.epoch_coordinator_telemetry();
+    assert_eq!(telemetry.epochs_requested(), 1);
+    assert_eq!(telemetry.epochs_completed(), 1);
+    assert!(
+        runtime
+            .background_worker_telemetry()
+            .expect("worker telemetry")
+            .jobs_completed()
+            > 0
+    );
+}
+
+#[test]
+fn invalid_registered_root_fails_before_acknowledgement_or_worker_dispatch() {
+    let mut runtime = GenerationalRuntime::with_background_workers(
+        BackgroundWorkerConfig::new(2, 1).expect("worker configuration"),
+    )
+    .expect("background workers");
+    let mutator = runtime
+        .register_mutator(MutatorExecutionState::Managed)
+        .expect("managed mutator");
+    runtime.request_major_collection();
+    let epoch = runtime
+        .begin_major_collection_handshake()
+        .expect("begin major handshake");
+    let stale = one_root(23, ManagedReference::new(u64::MAX));
+
+    assert!(matches!(
+        runtime.acknowledge_major_collection_handshake(mutator, epoch, &stale),
+        Err(MajorCollectionHandshakeError::Runtime(_))
+    ));
+    assert_eq!(runtime.pending_major_acknowledgements(), 1);
+    assert_eq!(runtime.active_major_collection_epoch(), Some(epoch));
+    assert_eq!(runtime.major_phase(), MajorCyclePhase::Idle);
+    assert_eq!(
+        runtime
+            .background_worker_telemetry()
+            .expect("worker telemetry")
+            .jobs_submitted(),
+        0
+    );
 }

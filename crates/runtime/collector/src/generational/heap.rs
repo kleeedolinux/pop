@@ -1,6 +1,6 @@
 //! Generational collector state and public control surface.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pop_runtime_interface::{
     CollectionStatistics, ManagedReference, RootPublication, RuntimeFailure,
@@ -14,6 +14,9 @@ use super::allocation::{
     AllocationPlacement, PageDescriptor, PageId, RegionState,
 };
 use super::arena::ArenaState;
+use super::coordination::{
+    CollectorEpoch, EpochCoordinator, MajorCollectionHandshakeError, MutatorId,
+};
 use super::memory::{
     GenerationalMemoryConfig, GenerationalMemoryTelemetry, MemoryController, NonHeapMemoryUsage,
 };
@@ -188,6 +191,10 @@ pub struct GenerationalRuntime {
     pub(crate) arenas: ArenaState,
     pub(crate) minor_requested: BTreeSet<SchedulerId>,
     pub(crate) major_requested: bool,
+    pub(crate) coordination: EpochCoordinator,
+    pub(crate) major_epoch: Option<CollectorEpoch>,
+    pub(crate) major_root_snapshots: BTreeMap<MutatorId, RootPublication>,
+    pub(crate) mutator_schedulers: BTreeMap<MutatorId, SchedulerId>,
 }
 
 impl GenerationalRuntime {
@@ -229,6 +236,10 @@ impl GenerationalRuntime {
             arenas: ArenaState::new(),
             minor_requested: BTreeSet::new(),
             major_requested: false,
+            coordination: EpochCoordinator::default(),
+            major_epoch: None,
+            major_root_snapshots: BTreeMap::new(),
+            mutator_schedulers: BTreeMap::new(),
         }
     }
 
@@ -390,7 +401,14 @@ impl GenerationalRuntime {
         &mut self,
         publication: &RootPublication,
     ) -> Result<(), RuntimeFailure> {
+        if self.coordination.registered_mutators() != 0 || self.major_epoch.is_some() {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         self.begin_major(publication)
+    }
+
+    pub(crate) fn handshake_failure(_error: MajorCollectionHandshakeError) -> RuntimeFailure {
+        RuntimeFailure::runtime_invariant()
     }
 
     pub(crate) fn finish_major(&mut self) -> CollectionStatistics {

@@ -1,6 +1,6 @@
 //! Public epoch, mutator-state, publication, error, and telemetry vocabulary.
 
-use pop_runtime_interface::{RootPublication, SafePointId};
+use pop_runtime_interface::{RootPublication, RuntimeFailure, SafePointId};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MutatorId(pub(super) u32);
@@ -158,6 +158,25 @@ pub enum EpochCoordinatorError {
     AcknowledgementsPending(usize),
     EpochOverflow,
     MutatorIdentityOverflow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MajorCollectionHandshakeError {
+    CollectionNotRequested,
+    Coordination(EpochCoordinatorError),
+    Runtime(RuntimeFailure),
+}
+
+impl From<EpochCoordinatorError> for MajorCollectionHandshakeError {
+    fn from(error: EpochCoordinatorError) -> Self {
+        Self::Coordination(error)
+    }
+}
+
+impl From<RuntimeFailure> for MajorCollectionHandshakeError {
+    fn from(error: RuntimeFailure) -> Self {
+        Self::Runtime(error)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

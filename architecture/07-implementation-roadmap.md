@@ -102,6 +102,8 @@ not table or runtime-name lookup.
 - bounded large-object pointer scanning with pointer-free field-scan elision;
 - bounded worker-local FIFO queues with opposite-end peer stealing,
   deterministic result application, steal telemetry, and joined shutdown;
+- runtime-owned major-mark epoch activation that validates and acknowledges
+  every registered mutator root snapshot before tracing or worker dispatch;
 - scoped pin handle/object counting and deterministic long-lived-pin telemetry;
 - domain/scheduler-homogeneous regions with exact fragmentation telemetry and
   bounded reserve-admitted selective-evacuation candidate selection;
@@ -144,8 +146,8 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   implemented cooperative SATB marking and ordered lazy sweeping without a
   full-heap transition inventory, page/TLAB allocation, hard-limit
   accounting, adaptive pacing, bounded assists, logical memory telemetry, the
-  standalone typed bounded-epoch coordinator, and opt-in bounded host-worker
-  mark/card/sweep dispatch; the runtime also has distinct ownership metadata,
+  runtime-integrated typed bounded mark-epoch coordinator, and opt-in bounded
+  host-worker mark/card/sweep dispatch; the runtime also has distinct ownership metadata,
   whole-graph local-to-shared publication, ownership barrier enforcement, and
   exact-one-owner isolated-region construction/transfer/dissolution, while
   scheduler-indexed TLABs/local collection now preserve heap independence;
@@ -158,7 +160,8 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   edges before the deterministic collector-owned commit, while phase-specific
   reference resolution and mutator-concurrent evacuation remain open;
   typed scoped bump arenas provide precise external roots and bulk reclamation;
-  parallel scheduler execution and scheduler/runtime integration remain open;
+  parallel scheduler execution and native scheduler transition integration
+  remain open;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.

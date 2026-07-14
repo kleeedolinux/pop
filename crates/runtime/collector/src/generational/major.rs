@@ -23,17 +23,35 @@ impl GenerationalRuntime {
         &mut self,
         publication: &RootPublication,
     ) -> Result<(), RuntimeFailure> {
+        self.begin_major_references(publication.managed_references().collect())
+    }
+
+    pub(crate) fn validate_major_references(
+        &self,
+        references: &[ManagedReference],
+    ) -> Result<(), RuntimeFailure> {
         if self.major_cycle_active() {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        let mut pending: Vec<_> = publication.managed_references().collect();
+        if references
+            .iter()
+            .chain(self.nursery.roots.values())
+            .chain(self.nursery.pins.values())
+            .all(|reference| self.nursery.contains(*reference))
+        {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
+    }
+
+    pub(crate) fn begin_major_references(
+        &mut self,
+        mut pending: Vec<ManagedReference>,
+    ) -> Result<(), RuntimeFailure> {
+        self.validate_major_references(&pending)?;
         pending.extend(self.nursery.roots.values().copied());
         pending.extend(self.nursery.pins.values().copied());
-        for reference in &pending {
-            if !self.nursery.contains(*reference) {
-                return Err(RuntimeFailure::runtime_invariant());
-            }
-        }
         self.major.reset();
         self.allocation
             .transition_shared_regions(RegionState::SharedMarking);

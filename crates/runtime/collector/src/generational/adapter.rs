@@ -312,8 +312,9 @@ impl RuntimeAdapter for GenerationalRuntime {
         roots: &mut RootPublication,
     ) -> Result<SafePointOutcome, RuntimeFailure> {
         self.pinning.advance_safe_point();
-        let servicing_minor =
-            self.minor_requested.contains(&self.scheduler) && !self.major_cycle_active();
+        let servicing_minor = self.minor_requested.contains(&self.scheduler)
+            && !self.major_cycle_active()
+            && self.active_major_collection_epoch().is_none();
         let identities_before: BTreeMap<_, _> = if servicing_minor {
             self.nursery
                 .objects
@@ -338,7 +339,14 @@ impl RuntimeAdapter for GenerationalRuntime {
             self.update_memory_target();
         }
         if self.major_requested && !self.major_cycle_active() {
-            self.begin_major(roots)?;
+            if self.has_registered_mutators() {
+                if self.active_major_collection_epoch().is_none() {
+                    self.begin_major_collection_handshake()
+                        .map_err(Self::handshake_failure)?;
+                }
+            } else {
+                self.begin_major(roots)?;
+            }
         }
         if let Some(statistics) = self.advance_major()? {
             self.update_memory_target();

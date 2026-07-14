@@ -21,7 +21,7 @@ pub use allocation::{
 pub use coordination::{
     CollectorEpoch, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
     EpochCoordinatorConfigError, EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress,
-    MutatorExecutionState, MutatorId, MutatorPublication,
+    MajorCollectionHandshakeError, MutatorExecutionState, MutatorId, MutatorPublication,
 };
 pub use evacuation::{
     EvacuationCandidate, EvacuationSelectionConfig, EvacuationSelectionConfigError,

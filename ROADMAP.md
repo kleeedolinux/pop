@@ -192,6 +192,11 @@ Package for the first release.
   - [x] Add typed mutator registration and bounded epoch handshakes with exact
     once-only acknowledgements, published root/TLAB/barrier state, explicit
     foreign-execution states, and deterministic transition telemetry.
+  - [x] Integrate the marking epoch with the generational runtime: registered
+    mutators now gate major-cycle activation until every precise root snapshot
+    is validated and acknowledged, no worker work is dispatched before that
+    boundary, and nursery relocation remains deferred while snapshots retain
+    physical tokens.
   - [x] Add opt-in persistent host workers with bounded owner-FIFO queues,
     opposite-end peer stealing, parallel exact object-map and collecting-safe-
     point remembered-card scans, deterministic result application, sweep
@@ -216,7 +221,7 @@ Package for the first release.
     collector-owned and atomic.
     Phase-specific resolution and mutator-concurrent evacuation remain
     production work.
-  - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
+  - [ ] Complete native scheduler/runtime transition integration, then add
     adaptive worker sizing and stealing policy, concurrent card refinement and
     page reclamation, stack watermarks, race/stress proof, and latency
     measurements.

@@ -234,6 +234,10 @@ impl AllocationInfrastructure {
         self.metrics
     }
 
+    pub(crate) fn tlab_top_bytes(&self, scheduler: SchedulerId) -> usize {
+        self.tlabs.get(&scheduler).map_or(0, |tlab| tlab.cursor)
+    }
+
     pub(crate) fn remove(&mut self, reference: ManagedReference) {
         self.placements.remove(&reference);
         self.reclaim_empty_pages();

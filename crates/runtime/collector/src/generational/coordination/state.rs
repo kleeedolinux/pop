@@ -243,6 +243,11 @@ impl EpochCoordinator {
     }
 
     #[must_use]
+    pub fn registered_mutators(&self) -> usize {
+        self.mutators.len()
+    }
+
+    #[must_use]
     pub fn active_phase(&self) -> Option<CollectorPhase> {
         self.active.map(|active| active.phase)
     }

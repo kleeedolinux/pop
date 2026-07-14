@@ -17,7 +17,12 @@ complete scheduler-local graph, prepares shared placements transactionally,
 then changes ownership; shared-to-local stores fail before any SATB/card or heap
 mutation. The bounded coordinator registers managed and foreign execution
 states, collects exact once-only root/TLAB/barrier publications, and completes
-protocol epochs without heap tracing in the handshake. Persistent named worker
+protocol epochs without heap tracing in the handshake. The generational runtime
+uses that coordinator to hold major marking idle until every registered managed
+mutator has published a validated precise-root snapshot; only the final
+acknowledgement enables SATB marking and makes work eligible for dispatch.
+Nursery relocation remains deferred while such a snapshot contains physical
+tokens. Persistent named worker
 threads receive immutable precise-slot snapshots through bounded per-worker
 queues, keep owner work FIFO, steal peer work from the opposite end, scan exact
 object maps and remembered cards in parallel, and return sequence-ordered
@@ -99,11 +104,12 @@ These are static Rust partitions behind the same PLRI dependency, not runtime
 plugins or dynamic dispatch.
 
 The `generational::coordination` partition separates typed epoch/publication
-vocabulary from its deterministic state machine. Detached and handle-only
-mutators acknowledge automatically; managed mutators publish precise state;
-bounded foreign transitions remain pending until they enter a safe state. This
-is protocol infrastructure, not a claim that background collection or native
-scheduler handshakes are complete.
+vocabulary, its deterministic state machine, and runtime integration. Detached
+and handle-only mutators acknowledge automatically; managed mutators publish
+precise state; bounded foreign transitions remain pending until they enter a
+safe state. Registered mutators gate the major mark snapshot and worker
+eligibility. This remains host conformance infrastructure, not a claim that
+background collection or native scheduler handshakes are complete.
 
 The `generational::workers` partition owns persistent host threads, bounded
 owner-FIFO queues with opposite-end peer stealing, immutable bounded mark-slot
