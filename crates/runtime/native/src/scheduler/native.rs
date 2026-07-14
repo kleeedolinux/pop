@@ -1626,6 +1626,9 @@ impl SharedScheduler {
             return false;
         }
         record.scheduler = destination;
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.scheduler_migrations =
+            telemetry.telemetry.scheduler_migrations.saturating_add(1);
         true
     }
 

@@ -1399,6 +1399,7 @@ fn idle_workers_steal_ready_work_from_a_blocked_peer_queue() {
 
     let telemetry = scheduler.telemetry();
     assert!(telemetry.tasks_stolen() >= 1);
+    assert_eq!(telemetry.scheduler_migrations(), telemetry.tasks_stolen());
     assert!(telemetry.worker_threads_used() >= 2);
     assert_eq!(telemetry.affine_tasks_stolen(), 0);
     assert!(telemetry.steal_searches() >= 1);
@@ -1552,6 +1553,7 @@ fn gc_transition_hook_can_delay_migration_without_losing_ready_work() {
     );
     assert_eq!(*completions.lock().expect("completion count"), 0);
     assert!(scheduler.telemetry().gc_delayed_migrations() > 0);
+    assert_eq!(scheduler.telemetry().scheduler_migrations(), 0);
 
     let (open, changed) = &*gate;
     *open.lock().expect("probe gate") = true;
