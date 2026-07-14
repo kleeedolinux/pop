@@ -448,6 +448,69 @@ fn ordinary_pop_integer_sequence_aggregates_are_checked_and_explicit() {
 }
 
 #[test]
+fn ordinary_pop_sequence_projection_and_composition_are_direct() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function projectedResult(): Int\n\
+                 local values: {Int} = {3, 1, 2}\n\
+                 local empty: {Int} = {}\n\
+                 local selected = findOr(values, function(value: Int): Boolean\n\
+                     return value % 2 == 0\n\
+                 end, 9)\n\
+                 local position = indexOr(values, function(value: Int): Boolean\n\
+                     return value == 2\n\
+                 end, -1)\n\
+                 local projectedSum = sumBy(values, function(value: Int): Int\n\
+                     return value * 2\n\
+                 end)\n\
+                 local projectedProduct = productBy(values, function(value: Int): Int\n\
+                     return value\n\
+                 end)\n\
+                 local least = minByOr(values, function(value: Int): Int\n\
+                     return value\n\
+                 end, 9)\n\
+                 local greatest = maxByOr(values, function(value: Int): Int\n\
+                     return value\n\
+                 end, 9)\n\
+                 local appended = collect(append(values, 9))\n\
+                 local prepended = collect(prepend(values, 8))\n\
+                 local states = scan(values, 10, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 if findOr(empty, function(value: Int): Boolean\n\
+                     return true\n\
+                 end, 7) ~= 7 or indexOr(empty, function(value: Int): Boolean\n\
+                     return true\n\
+                 end, -4) ~= -4 then\n\
+                     return -1\n\
+                 end\n\
+                 return selected + position + projectedSum + projectedProduct + least + greatest + List.get(appended, 4) + List.get(prepended, 1) + sum(states)\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("projectedResult")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified projected Sequence MIR")
+            .call(function, &[])
+            .expect("Sequence projection and composition"),
+        vec![int(87)]
+    );
+}
+
+#[test]
 fn ordinary_pop_lazy_sequence_bounds_and_composition_preserve_state() {
     let (mir, types) = executable_modules(&[
         (

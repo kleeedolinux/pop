@@ -245,6 +245,15 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
         "product",
         "minOr",
         "maxOr",
+        "findOr",
+        "indexOr",
+        "sumBy",
+        "productBy",
+        "minByOr",
+        "maxByOr",
+        "append",
+        "prepend",
+        "scan",
     ] {
         let function = standard_hir
             .functions()
@@ -275,7 +284,7 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
     let documentation = standard.checked_documentation();
     assert_eq!(
         documentation.len(),
-        29,
+        38,
         "every portable public API is documented"
     );
     let mut examples = Vec::new();
@@ -489,6 +498,27 @@ fn foundation_sequence_rejects_invalid_callbacks() {
          using Pop.Sequence\n\
          public function broken(values: {String}): Int\n\
              return sum(values)\n\
+         end\n",
+        "namespace Pop.Sequence.Contribution\n\
+         using Pop.Sequence\n\
+         public function broken(values: {Int}): Int\n\
+             return findOr(values, function(value: Int): Int\n\
+                 return value\n\
+             end, 0)\n\
+         end\n",
+        "namespace Pop.Sequence.Contribution\n\
+         using Pop.Sequence\n\
+         public function broken(values: {Int}): Int\n\
+             return sumBy(values, function(value: Int): Boolean\n\
+                 return value > 0\n\
+             end)\n\
+         end\n",
+        "namespace Pop.Sequence.Contribution\n\
+         using Pop.Sequence\n\
+         public function broken(values: {Int}): Iterator<Int>\n\
+             return scan(values, 0, function(state: String, value: Int): Int\n\
+                 return value\n\
+             end)\n\
          end\n",
     ] {
         let result = analyze_foundation(

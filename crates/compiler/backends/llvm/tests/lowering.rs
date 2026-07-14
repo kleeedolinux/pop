@@ -1051,6 +1051,47 @@ fn emitted_llvm_executes_integer_sequence_aggregates() {
 }
 
 #[test]
+fn emitted_llvm_executes_sequence_projection_and_composition() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private function main(): Int\n\
+                 local values: {Int} = {3, 1, 2}\n\
+                 local found = findOr(values, function(value: Int): Boolean\n\
+                     return value == 2\n\
+                 end, 9)\n\
+                 local position = indexOr(values, function(value: Int): Boolean\n\
+                     return value == 2\n\
+                 end, -1)\n\
+                 local total = sumBy(values, function(value: Int): Int\n\
+                     return value * 2\n\
+                 end)\n\
+                 local appended = collect(append(values, 9))\n\
+                 local prepended = collect(prepend(values, 8))\n\
+                 local states = scan(values, 10, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 return found + position + total + List.get(appended, 4) + List.get(prepended, 1) + sum(states)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-projection-composition");
+    assert_eq!(
+        result.status.code(),
+        Some(77),
+        "native executable misexecuted projected Sequence operations: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
 fn emitted_llvm_preserves_integer_sequence_sum_overflow() {
     let module = native_modules(&[
         (
