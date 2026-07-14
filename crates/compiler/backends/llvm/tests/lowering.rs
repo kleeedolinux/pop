@@ -203,6 +203,59 @@ fn async_await_lowers_to_native_suspend_boundary() {
 }
 
 #[test]
+fn qualified_task_and_tcp_standard_calls_lower_to_native_adapters() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/net.pop",
+        "namespace Main\n\
+         public function useStandard(): UInt64\n\
+             local listener = Net.Tcp.listenLoopback(0, 16, true)\n\
+             local cancelled = Task.CancelSource.cancel(listener)\n\
+             local requested = Task.CancelSource.cancellationRequested(listener)\n\
+             local received = Net.Tcp.receiveRaw(listener, listener, listener)\n\
+             local sent = Net.Tcp.sendAllRaw(listener, listener, listener)\n\
+             local closed = Net.Tcp.close(listener)\n\
+             return listener\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let text = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM standard lowering")
+    .to_string();
+
+    assert!(text.contains("@pop_std_net_tcp_listen_loopback"), "{text}");
+    assert!(
+        text.contains("@pop_std_task_cancel_source_cancel"),
+        "{text}"
+    );
+    assert!(
+        text.contains("@pop_std_task_cancel_source_cancellation_requested"),
+        "{text}"
+    );
+    assert!(text.contains("@pop_std_net_tcp_receive_raw"), "{text}");
+    assert!(text.contains("@pop_std_net_tcp_send_all_raw"), "{text}");
+    assert!(text.contains("@pop_std_net_tcp_close"), "{text}");
+}
+
+#[test]
 fn optional_scalar_collection_reads_execute_without_a_zero_sentinel() {
     let source = SourceFile::new(
         FileId::from_raw(0),

@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use pop_library_bridge::{NativeExport, poplib};
+use pop_library_bridge::poplib;
 
 /// Prints one Pop `Int` followed by a newline for the native bootstrap host.
 ///
@@ -47,8 +47,3 @@ pub extern "C" fn pop_std_print_string(reference: u64) {
     };
     print_string(value);
 }
-
-pub const NATIVE_EXPORTS: &[NativeExport] = &[
-    POP_STD_PRINT_INT_POPLIB_EXPORT,
-    POP_STD_PRINT_STRING_POPLIB_EXPORT,
-];

@@ -3077,20 +3077,36 @@ fn verify_callable_instruction(
             arguments,
             ..
         } => {
-            let parameter = match function.raw() {
-                0 => arena.source_type("Int"),
-                1 => arena.source_type("String"),
+            let (parameters, results) = match function.raw() {
+                0 => (type_ids(arena, &["Int"]), Some(Vec::new())),
+                1 => (type_ids(arena, &["String"]), Some(Vec::new())),
+                2 => (type_ids(arena, &["UInt64"]), type_ids(arena, &["Boolean"])),
+                3 => (type_ids(arena, &["UInt64"]), type_ids(arena, &["Boolean"])),
+                4 => (
+                    type_ids(arena, &["Int", "Int", "Boolean"]),
+                    type_ids(arena, &["UInt64"]),
+                ),
+                5 => (type_ids(arena, &["UInt64"]), type_ids(arena, &["UInt64"])),
+                6 => (
+                    type_ids(arena, &["UInt64", "UInt64", "UInt64"]),
+                    type_ids(arena, &["UInt64"]),
+                ),
+                7 => (
+                    type_ids(arena, &["UInt64", "UInt64", "UInt64"]),
+                    type_ids(arena, &["Boolean"]),
+                ),
+                8 => (type_ids(arena, &["UInt64"]), type_ids(arena, &["Boolean"])),
                 _ => {
                     errors.push(MirVerificationError::UnknownStandardFunction(*function));
-                    None
+                    return true;
                 }
             };
-            if let Some(parameter) = parameter {
+            if let (Some(parameters), Some(results)) = (parameters, results) {
                 verify_call_signature(
                     instruction,
                     arguments,
-                    &[parameter],
-                    &[],
+                    &parameters,
+                    &results,
                     false,
                     arena,
                     values,
@@ -3190,6 +3206,10 @@ fn verify_callable_instruction(
         _ => return false,
     }
     true
+}
+
+fn type_ids(arena: &TypeArena, names: &[&str]) -> Option<Vec<TypeId>> {
+    names.iter().map(|name| arena.source_type(name)).collect()
 }
 
 fn verify_indirect_call(

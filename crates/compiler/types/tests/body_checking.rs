@@ -1239,6 +1239,29 @@ fn async_defer_is_valid_only_inside_async_bodies() {
 }
 
 #[test]
+fn qualified_task_and_tcp_standard_functions_type_check_without_user_bindings() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function useStandard(): UInt64\n\
+             local listener = Net.Tcp.listenLoopback(0, 16, true)\n\
+             local cancelled = Task.CancelSource.cancel(listener)\n\
+             local requested = Task.CancelSource.cancellationRequested(listener)\n\
+             local received = Net.Tcp.receiveRaw(listener, listener, listener)\n\
+             local sent = Net.Tcp.sendAllRaw(listener, listener, listener)\n\
+             local closed = Net.Tcp.close(listener)\n\
+             return listener\n\
+         end\n",
+        "useStandard",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
 fn captured_mutation_uses_one_typed_cell_and_shadowing_does_not_capture() {
     let fixture = check_function(
         "namespace Example\n\

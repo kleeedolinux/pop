@@ -333,27 +333,57 @@ pub(crate) fn lower_instruction(
             function,
             arguments,
             ..
-        } => {
-            if arguments.len() != 1 {
+        } => match function.raw() {
+            0 if arguments.len() == 1 => {
+                format!("call void @pop_std_print_int(i64 %v{})", arguments[0].raw())
+            }
+            1 if arguments.len() == 1 => {
+                format!(
+                    "call void @pop_std_print_string(i64 %v{})",
+                    arguments[0].raw()
+                )
+            }
+            2 if arguments.len() == 1 => format!(
+                "{result} = call i1 @pop_std_task_cancel_source_cancel(i64 %v{})",
+                arguments[0].raw()
+            ),
+            3 if arguments.len() == 1 => format!(
+                "{result} = call i1 @pop_std_task_cancel_source_cancellation_requested(i64 %v{})",
+                arguments[0].raw()
+            ),
+            4 if arguments.len() == 3 => format!(
+                "{result} = call i64 @pop_std_net_tcp_listen_loopback(i64 %v{}, i64 %v{}, i1 %v{})",
+                arguments[0].raw(),
+                arguments[1].raw(),
+                arguments[2].raw()
+            ),
+            5 if arguments.len() == 1 => format!(
+                "{result} = call i64 @pop_std_net_tcp_accept(i64 %v{})",
+                arguments[0].raw()
+            ),
+            6 if arguments.len() == 3 => format!(
+                "{result} = call i64 @pop_std_net_tcp_receive_raw(i64 %v{}, i64 %v{}, i64 %v{})",
+                arguments[0].raw(),
+                arguments[1].raw(),
+                arguments[2].raw()
+            ),
+            7 if arguments.len() == 3 => format!(
+                "{result} = call i1 @pop_std_net_tcp_send_all_raw(i64 %v{}, i64 %v{}, i64 %v{})",
+                arguments[0].raw(),
+                arguments[1].raw(),
+                arguments[2].raw()
+            ),
+            8 if arguments.len() == 1 => format!(
+                "{result} = call i1 @pop_std_net_tcp_close(i64 %v{})",
+                arguments[0].raw()
+            ),
+            _ => {
                 return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
                 });
             }
-            match function.raw() {
-                0 => format!("call void @pop_std_print_int(i64 %v{})", arguments[0].raw()),
-                1 => format!(
-                    "call void @pop_std_print_string(i64 %v{})",
-                    arguments[0].raw()
-                ),
-                _ => {
-                    return Err(LlvmLoweringError::UnsupportedInstruction {
-                        function: FunctionId::from_raw(u32::MAX),
-                        value: instruction.result(),
-                    });
-                }
-            }
-        }
+        },
         MirInstructionKind::Await { task } => lower_await(
             &result,
             instruction.result(),
