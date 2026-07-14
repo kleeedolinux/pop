@@ -38,8 +38,9 @@ cargo bench -p pop-runtime-native --bench scheduler -- \
   --profile local-declared --workload all --workers standard
 ```
 
-Its `pop-scheduler-benchmark-v1` records label the target, scheduler stage,
-workload, worker profile, logical work, initial dispatch latency scope, and
-typed telemetry. The default run is local optimization evidence, not a
-portable performance claim or a substitute for the pending GC-coupled and
-operating-system resource profiles.
+Its `pop-scheduler-benchmark-v2` records label the target, scheduler stage,
+workload, worker profile, logical work, initial dispatch latency scope, queue
+depths and high-water marks, steal outcomes, worker lifecycle, and other typed
+telemetry. The default run is local optimization evidence, not a portable
+performance claim or a substitute for the pending GC-coupled and operating-
+system resource profiles.

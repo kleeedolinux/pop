@@ -626,6 +626,11 @@ impl DeterministicScheduler {
 
     fn refresh_counts(&mut self) {
         self.telemetry.retained_tasks = self.tasks.len();
+        self.telemetry.local_queue_depth = self.ready.len();
+        self.telemetry.maximum_local_queue_depth = self
+            .telemetry
+            .maximum_local_queue_depth
+            .max(self.ready.len());
         self.telemetry.ready_tasks = 0;
         self.telemetry.running_tasks = 0;
         self.telemetry.suspended_tasks = 0;

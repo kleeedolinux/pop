@@ -270,6 +270,9 @@ Post-baseline library work has begun without widening the release foundation:
       checksum-validated synchronized-reference benchmark for task control,
       ready polls, injection, hot-queue stealing, suspended frames, timers,
       external events, and blocking saturation.
+    - [x] Add exact current/high-water queue and blocking depth, bounded steal
+      search/outcome/batch, and worker lifecycle telemetry, including a final
+      shutdown snapshot and the `pop-scheduler-benchmark-v2` schema.
     - [ ] Bind scheduler transition events to native mutator registration,
       precise suspended-frame root publication, collector epochs, and the ABI 2
       writable-root transition before claiming production GC integration.
@@ -277,6 +280,9 @@ Post-baseline library work has begun without widening the release foundation:
       ping-pong latency, continuous I/O fairness, steal-storm and million-frame
       memory evidence, operating-system resource counters, and scheduler/GC
       interaction after the production collector binding exists.
+    - [ ] Add work-budget exhaustion, event/timer poll and delivery-delay,
+      blocking shutdown-delay, ready-to-run percentile, and scheduler migration
+      telemetry before treating observability as complete.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.

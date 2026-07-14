@@ -499,6 +499,16 @@ impl NativeScheduler {
         self.shutdown_threads()
     }
 
+    /// Stops and joins all workers, returning the final scheduler telemetry.
+    ///
+    /// # Errors
+    ///
+    /// Reports a worker that terminated outside the scheduler panic boundary.
+    pub fn shutdown_with_telemetry(mut self) -> Result<SchedulerTelemetry, SchedulerError> {
+        self.shutdown_threads()?;
+        Ok(self.shared.telemetry())
+    }
+
     fn shutdown_threads(&mut self) -> Result<(), SchedulerError> {
         let mut failure = None;
         self.event_driver.shutdown();
@@ -580,6 +590,10 @@ impl BlockingPool {
             let mut telemetry = lock(&scheduler.telemetry);
             telemetry.telemetry.blocking_submissions =
                 telemetry.telemetry.blocking_submissions.saturating_add(1);
+            let depth = telemetry.telemetry.blocking_queue_depth.saturating_add(1);
+            telemetry.telemetry.blocking_queue_depth = depth;
+            telemetry.telemetry.maximum_blocking_queue_depth =
+                telemetry.telemetry.maximum_blocking_queue_depth.max(depth);
         }
         drop(state);
         self.available.notify_one();
@@ -834,6 +848,7 @@ impl SharedScheduler {
             }),
         );
         injection.push_back(id);
+        self.record_injection_enqueued();
         self.record_scheduled(&registry);
         drop(registry);
         self.increment_ready();
@@ -873,6 +888,7 @@ impl SharedScheduler {
             }),
         );
         queue.push_back(id);
+        self.record_local_enqueued(1);
         self.record_scheduled(&registry);
         drop(registry);
         self.increment_ready();
@@ -926,6 +942,7 @@ impl SharedScheduler {
             queue.push_back(id);
             ids.push(id);
         }
+        self.record_local_enqueued(ids.len());
         {
             let mut telemetry = lock(&self.telemetry);
             telemetry.telemetry.tasks_scheduled = telemetry
@@ -985,10 +1002,11 @@ impl SharedScheduler {
                 })?;
                 record.state = InternalTaskState::Ready;
                 queue.push_back(id);
+                self.record_local_enqueued(1);
                 drop(record);
-                drop(queue);
                 self.record_resumed();
                 self.increment_ready();
+                drop(queue);
                 self.notify_work();
             } else {
                 let mut telemetry = lock(&self.telemetry);
@@ -1046,10 +1064,11 @@ impl SharedScheduler {
                 })?;
                 record.state = InternalTaskState::Ready;
                 queue.push_back(id);
+                self.record_local_enqueued(1);
                 drop(record);
-                drop(queue);
                 self.record_resumed();
                 self.increment_ready();
+                drop(queue);
                 self.notify_work();
             }
         }
@@ -1140,6 +1159,7 @@ impl SharedScheduler {
                 worker,
                 scheduler,
             })?;
+            self.record_worker_parked();
             drop(
                 self.queues
                     .work_available
@@ -1150,6 +1170,7 @@ impl SharedScheduler {
                 worker,
                 scheduler,
             })?;
+            self.record_worker_unparked();
         }
     }
 
@@ -1163,6 +1184,7 @@ impl SharedScheduler {
             });
         }
         if let Some(id) = lock(&self.queues.local[index]).pop_front() {
+            self.record_local_dequeued(1);
             return Some(QueuedTask {
                 id,
                 source: WorkSource::Local,
@@ -1190,7 +1212,11 @@ impl SharedScheduler {
             })
         };
         if let Some(position) = owner_position {
-            return injection.remove(position);
+            let id = injection.remove(position);
+            if id.is_some() {
+                self.record_injection_dequeued();
+            }
+            return id;
         }
         if !self.migration_enabled {
             return None;
@@ -1198,6 +1224,7 @@ impl SharedScheduler {
         let id = injection.pop_front()?;
         drop(injection);
         if self.assign_scheduler(id, index) {
+            self.record_injection_dequeued();
             Some(id)
         } else {
             lock(&self.queues.injection).push_back(id);
@@ -1209,26 +1236,14 @@ impl SharedScheduler {
         if !self.migration_enabled {
             return None;
         }
-        if self.submissions_active.load(Ordering::Acquire) != 0 {
-            return None;
-        }
-        let maximum_searchers = self.configuration.worker_count.div_ceil(2);
-        let entered = self
-            .searchers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |searchers| {
-                (searchers < maximum_searchers).then_some(searchers + 1)
-            })
-            .is_ok();
-        if !entered {
-            return None;
-        }
-        if self.submissions_active.load(Ordering::Acquire) != 0 {
-            self.searchers.fetch_sub(1, Ordering::AcqRel);
+        if !self.enter_steal_search() {
             return None;
         }
         let mut result = None;
+        let mut victims_examined = 0;
         for offset in 1..self.configuration.scheduler_count {
             let victim = (thief + offset) % self.configuration.scheduler_count;
+            victims_examined += 1;
             let Some(mut victim_queue) = try_lock(&self.queues.local[victim]) else {
                 continue;
             };
@@ -1293,6 +1308,7 @@ impl SharedScheduler {
                     .tasks_stolen
                     .saturating_add(u64::try_from(batch).unwrap_or(u64::MAX));
             }
+            self.record_local_dequeued(1);
             result = Some(QueuedTask {
                 id: first,
                 source: WorkSource::Stolen(batch),
@@ -1300,7 +1316,37 @@ impl SharedScheduler {
             break;
         }
         self.searchers.fetch_sub(1, Ordering::AcqRel);
+        self.record_steal_search(
+            victims_examined,
+            result.as_ref().map(|queued| match queued.source {
+                WorkSource::Stolen(batch) => batch,
+                WorkSource::Local | WorkSource::Injection => 0,
+            }),
+        );
         result
+    }
+
+    fn enter_steal_search(&self) -> bool {
+        if self.submissions_active.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        let maximum_searchers = self.configuration.worker_count.div_ceil(2);
+        let entered = self
+            .searchers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |searchers| {
+                (searchers < maximum_searchers).then_some(searchers + 1)
+            })
+            .is_ok();
+        if !entered {
+            return false;
+        }
+        if self.submissions_active.load(Ordering::Acquire) == 0 {
+            true
+        } else {
+            self.searchers.fetch_sub(1, Ordering::AcqRel);
+            self.record_steal_search(0, None);
+            false
+        }
     }
 
     fn assign_scheduler(&self, id: SchedulerTaskId, index: usize) -> bool {
@@ -1447,6 +1493,7 @@ impl SharedScheduler {
                 .scheduler_index(scheduler)
                 .expect("task scheduler remains configured");
             lock(&self.queues.local[index]).push_back(id);
+            self.record_local_enqueued(1);
         }
         if enqueue {
             self.notify_work();
@@ -1512,6 +1559,74 @@ impl SharedScheduler {
         // required because a single arbitrary wake can select a worker that
         // cannot run scheduler-affine work while its owner remains parked.
         self.queues.work_available.notify_all();
+    }
+
+    fn record_local_enqueued(&self, count: usize) {
+        let mut telemetry = lock(&self.telemetry);
+        let depth = telemetry.telemetry.local_queue_depth.saturating_add(count);
+        telemetry.telemetry.local_queue_depth = depth;
+        telemetry.telemetry.maximum_local_queue_depth =
+            telemetry.telemetry.maximum_local_queue_depth.max(depth);
+    }
+
+    fn record_local_dequeued(&self, count: usize) {
+        let mut telemetry = lock(&self.telemetry);
+        debug_assert!(telemetry.telemetry.local_queue_depth >= count);
+        telemetry.telemetry.local_queue_depth =
+            telemetry.telemetry.local_queue_depth.saturating_sub(count);
+    }
+
+    fn record_injection_enqueued(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        let depth = telemetry.telemetry.injection_queue_depth.saturating_add(1);
+        telemetry.telemetry.injection_queue_depth = depth;
+        telemetry.telemetry.maximum_injection_queue_depth =
+            telemetry.telemetry.maximum_injection_queue_depth.max(depth);
+    }
+
+    fn record_injection_dequeued(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        debug_assert!(telemetry.telemetry.injection_queue_depth > 0);
+        telemetry.telemetry.injection_queue_depth =
+            telemetry.telemetry.injection_queue_depth.saturating_sub(1);
+    }
+
+    fn record_steal_search(&self, victims_examined: usize, stolen_batch: Option<usize>) {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.steal_searches = telemetry.telemetry.steal_searches.saturating_add(1);
+        telemetry.telemetry.steal_victims_examined = telemetry
+            .telemetry
+            .steal_victims_examined
+            .saturating_add(u64::try_from(victims_examined).unwrap_or(u64::MAX));
+        if let Some(batch) = stolen_batch {
+            telemetry.telemetry.steal_successes =
+                telemetry.telemetry.steal_successes.saturating_add(1);
+            telemetry.telemetry.maximum_stolen_batch =
+                telemetry.telemetry.maximum_stolen_batch.max(batch);
+        } else {
+            telemetry.telemetry.steal_failures =
+                telemetry.telemetry.steal_failures.saturating_add(1);
+        }
+    }
+
+    fn record_worker_started(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.worker_starts = telemetry.telemetry.worker_starts.saturating_add(1);
+    }
+
+    fn record_worker_parked(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.worker_parks = telemetry.telemetry.worker_parks.saturating_add(1);
+    }
+
+    fn record_worker_unparked(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.worker_unparks = telemetry.telemetry.worker_unparks.saturating_add(1);
+    }
+
+    fn record_worker_stopped(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.worker_stops = telemetry.telemetry.worker_stops.saturating_add(1);
     }
 
     fn record_scheduled(&self, registry: &Registry) {
@@ -1592,6 +1707,7 @@ fn worker_loop(
         worker,
         scheduler,
     })?;
+    shared.record_worker_started();
     let work_result = (|| {
         let mut local_polls = 0;
         while let Some(queued) = shared.take_work(worker, scheduler, local_polls)? {
@@ -1612,11 +1728,9 @@ fn worker_loop(
         }
         Ok(())
     })();
-    let stop_result =
-        shared.require_runtime_transition(SchedulerRuntimeTransition::WorkerStopped {
-            worker,
-            scheduler,
-        });
+    let stop_result = shared
+        .require_runtime_transition(SchedulerRuntimeTransition::WorkerStopped { worker, scheduler })
+        .map(|()| shared.record_worker_stopped());
     work_result.and(stop_result)
 }
 
@@ -1633,6 +1747,21 @@ fn blocking_worker_loop(pool: &BlockingPool, scheduler: &SharedScheduler) {
             return;
         };
         state.active = state.active.saturating_add(1);
+        {
+            let mut telemetry = lock(&scheduler.telemetry);
+            debug_assert!(telemetry.telemetry.blocking_queue_depth > 0);
+            telemetry.telemetry.blocking_queue_depth =
+                telemetry.telemetry.blocking_queue_depth.saturating_sub(1);
+            let active = telemetry
+                .telemetry
+                .active_blocking_operations
+                .saturating_add(1);
+            telemetry.telemetry.active_blocking_operations = active;
+            telemetry.telemetry.maximum_active_blocking_operations = telemetry
+                .telemetry
+                .maximum_active_blocking_operations
+                .max(active);
+        }
         drop(state);
 
         let panicked = catch_unwind(AssertUnwindSafe(|| job.operation.run())).is_err();
@@ -1644,6 +1773,11 @@ fn blocking_worker_loop(pool: &BlockingPool, scheduler: &SharedScheduler) {
             telemetry.telemetry.blocking_panics =
                 telemetry.telemetry.blocking_panics.saturating_add(1);
         }
+        debug_assert!(telemetry.telemetry.active_blocking_operations > 0);
+        telemetry.telemetry.active_blocking_operations = telemetry
+            .telemetry
+            .active_blocking_operations
+            .saturating_sub(1);
         drop(telemetry);
         let mut state = lock(&pool.state);
         state.active = state.active.saturating_sub(1);

@@ -12,7 +12,7 @@ use pop_runtime_native::{
 };
 
 const WAIT_TIMEOUT: Duration = Duration::from_mins(5);
-pub const SCHEDULER_BENCHMARK_SCHEMA: &str = "pop-scheduler-benchmark-v1";
+pub const SCHEDULER_BENCHMARK_SCHEMA: &str = "pop-scheduler-benchmark-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerBenchmarkConfiguration {
@@ -123,6 +123,23 @@ pub struct SchedulerWorkloadCounters {
     pub blocking_submissions: u64,
     pub timers_delivered: u64,
     pub external_events_delivered: u64,
+    pub local_queue_depth: usize,
+    pub maximum_local_queue_depth: usize,
+    pub injection_queue_depth: usize,
+    pub maximum_injection_queue_depth: usize,
+    pub blocking_queue_depth: usize,
+    pub maximum_blocking_queue_depth: usize,
+    pub active_blocking_operations: usize,
+    pub maximum_active_blocking_operations: usize,
+    pub steal_searches: u64,
+    pub steal_victims_examined: u64,
+    pub steal_successes: u64,
+    pub steal_failures: u64,
+    pub maximum_stolen_batch: usize,
+    pub worker_starts: u64,
+    pub worker_parks: u64,
+    pub worker_unparks: u64,
+    pub worker_stops: u64,
     pub stale_ready_entries: u64,
     pub first_poll_latency_p50_nanoseconds: u64,
     pub first_poll_latency_p95_nanoseconds: u64,
@@ -327,11 +344,11 @@ pub fn run_scheduler_workload(
         state.scheduler.release_terminal_task(task)?;
     }
     let latencies = state.latencies.percentiles();
-    state.scheduler.shutdown()?;
+    let final_telemetry = state.scheduler.shutdown_with_telemetry()?;
     Ok(counters(
         workload,
         configuration,
-        telemetry,
+        &final_telemetry,
         checksum,
         latencies,
     ))
@@ -518,7 +535,7 @@ fn expected_checksum(tasks: usize, polls: usize) -> Result<u64, SchedulerBenchma
 fn counters(
     workload: SchedulerWorkload,
     configuration: SchedulerBenchmarkConfiguration,
-    telemetry: SchedulerTelemetry,
+    telemetry: &SchedulerTelemetry,
     checksum: u64,
     latencies: (u64, u64, u64, u64, u64),
 ) -> SchedulerWorkloadCounters {
@@ -536,6 +553,23 @@ fn counters(
         blocking_submissions: telemetry.blocking_submissions(),
         timers_delivered: telemetry.timers_delivered(),
         external_events_delivered: telemetry.external_events_delivered(),
+        local_queue_depth: telemetry.local_queue_depth(),
+        maximum_local_queue_depth: telemetry.maximum_local_queue_depth(),
+        injection_queue_depth: telemetry.injection_queue_depth(),
+        maximum_injection_queue_depth: telemetry.maximum_injection_queue_depth(),
+        blocking_queue_depth: telemetry.blocking_queue_depth(),
+        maximum_blocking_queue_depth: telemetry.maximum_blocking_queue_depth(),
+        active_blocking_operations: telemetry.active_blocking_operations(),
+        maximum_active_blocking_operations: telemetry.maximum_active_blocking_operations(),
+        steal_searches: telemetry.steal_searches(),
+        steal_victims_examined: telemetry.steal_victims_examined(),
+        steal_successes: telemetry.steal_successes(),
+        steal_failures: telemetry.steal_failures(),
+        maximum_stolen_batch: telemetry.maximum_stolen_batch(),
+        worker_starts: telemetry.worker_starts(),
+        worker_parks: telemetry.worker_parks(),
+        worker_unparks: telemetry.worker_unparks(),
+        worker_stops: telemetry.worker_stops(),
         stale_ready_entries: telemetry.stale_ready_entries(),
         first_poll_latency_p50_nanoseconds: latencies.0,
         first_poll_latency_p95_nanoseconds: latencies.1,

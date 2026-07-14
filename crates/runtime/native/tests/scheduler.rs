@@ -528,6 +528,99 @@ fn bounded_global_injection_rejects_before_retaining_an_unqueueable_task() {
 }
 
 #[test]
+fn telemetry_tracks_ready_and_blocking_queue_depths_and_high_water_marks() {
+    let configuration = configuration(1, 8)
+        .with_blocking_pool(1, 4)
+        .expect("bounded blocking configuration");
+    let scheduler = NativeScheduler::new(configuration).expect("native scheduler");
+    let (normal_started_sender, normal_started_receiver) = mpsc::channel();
+    let normal_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _normal_gate_cleanup = OpenGateOnDrop(Arc::clone(&normal_gate));
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            BlockingProbeTask {
+                started: normal_started_sender,
+                gate: Arc::clone(&normal_gate),
+            },
+        )
+        .expect("occupy normal worker");
+    normal_started_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("normal worker is occupied");
+
+    let completions = Arc::new(Mutex::new(0));
+    scheduler
+        .schedule_batch_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            (0..3)
+                .map(|_| CompleteTask {
+                    completions: Arc::clone(&completions),
+                })
+                .collect(),
+        )
+        .expect("fill local queue");
+    let injection_task = scheduler
+        .schedule(CancellationTask)
+        .expect("fill injection queue");
+
+    let (blocking_started_sender, blocking_started_receiver) = mpsc::channel();
+    let blocking_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _blocking_gate_cleanup = OpenGateOnDrop(Arc::clone(&blocking_gate));
+    let first_blocking_gate = Arc::clone(&blocking_gate);
+    scheduler
+        .submit_blocking(injection_task, move || {
+            blocking_started_sender
+                .send(())
+                .expect("report blocking operation start");
+            let (open, changed) = &*first_blocking_gate;
+            let mut open = open.lock().expect("blocking gate");
+            while !*open {
+                open = changed.wait(open).expect("blocking gate wait");
+            }
+        })
+        .expect("occupy blocking worker");
+    blocking_started_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("blocking worker is occupied");
+    scheduler
+        .submit_blocking(injection_task, || {})
+        .expect("queue first blocking operation");
+    scheduler
+        .submit_blocking(injection_task, || {})
+        .expect("queue second blocking operation");
+
+    let queued = scheduler.telemetry();
+    assert_eq!(queued.local_queue_depth(), 3);
+    assert_eq!(queued.maximum_local_queue_depth(), 3);
+    assert_eq!(queued.injection_queue_depth(), 1);
+    assert_eq!(queued.maximum_injection_queue_depth(), 1);
+    assert_eq!(queued.blocking_queue_depth(), 2);
+    assert_eq!(queued.maximum_blocking_queue_depth(), 2);
+    assert_eq!(queued.active_blocking_operations(), 1);
+    assert_eq!(queued.maximum_active_blocking_operations(), 1);
+
+    let (open, changed) = &*blocking_gate;
+    *open.lock().expect("blocking gate") = true;
+    changed.notify_one();
+    let (open, changed) = &*normal_gate;
+    *open.lock().expect("normal gate") = true;
+    changed.notify_one();
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("queued work drains");
+    let drained = scheduler.telemetry();
+    assert_eq!(drained.local_queue_depth(), 0);
+    assert_eq!(drained.injection_queue_depth(), 0);
+    assert_eq!(drained.blocking_queue_depth(), 0);
+    assert_eq!(drained.active_blocking_operations(), 0);
+    assert_eq!(drained.maximum_local_queue_depth(), 3);
+    assert_eq!(drained.maximum_blocking_queue_depth(), 2);
+}
+
+#[test]
 fn idle_workers_steal_ready_work_from_a_blocked_peer_queue() {
     let transitions = Arc::new(PermitRuntimeTransitions);
     let scheduler = NativeScheduler::new_with_runtime_transitions(configuration(3, 8), transitions)
@@ -592,6 +685,55 @@ fn idle_workers_steal_ready_work_from_a_blocked_peer_queue() {
     assert!(telemetry.tasks_stolen() >= 1);
     assert!(telemetry.worker_threads_used() >= 2);
     assert_eq!(telemetry.affine_tasks_stolen(), 0);
+    assert!(telemetry.steal_searches() >= 1);
+    assert!(telemetry.steal_victims_examined() >= telemetry.steal_successes());
+    assert!(telemetry.steal_successes() >= 1);
+    assert_eq!(
+        telemetry.steal_searches(),
+        telemetry
+            .steal_successes()
+            .saturating_add(telemetry.steal_failures())
+    );
+    assert!(telemetry.maximum_stolen_batch() >= 1);
+}
+
+#[test]
+fn telemetry_reports_every_worker_lifecycle_through_shutdown() {
+    let scheduler = NativeScheduler::new(configuration(2, 4)).expect("native scheduler");
+    let parked_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while scheduler.telemetry().worker_parks() < 2 {
+        assert!(
+            std::time::Instant::now() < parked_deadline,
+            "workers did not enter the park protocol"
+        );
+        std::thread::yield_now();
+    }
+
+    let completions = Arc::new(Mutex::new(0));
+    for scheduler_raw in 1..=2 {
+        scheduler
+            .schedule_on(
+                SchedulerId::new(scheduler_raw),
+                SchedulerTaskMobility::Affine,
+                CompleteTask {
+                    completions: Arc::clone(&completions),
+                },
+            )
+            .expect("schedule exact-worker lifecycle probe");
+    }
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("lifecycle probes complete");
+    let final_telemetry = scheduler
+        .shutdown_with_telemetry()
+        .expect("scheduler shutdown telemetry");
+
+    assert_eq!(final_telemetry.worker_starts(), 2);
+    assert_eq!(final_telemetry.worker_stops(), 2);
+    assert!(final_telemetry.worker_parks() >= 2);
+    assert!(final_telemetry.worker_unparks() >= 2);
+    assert_eq!(final_telemetry.worker_threads_used(), 2);
+    assert_eq!(*completions.lock().expect("completion count"), 2);
 }
 
 #[test]
@@ -998,8 +1140,11 @@ fn concurrent_wake_and_cancellation_races_do_not_lose_or_duplicate_tasks() {
             Ok(SchedulerTaskState::Cancelled)
         );
     }
-    assert_eq!(scheduler.telemetry().cancellations_observed(), 100);
-    assert_eq!(scheduler.telemetry().stale_ready_entries(), 0);
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.cancellations_observed(), 100);
+    assert_eq!(telemetry.local_queue_depth(), 0);
+    assert_eq!(telemetry.injection_queue_depth(), 0);
+    assert_eq!(telemetry.stale_ready_entries(), 0);
 }
 
 #[test]
@@ -1097,6 +1242,27 @@ fn deterministic_ready_tail_prevents_an_always_ready_task_from_starving_a_peer()
         scheduler.task_state(peer),
         Ok(SchedulerTaskState::Completed)
     );
+}
+
+#[test]
+fn deterministic_telemetry_tracks_ready_queue_depth_and_high_water_mark() {
+    let mut scheduler = DeterministicScheduler::recording(configuration(2, 4));
+    scheduler
+        .schedule(YieldOnceTask { first: true })
+        .expect("first deterministic queue task");
+    scheduler
+        .schedule(YieldOnceTask { first: true })
+        .expect("second deterministic queue task");
+
+    let queued = scheduler.telemetry();
+    assert_eq!(queued.local_queue_depth(), 2);
+    assert_eq!(queued.maximum_local_queue_depth(), 2);
+    scheduler
+        .run_until_idle(8)
+        .expect("drain deterministic ready queue");
+    let drained = scheduler.telemetry();
+    assert_eq!(drained.local_queue_depth(), 0);
+    assert_eq!(drained.maximum_local_queue_depth(), 2);
 }
 
 #[test]

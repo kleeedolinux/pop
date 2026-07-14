@@ -16,7 +16,7 @@ fn representative_configuration() -> SchedulerBenchmarkConfiguration {
 
 #[test]
 fn scheduler_benchmark_inventory_is_closed_and_typed() {
-    assert_eq!(SCHEDULER_BENCHMARK_SCHEMA, "pop-scheduler-benchmark-v1");
+    assert_eq!(SCHEDULER_BENCHMARK_SCHEMA, "pop-scheduler-benchmark-v2");
     let names: Vec<_> = SchedulerWorkload::ALL
         .into_iter()
         .map(SchedulerWorkload::name)
@@ -56,6 +56,12 @@ fn ready_poll_benchmark_preserves_exact_logical_work_and_checksum() {
     assert_eq!(counters.polls, 24);
     assert_eq!(counters.completions, 8);
     assert_eq!(counters.checksum, 108);
+    assert_eq!(counters.local_queue_depth, 0);
+    assert_eq!(counters.injection_queue_depth, 0);
+    assert_eq!(counters.blocking_queue_depth, 0);
+    assert!(counters.maximum_local_queue_depth > 0);
+    assert_eq!(counters.worker_starts, 2);
+    assert_eq!(counters.worker_stops, 2);
     assert_eq!(counters.stale_ready_entries, 0);
 }
 

@@ -105,7 +105,7 @@ fn main() {
                     (elapsed_nanoseconds % operations).saturating_mul(1_000) / operations;
 
                 println!(
-                    "schema={}\tprofile={profile}\ttarget_architecture={}\ttarget_operating_system={}\tbuild_profile=bench-optimized\tscheduler_stage=bounded-synchronized-reference\tworkload={}\tworkers={}\tavailable_parallelism={available_parallelism}\tsamples={samples}\tsample={sample}\ttasks={}\tpolls_per_task={polls_per_task}\toperations={}\tchecksum={}\telapsed_nanoseconds={elapsed_nanoseconds}\tnanoseconds_per_operation={nanoseconds_per_operation}.{fractional_nanoseconds:03}\tlatency_scope=initial-ready-to-first-poll\tlatency_p50_nanoseconds={}\tlatency_p95_nanoseconds={}\tlatency_p99_nanoseconds={}\tlatency_p999_nanoseconds={}\tlatency_max_nanoseconds={}\tpolls={}\tcompletions={}\tsuspensions={}\twake_requests={}\ttasks_stolen={}\tblocking_submissions={}\ttimers_delivered={}\texternal_events_delivered={}\tstale_ready_entries={}",
+                    "schema={}\tprofile={profile}\ttarget_architecture={}\ttarget_operating_system={}\tbuild_profile=bench-optimized\tscheduler_stage=bounded-synchronized-reference\tworkload={}\tworkers={}\tavailable_parallelism={available_parallelism}\tsamples={samples}\tsample={sample}\ttasks={}\tpolls_per_task={polls_per_task}\toperations={}\tchecksum={}\telapsed_nanoseconds={elapsed_nanoseconds}\tnanoseconds_per_operation={nanoseconds_per_operation}.{fractional_nanoseconds:03}\tlatency_scope=initial-ready-to-first-poll\tlatency_p50_nanoseconds={}\tlatency_p95_nanoseconds={}\tlatency_p99_nanoseconds={}\tlatency_p999_nanoseconds={}\tlatency_max_nanoseconds={}\tpolls={}\tcompletions={}\tsuspensions={}\twake_requests={}\ttasks_stolen={}\tblocking_submissions={}\ttimers_delivered={}\texternal_events_delivered={}\tlocal_queue_depth={}\tmaximum_local_queue_depth={}\tinjection_queue_depth={}\tmaximum_injection_queue_depth={}\tblocking_queue_depth={}\tmaximum_blocking_queue_depth={}\tactive_blocking_operations={}\tmaximum_active_blocking_operations={}\tsteal_searches={}\tsteal_victims_examined={}\tsteal_successes={}\tsteal_failures={}\tmaximum_stolen_batch={}\tworker_starts={}\tworker_parks={}\tworker_unparks={}\tworker_stops={}\tstale_ready_entries={}",
                     SCHEDULER_BENCHMARK_SCHEMA,
                     std::env::consts::ARCH,
                     std::env::consts::OS,
@@ -127,6 +127,23 @@ fn main() {
                     counters.blocking_submissions,
                     counters.timers_delivered,
                     counters.external_events_delivered,
+                    counters.local_queue_depth,
+                    counters.maximum_local_queue_depth,
+                    counters.injection_queue_depth,
+                    counters.maximum_injection_queue_depth,
+                    counters.blocking_queue_depth,
+                    counters.maximum_blocking_queue_depth,
+                    counters.active_blocking_operations,
+                    counters.maximum_active_blocking_operations,
+                    counters.steal_searches,
+                    counters.steal_victims_examined,
+                    counters.steal_successes,
+                    counters.steal_failures,
+                    counters.maximum_stolen_batch,
+                    counters.worker_starts,
+                    counters.worker_parks,
+                    counters.worker_unparks,
+                    counters.worker_stops,
                     counters.stale_ready_entries,
                 );
             }
