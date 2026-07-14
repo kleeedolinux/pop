@@ -755,7 +755,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                         .substitute_type_parameters(result.type_id()?, &substitutions)
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let mut typed_arguments = Vec::with_capacity(arguments.len());
+            let mut checked_arguments = Vec::with_capacity(arguments.len());
             for (argument, parameter_type) in arguments.iter().zip(parameter_types) {
                 let typed = self.check_expression_expected(
                     argument,
@@ -767,7 +767,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     typed.span(),
                     argument.span(),
                 );
-                typed_arguments.push(typed);
+                checked_arguments.push(typed);
             }
             let dispatch = self
                 .resolver
@@ -782,7 +782,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 call: TypedCall {
                     dispatch,
                     type_arguments: resolved_arguments,
-                    arguments: typed_arguments,
+                    arguments: checked_arguments,
                     span,
                 },
                 results: result_types,

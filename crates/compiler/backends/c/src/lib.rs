@@ -9,6 +9,10 @@
 //! Extend the supported subset in validation and conformance tests before adding
 //! emission. The C backend must never bypass canonical MIR or invent fallbacks.
 
+// The C backend predates the Rust 1.96 clippy gate. Keep the style baseline
+// explicit until emission/lowering are split further.
+#![allow(clippy::match_same_arms, clippy::wildcard_imports)]
+
 mod api;
 mod emission;
 mod lowering;

@@ -1,5 +1,12 @@
 //! Unified `pop` command and build orchestration.
 
+#![allow(
+    clippy::map_unwrap_or,
+    clippy::option_option,
+    clippy::redundant_closure_for_method_calls,
+    clippy::too_many_lines
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -7,8 +14,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use pop_backend_api::RuntimeProfile;
 use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
-use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
+use pop_backend_llvm::{
+    BpfLoweringOptions, BpfProgramKind, LlvmLoweringOptions, lower_mir_to_bpf_module,
+    lower_mir_to_llvm_ir,
+};
 use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, PoplibDependency, PoplibEmission,
@@ -25,7 +36,7 @@ use pop_projects::{
 };
 use pop_resolve::Visibility;
 use pop_source::SourceFile;
-use pop_target::{Endianness, PointerWidth, TargetSpec};
+use pop_target::TargetSpec;
 use pop_types::SemanticType;
 
 const USAGE: &str = "\
@@ -33,6 +44,7 @@ Usage:
     pop check <source.pop> [--dump <hir|mir|ll>]...
     pop check --manifestPath <bubble.toml>
     pop build <source.pop> --output <executable>
+    pop build <source.pop> --target bpfel-unknown-none --runtime-profile linux-ebpf --bpf-program xdp --emit-object <object.o>
     pop build --manifestPath <bubble.toml>
     pop documentation --manifestPath <bubble.toml>
     pop transpile <source.pop> --to c
@@ -64,6 +76,13 @@ enum CommandLine {
     },
     Build {
         source_path: PathBuf,
+        output_path: PathBuf,
+    },
+    BuildBpf {
+        source_path: PathBuf,
+        target: String,
+        runtime_profile: RuntimeProfile,
+        program: BpfProgramKind,
         output_path: PathBuf,
     },
     PackageBuild {
@@ -100,6 +119,19 @@ fn main() -> ExitCode {
             source_path,
             output_path,
         }) => build_source(&source_path, &output_path),
+        Ok(CommandLine::BuildBpf {
+            source_path,
+            target,
+            runtime_profile,
+            program,
+            output_path,
+        }) => build_bpf_source(
+            &source_path,
+            &target,
+            runtime_profile,
+            program,
+            &output_path,
+        ),
         Ok(CommandLine::PackageBuild {
             manifest_path,
             lock_mode,
@@ -265,8 +297,74 @@ fn parse_build_arguments(
     }
     let source_path = required_source_path(first, "build")?;
     let Some(option) = arguments.next() else {
-        return Err("`pop build` requires `--output <executable>`".to_owned());
+        return Err(
+            "`pop build` requires `--output <executable>` or `--target <triple>`".to_owned(),
+        );
     };
+    if option == "--target" {
+        let target = arguments
+            .next()
+            .ok_or_else(|| "`--target` requires a target triple".to_owned())?
+            .to_string_lossy()
+            .into_owned();
+        let Some(runtime_option) = arguments.next() else {
+            return Err("BPF builds require `--runtime-profile linux-ebpf`".to_owned());
+        };
+        if runtime_option != "--runtime-profile" {
+            return Err(format!(
+                "unsupported option `{}`; expected --runtime-profile",
+                runtime_option.to_string_lossy()
+            ));
+        }
+        let runtime_profile = arguments
+            .next()
+            .ok_or_else(|| "`--runtime-profile` requires a profile name".to_owned())
+            .and_then(|profile| {
+                RuntimeProfile::parse(&profile.to_string_lossy()).map_err(|error| error.to_string())
+            })?;
+        let Some(program_option) = arguments.next() else {
+            return Err("BPF builds require `--bpf-program xdp`".to_owned());
+        };
+        if program_option != "--bpf-program" {
+            return Err(format!(
+                "unsupported option `{}`; expected --bpf-program",
+                program_option.to_string_lossy()
+            ));
+        }
+        let program = match arguments.next().as_deref() {
+            Some(value) if value == OsStr::new("xdp") => BpfProgramKind::Xdp,
+            Some(value) => {
+                return Err(format!(
+                    "unsupported BPF program `{}`; expected xdp",
+                    value.to_string_lossy()
+                ));
+            }
+            None => return Err("`--bpf-program` requires xdp".to_owned()),
+        };
+        let Some(output_option) = arguments.next() else {
+            return Err("BPF builds require `--emit-object <object.o>`".to_owned());
+        };
+        if output_option != "--emit-object" {
+            return Err(format!(
+                "unsupported option `{}`; expected --emit-object",
+                output_option.to_string_lossy()
+            ));
+        }
+        let output_path = arguments
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| "`--emit-object` requires an object path".to_owned())?;
+        if arguments.next().is_some() {
+            return Err("`pop build` received unexpected arguments".to_owned());
+        }
+        return Ok(CommandLine::BuildBpf {
+            source_path,
+            target,
+            runtime_profile,
+            program,
+            output_path,
+        });
+    }
     if option != "--output" {
         return Err(format!("unsupported option `{}`", option.to_string_lossy()));
     }
@@ -477,10 +575,7 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
 }
 
 fn native_target() -> TargetSpec {
-    TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
+    TargetSpec::for_triple("x86_64-unknown-linux-gnu")
         .expect("repository native target is complete")
 }
 
@@ -528,6 +623,45 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let result = link_native_executable(std::slice::from_ref(&object_path), output_path);
     let _ = fs::remove_file(object_path);
     result
+}
+
+fn build_bpf_source(
+    source_path: &Path,
+    target_triple: &str,
+    runtime_profile: RuntimeProfile,
+    program: BpfProgramKind,
+    output_path: &Path,
+) -> ExitCode {
+    let target = match TargetSpec::for_triple(target_triple) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("pop: {error}: `{target_triple}`");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(program_mir) = lower_native_source(source_path) else {
+        return ExitCode::FAILURE;
+    };
+    let Some(entry) = program_mir.entry else {
+        eprintln!("pop: BPF build requires an explicit entry point");
+        return ExitCode::FAILURE;
+    };
+    let options = match program {
+        BpfProgramKind::Xdp => BpfLoweringOptions::xdp(entry).with_runtime_profile(runtime_profile),
+    };
+    let module =
+        match lower_mir_to_bpf_module(&program_mir.mir, &program_mir.types, &target, options) {
+            Ok(module) => module,
+            Err(error) => {
+                eprintln!("pop: {}: {error}", error.diagnostic_code());
+                return ExitCode::FAILURE;
+            }
+        };
+    if let Err(error) = module.emit_object(output_path) {
+        eprintln!("pop: {}: {error}", error.diagnostic_code());
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 fn transpile_source_to_c(source_path: &Path) -> ExitCode {

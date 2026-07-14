@@ -282,7 +282,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return None;
         }
 
-        let mut typed_arguments = Vec::with_capacity(arguments.len());
+        let mut checked_values = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(signature.parameters()) {
             let typed = self.check_expression(argument)?;
             if !self.infer_type_pattern(
@@ -303,7 +303,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     ));
                 return None;
             }
-            typed_arguments.push(typed);
+            checked_values.push(typed);
         }
 
         for parameter in signature.type_parameters() {
@@ -322,7 +322,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
         }
 
-        let mut type_arguments = Vec::with_capacity(signature.type_parameters().len());
+        let mut resolved_generics = Vec::with_capacity(signature.type_parameters().len());
         for parameter in signature.type_parameters() {
             let Some(argument) = substitutions.get(&parameter.parameter()).copied() else {
                 self.diagnostics
@@ -333,12 +333,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     ));
                 return None;
             };
-            type_arguments.push(argument);
+            resolved_generics.push(argument);
         }
         let substitution_map: BTreeMap<_, _> = signature
             .type_parameters()
             .iter()
-            .zip(&type_arguments)
+            .zip(&resolved_generics)
             .map(|(parameter, argument)| (parameter.parameter(), *argument))
             .collect();
         self.resolver
@@ -359,7 +359,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             })
             .collect::<Option<Vec<_>>>()?;
         for ((typed, expected), source) in
-            typed_arguments.iter().zip(&parameter_types).zip(arguments)
+            checked_values.iter().zip(&parameter_types).zip(arguments)
         {
             self.require_same_type(*expected, typed.type_id(), typed.span(), source.span());
         }
@@ -383,8 +383,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(CheckedCall {
             call: TypedCall {
                 dispatch,
-                type_arguments,
-                arguments: typed_arguments,
+                type_arguments: resolved_generics,
+                arguments: checked_values,
                 span,
             },
             results,

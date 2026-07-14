@@ -199,7 +199,7 @@ fn optional_scalar_collection_reads_execute_without_a_zero_sentinel() {
     )
     .expect("LLVM optional collection lowering");
     let result = link_with_runtime_and_run(&module, "optional-scalar");
-    assert_eq!(result.status.code(), Some(14), "{}", module);
+    assert_eq!(result.status.code(), Some(14), "{module}");
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn specialized_generic_data_and_calls_execute_natively() {
     .expect("LLVM lowering");
 
     let result = link_with_runtime_and_run(&module, "generic-execution");
-    assert_eq!(result.status.code(), Some(7), "{}", module);
+    assert_eq!(result.status.code(), Some(7), "{module}");
 }
 
 #[test]
@@ -433,7 +433,7 @@ fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
     assert!(text.contains("@pop_rt_field_get"), "{text}");
 
     let result = link_with_runtime_and_run(&module, "fixed-pack");
-    assert_eq!(result.status.code(), Some(21), "{}", module);
+    assert_eq!(result.status.code(), Some(21), "{module}");
 }
 
 #[test]

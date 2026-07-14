@@ -154,6 +154,9 @@ fn parse_entry(line_number: usize, line: &'static str) -> Result<CatalogEntry, C
         Some("Resolution") => DiagnosticCategory::Resolution,
         Some("Type") => DiagnosticCategory::Type,
         Some("CompileTime") => DiagnosticCategory::CompileTime,
+        Some("Backend") => DiagnosticCategory::Backend,
+        Some("Project") => DiagnosticCategory::Project,
+        Some("Tooling") => DiagnosticCategory::Tooling,
         Some("Style") => DiagnosticCategory::Style,
         _ => {
             return Err(CatalogError {

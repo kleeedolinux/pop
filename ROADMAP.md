@@ -353,6 +353,8 @@ Post-baseline library work has begun without widening the release foundation:
 ## Explicitly after 0.1.0
 
 - expanding the experimental C backend beyond its accepted fail-closed subset;
+- stabilizing or expanding the experimental eBPF backend beyond the initial
+  runtime-free XDP object experiment;
 - a custom VM or stable serialized MIR/bytecode compatibility promise;
 - the complete official extension and public-library catalog;
 - finalizers, weak references, unrestricted runtime reflection, and Bubble

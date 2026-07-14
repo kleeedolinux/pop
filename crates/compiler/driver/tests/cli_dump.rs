@@ -20,6 +20,16 @@ fn example(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn bpf_example(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .join("examples")
+        .join("bpf")
+        .join(name)
+}
+
 fn run_pop(arguments: &[&str], source: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pop"));
     command.args(arguments);
@@ -260,6 +270,54 @@ fn transpile_supports_the_runtime_free_native_math_example() {
     );
     assert!(output.stderr.is_empty());
     assert!(output_text(&output.stdout).contains("int main(void)"));
+}
+
+#[test]
+fn bpf_build_requires_a_known_explicit_target() {
+    let object = std::env::temp_dir().join(format!("pop-bpf-unknown-{}.o", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build"])
+        .arg(bpf_example("xdpPass.pop"))
+        .args([
+            "--target",
+            "bpf-unknown-linux",
+            "--runtime-profile",
+            "linux-ebpf",
+            "--bpf-program",
+            "xdp",
+            "--emit-object",
+        ])
+        .arg(&object)
+        .output()
+        .expect("pop build bpf usage runs");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!object.exists(), "failed BPF build must not emit an object");
+    assert!(output_text(&output.stderr).contains("unknown Pop Lang target triple"));
+}
+
+#[test]
+fn bpf_build_rejects_unknown_runtime_profile_before_artifact_emission() {
+    let object = std::env::temp_dir().join(format!("pop-bpf-profile-{}.o", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build"])
+        .arg(bpf_example("xdpPass.pop"))
+        .args([
+            "--target",
+            "bpfel-unknown-none",
+            "--runtime-profile",
+            "kernel-default",
+            "--bpf-program",
+            "xdp",
+            "--emit-object",
+        ])
+        .arg(&object)
+        .output()
+        .expect("pop build bpf usage runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(!object.exists(), "failed BPF build must not emit an object");
+    assert!(output_text(&output.stderr).contains("unknown runtime profile"));
 }
 
 #[test]

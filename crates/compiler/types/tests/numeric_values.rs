@@ -1,3 +1,9 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::float_cmp
+)]
+
 use std::cmp::Ordering;
 
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue, NumericError};

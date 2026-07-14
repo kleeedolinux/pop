@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_for_method_calls, clippy::too_many_lines)]
+
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{

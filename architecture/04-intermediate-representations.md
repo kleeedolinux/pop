@@ -11,6 +11,7 @@
 | MIR | Portable execution semantics | CFGs, typed values, abstract runtime operations | source sugar, LLVM opcodes |
 | C11 source | Experimental backend artifact | exact-width C types, checked helpers, private control-flow lowering | canonical language semantics, unchecked fallbacks |
 | LLVM IR | Native backend implementation | LLVM types, intrinsics, target ABI | canonical language semantics |
+| LLVM BPF IR | Experimental backend implementation | BPF triple, section metadata, backend-private scalar lowering | canonical language semantics, Pop managed runtime |
 
 ## Stable identities
 

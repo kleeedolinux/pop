@@ -1,4 +1,4 @@
-# ADR 0059: Native Stable-Token Generational Transition
+# ADR 0071: Native Stable-Token Generational Transition
 
 - Status: accepted
 - Date: 2026-07-14
