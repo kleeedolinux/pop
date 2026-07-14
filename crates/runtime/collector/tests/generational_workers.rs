@@ -1,5 +1,6 @@
 use pop_runtime_collector::{
-    BackgroundWorkerConfig, BackgroundWorkerConfigError, GenerationalRuntime,
+    BackgroundWorkerConfig, BackgroundWorkerConfigError, BackgroundWorkerStartError,
+    GenerationalRuntime,
 };
 use pop_runtime_interface::{
     AllocationClass, ObjectAllocationRequest, ObjectMap, ObjectSlot, RootPublication,
@@ -66,6 +67,27 @@ fn background_worker_configuration_rejects_zero_or_unbounded_geometry() {
     assert_eq!(
         BackgroundWorkerConfig::new(1, 0),
         Err(BackgroundWorkerConfigError::ZeroQueueCapacity)
+    );
+}
+
+#[test]
+fn worker_pool_can_be_attached_once_to_an_existing_configured_runtime() {
+    let config = BackgroundWorkerConfig::new(2, 2).expect("worker configuration");
+    let mut runtime = GenerationalRuntime::new();
+
+    runtime
+        .start_background_workers(config)
+        .expect("start workers");
+    assert_eq!(
+        runtime.start_background_workers(config),
+        Err(BackgroundWorkerStartError::AlreadyStarted)
+    );
+    assert_eq!(
+        runtime
+            .background_worker_telemetry()
+            .expect("worker telemetry")
+            .workers_started(),
+        2
     );
 }
 

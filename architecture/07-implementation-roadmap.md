@@ -106,6 +106,9 @@ not table or runtime-name lookup.
 - failure-atomic stopped-mutator selective evacuation with compact monomorphic
   destination pages, exact field/root/handle/card rewriting, stale-token
   invalidation, transient quarantine, and peak reserve admission;
+- bounded worker-assisted selected-object internal-edge rewriting with
+  deterministic results and one collector-owned atomic reference/placement
+  commit;
 - mutable typed root updates, runtime-profile/backend capability negotiation,
   and a real single-mutator relocation conformance collector before production
   TLAB/parallel-evacuation claims (ADR 0039);
@@ -148,8 +151,10 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   deterministic reserve-bounded evacuation-set selection, and a
   failure-atomic stopped-mutator relocation slice that copies into compact
   monomorphic pages, rewrites precise fields/roots/handles/card metadata,
-  invalidates old tokens, and retires quarantined regions; phase-specific
-  reference resolution and concurrent worker-driven evacuation remain open;
+  invalidates old tokens, and retires quarantined regions; the collector can
+  stage selected-object copies for bounded workers to rewrite their internal
+  edges before the deterministic collector-owned commit, while phase-specific
+  reference resolution and mutator-concurrent evacuation remain open;
   typed scoped bump arenas provide precise external roots and bulk reclamation;
   parallel scheduler execution and scheduler/runtime integration remain open;
 - the first public-library slices authorized by the section 22 implementation

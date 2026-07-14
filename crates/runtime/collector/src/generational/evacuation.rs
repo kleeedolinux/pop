@@ -1,11 +1,13 @@
 //! Deterministic reserve-bounded mature-region selection and evacuation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use pop_runtime_interface::{ManagedReference, RootPublication, RuntimeFailure};
 
 use super::allocation::{RegionId, RegionState, RegionTelemetry};
 use super::heap::GenerationalRuntime;
+use super::workers::EvacuationRewriteTask;
 use crate::heap::{BootstrapRuntime, SlotValue};
 use crate::relocation::CollectorGeneration;
 
@@ -79,6 +81,7 @@ pub struct EvacuationStatistics {
     pin_handles_updated: usize,
     peak_committed_bytes: usize,
     committed_bytes_reclaimed: usize,
+    worker_objects_processed: usize,
 }
 
 impl EvacuationStatistics {
@@ -125,6 +128,11 @@ impl EvacuationStatistics {
     #[must_use]
     pub const fn committed_bytes_reclaimed(self) -> usize {
         self.committed_bytes_reclaimed
+    }
+
+    #[must_use]
+    pub const fn worker_objects_processed(self) -> usize {
+        self.worker_objects_processed
     }
 }
 
@@ -310,7 +318,8 @@ impl GenerationalRuntime {
             self.selected_evacuation_objects(&selected_regions, expected_objects)?;
         let (relocations, next_reference, bytes_copied) =
             self.plan_relocation_tokens(&selected_objects)?;
-        let (next_objects, object_fields_updated) = self.relocate_objects(&relocations)?;
+        let (next_objects, object_fields_updated, worker_objects_processed) =
+            self.relocate_objects(&relocations)?;
 
         let (next_roots, strong_handles_updated) =
             relocate_handles(&self.nursery.roots, &relocations);
@@ -351,6 +360,7 @@ impl GenerationalRuntime {
             pin_handles_updated,
             peak_committed_bytes: peak_committed,
             committed_bytes_reclaimed: committed_before.saturating_sub(committed_after),
+            worker_objects_processed,
         })
     }
 
@@ -410,6 +420,68 @@ impl GenerationalRuntime {
     }
 
     fn relocate_objects(
+        &mut self,
+        relocations: &BTreeMap<ManagedReference, ManagedReference>,
+    ) -> Result<
+        (
+            BTreeMap<ManagedReference, crate::relocation::RelocationAllocation>,
+            usize,
+            usize,
+        ),
+        RuntimeFailure,
+    > {
+        if self.workers.is_none() {
+            let (objects, fields_updated) = self.relocate_objects_on_collector(relocations)?;
+            return Ok((objects, fields_updated, 0));
+        }
+
+        let tasks = relocations
+            .iter()
+            .map(|(source, destination)| {
+                Ok(EvacuationRewriteTask {
+                    destination: *destination,
+                    allocation: self
+                        .nursery
+                        .objects
+                        .get(source)
+                        .cloned()
+                        .ok_or_else(RuntimeFailure::runtime_invariant)?,
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeFailure>>()?;
+        let relocation_snapshot = Arc::new(relocations.clone());
+        let results = self
+            .workers
+            .as_mut()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?
+            .evacuate(tasks, &relocation_snapshot)?;
+        let mut fields_updated = 0usize;
+        let mut next_objects = BTreeMap::new();
+        for (reference, object) in &self.nursery.objects {
+            if relocations.contains_key(reference) {
+                continue;
+            }
+            let mut next_object = object.clone();
+            fields_updated = fields_updated
+                .saturating_add(rewrite_object_references(&mut next_object, relocations));
+            if next_objects.insert(*reference, next_object).is_some() {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+        }
+        let worker_objects_processed = results.len();
+        for result in results {
+            fields_updated = fields_updated.saturating_add(result.fields_updated);
+            if next_objects
+                .insert(result.destination, result.allocation)
+                .is_some()
+            {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+        }
+        Ok((next_objects, fields_updated, worker_objects_processed))
+    }
+
+    fn relocate_objects_on_collector(
         &self,
         relocations: &BTreeMap<ManagedReference, ManagedReference>,
     ) -> Result<
@@ -424,14 +496,8 @@ impl GenerationalRuntime {
         for (reference, object) in &self.nursery.objects {
             let next_key = relocated(*reference, relocations);
             let mut next_object = object.clone();
-            for slot in &mut next_object.allocation.slots {
-                if let SlotValue::Reference(Some(reference)) = slot
-                    && let Some(next) = relocations.get(reference)
-                {
-                    *reference = *next;
-                    fields_updated = fields_updated.saturating_add(1);
-                }
-            }
+            fields_updated = fields_updated
+                .saturating_add(rewrite_object_references(&mut next_object, relocations));
             if next_objects.insert(next_key, next_object).is_some() {
                 return Err(RuntimeFailure::runtime_invariant());
             }
@@ -513,6 +579,22 @@ fn relocated_stack_roots(
         })
         .collect();
     (roots, updated)
+}
+
+fn rewrite_object_references(
+    object: &mut crate::relocation::RelocationAllocation,
+    relocations: &BTreeMap<ManagedReference, ManagedReference>,
+) -> usize {
+    let mut updated = 0usize;
+    for slot in &mut object.allocation.slots {
+        if let SlotValue::Reference(Some(reference)) = slot
+            && let Some(destination) = relocations.get(reference)
+        {
+            *reference = *destination;
+            updated = updated.saturating_add(1);
+        }
+    }
+    updated
 }
 
 fn relocated(

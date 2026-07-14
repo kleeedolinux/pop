@@ -257,8 +257,25 @@ impl GenerationalRuntime {
         workers: BackgroundWorkerConfig,
     ) -> Result<Self, BackgroundWorkerStartError> {
         let mut runtime = Self::new();
-        runtime.workers = Some(BackgroundWorkerPool::new(workers)?);
+        runtime.start_background_workers(workers)?;
         Ok(runtime)
+    }
+
+    /// Attaches persistent bounded host workers to this configured runtime.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a second worker pool or returns a typed thread-start failure
+    /// without replacing the runtime's current collector state.
+    pub fn start_background_workers(
+        &mut self,
+        workers: BackgroundWorkerConfig,
+    ) -> Result<(), BackgroundWorkerStartError> {
+        if self.workers.is_some() {
+            return Err(BackgroundWorkerStartError::AlreadyStarted);
+        }
+        self.workers = Some(BackgroundWorkerPool::new(workers)?);
+        Ok(())
     }
 
     pub fn request_minor_collection(&mut self) {

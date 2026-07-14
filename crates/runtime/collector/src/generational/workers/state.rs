@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use pop_runtime_interface::{ManagedReference, RuntimeFailure};
 
 use crate::heap::{Allocation, SlotValue};
+use crate::relocation::RelocationAllocation;
 
 use super::super::heap::LargeObjectScanChunk;
 use super::model::{BackgroundWorkerConfig, BackgroundWorkerStartError, BackgroundWorkerTelemetry};
@@ -21,6 +22,11 @@ pub(crate) struct MarkTask {
 pub(crate) struct CardRefinementTask {
     pub(crate) owner: ManagedReference,
     pub(crate) allocation: Allocation,
+}
+
+pub(crate) struct EvacuationRewriteTask {
+    pub(crate) destination: ManagedReference,
+    pub(crate) allocation: RelocationAllocation,
 }
 
 enum WorkerCommand {
@@ -37,6 +43,11 @@ enum WorkerCommand {
         sequence: u64,
         reference: ManagedReference,
     },
+    Evacuate {
+        sequence: u64,
+        task: EvacuationRewriteTask,
+        relocations: Arc<BTreeMap<ManagedReference, ManagedReference>>,
+    },
     Shutdown,
 }
 
@@ -51,6 +62,11 @@ enum WorkerOutcome {
         children: Result<Vec<ManagedReference>, ()>,
     },
     Sweep(ManagedReference),
+    Evacuated {
+        destination: ManagedReference,
+        allocation: RelocationAllocation,
+        fields_updated: usize,
+    },
 }
 
 struct WorkerResult {
@@ -63,6 +79,12 @@ pub(crate) struct MarkResult {
     pub(crate) reference: ManagedReference,
     pub(crate) large_object_scan_chunk: Option<LargeObjectScanChunk>,
     pub(crate) children: Vec<ManagedReference>,
+}
+
+pub(crate) struct EvacuationRewriteResult {
+    pub(crate) destination: ManagedReference,
+    pub(crate) allocation: RelocationAllocation,
+    pub(crate) fields_updated: usize,
 }
 
 pub(crate) struct BackgroundWorkerPool {
@@ -136,7 +158,9 @@ impl BackgroundWorkerPool {
                     self.telemetry.mark_jobs_completed =
                         self.telemetry.mark_jobs_completed.saturating_add(1);
                 }
-                WorkerOutcome::RefinedCard { .. } | WorkerOutcome::Sweep(_) => {
+                WorkerOutcome::RefinedCard { .. }
+                | WorkerOutcome::Sweep(_)
+                | WorkerOutcome::Evacuated { .. } => {
                     return Err(RuntimeFailure::runtime_invariant());
                 }
             }
@@ -178,7 +202,9 @@ impl BackgroundWorkerPool {
                         .card_refinement_jobs_completed
                         .saturating_add(1);
                 }
-                WorkerOutcome::Mark { .. } | WorkerOutcome::Sweep(_) => {
+                WorkerOutcome::Mark { .. }
+                | WorkerOutcome::Sweep(_)
+                | WorkerOutcome::Evacuated { .. } => {
                     return Err(RuntimeFailure::runtime_invariant());
                 }
             }
@@ -208,13 +234,57 @@ impl BackgroundWorkerPool {
                     self.telemetry.sweep_jobs_completed =
                         self.telemetry.sweep_jobs_completed.saturating_add(1);
                 }
-                WorkerOutcome::Mark { .. } | WorkerOutcome::RefinedCard { .. } => {
+                WorkerOutcome::Mark { .. }
+                | WorkerOutcome::RefinedCard { .. }
+                | WorkerOutcome::Evacuated { .. } => {
                     return Err(RuntimeFailure::runtime_invariant());
                 }
             }
         }
         self.complete_batch(count);
         Ok(swept)
+    }
+
+    pub(crate) fn evacuate(
+        &mut self,
+        tasks: Vec<EvacuationRewriteTask>,
+        relocations: &Arc<BTreeMap<ManagedReference, ManagedReference>>,
+    ) -> Result<Vec<EvacuationRewriteResult>, RuntimeFailure> {
+        let count = tasks.len();
+        for task in tasks {
+            let sequence = self.next_sequence()?;
+            self.submit(WorkerCommand::Evacuate {
+                sequence,
+                task,
+                relocations: Arc::clone(relocations),
+            })?;
+        }
+        let results = self.collect(count)?;
+        let mut evacuated = Vec::with_capacity(count);
+        for result in results {
+            match result.outcome {
+                WorkerOutcome::Evacuated {
+                    destination,
+                    allocation,
+                    fields_updated,
+                } => {
+                    evacuated.push(EvacuationRewriteResult {
+                        destination,
+                        allocation,
+                        fields_updated,
+                    });
+                    self.telemetry.evacuation_jobs_completed =
+                        self.telemetry.evacuation_jobs_completed.saturating_add(1);
+                }
+                WorkerOutcome::Mark { .. }
+                | WorkerOutcome::RefinedCard { .. }
+                | WorkerOutcome::Sweep(_) => {
+                    return Err(RuntimeFailure::runtime_invariant());
+                }
+            }
+        }
+        self.complete_batch(count);
+        Ok(evacuated)
     }
 
     pub(crate) fn telemetry(&self) -> BackgroundWorkerTelemetry {
@@ -310,11 +380,40 @@ fn worker_loop(
                 worker,
                 outcome: WorkerOutcome::Sweep(reference),
             },
+            WorkerCommand::Evacuate {
+                sequence,
+                task,
+                relocations,
+            } => WorkerResult {
+                sequence,
+                worker,
+                outcome: evacuate(task, &relocations),
+            },
             WorkerCommand::Shutdown => break,
         };
         if results.send(result).is_err() {
             break;
         }
+    }
+}
+
+fn evacuate(
+    mut task: EvacuationRewriteTask,
+    relocations: &BTreeMap<ManagedReference, ManagedReference>,
+) -> WorkerOutcome {
+    let mut fields_updated = 0usize;
+    for slot in &mut task.allocation.allocation.slots {
+        if let SlotValue::Reference(Some(reference)) = slot
+            && let Some(destination) = relocations.get(reference)
+        {
+            *reference = *destination;
+            fields_updated = fields_updated.saturating_add(1);
+        }
+    }
+    WorkerOutcome::Evacuated {
+        destination: task.destination,
+        allocation: task.allocation,
+        fields_updated,
     }
 }
 

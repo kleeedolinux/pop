@@ -1,7 +1,7 @@
 use pop_runtime_collector::{
-    AllocationInfrastructureConfig, EvacuationSelectionConfig, EvacuationSelectionConfigError,
-    GenerationalMemoryConfig, GenerationalRuntime, HeapDomain, MajorCollectorConfig,
-    MajorCyclePhase, RegionState, SchedulerId,
+    AllocationInfrastructureConfig, BackgroundWorkerConfig, EvacuationSelectionConfig,
+    EvacuationSelectionConfigError, GenerationalMemoryConfig, GenerationalRuntime, HeapDomain,
+    MajorCollectorConfig, MajorCyclePhase, RegionState, SchedulerId,
 };
 use pop_runtime_interface::{
     AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
@@ -375,6 +375,9 @@ fn selected_shared_regions_copy_objects_and_rewrite_every_reference_kind() {
 #[test]
 fn evacuation_rejects_stale_publications_without_partial_relocation() {
     let mut runtime = runtime(256);
+    runtime
+        .start_background_workers(BackgroundWorkerConfig::new(2, 1).expect("worker configuration"))
+        .expect("start workers");
     let original = runtime
         .allocate_object(&object(70, AllocationClass::Mature, 1))
         .expect("mature object");
@@ -398,4 +401,59 @@ fn evacuation_rejects_stale_publications_without_partial_relocation() {
         stale_roots.managed_references().next(),
         Some(ManagedReference::new(u64::MAX))
     );
+    let worker_telemetry = runtime
+        .background_worker_telemetry()
+        .expect("worker telemetry");
+    assert_eq!(worker_telemetry.jobs_submitted(), 0);
+    assert_eq!(worker_telemetry.evacuation_jobs_completed(), 0);
+}
+
+#[test]
+fn configured_workers_rewrite_selected_object_edges_before_atomic_evacuation_commit() {
+    let mut runtime = runtime(512);
+    runtime
+        .start_background_workers(BackgroundWorkerConfig::new(2, 2).expect("worker configuration"))
+        .expect("start workers");
+    let request = reference_object(80, AllocationClass::Mature);
+    let mut shared = Vec::new();
+    for _ in 0..5 {
+        let reference = runtime.allocate_object(&request).expect("mature object");
+        runtime.publish_shared(reference).expect("publish object");
+        shared.push(reference);
+    }
+    runtime
+        .store_reference(shared[0], ObjectSlot::new(0), Some(shared[1]))
+        .expect("selected edge");
+    runtime
+        .store_reference(shared[4], ObjectSlot::new(0), Some(shared[0]))
+        .expect("outside edge");
+    let mut roots = one_root(80, shared[0]);
+    runtime
+        .select_evacuation_candidates(
+            EvacuationSelectionConfig::new(1, 50).expect("selection config"),
+        )
+        .expect("select candidate");
+
+    let statistics = runtime
+        .evacuate_selected_regions(&mut roots)
+        .expect("worker-assisted evacuation");
+
+    assert_eq!(statistics.objects_evacuated(), 4);
+    assert_eq!(statistics.worker_objects_processed(), 4);
+    assert_eq!(statistics.object_fields_updated(), 2);
+    let relocated_root = roots.managed_references().next().expect("relocated root");
+    assert_eq!(
+        runtime
+            .load_reference(shared[4], ObjectSlot::new(0))
+            .expect("rewritten outside edge"),
+        Some(relocated_root)
+    );
+    let worker_telemetry = runtime
+        .background_worker_telemetry()
+        .expect("worker telemetry");
+    assert_eq!(worker_telemetry.evacuation_jobs_completed(), 4);
+    assert_eq!(worker_telemetry.jobs_submitted(), 4);
+    assert_eq!(worker_telemetry.jobs_completed(), 4);
+    assert_eq!(worker_telemetry.worker_threads_used(), 2);
+    assert_eq!(worker_telemetry.maximum_batch_size(), 4);
 }

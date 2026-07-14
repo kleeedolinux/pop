@@ -51,14 +51,19 @@ already selected regions against its bound, and admits live-copy cost only when
 it fits the protected evacuation reserve. Selected regions leave allocation
 pools until evacuation or explicit cancellation. The implemented
 stopped-mutator evacuation slice validates every precise reference before
-mutation, assigns private forwarding tokens, copies selected objects into
-compact monomorphic shared pages, rewrites object fields, stack roots, strong
-handles, and card metadata, invalidates old tokens, and passes retired regions
-through quarantine before removing their pages. Placement and heap state are
-staged together, so stale roots, malformed metadata, or peak evacuation-reserve
-exhaustion cannot expose a partial relocation. Phase-specific reference
-resolution and worker-driven concurrent evacuation remain unfinished
-production work. A separate memory controller
+mutation and assigns private forwarding tokens. When configured, the collector
+stages selected-object copies and the persistent bounded worker pool rewrites
+their internal edges. Results return in submission order before the collector
+rewrites outside fields, stack roots, strong handles, and card metadata. It then
+places copies into compact monomorphic shared pages, invalidates old tokens, and
+passes retired regions through quarantine before removing their pages.
+Placement and heap state are staged together, so stale roots, malformed
+metadata, worker failure, or peak evacuation-reserve exhaustion cannot expose a
+partial relocation. Workers may be attached once to a runtime that already has
+custom allocation/memory policy. This is parallel stopped-mutator reference
+rewrite work, not parallel copying or mutator-concurrent evacuation;
+phase-specific reference resolution and concurrent relocation remain
+unfinished production work. A separate memory controller
 enforces a byte hard limit before heap mutation, protects emergency and
 evacuation reserves, accounts
 typed stack/code/metadata/native/arena/isolated usage, adapts the collection
@@ -103,7 +108,9 @@ The `generational::workers` partition owns persistent host threads, bounded
 per-worker queues, immutable bounded mark-slot snapshots, deterministic result
 ordering, telemetry, and joined shutdown. It performs parallel marking,
 remembered-card refinement, and sweep dispatch only when explicitly configured;
-it does not claim adaptive sizing, work stealing, mutator-concurrent
+selected-region evacuation can also submit one internal-edge-rewrite job per
+collector-staged selected-object copy while retaining a collector-owned atomic
+commit. It does not claim adaptive sizing, work stealing, mutator-concurrent
 tracing/refinement, or concurrent heap mutation. Major telemetry records
 completed large-object scan chunks, the maximum slots per chunk, pending chunk
 queue depth, and pointer-free large objects without exposing heap contents.

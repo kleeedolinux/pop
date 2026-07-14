@@ -47,6 +47,7 @@ impl BackgroundWorkerConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackgroundWorkerStartError {
+    AlreadyStarted,
     ThreadSpawn,
 }
 
@@ -59,6 +60,7 @@ pub struct BackgroundWorkerTelemetry {
     pub(super) mark_jobs_completed: u64,
     pub(super) card_refinement_jobs_completed: u64,
     pub(super) sweep_jobs_completed: u64,
+    pub(super) evacuation_jobs_completed: u64,
     pub(super) batches_completed: u64,
     pub(super) maximum_batch_size: usize,
 }
@@ -83,6 +85,7 @@ impl BackgroundWorkerTelemetry {
         mark_jobs_completed: u64,
         card_refinement_jobs_completed: u64,
         sweep_jobs_completed: u64,
+        evacuation_jobs_completed: u64,
         batches_completed: u64,
         maximum_batch_size: usize,
     }

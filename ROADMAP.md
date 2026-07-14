@@ -208,8 +208,14 @@ Package for the first release.
     slice that copies objects into compact monomorphic pages, rewrites precise
     fields, stack roots, strong handles, and card metadata, invalidates old
     tokens, quarantines retired regions before removal, and accounts peak use of
-    the protected evacuation reserve. Phase-specific concurrent resolution and
-    worker-driven evacuation remain production work.
+    the protected evacuation reserve.
+  - [x] Attach the persistent bounded worker pool to an already configured
+    runtime, stage selected-object evacuation copies on the collector, dispatch
+    their internal-edge rewrites across workers, restore deterministic result
+    order, and leave the final external-edge/root/placement commit
+    collector-owned and atomic.
+    Phase-specific resolution and mutator-concurrent evacuation remain
+    production work.
   - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
     adaptive worker sizing/work stealing, concurrent card refinement and page
     reclamation, stack watermarks, race/stress proof, and latency measurements.
