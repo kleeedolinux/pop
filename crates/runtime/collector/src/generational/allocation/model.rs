@@ -2,7 +2,10 @@
 
 use pop_runtime_interface::{ObjectSlot, RuntimeTypeId};
 
+use crate::ownership::SchedulerId;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
 pub struct AllocationInfrastructureConfig {
     pub(super) page_bytes: usize,
     pub(super) region_bytes: usize,
@@ -31,10 +34,13 @@ impl AllocationInfrastructureConfig {
         if page_bytes == 0 || region_bytes == 0 || tlab_bytes == 0 {
             return Err(AllocationInfrastructureError::ZeroSize);
         }
-        if page_bytes % 8 != 0 || region_bytes % 8 != 0 || tlab_bytes % 8 != 0 {
+        if !page_bytes.is_multiple_of(8)
+            || !region_bytes.is_multiple_of(8)
+            || !tlab_bytes.is_multiple_of(8)
+        {
             return Err(AllocationInfrastructureError::UnalignedSize);
         }
-        if region_bytes % page_bytes != 0 {
+        if !region_bytes.is_multiple_of(page_bytes) {
             return Err(AllocationInfrastructureError::RegionPageMismatch);
         }
         if tlab_bytes > page_bytes {
@@ -76,11 +82,19 @@ pub struct PageId(pub(super) u64);
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegionId(pub(super) u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl RegionId {
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HeapDomain {
     LocalEden,
     LocalSurvivor,
     LocalMature,
+    Isolated,
     Shared,
     LargeObject,
     Pinned,
@@ -121,6 +135,7 @@ pub struct PageDescriptor {
     pub(super) id: PageId,
     pub(super) region: RegionId,
     pub(super) domain: HeapDomain,
+    pub(super) scheduler: Option<SchedulerId>,
     pub(super) type_id: RuntimeTypeId,
     pub(super) slot_count: u32,
     pub(super) reference_slots: Vec<ObjectSlot>,
@@ -141,6 +156,11 @@ impl PageDescriptor {
     #[must_use]
     pub const fn domain(&self) -> HeapDomain {
         self.domain
+    }
+
+    #[must_use]
+    pub const fn scheduler(&self) -> Option<SchedulerId> {
+        self.scheduler
     }
 
     #[must_use]
@@ -177,6 +197,9 @@ pub struct AllocationMetrics {
     pub(super) allocated_bytes: u64,
     pub(super) survivor_copies: u64,
     pub(super) promotions: u64,
+    pub(super) pages_returned: u64,
+    pub(super) page_reclamation_passes: u64,
+    pub(super) mature_page_index_hits: u64,
 }
 
 impl AllocationMetrics {
@@ -208,5 +231,20 @@ impl AllocationMetrics {
     #[must_use]
     pub const fn promotions(self) -> u64 {
         self.promotions
+    }
+
+    #[must_use]
+    pub const fn pages_returned(self) -> u64 {
+        self.pages_returned
+    }
+
+    #[must_use]
+    pub const fn page_reclamation_passes(self) -> u64 {
+        self.page_reclamation_passes
+    }
+
+    #[must_use]
+    pub const fn mature_page_index_hits(self) -> u64 {
+        self.mature_page_index_hits
     }
 }

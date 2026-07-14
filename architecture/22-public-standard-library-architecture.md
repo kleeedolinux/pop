@@ -328,6 +328,9 @@ Every implemented family must pass:
   and `Pop.Rpc` without exposing compiler-private crates.
 - `Time` owns clocks/timers/deadlines; durable or calendar-driven jobs belong to
   optional `Schedule`.
+- `Actor` owns local isolated actors, typed mailboxes, and supervision;
+  distributed endpoints remain distinct under the optional official
+  `Pop.Cluster` Package and `Cluster` root.
 - `Ui` and `Ai` are accepted technical forms, cased as words. Package metadata
   spells their identities `Pop.Ui` and `Pop.Ai`.
 - No top-level `System`, `Runtime`, `Context`, `Config`, `Observe`, `Term`,

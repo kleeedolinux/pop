@@ -22,17 +22,11 @@ impl BootstrapRuntime {
                 allocation.kind,
                 AllocationKind::Array(ArrayElementMap::Scalar)
             )
-            || !allocation
-                .slots
-                .iter()
-                .all(|slot| matches!(slot, SlotValue::Scalar(_)))
+            || !allocation.object_map.reference_slots().is_empty()
         {
             return None;
         }
-        Some(allocation.slots.iter().map(|slot| match slot {
-            SlotValue::Scalar(value) => *value,
-            SlotValue::Reference(_) => unreachable!("scalar array was validated"),
-        }))
+        Some(allocation.slots.iter().map(|slot| slot.raw()))
     }
 
     #[must_use]
@@ -80,7 +74,7 @@ impl BootstrapRuntime {
                 .get_mut(&owner)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
             for slot in &mut allocation.slots {
-                *slot = SlotValue::Scalar(value);
+                *slot = SlotValue::scalar(value);
             }
         }
         Ok(())
@@ -105,9 +99,10 @@ impl BootstrapRuntime {
         let previous = self
             .objects
             .get(&owner)
+            .filter(|allocation| allocation.object_map.is_reference_slot(slot))
             .and_then(|allocation| allocation.slots.get(slot.raw() as usize))
             .copied();
-        let Some(SlotValue::Reference(previous)) = previous else {
+        let Some(previous) = previous.map(SlotValue::as_reference) else {
             return Err(RuntimeFailure::runtime_invariant());
         };
         self.write_barrier(WriteBarrier::new(
@@ -121,7 +116,7 @@ impl BootstrapRuntime {
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        allocation.slots[slot.raw() as usize] = SlotValue::Reference(value);
+        allocation.slots[slot.raw() as usize] = SlotValue::reference(value);
         Ok(())
     }
 
@@ -141,13 +136,13 @@ impl BootstrapRuntime {
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if allocation.object_map.is_reference_slot(slot) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         let Some(current) = allocation.slots.get_mut(slot.raw() as usize) else {
             return Err(RuntimeFailure::runtime_invariant());
         };
-        if !matches!(current, SlotValue::Scalar(_)) {
-            return Err(RuntimeFailure::runtime_invariant());
-        }
-        *current = SlotValue::Scalar(value);
+        *current = SlotValue::scalar(value);
         Ok(())
     }
 
@@ -166,9 +161,12 @@ impl BootstrapRuntime {
             .objects
             .get(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if allocation.object_map.is_reference_slot(slot) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         match allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Scalar(value)) => Ok(*value),
-            Some(SlotValue::Reference(_)) | None => Err(RuntimeFailure::runtime_invariant()),
+            Some(value) => Ok(value.raw()),
+            None => Err(RuntimeFailure::runtime_invariant()),
         }
     }
 
@@ -210,8 +208,7 @@ impl BootstrapRuntime {
         let is_reference = self
             .objects
             .get(&owner)
-            .and_then(|allocation| allocation.slots.get(slot.raw() as usize))
-            .is_some_and(|slot| matches!(slot, SlotValue::Reference(_)));
+            .is_some_and(|allocation| allocation.object_map.is_reference_slot(slot));
         if is_reference {
             self.store_reference(
                 owner,
@@ -258,11 +255,12 @@ impl BootstrapRuntime {
             .objects
             .get(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        match allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Scalar(value)) => Ok(*value),
-            Some(SlotValue::Reference(value)) => Ok(value.map_or(0, ManagedReference::raw)),
-            None => Err(RuntimeFailure::runtime_invariant()),
-        }
+        allocation
+            .slots
+            .get(slot.raw() as usize)
+            .copied()
+            .map(SlotValue::raw)
+            .ok_or_else(RuntimeFailure::runtime_invariant)
     }
 
     #[must_use]

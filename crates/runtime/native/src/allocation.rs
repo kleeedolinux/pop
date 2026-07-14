@@ -58,13 +58,9 @@ pub extern "C" fn pop_rt_allocate_array_filled(
     let Ok(mut runtime) = abi_runtime().lock() else {
         return 0;
     };
-    let Ok(reference) = runtime.allocate_array(&request) else {
-        return 0;
-    };
-    if runtime.fill_array_value(reference, initial_value).is_err() {
-        return 0;
-    }
-    reference.raw()
+    runtime
+        .allocate_array_filled(&request, initial_value)
+        .map_or(0, ManagedReference::raw)
 }
 
 #[allow(unsafe_code)]
@@ -82,13 +78,18 @@ pub fn allocate_mapped_object(slot_count: u64, reference_slots: &[u32]) -> u64 {
     let Ok(slot_count) = u32::try_from(slot_count) else {
         return 0;
     };
-    let slots = reference_slots
-        .iter()
-        .copied()
-        .map(ObjectSlot::new)
-        .collect();
-    let Ok(object_map) = ObjectMap::new(slot_count, slots) else {
-        return 0;
+    let object_map = if reference_slots.is_empty() {
+        ObjectMap::scalar(slot_count)
+    } else {
+        let slots = reference_slots
+            .iter()
+            .copied()
+            .map(ObjectSlot::new)
+            .collect();
+        let Ok(object_map) = ObjectMap::new(slot_count, slots) else {
+            return 0;
+        };
+        object_map
     };
     let request =
         ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
@@ -128,10 +129,70 @@ pub unsafe extern "C" fn pop_rt_allocate_mapped_object(
     allocate_mapped_object(slot_count, reference_slots)
 }
 
-fn abi_allocate_object(slot_count: u32) -> u64 {
-    let Ok(object_map) = ObjectMap::new(slot_count, Vec::new()) else {
+/// Allocates and publishes one object with its complete precisely mapped
+/// payload.
+///
+/// # Safety
+///
+/// Nonzero counts require readable arrays of exactly the corresponding length.
+/// Initial values use the physical slot representation selected by LLVM.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_allocate_initialized_object(
+    slot_count: u64,
+    reference_slots: *const u32,
+    reference_count: u64,
+    initial_values: *const u64,
+    value_count: u64,
+) -> u64 {
+    let Ok(slot_count) = u32::try_from(slot_count) else {
         return 0;
     };
+    let Ok(reference_count) = usize::try_from(reference_count) else {
+        return 0;
+    };
+    let Ok(value_count) = usize::try_from(value_count) else {
+        return 0;
+    };
+    if value_count != slot_count as usize
+        || (reference_count != 0 && reference_slots.is_null())
+        || (value_count != 0 && initial_values.is_null())
+    {
+        return 0;
+    }
+    let references = if reference_count == 0 {
+        &[]
+    } else {
+        // SAFETY: The caller contract requires this exact readable array.
+        unsafe { std::slice::from_raw_parts(reference_slots, reference_count) }
+    };
+    let values = if value_count == 0 {
+        &[]
+    } else {
+        // SAFETY: The caller contract requires this exact readable array.
+        unsafe { std::slice::from_raw_parts(initial_values, value_count) }
+    };
+    let object_map = if references.is_empty() {
+        ObjectMap::scalar(slot_count)
+    } else {
+        let slots = references.iter().copied().map(ObjectSlot::new).collect();
+        let Ok(object_map) = ObjectMap::new(slot_count, slots) else {
+            return 0;
+        };
+        object_map
+    };
+    let request =
+        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    runtime
+        .allocate_object_initialized(&request, values)
+        .map_or(0, ManagedReference::raw)
+}
+
+fn abi_allocate_object(slot_count: u32) -> u64 {
+    let object_map = ObjectMap::scalar(slot_count);
     let request =
         ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
     let Ok(mut runtime) = abi_runtime().lock() else {

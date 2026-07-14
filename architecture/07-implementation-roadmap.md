@@ -99,6 +99,32 @@ not table or runtime-name lookup.
   Rust-runtime operations;
 - `BubbleContext` default loading and initialization;
 - moving nursery, card barriers, and GC stress tests;
+- bounded large-object pointer scanning with pointer-free field-scan elision;
+- bounded worker-local FIFO queues with opposite-end peer stealing,
+  deterministic result application, steal telemetry, and joined shutdown;
+- runtime-owned major-mark epoch activation that validates and acknowledges
+  every registered mutator root snapshot before tracing or worker dispatch;
+- accepted native stable-token generational composition that removes the
+  bootstrap collector from ABI 1 executables while reserving moving nursery and
+  evacuation for verified ABI 2 writable roots;
+- ABI 1.11 atomic initialized-object publication plus profiled retained-graph
+  fast paths: cached committed accounting, prepublication managed-array fill,
+  stable-stage barrier specialization, mutator-local mature-span cursors,
+  inline one-word payload slots, constant-time homogeneous-array
+  classification, and deterministic arena-indexed token metadata without
+  duplicate per-entry tokens;
+- backend-private scalar replacement for non-escaping scalar arrays, including
+  read-only loop-local instances, with exact shape/bounds traps, loop safe
+  points, and managed, escaping, or mutated-loop negative coverage;
+- scoped pin handle/object counting and deterministic long-lived-pin telemetry;
+- domain/scheduler-homogeneous regions with exact fragmentation telemetry and
+  bounded reserve-admitted selective-evacuation candidate selection;
+- failure-atomic stopped-mutator selective evacuation with compact monomorphic
+  destination pages, exact field/root/handle/card rewriting, stale-token
+  invalidation, transient quarantine, and peak reserve admission;
+- bounded worker-assisted selected-object internal-edge rewriting with
+  deterministic results and one collector-owned atomic reference/placement
+  commit;
 - mutable typed root updates, runtime-profile/backend capability negotiation,
   and a real single-mutator relocation conformance collector before production
   TLAB/parallel-evacuation claims (ADR 0039);
@@ -128,7 +154,26 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - coroutines/async model;
 - FFI;
 - opt-in retained metadata and generated typed adapters where justified;
-- concurrent mature GC, pacing, latency telemetry, and benchmark gates;
+- production concurrent mature GC and latency/benchmark gates, building on the
+  implemented cooperative SATB marking and ordered lazy sweeping without a
+  full-heap transition inventory, page/TLAB allocation, hard-limit
+  accounting, adaptive pacing, bounded assists, logical memory telemetry, the
+  runtime-integrated typed bounded mark-epoch coordinator, and opt-in bounded
+  host-worker mark/card/sweep dispatch; the runtime also has distinct ownership metadata,
+  whole-graph local-to-shared publication, ownership barrier enforcement, and
+  exact-one-owner isolated-region construction/transfer/dissolution, while
+  scheduler-indexed TLABs/local collection now preserve heap independence;
+  shared regions now expose exact fragmentation/pin/reference accounting,
+  deterministic reserve-bounded evacuation-set selection, and a
+  failure-atomic stopped-mutator relocation slice that copies into compact
+  monomorphic pages, rewrites precise fields/roots/handles/card metadata,
+  invalidates old tokens, and retires quarantined regions; the collector can
+  stage selected-object copies for bounded workers to rewrite their internal
+  edges before the deterministic collector-owned commit, while phase-specific
+  reference resolution and mutator-concurrent evacuation remain open;
+  typed scoped bump arenas provide precise external roots and bulk reclamation;
+  parallel scheduler execution and native scheduler transition integration
+  remain open;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.

@@ -100,6 +100,15 @@ fn object_and_stack_maps_are_canonical_precise_contracts() {
 }
 
 #[test]
+fn scalar_object_maps_are_canonical_without_reference_validation_work() {
+    let map = ObjectMap::scalar(2);
+
+    assert_eq!(map.slot_count(), 2);
+    assert!(map.reference_slots().is_empty());
+    assert!(!map.is_reference_slot(ObjectSlot::new(0)));
+}
+
+#[test]
 fn root_publication_mutation_preserves_canonical_slots_and_stack_map() {
     let stack_map = StackMap::new(
         SafePointId::new(12),

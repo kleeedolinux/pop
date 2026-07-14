@@ -14,14 +14,18 @@ impl RelocationRuntime {
     pub(super) fn collect_minor(
         &mut self,
         publication: &mut RootPublication,
+        scheduler: crate::SchedulerId,
     ) -> Result<CollectionStatistics, RuntimeFailure> {
-        let pending = self.minor_collection_roots(publication)?;
-        let live_young = self.trace_live_young(pending)?;
+        let pending = self.minor_collection_roots(publication, scheduler)?;
+        let live_young = self.trace_live_young(pending, scheduler)?;
 
         let young_before = self
             .objects
             .values()
-            .filter(|object| matches!(object.generation, CollectorGeneration::Nursery { .. }))
+            .filter(|object| {
+                matches!(object.generation, CollectorGeneration::Nursery { .. })
+                    && object.ownership == crate::ObjectOwnership::SchedulerLocal(scheduler)
+            })
             .count();
         let pinned: BTreeSet<_> = self.pins.values().copied().collect();
         let mut relocations = BTreeMap::new();
@@ -29,10 +33,12 @@ impl RelocationRuntime {
             relocations.insert(*old, self.fresh_reference()?);
         }
 
-        let mut next_objects = BTreeMap::new();
-        for (reference, object) in &self.objects {
-            if object.generation == CollectorGeneration::Mature {
-                next_objects.insert(*reference, object.clone());
+        let mut next_objects = super::table::ObjectTable::new();
+        for (reference, object) in self.objects.iter() {
+            if object.generation == CollectorGeneration::Mature
+                || object.ownership != crate::ObjectOwnership::SchedulerLocal(scheduler)
+            {
+                next_objects.insert(reference, object.clone());
             }
         }
         for old in &live_young {
@@ -56,11 +62,12 @@ impl RelocationRuntime {
         }
 
         for object in next_objects.values_mut() {
-            for slot in &mut object.allocation.slots {
-                if let SlotValue::Reference(Some(reference)) = slot
-                    && let Some(relocated) = relocations.get(reference)
+            for slot in object.allocation.object_map.reference_slots() {
+                let value = &mut object.allocation.slots[slot.raw() as usize];
+                if let Some(reference) = value.as_reference()
+                    && let Some(relocated) = relocations.get(&reference)
                 {
-                    *reference = *relocated;
+                    *value = SlotValue::reference(Some(*relocated));
                 }
             }
         }
@@ -85,6 +92,7 @@ impl RelocationRuntime {
         self.roots = next_roots;
         self.pins = next_pins;
         self.dirty_cards = next_dirty_cards;
+        self.refined_cards = None;
         for ((_, value), update) in publication.root_values_mut().zip(stack_updates) {
             *value = update;
         }
@@ -96,6 +104,7 @@ impl RelocationRuntime {
     fn minor_collection_roots(
         &self,
         publication: &RootPublication,
+        scheduler: crate::SchedulerId,
     ) -> Result<Vec<ManagedReference>, RuntimeFailure> {
         let stack_roots: Vec<_> = publication.managed_references().collect();
         let handle_roots: Vec<_> = self.roots.values().copied().collect();
@@ -107,13 +116,31 @@ impl RelocationRuntime {
         let mut pending = stack_roots;
         pending.extend(handle_roots);
         pending.extend(pin_roots);
-        for owner in &self.dirty_cards {
-            let object = self
-                .objects
-                .get(owner)
-                .filter(|object| object.generation == CollectorGeneration::Mature)
-                .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            append_references(object, &mut pending)?;
+        let relevant_cards: BTreeSet<_> = self
+            .dirty_cards
+            .iter()
+            .copied()
+            .filter(|owner| {
+                self.objects.get(owner).is_some_and(|object| {
+                    object.generation == CollectorGeneration::Mature
+                        && object.ownership == crate::ObjectOwnership::SchedulerLocal(scheduler)
+                })
+            })
+            .collect();
+        if let Some(refined) = &self.refined_cards {
+            if refined.keys().copied().collect::<BTreeSet<_>>() != relevant_cards {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+            pending.extend(refined.values().flatten().copied());
+        } else {
+            for owner in &relevant_cards {
+                let object = self
+                    .objects
+                    .get(owner)
+                    .filter(|object| object.generation == CollectorGeneration::Mature)
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                append_references(object, &mut pending)?;
+            }
         }
         Ok(pending)
     }
@@ -121,6 +148,7 @@ impl RelocationRuntime {
     fn trace_live_young(
         &self,
         mut pending: Vec<ManagedReference>,
+        scheduler: crate::SchedulerId,
     ) -> Result<BTreeSet<ManagedReference>, RuntimeFailure> {
         let mut live_young = BTreeSet::new();
         while let Some(reference) = pending.pop() {
@@ -128,7 +156,10 @@ impl RelocationRuntime {
                 .objects
                 .get(&reference)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            if object.generation == CollectorGeneration::Mature || !live_young.insert(reference) {
+            if object.generation == CollectorGeneration::Mature
+                || object.ownership != crate::ObjectOwnership::SchedulerLocal(scheduler)
+                || !live_young.insert(reference)
+            {
                 continue;
             }
             append_references(object, &mut pending)?;
@@ -142,12 +173,14 @@ fn append_references(
     pending: &mut Vec<ManagedReference>,
 ) -> Result<(), RuntimeFailure> {
     for slot in object.allocation.object_map.reference_slots() {
-        match object.allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Reference(Some(reference))) => pending.push(*reference),
-            Some(SlotValue::Reference(None)) => {}
-            Some(SlotValue::Scalar(_)) | None => {
-                return Err(RuntimeFailure::runtime_invariant());
-            }
+        let value = object
+            .allocation
+            .slots
+            .get(slot.raw() as usize)
+            .copied()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if let Some(reference) = value.as_reference() {
+            pending.push(reference);
         }
     }
     Ok(())
@@ -169,23 +202,27 @@ fn relocate_handles<Handle: Copy + Ord>(
 }
 
 fn remembered_cards(
-    objects: &BTreeMap<ManagedReference, super::heap::RelocationAllocation>,
+    objects: &super::table::ObjectTable<super::heap::RelocationAllocation>,
 ) -> BTreeSet<ManagedReference> {
     objects
         .iter()
         .filter_map(|(reference, object)| {
             (object.generation == CollectorGeneration::Mature
-                && object.allocation.slots.iter().any(|slot| {
-                    matches!(
-                        slot,
-                        SlotValue::Reference(Some(child))
-                            if objects.get(child).is_some_and(|child| matches!(
-                                child.generation,
-                                CollectorGeneration::Nursery { .. }
-                            ))
-                    )
-                }))
-            .then_some(*reference)
+                && object
+                    .allocation
+                    .object_map
+                    .reference_slots()
+                    .iter()
+                    .any(|slot| {
+                        object.allocation.slots[slot.raw() as usize]
+                            .as_reference()
+                            .is_some_and(|child| {
+                                objects.get(&child).is_some_and(|child| {
+                                    matches!(child.generation, CollectorGeneration::Nursery { .. })
+                                })
+                            })
+                    }))
+            .then_some(reference)
         })
         .collect()
 }

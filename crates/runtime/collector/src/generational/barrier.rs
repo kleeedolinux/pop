@@ -7,6 +7,19 @@ use crate::relocation::CollectorGeneration;
 use super::heap::{GenerationalRuntime, MajorCyclePhase};
 
 impl GenerationalRuntime {
+    /// Loads one precise managed edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for an invalid owner or non-reference slot.
+    pub fn load_reference(
+        &self,
+        owner: ManagedReference,
+        slot: ObjectSlot,
+    ) -> Result<Option<ManagedReference>, RuntimeFailure> {
+        self.nursery.load_reference(owner, slot)
+    }
+
     /// Stores one precise managed edge through SATB and card barriers.
     ///
     /// # Errors
@@ -22,6 +35,7 @@ impl GenerationalRuntime {
         if value.is_some_and(|reference| !self.nursery.contains(reference)) {
             return Err(RuntimeFailure::runtime_invariant());
         }
+        self.validate_ownership_edge(owner, value)?;
         self.record_satb(previous);
         self.record_post_scan_edge(owner, value);
         self.nursery.store_reference(owner, slot, value)
@@ -45,11 +59,17 @@ impl GenerationalRuntime {
     }
 
     pub(crate) fn mark_new_allocation(&mut self, reference: ManagedReference) {
-        if self.major.phase == MajorCyclePhase::Marking
-            && self.nursery.generation(reference) == Some(CollectorGeneration::Mature)
-        {
-            self.major.marked_mature.insert(reference);
-            self.major.pending.push(reference);
+        if self.nursery.generation(reference) == Some(CollectorGeneration::Mature) {
+            match self.major.phase {
+                MajorCyclePhase::Marking => {
+                    self.major.marked_mature.insert(reference);
+                    self.major.pending.push(reference);
+                }
+                MajorCyclePhase::Sweeping => {
+                    self.major.marked_mature.insert(reference);
+                }
+                MajorCyclePhase::Idle => {}
+            }
         }
     }
 

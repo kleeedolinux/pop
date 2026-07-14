@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use pop_runtime_interface::{
-    AllocationClass, CollectionStatistics, ManagedReference, ObjectMap, ObjectSlot, PanicPayload,
+    AllocationClass, CollectionStatistics, ManagedReference, ObjectMap, PanicPayload,
     RootPublication, RuntimeFailure, RuntimeTypeId,
 };
 
@@ -38,9 +38,42 @@ impl BootstrapRuntime {
         kind: AllocationKind,
         object_map: ObjectMap,
     ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate_with_initial(type_id, allocation_class, kind, object_map, None)
+    }
+
+    pub(crate) fn allocate_filled(
+        &mut self,
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        kind: AllocationKind,
+        object_map: ObjectMap,
+        initial_value: u64,
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate_with_initial(
+            type_id,
+            allocation_class,
+            kind,
+            object_map,
+            Some(initial_value),
+        )
+    }
+
+    fn allocate_with_initial(
+        &mut self,
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        kind: AllocationKind,
+        object_map: ObjectMap,
+        initial_value: Option<u64>,
+    ) -> Result<ManagedReference, RuntimeFailure> {
         let requested_slots = usize::try_from(object_map.slot_count())
             .map_err(|_| Self::out_of_memory(1, usize::MAX))?;
         self.ensure_capacity(requested_slots)?;
+        if !object_map.reference_slots().is_empty()
+            && let Some(value) = initial_value.filter(|value| *value != 0)
+        {
+            self.validate_reference(ManagedReference::new(value))?;
+        }
         let reference = ManagedReference::new(self.next_reference);
         self.next_reference = self
             .next_reference
@@ -50,12 +83,8 @@ impl BootstrapRuntime {
         slots
             .try_reserve_exact(requested_slots)
             .map_err(|_| Self::out_of_memory(1, requested_slots))?;
-        for index in 0..object_map.slot_count() {
-            slots.push(if object_map.is_reference_slot(ObjectSlot::new(index)) {
-                SlotValue::Reference(None)
-            } else {
-                SlotValue::Scalar(0)
-            });
+        for _ in 0..object_map.slot_count() {
+            slots.push(SlotValue::scalar(initial_value.unwrap_or(0)));
         }
         self.objects.insert(
             reference,
@@ -64,7 +93,7 @@ impl BootstrapRuntime {
                 type_id,
                 class: allocation_class,
                 object_map,
-                slots,
+                slots: slots.into(),
             },
         );
         self.slot_count += requested_slots;
@@ -110,12 +139,13 @@ impl BootstrapRuntime {
                 .get(&reference)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
             for slot in allocation.object_map.reference_slots() {
-                match allocation.slots.get(slot.raw() as usize) {
-                    Some(SlotValue::Reference(Some(child))) => pending.push(*child),
-                    Some(SlotValue::Reference(None)) => {}
-                    Some(SlotValue::Scalar(_)) | None => {
-                        return Err(RuntimeFailure::runtime_invariant());
-                    }
+                let value = allocation
+                    .slots
+                    .get(slot.raw() as usize)
+                    .copied()
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                if let Some(child) = value.as_reference() {
+                    pending.push(child);
                 }
             }
         }

@@ -59,6 +59,19 @@ pub fn request_abi_collection() -> bool {
 }
 
 pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
+    if roots.len() > u32::MAX as usize {
+        return 0;
+    }
+    let Ok(mut runtime) = abi_runtime().lock() else {
+        return 0;
+    };
+    if !runtime.collection_requested() {
+        return u8::from(
+            roots
+                .iter()
+                .all(|root| *root == 0 || runtime.contains(ManagedReference::new(*root))),
+        );
+    }
     let root_slots = (0..roots.len())
         .filter_map(|index| u32::try_from(index).ok())
         .map(pop_runtime_interface::RootSlot::new)
@@ -75,9 +88,6 @@ pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
         .map(|root| (root != 0).then(|| ManagedReference::new(root)))
         .collect();
     let Ok(mut publication) = RootPublication::new(stack_map, roots) else {
-        return 0;
-    };
-    let Ok(mut runtime) = abi_runtime().lock() else {
         return 0;
     };
     u8::from(runtime.safe_point(&mut publication).is_ok())

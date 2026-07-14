@@ -7,6 +7,10 @@ use pop_runtime_interface::{
     RuntimeTypeId,
 };
 
+mod slot;
+
+pub(crate) use slot::{SlotStorage, SlotValue};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapLimits {
     pub(crate) maximum_objects: usize,
@@ -88,17 +92,15 @@ impl CollectorMetrics {
         self.allocations = self.allocations.saturating_add(1);
     }
 
+    pub(crate) fn rollback_allocation(&mut self) {
+        self.allocations = self.allocations.saturating_sub(1);
+    }
+
     pub(crate) fn record_collection(&mut self, reclaimed: u64, scanned: u64) {
         self.collections = self.collections.saturating_add(1);
         self.reclaimed_objects = self.reclaimed_objects.saturating_add(reclaimed);
         self.scanned_objects = self.scanned_objects.saturating_add(scanned);
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SlotValue {
-    Scalar(u64),
-    Reference(Option<ManagedReference>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,7 +116,7 @@ pub(crate) struct Allocation {
     pub(crate) type_id: RuntimeTypeId,
     pub(crate) class: AllocationClass,
     pub(crate) object_map: ObjectMap,
-    pub(crate) slots: Vec<SlotValue>,
+    pub(crate) slots: SlotStorage,
 }
 
 pub struct BootstrapRuntime {
@@ -165,6 +167,11 @@ impl BootstrapRuntime {
     #[must_use]
     pub const fn slot_count(&self) -> usize {
         self.slot_count
+    }
+
+    #[must_use]
+    pub const fn collection_requested(&self) -> bool {
+        self.collection_requested
     }
 
     #[must_use]

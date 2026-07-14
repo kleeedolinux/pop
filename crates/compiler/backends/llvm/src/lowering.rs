@@ -123,6 +123,10 @@ pub fn lower_mir_to_llvm_ir(
             "declare i64 @{}(i64)",
             native_runtime_symbol(RuntimeOperation::AllocateObject)
         ),
+        format!(
+            "declare i64 @{}(i64, ptr, i64, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::AllocateObjectInitialized)
+        ),
         "declare i64 @pop_rt_allocate_mapped_object(i64, ptr, i64)".to_owned(),
         format!(
             "declare i64 @{}(i64, i1)",
@@ -425,6 +429,13 @@ pub(crate) struct DirectScalarArray {
     pub(crate) length: ValueId,
     pub(crate) initial_value: ValueId,
     pub(crate) element_type: TypeId,
+    pub(crate) storage: DirectScalarArrayStorage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectScalarArrayStorage {
+    Native,
+    ScalarReplaced,
 }
 
 #[derive(Debug, Default)]
@@ -445,33 +456,40 @@ impl DirectScalarArrays {
         };
         let mut allocations = BTreeMap::new();
         let mut aliases = BTreeMap::new();
-        for instruction in entry.instructions() {
-            let MirInstructionKind::ArrayCreate {
-                length,
-                initial_value,
-                element_map: ArrayElementMap::Scalar,
-            } = instruction.kind()
-            else {
-                continue;
-            };
-            let Some(SemanticType::Array(element_type)) = value_types
-                .get(&instruction.result())
-                .and_then(|type_id| types.get(*type_id))
-            else {
-                continue;
-            };
-            if !is_direct_scalar_element(*element_type, types) {
-                continue;
+        let mut entry_allocations = BTreeSet::new();
+        for block in blocks {
+            for instruction in block.instructions() {
+                let MirInstructionKind::ArrayCreate {
+                    length,
+                    initial_value,
+                    element_map: ArrayElementMap::Scalar,
+                } = instruction.kind()
+                else {
+                    continue;
+                };
+                let Some(SemanticType::Array(element_type)) = value_types
+                    .get(&instruction.result())
+                    .and_then(|type_id| types.get(*type_id))
+                else {
+                    continue;
+                };
+                if !is_direct_scalar_element(*element_type, types) {
+                    continue;
+                }
+                allocations.insert(
+                    instruction.result(),
+                    DirectScalarArray {
+                        length: *length,
+                        initial_value: *initial_value,
+                        element_type: *element_type,
+                        storage: DirectScalarArrayStorage::ScalarReplaced,
+                    },
+                );
+                aliases.insert(instruction.result(), instruction.result());
+                if block.block() == entry.block() {
+                    entry_allocations.insert(instruction.result());
+                }
             }
-            allocations.insert(
-                instruction.result(),
-                DirectScalarArray {
-                    length: *length,
-                    initial_value: *initial_value,
-                    element_type: *element_type,
-                },
-            );
-            aliases.insert(instruction.result(), instruction.result());
         }
         if allocations.is_empty() {
             return Self::default();
@@ -510,6 +528,7 @@ impl DirectScalarArrays {
         }
 
         let mut rejected = BTreeSet::new();
+        let mut mutated = BTreeSet::new();
         for block in blocks {
             for instruction in block.instructions() {
                 let used = instruction
@@ -518,6 +537,14 @@ impl DirectScalarArrays {
                     .filter_map(|value| aliases.get(&value).copied())
                     .collect::<BTreeSet<_>>();
                 for origin in used {
+                    if matches!(
+                        instruction.kind(),
+                        MirInstructionKind::ArraySet { array, .. }
+                            | MirInstructionKind::ArrayFill { array, .. }
+                            if aliases.get(array).copied() == Some(origin)
+                    ) {
+                        mutated.insert(origin);
+                    }
                     let allowed_array = match instruction.kind() {
                         MirInstructionKind::ArrayLength { array }
                         | MirInstructionKind::ArrayGetChecked { array, .. }
@@ -592,6 +619,15 @@ impl DirectScalarArrays {
                 | MirTerminator::ContinueUnwind(_)
                 | MirTerminator::ResumeUnwind
                 | MirTerminator::Unreachable => {}
+            }
+        }
+        for origin in mutated {
+            if entry_allocations.contains(&origin) {
+                if let Some(allocation) = allocations.get_mut(&origin) {
+                    allocation.storage = DirectScalarArrayStorage::Native;
+                }
+            } else {
+                rejected.insert(origin);
             }
         }
         allocations.retain(|origin, _| !rejected.contains(origin));

@@ -451,6 +451,13 @@ A page descriptor may define:
 
 Objects on such a page may omit a per-object type pointer.
 
+The physical payload uses one machine word per logical slot. The page/object
+pointer map is the sole authority that interprets a word as a scalar or managed
+reference; payload words do not duplicate that fact with a per-slot runtime
+tag. A scalar whose bits equal a managed token remains a scalar and must never
+be traced. Segmented token directories derive the token from the segment and
+slot coordinate rather than storing the same token beside every entry.
+
 This improves:
 
 - object density;

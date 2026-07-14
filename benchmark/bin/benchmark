@@ -22,7 +22,7 @@ module PopBenchmark
   LDC_LINUX_SHA256 = "a7bc9c956138f558cadf9c962352f59d41c80df6eb3ae3f8039f25be14a69303"
 
   Runtime = Data.define(:id, :name, :source_directory, :source_extension, :command, :provisioner, :builder, :mode)
-  Workload = Data.define(:id, :name, :description)
+  Workload = Data.define(:id, :name, :category, :description, :expected_output)
 
   class Registry
     attr_reader :runtimes, :workloads
@@ -36,18 +36,21 @@ module PopBenchmark
       @runtimes << Runtime.new(id, name, directory, extension, command, provisioner, builder, mode)
     end
 
-    def workload(id, name:, description:)
-      @workloads << Workload.new(id, name, description)
+    def workload(id, name:, category:, description:, expected_output:)
+      @workloads << Workload.new(id, name, category, description, expected_output)
     end
   end
 
   REGISTRY = Registry.new
   REGISTRY.instance_eval do
     runtime "lua", name: "Lua 5.5.0", extension: "lua", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "lua", "bin", "lua"), source] }, provisioner: :lua
-    runtime "luajit", name: "LuaJIT 2.1", extension: "lua", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "luajit", "bin", "luajit-2.1.0-beta3"), source] }, provisioner: :luajit, mode: "JIT"
+    runtime "luajit", name: "LuaJIT 2.1", extension: "lua", command: ->(source, _) { [Provision.luajit_executable, source] }, provisioner: :luajit, mode: "JIT"
     runtime "luau", name: "Luau 0.729", extension: "luau", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "luau", "luau"), source] }, provisioner: :luau
     runtime "luaujit", name: "Luau 0.729 native codegen", extension: "luau", command: ->(source, _) { [File.join(TOOL_DIRECTORY, "luaujit", "luau"), "--codegen", source] }, provisioner: :luaujit, mode: "native JIT"
     runtime "ruby", name: "Ruby 3.4", extension: "rb", directory: "ruby", command: ->(source, _) { [RbConfig.ruby, source] }, provisioner: :ruby
+    runtime "python", name: "Python 3", extension: "py", directory: "python", command: ->(source, _) { ["python3", source] }, provisioner: :python
+    runtime "javascript", name: "JavaScript · Node.js", extension: "js", directory: "javascript", command: ->(source, _) { ["node", source] }, provisioner: :javascript, mode: "JIT"
+    runtime "rust", name: "Rust · rustc -O", extension: "rs", directory: "rust", command: ->(_, artifact) { [artifact] }, provisioner: :rust, builder: :rust, mode: "ahead of time"
     runtime "go", name: "Go 1.26", extension: "go", command: ->(_, artifact) { [artifact] }, provisioner: :go, builder: :go, mode: "ahead of time"
     runtime "c", name: "C · Clang 22 -O3", extension: "c", command: ->(_, artifact) { [artifact] }, provisioner: :c, builder: :c, mode: "ahead of time"
     runtime "d", name: "D · LDC 1.42 -O3", extension: "d", command: ->(_, artifact) { [artifact] }, provisioner: :ldc, builder: :d, mode: "ahead of time"
@@ -55,9 +58,11 @@ module PopBenchmark
     runtime "crystal", name: "Crystal 1.20 · release", extension: "cr", directory: "crystal", command: ->(_, artifact) { [artifact] }, provisioner: :crystal, builder: :crystal, mode: "ahead of time"
     runtime "poplang", name: "Pop Lang · LLVM O3", extension: "pop", command: ->(_, artifact) { [artifact] }, provisioner: :poplang, builder: :poplang, mode: "ahead of time"
 
-    workload "fibonacci", name: "Recursive Fibonacci", description: "Repeated recursive integer calls; prints a checksum."
-    workload "integerLoop", name: "Integer loop", description: "Integer arithmetic in a counted loop; prints a checksum."
-    workload "tableLoop", name: "Array loop", description: "Builds and sums a numeric collection; prints a checksum."
+    workload "fibonacci", name: "Recursive Fibonacci", category: "Calls", description: "Repeated recursive integer calls; prints a checksum.", expected_output: "9534330\n"
+    workload "integerLoop", name: "Integer loop", category: "Loops", description: "Integer arithmetic in a counted loop; prints a checksum.", expected_output: "1250000025000000\n"
+    workload "tableLoop", name: "Numeric array", category: "Arrays", description: "Builds, mutates, and sums one million integers.", expected_output: "500000500000\n"
+    workload "allocationChurn", name: "Allocation churn", category: "GC", description: "Allocates twenty thousand short-lived numeric arrays to exercise allocation and reclamation.", expected_output: "200010000\n"
+    workload "objectArray", name: "Retained object array", category: "GC", description: "Allocates and retains two hundred thousand objects through a managed-reference array.", expected_output: "20000100000\n"
   end
 
   module Command
@@ -109,13 +114,28 @@ module PopBenchmark
     end
 
     def luajit
-      executable = File.join(TOOL_DIRECTORY, "luajit", "bin", "luajit-2.1.0-beta3")
+      executable = luajit_executable
       return if File.executable?(executable)
-      source = archive("https://github.com/LuaJIT/LuaJIT/archive/refs/tags/v2.1.0-beta3.tar.gz", "luajit-2.1.0-beta3.tar.gz")
-      build_source("luajit", source, "LuaJIT-2.1.0-beta3") do |directory, prefix|
-        Command.run("make", "amalg", "XCFLAGS=-O3 -fPIC", chdir: directory)
-        Command.run("make", "install", "PREFIX=#{prefix}", chdir: directory)
-      end
+      host_executable = find_executable("luajit")
+      return @luajit_executable = host_executable if host_executable
+
+      stage = File.join(TOOL_DIRECTORY, ".stage-luajit")
+      FileUtils.rm_rf(stage)
+      Command.run("git", "clone", "--branch", "v2.1", "--depth", "1", "https://luajit.org/git/luajit.git", stage)
+      prefix = File.join(TOOL_DIRECTORY, "luajit")
+      Command.run("make", "amalg", "XCFLAGS=-O3 -fPIC", chdir: stage)
+      Command.run("make", "install", "PREFIX=#{prefix}", chdir: stage)
+      @luajit_executable = Dir.glob(File.join(prefix, "bin", "luajit-2.1.*")).find { |path| File.executable?(path) }
+      raise "LuaJIT build did not install an executable" unless @luajit_executable
+    ensure
+      FileUtils.rm_rf(stage) if defined?(stage) && stage
+    end
+
+    def luajit_executable
+      return @luajit_executable if @luajit_executable
+
+      local = Dir.glob(File.join(TOOL_DIRECTORY, "luajit", "bin", "luajit-2.1.*")).find { |path| File.executable?(path) }
+      @luajit_executable = local || find_executable("luajit") || File.join(TOOL_DIRECTORY, "luajit", "bin", "luajit")
     end
 
     def luau
@@ -157,6 +177,18 @@ module PopBenchmark
       require_tool(RbConfig.ruby, "--version")
     end
 
+    def python
+      require_tool("python3", "--version")
+    end
+
+    def javascript
+      require_tool("node", "--version")
+    end
+
+    def rust
+      require_tool("rustc", "--version")
+    end
+
     def go
       require_tool("go", "version")
     end
@@ -174,7 +206,7 @@ module PopBenchmark
     end
 
     def ldc
-      executable = File.join(TOOL_DIRECTORY, "ldc", "bin", "ldc2")
+      executable = ldc_executable
       return if File.executable?(executable)
       raise "automatic LDC provisioning currently supports Linux x86_64" unless host == :linux
 
@@ -196,6 +228,18 @@ module PopBenchmark
       FileUtils.cp_r(root, File.join(TOOL_DIRECTORY, "ldc"))
     ensure
       FileUtils.rm_rf(stage) if defined?(stage) && stage
+    end
+
+    def ldc_executable
+      find_executable("ldc2") || File.join(TOOL_DIRECTORY, "ldc", "bin", "ldc2")
+    end
+
+    def find_executable(name)
+      ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
+        candidate = File.join(directory, name)
+        return candidate if File.file?(candidate) && File.executable?(candidate)
+      end
+      nil
     end
 
     def require_tool(command, *arguments)
@@ -239,6 +283,12 @@ module PopBenchmark
       executable
     end
 
+    def rust(source, directory)
+      executable = File.join(directory, "benchmark")
+      Command.run("rustc", "--edition=2024", "-C", "opt-level=3", "-C", "target-cpu=native", "-C", "strip=symbols", source, "-o", executable)
+      executable
+    end
+
     def c(source, directory)
       executable = File.join(directory, "benchmark")
       Command.run("clang", "-std=c17", "-O3", "-march=native", source, "-o", executable)
@@ -247,7 +297,7 @@ module PopBenchmark
 
     def d(source, directory)
       executable = File.join(directory, "benchmark")
-      compiler = File.join(TOOL_DIRECTORY, "ldc", "bin", "ldc2")
+      compiler = Provision.ldc_executable
       Command.run(compiler, "-O3", "-release", "-mcpu=native", source, "-of=#{executable}")
       executable
     end
@@ -290,7 +340,9 @@ module PopBenchmark
       available = @runtimes.select { |runtime| provision(runtime) }
       prepared = available.product(@workloads).filter_map do |runtime, workload|
         begin
-          [runtime, workload, prepare_command(runtime, workload)]
+          command = prepare_command(runtime, workload)
+          validate_command(command, workload)
+          [runtime, workload, command]
         rescue StandardError => error
           warn "benchmark: skipping #{runtime.id}/#{workload.id}: #{error.message.lines.first.strip}"
           nil
@@ -312,7 +364,7 @@ module PopBenchmark
         "samples" => @samples,
         "warmups" => @warmups,
         "timing" => "execution only; provisioning and compilation are excluded",
-        "workloads" => @workloads.map { |workload| { "id" => workload.id, "name" => workload.name, "description" => workload.description } },
+        "workloads" => @workloads.map { |workload| { "id" => workload.id, "name" => workload.name, "category" => workload.category, "description" => workload.description } },
         "results" => measurements
       }
     end
@@ -351,6 +403,23 @@ module PopBenchmark
       Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
     end
 
+    def validate_command(command, workload)
+      output = Command.run(*command)
+      return if output == workload.expected_output
+      return if numeric_checksum(output) == numeric_checksum(workload.expected_output)
+
+      raise "checksum mismatch for #{workload.id}: expected #{workload.expected_output.inspect}, got #{output.inspect}"
+    end
+
+    def numeric_checksum(output)
+      text = output.strip
+      return unless text.match?(/\A[+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?\z/)
+
+      Rational(text)
+    rescue ArgumentError, ZeroDivisionError
+      nil
+    end
+
     def result(runtime, workload, times)
       sorted = times.sort
       comparable = true
@@ -366,6 +435,9 @@ module PopBenchmark
         "minimumSeconds" => sorted.first,
         "comparable" => comparable
       }
+      if runtime.id == "poplang"
+        result["collectorStage"] = "NativeStableGenerationalConformance"
+      end
 
       result
     end
@@ -520,6 +592,9 @@ module PopBenchmark
       when "d" then File.join(DIRECTORY, "assets", "icons", "d.svg")
       when "csharp" then File.join(DIRECTORY, "assets", "icons", "dotnet.svg")
       when "crystal" then File.join(DIRECTORY, "assets", "icons", "crystal.svg")
+      when "python" then File.join(DIRECTORY, "assets", "icons", "python.svg")
+      when "javascript" then File.join(DIRECTORY, "assets", "icons", "javascript.svg")
+      when "rust" then File.join(DIRECTORY, "assets", "icons", "rust.svg")
       when "lua", "luajit", "luau", "luaujit" then File.join(DIRECTORY, "assets", "icons", "lua.svg")
       end
       return "" unless filename && File.file?(filename)
@@ -532,13 +607,14 @@ module PopBenchmark
     module_function
 
     def call(arguments)
-      command = arguments.shift || "run"
+      command = arguments.shift || "batch"
       case command
       when "list" then puts JSON.pretty_generate("runtimes" => REGISTRY.runtimes.map { |item| { "id" => item.id, "name" => item.name } }, "workloads" => REGISTRY.workloads.map { |item| { "id" => item.id, "name" => item.name } })
       when "provision" then provision(arguments)
       when "run" then run(arguments)
+      when "batch" then batch(arguments)
       when "render" then render(arguments)
-      else raise "usage: benchmark [list|provision|run|render]"
+      else raise "usage: benchmark [list|provision|run|batch|render]"
       end
     rescue StandardError => error
       warn "benchmark: #{error.message}"
@@ -552,12 +628,40 @@ module PopBenchmark
     end
 
     def run(arguments)
+      options = run_options(arguments)
+      write_results(options)
+    end
+
+    def batch(arguments)
+      options = run_options(arguments, html: true)
+      document = write_results(options)
+      FileUtils.mkdir_p(File.dirname(options[:html]))
+      File.write(options[:html], Report.render(document))
+      puts options[:html]
+    end
+
+    def run_options(arguments, html: false)
       options = { samples: 7, warmups: 2, runtimes: [], workloads: [], output: File.join(RESULT_DIRECTORY, "latest.json") }
-      OptionParser.new { |parser| parser.on("--samples NUMBER", Integer) { |value| options[:samples] = value }; parser.on("--warmups NUMBER", Integer) { |value| options[:warmups] = value }; parser.on("--runtime NAME") { |value| options[:runtimes] << value }; parser.on("--workload NAME") { |value| options[:workloads] << value }; parser.on("--output PATH") { |value| options[:output] = value } }.parse!(arguments)
+      options[:html] = File.join(RESULT_DIRECTORY, "latest.html") if html
+      OptionParser.new do |parser|
+        parser.on("--samples NUMBER", Integer) { |value| options[:samples] = value }
+        parser.on("--warmups NUMBER", Integer) { |value| options[:warmups] = value }
+        parser.on("--runtime NAME") { |value| options[:runtimes] << value }
+        parser.on("--workload NAME") { |value| options[:workloads] << value }
+        parser.on("--output PATH") { |value| options[:output] = value }
+        parser.on("--html PATH") { |value| options[:html] = value } if html
+      end.parse!(arguments)
+      raise "samples must be positive" unless options[:samples].positive?
+      raise "warmups cannot be negative" if options[:warmups].negative?
+      options
+    end
+
+    def write_results(options)
       document = Runner.new(samples: options[:samples], warmups: options[:warmups], selected_runtimes: options[:runtimes], selected_workloads: options[:workloads]).run
       FileUtils.mkdir_p(File.dirname(options[:output]))
       File.write(options[:output], JSON.pretty_generate(document) + "\n")
       puts options[:output]
+      document
     end
 
     def render(arguments)

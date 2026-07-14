@@ -1,12 +1,12 @@
-//! Process-global native bootstrap composition state.
+//! Process-global native stable-generational composition state.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
-use pop_runtime_collector::BootstrapRuntime;
+use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::ArrayElementMap;
 
-static ABI_RUNTIME: OnceLock<Mutex<BootstrapRuntime>> = OnceLock::new();
+static ABI_RUNTIME: OnceLock<Mutex<StableGenerationalRuntime>> = OnceLock::new();
 static ABI_TABLES: OnceLock<Mutex<BTreeMap<u64, TableMetadata>>> = OnceLock::new();
 static ABI_LISTS: OnceLock<Mutex<BTreeMap<u64, ListMetadata>>> = OnceLock::new();
 
@@ -25,8 +25,8 @@ pub(crate) struct ListMetadata {
     pub(crate) element_map: ArrayElementMap,
 }
 
-pub(crate) fn abi_runtime() -> &'static Mutex<BootstrapRuntime> {
-    ABI_RUNTIME.get_or_init(|| Mutex::new(BootstrapRuntime::new()))
+pub(crate) fn abi_runtime() -> &'static Mutex<StableGenerationalRuntime> {
+    ABI_RUNTIME.get_or_init(|| Mutex::new(StableGenerationalRuntime::new()))
 }
 
 pub(crate) fn abi_tables() -> &'static Mutex<BTreeMap<u64, TableMetadata>> {

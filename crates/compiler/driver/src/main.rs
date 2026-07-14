@@ -1673,13 +1673,13 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
             command.arg("--release");
         }
         if !matches!(command.status(), Ok(status) if status.success()) {
-            eprintln!("pop: could not build bootstrap foundation archives");
+            eprintln!("pop: could not build native foundation archives");
             return ExitCode::FAILURE;
         }
     }
 
     if !standard.is_file() || !runtime.is_file() {
-        eprintln!("pop: bootstrap foundation archives were not produced");
+        eprintln!("pop: native foundation archives were not produced");
         return ExitCode::FAILURE;
     }
 

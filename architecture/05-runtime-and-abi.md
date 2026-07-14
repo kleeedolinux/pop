@@ -19,7 +19,8 @@ separates the Rust implementation into four ownership boundaries:
   platform entry, or process-global runtime responsibility;
 - `pop-runtime-native-abi` owns the versioned C spelling and physical sentinel
   vocabulary used by native adapters;
-- `pop-runtime-native` owns exported symbols, process-global bootstrap state,
+- `pop-runtime-native` owns exported symbols, process-global stable-token
+  generational state,
   UTF-8/process-entry adaptation, and native termination behavior.
 
 The Cargo dependency direction is native facade → collector/native-ABI → PLRI.
@@ -28,11 +29,11 @@ depends on the other. A VM can therefore compose the collector without linking
 the native C ABI, while LLVM can select native ABI symbols without importing
 collector storage or tracing policy.
 
-The bootstrap native ABI uses nonzero `u64` opaque managed/root handles and
+Native ABI 1 uses nonzero `u64` opaque managed/root tokens and
 zero as the invalid/null sentinel. The LLVM backend chooses this physical
 representation in its private lowering; MIR remains expressed in abstract
 managed references and `RuntimeOperation` identities. Exported `pop_rt_*`
-symbols are versioned and cover only operations with a defined bootstrap
+symbols are versioned and cover only operations with a defined ABI
 failure sentinel; richer failures remain typed `RuntimeFailure` values in PLRI
 and Rust adapters.
 
@@ -48,23 +49,31 @@ a backend with verified relocating-root support. ABI 1.x, immutable root spills,
 or a target capability alone cannot satisfy the production profile. Profile/
 ABI mismatch fails before link or load; there is no silent bootstrap fallback.
 
+Under ADR 0059, ABI 1 native execution no longer uses `BootstrapRuntime`.
+Instead it composes the generational allocator and incremental SATB mature
+collector in a `NativeStableGenerationalConformance` stage that places every
+native allocation in a non-moving domain. This stage preserves ABI 1 stable
+tokens and cannot enable the moving nursery or selective evacuation. ABI 2 and
+verified post-safe-point LLVM root reloads remain mandatory for the production
+profile.
+
 `Pop.Internal` supplies the trusted managed/intrinsic side of these contracts;
 `Pop.Standard` calls public typed adapters rather than PLRI entries directly.
 See [Base libraries](./16-base-libraries.md).
 
-The standalone native bootstrap links Rust static archives for both foundation
+The standalone native executable links Rust static archives for both foundation
 libraries. Trusted `Pop.Standard` prelude-function identities map the typed
 source calls `print(Int)` and `print(String)` to fixed output adapters. These
 adapters are not PLRI operations, and their host ABI spellings never
 participate in source name resolution.
 
-The bootstrap runtime supplies a versioned, read-only UTF-8 string-copy ABI for
+The native runtime supplies a versioned, read-only UTF-8 string-copy ABI for
 the trusted string-output adapter. It validates the managed `String` identity,
 distinguishes an empty string from failure, and rejects undersized buffers.
-This addition advances the bootstrap native ABI from version 1.0 to 1.1.
+This addition advanced native ABI 1 from version 1.0 to 1.1.
 `Pop.Internal` contains the unsafe ABI call and exposes a checked adapter to
 `Pop.Standard`; generated MIR cannot inspect string storage or call the ABI by
-spelling. This bootstrap service does not expose general object memory,
+spelling. This service does not expose general object memory,
 reflection, or string mutation.
 
 String concatenation and closed primitive formatting use typed PLRI semantics.
@@ -73,14 +82,14 @@ owned UTF-8 results, but HIR/MIR name only backend-neutral `StringConcat` and
 `StringFormat` operations. Helpers never inspect a runtime type or ambient
 locale. Their output bytes follow ADR 0041 identically across backends.
 
-Scoped pin handles advance the bootstrap native ABI to version 1.2. Distinct
+Scoped pin handles advance native ABI 1 to version 1.2. Distinct
 typed table allocation advances it to version 1.3: the allocation request and
 native entry carry the entry count plus homogeneous key/value managed-reference
 maps. Arrays retain their contiguous homogeneous element map, while tables use
 interleaved key/value slots without becoming generic objects or exposing their
 layout to MIR.
 
-ADR 0034 advances the bootstrap native ABI to version 1.4 and completes fixed
+ADR 0034 advances native ABI 1 to version 1.4 and completes fixed
 arrays with bulk initialized allocation, O(1) length, optional and checked
 reads, checked writes, and fill. PLRI adapters preserve one-based bounds
 behavior and distinguish scalar from managed elements. Native backends may
@@ -88,22 +97,22 @@ scalar-replace non-escaping arrays, batch transitions, or use scoped pinned
 contiguous access, but raw managed pointers never become source, HIR, MIR, or
 public PLRI values.
 
-ADR 0041 advances the bootstrap native ABI to version 1.5 with closed string
+ADR 0041 advances native ABI 1 to version 1.5 with closed string
 concatenation and primitive-format helpers. The format tag is selected from the
 verified MIR operand kind and cannot request a runtime type lookup or universal
 formatting fallback.
 
-ADR 0046 advances the bootstrap native ABI to version 1.6 with typed table get
+ADR 0046 advances native ABI 1 to version 1.6 with typed table get
 and insert-or-replace operations. Key comparison follows the compiler-approved
 canonical key contract, and table growth preserves stable managed identity and
 precise key/value maps.
 
-ADR 0051 advances the bootstrap native ABI to version 1.7. Optional array and
+ADR 0051 advances native ABI 1 to version 1.7. Optional array and
 table lookup adapters return a presence status separately from an out payload,
 so a present scalar zero or `false` cannot collide with absence. LLVM's private
 typed optional pair is not a MIR or PLRI value representation.
 
-ADR 0053 advances the bootstrap native ABI to version 1.8 with statically
+ADR 0053 advances native ABI 1 to version 1.8 with statically
 selected iteration-session acquisition and step operations. The acquisition
 operation receives a compiler-proven closed collection-kind tag. The step
 operation returns a closed item/end status plus one typed raw payload; tuple
@@ -111,7 +120,7 @@ items remain ordinary typed tuple objects. Iterator state roots its source,
 checks the source length or key-set size before every step, and never performs
 member lookup from a string.
 
-The growable-list portion of ADR 0053 advances the bootstrap native ABI to
+The growable-list portion of ADR 0053 advances native ABI 1 to
 version 1.9. `ListCreate` receives a nonnegative reserved capacity and the
 compiler-proven homogeneous element-reference map, returning a stable managed
 handle or the closed allocation-failure sentinel. `ListLength`, optional and
@@ -120,6 +129,14 @@ adapters where a scalar zero is a valid element. The native facade keeps length
 and capacity private, grows storage without changing the list handle, and
 applies precise barriers for managed elements. MIR retains distinct typed list
 operations; no backend may reinterpret them as array or table operations.
+
+ADR 0060 advances native ABI 1 to version 1.11 with atomic initialized object
+allocation. LLVM passes the exact pointer map and one physical initializer per
+logical slot in a single native transition. The runtime validates every managed
+initializer before publication and returns either a completely initialized
+object or the closed allocation-failure sentinel. MIR retains one backend-neutral
+typed record/class construction operation; later mutation still uses the
+ordinary checked store and barrier path.
 
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
@@ -242,6 +259,19 @@ the first single-mutator moving nursery and generational card barrier, but no
 mature-heap collection, concurrent marking, or SATB barrier; mature objects are
 retained. It is therefore test infrastructure for relocation correctness, not
 the selectable `ProductionGenerational` runtime profile.
+
+The collector also contains a later `GenerationalRuntime`
+conformance composition. It adds page-described TLAB placement, cooperative
+incremental SATB mature tracing/sweeping, protected emergency and evacuation
+reserves, typed non-heap memory accounting, adaptive growth targets, bounded
+allocation assists, deterministic byte-limit OOM, empty-page return, and
+domain/debt telemetry. It still reports the lower relocation contract because
+cooperative work is not concurrent production marking, the native backend does
+not yet provide writable relocating roots, and no profile may infer production
+capability from implementation experiments. ADR 0059 permits a closed native
+stable-token wrapper to use its mature allocator, SATB marking, and sweeping
+without exposing nursery relocation; this does not select the production
+profile.
 
 The collector implementation consumes these contracts. It does not redefine
 them, and native exports remain a delegating facade over a concrete collector.

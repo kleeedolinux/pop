@@ -656,6 +656,9 @@ fn assert_native_facade_boundary(runtime: &Path) {
         );
     }
     let native_root = read_required(runtime.join("native/src/lib.rs"));
+    let native_state = read_required(runtime.join("native/src/state.rs"));
+    assert!(native_state.contains("StableGenerationalRuntime"));
+    assert!(!native_state.contains("BootstrapRuntime"));
     for declaration in [
         "mod allocation;",
         "mod failure;",

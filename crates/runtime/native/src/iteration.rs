@@ -1,6 +1,6 @@
 //! Closed native adapters for reserved nominal collection iteration.
 
-use pop_runtime_collector::BootstrapRuntime;
+use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::{
     AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
     RuntimeAdapter, RuntimeTypeId,
@@ -144,7 +144,7 @@ pub unsafe extern "C" fn pop_rt_iteration_next(iterator: u64, output: *mut u64) 
 }
 
 fn iteration_item(
-    runtime: &mut BootstrapRuntime,
+    runtime: &mut StableGenerationalRuntime,
     source: u64,
     kind: u64,
     position: u64,
@@ -164,7 +164,7 @@ fn iteration_item(
 }
 
 fn array_iteration_item(
-    runtime: &BootstrapRuntime,
+    runtime: &StableGenerationalRuntime,
     source: u64,
     position: u64,
 ) -> Result<IterationStep, IterationStatus> {
@@ -191,7 +191,7 @@ fn array_iteration_item(
 }
 
 fn table_iteration_item(
-    runtime: &mut BootstrapRuntime,
+    runtime: &mut StableGenerationalRuntime,
     source: u64,
     position: u64,
 ) -> Result<IterationStep, IterationStatus> {
@@ -247,7 +247,7 @@ fn table_iteration_item(
 }
 
 fn list_iteration_item(
-    runtime: &BootstrapRuntime,
+    runtime: &StableGenerationalRuntime,
     source: u64,
     position: u64,
 ) -> Result<IterationStep, IterationStatus> {
@@ -276,7 +276,7 @@ fn list_iteration_item(
 }
 
 fn range_iteration_item(
-    runtime: &BootstrapRuntime,
+    runtime: &StableGenerationalRuntime,
     source: u64,
     position: u64,
     state: u64,

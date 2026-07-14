@@ -1073,8 +1073,9 @@ pub(crate) fn lower_terminator(
     {
         let releases = direct_scalar_arrays
             .allocations
-            .keys()
-            .map(|origin| {
+            .iter()
+            .filter(|(_, allocation)| allocation.storage == DirectScalarArrayStorage::Native)
+            .map(|(origin, _)| {
                 format!(
                     "%pop_direct_array_{}_storage = inttoptr i64 %v{} to ptr\n  call void @free(ptr %pop_direct_array_{}_storage)",
                     origin.raw(),
@@ -1600,6 +1601,9 @@ pub(crate) fn lower_direct_array_create(
     if initial_type != allocation.element_type {
         return Err(LlvmLoweringError::InvalidType(allocation.element_type));
     }
+    if allocation.storage == DirectScalarArrayStorage::ScalarReplaced {
+        return Ok(lower_scalar_replaced_array_create(result, allocation));
+    }
     let (mut lines, stored) = lower_runtime_slot_store(
         allocation.initial_value,
         initial_type,
@@ -1661,6 +1665,36 @@ pub(crate) fn lower_direct_array_create(
     Ok(lines.join("\n"))
 }
 
+fn lower_scalar_replaced_array_create(result: &str, allocation: DirectScalarArray) -> String {
+    let label = result.trim_start_matches('%');
+    [
+        format!(
+            "{result}_size_pair = call {{ i64, i1 }} @llvm.umul.with.overflow.i64(i64 %v{}, i64 8)",
+            allocation.length.raw()
+        ),
+        format!("{result}_size_overflow = extractvalue {{ i64, i1 }} {result}_size_pair, 1"),
+        format!(
+            "{result}_length_nonnegative = icmp sge i64 %v{}, 0",
+            allocation.length.raw()
+        ),
+        format!("{result}_size_valid = xor i1 {result}_size_overflow, true"),
+        format!("{result}_shape_valid = and i1 {result}_length_nonnegative, {result}_size_valid"),
+        format!(
+            "{result}_shape_expected = call i1 @llvm.expect.i1(i1 {result}_shape_valid, i1 true)"
+        ),
+        format!("br i1 {result}_shape_expected, label %{label}_create, label %{label}_length_trap"),
+        format!("{label}_length_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_create:"),
+        format!("  {result} = add i64 %v{}, 0", allocation.length.raw()),
+    ]
+    .join("\n")
+}
+
 pub(crate) fn lower_direct_array_length(result: &str, allocation: DirectScalarArray) -> String {
     let label = result.trim_start_matches('%');
     format!(
@@ -1681,6 +1715,14 @@ pub(crate) fn lower_direct_array_get(
     let expected_type = llvm_type(allocation.element_type, types)?;
     if element_type != expected_type {
         return Err(LlvmLoweringError::InvalidType(result_type));
+    }
+    if allocation.storage == DirectScalarArrayStorage::ScalarReplaced {
+        return Ok(lower_scalar_replaced_array_get(
+            result,
+            allocation,
+            index,
+            &element_type,
+        ));
     }
     let label = result.trim_start_matches('%');
     let mut lines = vec![
@@ -1715,6 +1757,39 @@ pub(crate) fn lower_direct_array_get(
         types,
     )?);
     Ok(lines.join("\n"))
+}
+
+fn lower_scalar_replaced_array_get(
+    result: &str,
+    allocation: DirectScalarArray,
+    index: ValueId,
+    element_type: &str,
+) -> String {
+    let label = result.trim_start_matches('%');
+    [
+        format!("{result}_zero_index = sub i64 %v{}, 1", index.raw()),
+        format!(
+            "{result}_in_bounds = icmp ult i64 {result}_zero_index, %v{}",
+            allocation.length.raw()
+        ),
+        format!(
+            "{result}_in_bounds_expected = call i1 @llvm.expect.i1(i1 {result}_in_bounds, i1 true)"
+        ),
+        format!("br i1 {result}_in_bounds_expected, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+        format!(
+            "  {result} = select i1 true, {element_type} %v{}, {element_type} %v{}",
+            allocation.initial_value.raw(),
+            allocation.initial_value.raw()
+        ),
+    ]
+    .join("\n")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2172,34 +2247,135 @@ pub(crate) fn lower_object_make(
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
 ) -> Result<String, LlvmLoweringError> {
-    let reference_slots = fields
-        .iter()
-        .filter_map(|(field, value)| {
-            values
-                .get(value)
+    lower_initialized_object(
+        result,
+        fields,
+        slot_count,
+        None,
+        values,
+        types,
+        field_layout,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ObjectInitializer {
+    Constant(u64),
+    Value(ValueId),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_initialized_object(
+    result: &str,
+    fields: &[(FieldId, ValueId)],
+    slot_count: u32,
+    class: Option<ClassId>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+) -> Result<String, LlvmLoweringError> {
+    let mut reference_slots = Vec::new();
+    for (field, value) in fields {
+        if values
+            .get(value)
+            .copied()
+            .is_some_and(|type_id| is_managed_type(type_id, types))
+        {
+            let slot = field_layout
+                .get(field)
                 .copied()
-                .filter(|type_id| is_managed_type(*type_id, types))
-                .and_then(|_| field_layout.get(field).copied())
-                .map(|slot| slot - 1)
-        })
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(result, slot_count, &reference_slots);
+                .and_then(|slot| slot.checked_sub(1))
+                .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+            reference_slots.push(slot);
+        }
+    }
+    let slot_count_usize = usize::try_from(slot_count)
+        .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let mut initializers = vec![None; slot_count_usize];
+    if let Some(class) = class {
+        let Some(slot) = initializers.first_mut() else {
+            return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+        };
+        *slot = Some(ObjectInitializer::Constant(u64::from(class.raw())));
+    }
     for (field, value) in fields {
         let slot = field_layout
             .get(field)
             .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
-        let type_id = *values
-            .get(value)
-            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-        let (conversions, stored) =
-            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
-        lines.extend(conversions);
+        let index = slot
+            .checked_sub(1)
+            .and_then(|slot| usize::try_from(slot).ok())
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let Some(initializer) = initializers.get_mut(index) else {
+            return Err(LlvmLoweringError::InvalidFieldLayout(*field));
+        };
+        *initializer = Some(ObjectInitializer::Value(*value));
+    }
+    if initializers.iter().any(Option::is_none) {
+        return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+    }
+
+    let map = format!("{result}_object_map");
+    let map_pointer = if reference_slots.is_empty() {
+        "null".to_owned()
+    } else {
+        format!("{map}_pointer")
+    };
+    let mut lines = Vec::new();
+    if !reference_slots.is_empty() {
+        lines.push(format!("{map} = alloca [{} x i32]", reference_slots.len()));
+        for (index, slot) in reference_slots.iter().enumerate() {
+            let entry = format!("{map}_{index}");
+            lines.extend([
+                format!(
+                    "{entry} = getelementptr [{} x i32], ptr {map}, i64 0, i64 {index}",
+                    reference_slots.len()
+                ),
+                format!("store i32 {slot}, ptr {entry}"),
+            ]);
+        }
         lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            slot
+            "{map_pointer} = getelementptr [{} x i32], ptr {map}, i64 0, i64 0",
+            reference_slots.len()
         ));
     }
+
+    let payload = format!("{result}_initial_values");
+    let payload_pointer = if slot_count == 0 {
+        "null".to_owned()
+    } else {
+        format!("{payload}_pointer")
+    };
+    if slot_count != 0 {
+        lines.push(format!("{payload} = alloca [{slot_count} x i64]"));
+        for (index, initializer) in initializers.into_iter().enumerate() {
+            let entry = format!("{payload}_{index}");
+            lines.push(format!(
+                "{entry} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 {index}"
+            ));
+            let stored = match initializer.expect("complete initializers were validated") {
+                ObjectInitializer::Constant(value) => value.to_string(),
+                ObjectInitializer::Value(value) => {
+                    let type_id = *values
+                        .get(&value)
+                        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+                    let (conversions, stored) =
+                        lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?;
+                    lines.extend(conversions);
+                    stored
+                }
+            };
+            lines.push(format!("store i64 {stored}, ptr {entry}"));
+        }
+        lines.push(format!(
+            "{payload_pointer} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 0"
+        ));
+    }
+    lines.push(format!(
+        "{result} = call i64 @{}(i64 {slot_count}, ptr {map_pointer}, i64 {}, ptr {payload_pointer}, i64 {slot_count})",
+        native_runtime_symbol(RuntimeOperation::AllocateObjectInitialized),
+        reference_slots.len()
+    ));
     Ok(lines.join("\n"))
 }
 
@@ -2423,25 +2599,15 @@ pub(crate) fn lower_class_make(
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
 ) -> Result<String, LlvmLoweringError> {
-    let lowered = lower_object_make(result, fields, slot_count, values, types, field_layout)?;
-    let mut lines = lowered.lines().map(str::to_owned).collect::<Vec<_>>();
-    let allocation = lines
-        .iter()
-        .position(|line| {
-            line.starts_with(&format!(
-                "{result} = call i64 @pop_rt_allocate_mapped_object("
-            ))
-        })
-        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    lines.insert(
-        allocation + 1,
-        format!(
-            "call i8 @{}(i64 {result}, i64 1, i64 {})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            class.raw()
-        ),
-    );
-    Ok(lines.join("\n"))
+    lower_initialized_object(
+        result,
+        fields,
+        slot_count,
+        Some(class),
+        values,
+        types,
+        field_layout,
+    )
 }
 
 pub(crate) fn lower_union_make(
