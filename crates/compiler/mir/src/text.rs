@@ -872,6 +872,11 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             parse_prefixed(function, 's', line)?,
         )));
     }
+    if let Some(task) = text.strip_prefix("await ") {
+        return Ok(MirInstructionKind::Await {
+            task: ValueId::from_raw(parse_prefixed(task, 'v', line)?),
+        });
+    }
     if let Some(operands) = text.strip_prefix("string.concat ") {
         let (left, right) = parse_two_values(operands, line)?;
         return Ok(MirInstructionKind::StringConcat { left, right });

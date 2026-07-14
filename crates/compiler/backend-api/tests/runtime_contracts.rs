@@ -3,7 +3,7 @@ use pop_backend_api::{
     RuntimeProfileSelectionError, validate_runtime_contracts,
 };
 use pop_foundation::{FunctionId, ValueId};
-use pop_mir::MirEffect;
+use pop_mir::{MirEffect, parse_mir_dump};
 use pop_target::{TargetCapability, TargetSpec};
 
 fn bpf_target() -> TargetSpec {
@@ -114,6 +114,47 @@ fn blocking_effect_requires_a_distinct_blocking_pool_contract() {
             ref requirement,
             ..
         } if requirement.contract() == RuntimeContract::BlockingPool
+            && requirement.origin() == origin
+    ));
+}
+
+#[test]
+fn await_instruction_requires_coroutine_scheduler_contract() {
+    let mir = parse_mir_dump(concat!(
+        "mir bubble b0 namespace n0\n",
+        "dependencies\n",
+        "function s0 f0() -> (t5) effects[]\n",
+        "  b0():\n",
+        "    v0:t15 = const.integer Int64 0\n",
+        "    v1:t5 = await v0\n",
+        "    return (v1)\n",
+    ))
+    .expect("structural MIR");
+    let requirements = ProgramRequirements::derive_from_mir(&mir);
+    let origin = RequirementOrigin::Instruction {
+        function: FunctionId::from_raw(0),
+        value: ValueId::from_raw(1),
+    };
+
+    assert!(
+        requirements
+            .runtime_requirements()
+            .iter()
+            .any(
+                |requirement| requirement.contract() == RuntimeContract::CoroutineScheduler
+                    && requirement.origin() == origin
+            )
+    );
+
+    let error = validate_runtime_contracts(&requirements, RuntimeProfile::LinuxEbpf, &bpf_target())
+        .expect_err("linux-ebpf has no coroutine scheduler");
+    assert!(matches!(
+        error,
+        RuntimeContractError::MissingContract {
+            profile: RuntimeProfile::LinuxEbpf,
+            ref requirement,
+            ..
+        } if requirement.contract() == RuntimeContract::CoroutineScheduler
             && requirement.origin() == origin
     ));
 }
