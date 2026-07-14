@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -11,10 +11,10 @@ use pop_runtime_collector::SchedulerId;
 
 use super::{
     DetachedSchedulerRuntimeTransitions, SchedulerBlockingOperationId, SchedulerConfiguration,
-    SchedulerError, SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
-    SchedulerRuntimeTransitions, SchedulerTask, SchedulerTaskContext, SchedulerTaskId,
-    SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry,
-    SchedulerWorkerId,
+    SchedulerError, SchedulerExternalEventId, SchedulerRuntimeTransition,
+    SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitions, SchedulerTask,
+    SchedulerTaskContext, SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll,
+    SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
 };
 
 enum InternalTaskState {
@@ -88,6 +88,8 @@ struct SharedScheduler {
     telemetry: Mutex<TelemetryState>,
     shutdown: AtomicBool,
     searchers: AtomicUsize,
+    migration_enabled: bool,
+    submissions_active: AtomicUsize,
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +102,24 @@ enum WorkSource {
 struct QueuedTask {
     id: SchedulerTaskId,
     source: WorkSource,
+}
+
+struct SubmissionGuard<'a>(&'a AtomicUsize);
+
+impl<'a> SubmissionGuard<'a> {
+    fn enter(active: &'a AtomicUsize, searchers: &AtomicUsize) -> Self {
+        active.fetch_add(1, Ordering::AcqRel);
+        while searchers.load(Ordering::Acquire) != 0 {
+            thread::yield_now();
+        }
+        Self(active)
+    }
+}
+
+impl Drop for SubmissionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 type StartedTask = (Arc<TaskCell>, Box<dyn SchedulerTask>, SchedulerTaskContext);
@@ -133,11 +153,41 @@ struct BlockingPool {
     capacity: usize,
 }
 
+struct ExternalEventRegistration {
+    task: SchedulerTaskId,
+    signalled: bool,
+    delivered: bool,
+}
+
+struct EventDriverState {
+    events: BTreeMap<SchedulerExternalEventId, ExternalEventRegistration>,
+    timers: BTreeMap<(Instant, SchedulerTimerId), SchedulerTaskId>,
+    deliveries: VecDeque<SchedulerExternalEventId>,
+    next_event: u64,
+    next_timer: u64,
+    shutdown: bool,
+}
+
+struct EventDriver {
+    state: Mutex<EventDriverState>,
+    changed: Condvar,
+    event_capacity: usize,
+    timer_capacity: usize,
+    delivery_capacity: usize,
+}
+
+enum HostDelivery {
+    ExternalEvent(SchedulerTaskId),
+    Timer(SchedulerTaskId),
+}
+
 pub struct NativeScheduler {
     shared: Arc<SharedScheduler>,
     threads: Vec<JoinHandle<Result<(), SchedulerError>>>,
     blocking: Arc<BlockingPool>,
     blocking_threads: Vec<JoinHandle<()>>,
+    event_driver: Arc<EventDriver>,
+    event_driver_thread: Option<JoinHandle<()>>,
 }
 
 impl NativeScheduler {
@@ -147,9 +197,10 @@ impl NativeScheduler {
     ///
     /// Fails closed if any worker cannot be started.
     pub fn new(configuration: SchedulerConfiguration) -> Result<Self, SchedulerError> {
-        Self::new_with_runtime_transitions(
+        Self::start(
             configuration,
             Arc::new(DetachedSchedulerRuntimeTransitions),
+            false,
         )
     }
 
@@ -164,7 +215,19 @@ impl NativeScheduler {
         runtime_transitions: Arc<T>,
     ) -> Result<Self, SchedulerError> {
         let runtime_transitions: Arc<dyn SchedulerRuntimeTransitions> = runtime_transitions;
-        let shared = Arc::new(SharedScheduler::new(configuration, runtime_transitions));
+        Self::start(configuration, runtime_transitions, true)
+    }
+
+    fn start(
+        configuration: SchedulerConfiguration,
+        runtime_transitions: Arc<dyn SchedulerRuntimeTransitions>,
+        migration_enabled: bool,
+    ) -> Result<Self, SchedulerError> {
+        let shared = Arc::new(SharedScheduler::new(
+            configuration,
+            runtime_transitions,
+            migration_enabled,
+        ));
         let mut threads: Vec<JoinHandle<Result<(), SchedulerError>>> =
             Vec::with_capacity(configuration.worker_count);
         for index in 0..configuration.worker_count {
@@ -207,11 +270,30 @@ impl NativeScheduler {
             };
             blocking_threads.push(handle);
         }
+        let event_driver = Arc::new(EventDriver::new(configuration));
+        let driver_state = Arc::clone(&event_driver);
+        let driver_scheduler = Arc::clone(&shared);
+        let Ok(event_driver_thread) = thread::Builder::new()
+            .name("pop-event-driver".to_owned())
+            .spawn(move || event_driver_loop(&driver_state, &driver_scheduler))
+        else {
+            blocking.shutdown();
+            for thread in blocking_threads {
+                let _ = thread.join();
+            }
+            shared.shutdown();
+            for thread in threads {
+                let _ = thread.join();
+            }
+            return Err(SchedulerError::ThreadStart);
+        };
         Ok(Self {
             shared,
             threads,
             blocking,
             blocking_threads,
+            event_driver,
+            event_driver_thread: Some(event_driver_thread),
         })
     }
 
@@ -241,6 +323,28 @@ impl NativeScheduler {
             .schedule_local(scheduler, mobility, Box::new(task))
     }
 
+    /// Adds one bounded batch to an exact logical scheduler atomically.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown schedulers, retained/local capacity, or identity
+    /// exhaustion before retaining any task in the batch.
+    pub fn schedule_batch_on<T: SchedulerTask>(
+        &self,
+        scheduler: SchedulerId,
+        mobility: SchedulerTaskMobility,
+        tasks: Vec<T>,
+    ) -> Result<Vec<SchedulerTaskId>, SchedulerError> {
+        self.shared.schedule_local_batch(
+            scheduler,
+            mobility,
+            tasks
+                .into_iter()
+                .map(|task| Box::new(task) as Box<dyn SchedulerTask>)
+                .collect(),
+        )
+    }
+
     /// Submits declared blocking work to the bounded non-mutator pool.
     /// Completion wakes the exact owning task through the normal ready path.
     ///
@@ -259,6 +363,75 @@ impl NativeScheduler {
         }
         self.blocking
             .submit(task, Box::new(operation), &self.shared)
+    }
+
+    /// Registers one exact one-shot external readiness source.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown/terminal tasks, closed state, registration capacity,
+    /// or typed identity exhaustion before retaining the source.
+    pub fn register_external_event(
+        &self,
+        task: SchedulerTaskId,
+    ) -> Result<SchedulerExternalEventId, SchedulerError> {
+        self.shared.ensure_open()?;
+        if self.shared.task_state(task)?.terminal() {
+            return Err(SchedulerError::UnknownTask(task));
+        }
+        self.event_driver.register_event(task, &self.shared)
+    }
+
+    /// Signals one exact external readiness source at most once.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown sources, closed state, or delivery-queue saturation.
+    pub fn signal_external_event(
+        &self,
+        event: SchedulerExternalEventId,
+    ) -> Result<bool, SchedulerError> {
+        self.shared.ensure_open()?;
+        self.event_driver.signal_event(event, &self.shared)
+    }
+
+    /// Releases one retained external source and any pending delivery.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown source.
+    pub fn release_external_event(
+        &self,
+        event: SchedulerExternalEventId,
+    ) -> Result<(), SchedulerError> {
+        self.event_driver.release_event(event)
+    }
+
+    /// Registers a bounded one-shot host timer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown/terminal tasks, closed state, deadline overflow, timer
+    /// capacity, or typed identity exhaustion before retaining the timer.
+    pub fn schedule_wake_after(
+        &self,
+        task: SchedulerTaskId,
+        delay: Duration,
+    ) -> Result<SchedulerTimerId, SchedulerError> {
+        self.shared.ensure_open()?;
+        if self.shared.task_state(task)?.terminal() {
+            return Err(SchedulerError::UnknownTask(task));
+        }
+        self.event_driver.schedule_timer(task, delay, &self.shared)
+    }
+
+    /// Cancels one retained one-shot timer before delivery.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown or already delivered timer.
+    pub fn cancel_timer(&self, timer: SchedulerTimerId) -> Result<(), SchedulerError> {
+        self.event_driver.cancel_timer(timer)
     }
 
     /// Marks a suspended/running task ready exactly once.
@@ -327,18 +500,22 @@ impl NativeScheduler {
     }
 
     fn shutdown_threads(&mut self) -> Result<(), SchedulerError> {
+        let mut failure = None;
+        self.event_driver.shutdown();
+        if self
+            .event_driver_thread
+            .take()
+            .is_some_and(|thread| thread.join().is_err())
+        {
+            failure = Some(SchedulerError::ThreadJoin);
+        }
         self.blocking.shutdown();
         for thread in self.blocking_threads.drain(..) {
             if thread.join().is_err() {
-                self.shared.shutdown();
-                for thread in self.threads.drain(..) {
-                    let _ = thread.join();
-                }
-                return Err(SchedulerError::ThreadJoin);
+                failure.get_or_insert(SchedulerError::ThreadJoin);
             }
         }
         self.shared.shutdown();
-        let mut failure = None;
         for thread in self.threads.drain(..) {
             match thread.join() {
                 Ok(Ok(())) => {}
@@ -432,10 +609,161 @@ impl BlockingPool {
     }
 }
 
+impl EventDriver {
+    fn new(configuration: SchedulerConfiguration) -> Self {
+        Self {
+            state: Mutex::new(EventDriverState {
+                events: BTreeMap::new(),
+                timers: BTreeMap::new(),
+                deliveries: VecDeque::new(),
+                next_event: 1,
+                next_timer: 1,
+                shutdown: false,
+            }),
+            changed: Condvar::new(),
+            event_capacity: configuration.external_event_capacity,
+            timer_capacity: configuration.timer_capacity,
+            delivery_capacity: configuration.event_delivery_capacity,
+        }
+    }
+
+    fn register_event(
+        &self,
+        task: SchedulerTaskId,
+        scheduler: &SharedScheduler,
+    ) -> Result<SchedulerExternalEventId, SchedulerError> {
+        let mut state = lock(&self.state);
+        if state.shutdown {
+            return Err(SchedulerError::Closed);
+        }
+        if state.events.len() >= self.event_capacity {
+            return Err(SchedulerError::ExternalEventCapacity);
+        }
+        let event = SchedulerExternalEventId::new(state.next_event);
+        state.next_event = state
+            .next_event
+            .checked_add(1)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        state.events.insert(
+            event,
+            ExternalEventRegistration {
+                task,
+                signalled: false,
+                delivered: false,
+            },
+        );
+        let mut telemetry = lock(&scheduler.telemetry);
+        telemetry.telemetry.external_events_registered = telemetry
+            .telemetry
+            .external_events_registered
+            .saturating_add(1);
+        Ok(event)
+    }
+
+    fn signal_event(
+        &self,
+        event: SchedulerExternalEventId,
+        scheduler: &SharedScheduler,
+    ) -> Result<bool, SchedulerError> {
+        let mut state = lock(&self.state);
+        if state.shutdown {
+            return Err(SchedulerError::Closed);
+        }
+        let registration = state
+            .events
+            .get(&event)
+            .ok_or(SchedulerError::UnknownExternalEvent(event))?;
+        if registration.signalled || registration.delivered {
+            let mut telemetry = lock(&scheduler.telemetry);
+            telemetry.telemetry.external_event_signals_coalesced = telemetry
+                .telemetry
+                .external_event_signals_coalesced
+                .saturating_add(1);
+            return Ok(false);
+        }
+        if state.deliveries.len() >= self.delivery_capacity {
+            return Err(SchedulerError::EventDeliveryCapacity);
+        }
+        state
+            .events
+            .get_mut(&event)
+            .expect("validated event remains registered")
+            .signalled = true;
+        state.deliveries.push_back(event);
+        drop(state);
+        self.changed.notify_one();
+        Ok(true)
+    }
+
+    fn release_event(&self, event: SchedulerExternalEventId) -> Result<(), SchedulerError> {
+        let mut state = lock(&self.state);
+        state
+            .events
+            .remove(&event)
+            .ok_or(SchedulerError::UnknownExternalEvent(event))?;
+        state.deliveries.retain(|pending| *pending != event);
+        Ok(())
+    }
+
+    fn schedule_timer(
+        &self,
+        task: SchedulerTaskId,
+        delay: Duration,
+        scheduler: &SharedScheduler,
+    ) -> Result<SchedulerTimerId, SchedulerError> {
+        let deadline = Instant::now()
+            .checked_add(delay)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        let mut state = lock(&self.state);
+        if state.shutdown {
+            return Err(SchedulerError::Closed);
+        }
+        if state.timers.len() >= self.timer_capacity {
+            return Err(SchedulerError::TimerCapacity);
+        }
+        let timer = SchedulerTimerId::new(state.next_timer);
+        state.next_timer = state
+            .next_timer
+            .checked_add(1)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        state.timers.insert((deadline, timer), task);
+        let mut telemetry = lock(&scheduler.telemetry);
+        telemetry.telemetry.timers_scheduled =
+            telemetry.telemetry.timers_scheduled.saturating_add(1);
+        drop(telemetry);
+        drop(state);
+        self.changed.notify_one();
+        Ok(timer)
+    }
+
+    fn cancel_timer(&self, timer: SchedulerTimerId) -> Result<(), SchedulerError> {
+        let mut state = lock(&self.state);
+        let key = state
+            .timers
+            .keys()
+            .find(|(_, candidate)| *candidate == timer)
+            .copied()
+            .ok_or(SchedulerError::UnknownTimer(timer))?;
+        state.timers.remove(&key);
+        Ok(())
+    }
+
+    fn shutdown(&self) {
+        let mut state = lock(&self.state);
+        state.shutdown = true;
+        state.deliveries.clear();
+        state.timers.clear();
+        state.events.clear();
+        drop(state);
+        self.changed.notify_all();
+    }
+}
+
 impl SharedScheduler {
     fn new(
         configuration: SchedulerConfiguration,
         runtime_transitions: Arc<dyn SchedulerRuntimeTransitions>,
+        migration_enabled: bool,
     ) -> Self {
         Self {
             configuration,
@@ -464,6 +792,8 @@ impl SharedScheduler {
             }),
             shutdown: AtomicBool::new(false),
             searchers: AtomicUsize::new(0),
+            migration_enabled,
+            submissions_active: AtomicUsize::new(0),
         }
     }
 
@@ -472,6 +802,7 @@ impl SharedScheduler {
         task: Box<dyn SchedulerTask>,
     ) -> Result<SchedulerTaskId, SchedulerError> {
         self.ensure_open()?;
+        let _submission = SubmissionGuard::enter(&self.submissions_active, &self.searchers);
         if lock(&self.registry).tasks.len() >= self.configuration.task_capacity {
             return Err(SchedulerError::TaskCapacity);
         }
@@ -518,6 +849,7 @@ impl SharedScheduler {
         task: Box<dyn SchedulerTask>,
     ) -> Result<SchedulerTaskId, SchedulerError> {
         self.ensure_open()?;
+        let _submission = SubmissionGuard::enter(&self.submissions_active, &self.searchers);
         let index = self.scheduler_index(scheduler)?;
         let mut queue = lock(&self.queues.local[index]);
         if queue.len() >= self.configuration.local_queue_capacity {
@@ -547,6 +879,71 @@ impl SharedScheduler {
         drop(queue);
         self.notify_work();
         Ok(id)
+    }
+
+    fn schedule_local_batch(
+        &self,
+        scheduler: SchedulerId,
+        mobility: SchedulerTaskMobility,
+        tasks: Vec<Box<dyn SchedulerTask>>,
+    ) -> Result<Vec<SchedulerTaskId>, SchedulerError> {
+        self.ensure_open()?;
+        let _submission = SubmissionGuard::enter(&self.submissions_active, &self.searchers);
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = self.scheduler_index(scheduler)?;
+        let mut queue = lock(&self.queues.local[index]);
+        if queue.len().saturating_add(tasks.len()) > self.configuration.local_queue_capacity {
+            return Err(SchedulerError::LocalQueueCapacity);
+        }
+        let mut registry = lock(&self.registry);
+        if registry.tasks.len().saturating_add(tasks.len()) > self.configuration.task_capacity {
+            return Err(SchedulerError::TaskCapacity);
+        }
+        let additional =
+            u64::try_from(tasks.len()).map_err(|_| SchedulerError::IdentityOverflow)?;
+        registry
+            .next_task
+            .checked_add(additional)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+
+        let mut ids = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let id = next_task_id(&mut registry)?;
+            registry.tasks.insert(
+                id,
+                Arc::new(TaskCell {
+                    record: Mutex::new(TaskRecord {
+                        task: Some(task),
+                        state: InternalTaskState::Ready,
+                        scheduler,
+                        mobility,
+                        cancellation_requested: false,
+                    }),
+                }),
+            );
+            queue.push_back(id);
+            ids.push(id);
+        }
+        {
+            let mut telemetry = lock(&self.telemetry);
+            telemetry.telemetry.tasks_scheduled = telemetry
+                .telemetry
+                .tasks_scheduled
+                .saturating_add(u64::try_from(ids.len()).unwrap_or(u64::MAX));
+            telemetry.telemetry.retained_tasks = registry.tasks.len();
+            telemetry.telemetry.ready_tasks =
+                telemetry.telemetry.ready_tasks.saturating_add(ids.len());
+        }
+        drop(registry);
+        {
+            let mut activity = lock(&self.activity);
+            activity.ready = activity.ready.saturating_add(ids.len());
+        }
+        drop(queue);
+        self.notify_work();
+        Ok(ids)
     }
 
     fn wake(&self, id: SchedulerTaskId) -> Result<bool, SchedulerError> {
@@ -590,6 +987,7 @@ impl SharedScheduler {
                 queue.push_back(id);
                 drop(record);
                 drop(queue);
+                self.record_resumed();
                 self.increment_ready();
                 self.notify_work();
             } else {
@@ -650,6 +1048,7 @@ impl SharedScheduler {
                 queue.push_back(id);
                 drop(record);
                 drop(queue);
+                self.record_resumed();
                 self.increment_ready();
                 self.notify_work();
             }
@@ -679,7 +1078,9 @@ impl SharedScheduler {
             return Err(SchedulerError::TaskNotTerminal(id));
         }
         registry.tasks.remove(&id);
-        self.refresh_retained(&registry);
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.retained_tasks = registry.tasks.len();
+        telemetry.telemetry.terminal_tasks = telemetry.telemetry.terminal_tasks.saturating_sub(1);
         Ok(())
     }
 
@@ -755,14 +1156,11 @@ impl SharedScheduler {
     fn try_take(&self, index: usize, local_polls: usize) -> Option<QueuedTask> {
         let check_injection =
             local_polls.is_multiple_of(self.configuration.injection_poll_interval);
-        if check_injection && let Some(id) = lock(&self.queues.injection).pop_front() {
-            if self.assign_scheduler(id, index) {
-                return Some(QueuedTask {
-                    id,
-                    source: WorkSource::Injection,
-                });
-            }
-            lock(&self.queues.injection).push_back(id);
+        if check_injection && let Some(id) = self.take_injection(index) {
+            return Some(QueuedTask {
+                id,
+                source: WorkSource::Injection,
+            });
         }
         if let Some(id) = lock(&self.queues.local[index]).pop_front() {
             return Some(QueuedTask {
@@ -770,19 +1168,50 @@ impl SharedScheduler {
                 source: WorkSource::Local,
             });
         }
-        if !check_injection && let Some(id) = lock(&self.queues.injection).pop_front() {
-            if self.assign_scheduler(id, index) {
-                return Some(QueuedTask {
-                    id,
-                    source: WorkSource::Injection,
-                });
-            }
-            lock(&self.queues.injection).push_back(id);
+        if !check_injection && let Some(id) = self.take_injection(index) {
+            return Some(QueuedTask {
+                id,
+                source: WorkSource::Injection,
+            });
         }
         self.try_steal(index)
     }
 
+    fn take_injection(&self, index: usize) -> Option<SchedulerTaskId> {
+        let destination = scheduler_id(index);
+        let mut injection = lock(&self.queues.injection);
+        let owner_position = {
+            let registry = lock(&self.registry);
+            injection.iter().position(|id| {
+                registry
+                    .tasks
+                    .get(id)
+                    .is_some_and(|cell| lock(&cell.record).scheduler == destination)
+            })
+        };
+        if let Some(position) = owner_position {
+            return injection.remove(position);
+        }
+        if !self.migration_enabled {
+            return None;
+        }
+        let id = injection.pop_front()?;
+        drop(injection);
+        if self.assign_scheduler(id, index) {
+            Some(id)
+        } else {
+            lock(&self.queues.injection).push_back(id);
+            None
+        }
+    }
+
     fn try_steal(&self, thief: usize) -> Option<QueuedTask> {
+        if !self.migration_enabled {
+            return None;
+        }
+        if self.submissions_active.load(Ordering::Acquire) != 0 {
+            return None;
+        }
         let maximum_searchers = self.configuration.worker_count.div_ceil(2);
         let entered = self
             .searchers
@@ -793,19 +1222,28 @@ impl SharedScheduler {
         if !entered {
             return None;
         }
+        if self.submissions_active.load(Ordering::Acquire) != 0 {
+            self.searchers.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
         let mut result = None;
         for offset in 1..self.configuration.scheduler_count {
             let victim = (thief + offset) % self.configuration.scheduler_count;
-            let mut victim_queue = lock(&self.queues.local[victim]);
+            let Some(mut victim_queue) = try_lock(&self.queues.local[victim]) else {
+                continue;
+            };
             if victim_queue.is_empty() {
                 continue;
             }
-            let registry = lock(&self.registry);
+            let Some(registry) = try_lock(&self.registry) else {
+                continue;
+            };
             let eligible = victim_queue
                 .iter()
                 .filter(|id| {
                     registry.tasks.get(id).is_some_and(|cell| {
-                        lock(&cell.record).mobility == SchedulerTaskMobility::Movable
+                        try_lock(&cell.record)
+                            .is_some_and(|record| record.mobility == SchedulerTaskMobility::Movable)
                     })
                 })
                 .count();
@@ -819,7 +1257,9 @@ impl SharedScheduler {
                 let Some(cell) = registry.tasks.get(&id) else {
                     continue;
                 };
-                let mut record = lock(&cell.record);
+                let Some(mut record) = try_lock(&cell.record) else {
+                    continue;
+                };
                 if record.mobility != SchedulerTaskMobility::Movable
                     || !self.migration_allowed(id, record.scheduler, scheduler_id(thief))
                 {
@@ -853,7 +1293,6 @@ impl SharedScheduler {
                     .tasks_stolen
                     .saturating_add(u64::try_from(batch).unwrap_or(u64::MAX));
             }
-            self.notify_work();
             result = Some(QueuedTask {
                 id: first,
                 source: WorkSource::Stolen(batch),
@@ -888,6 +1327,8 @@ impl SharedScheduler {
         let cell = self.task(queued.id)?;
         let mut record = lock(&cell.record);
         if !matches!(record.state, InternalTaskState::Ready) {
+            drop(record);
+            self.discard_stale_ready_entry();
             return Ok(None);
         }
         self.require_runtime_transition(SchedulerRuntimeTransition::TaskDispatched {
@@ -914,12 +1355,13 @@ impl SharedScheduler {
         {
             let mut telemetry = lock(&self.telemetry);
             telemetry.telemetry.polls = telemetry.telemetry.polls.saturating_add(1);
+            telemetry.telemetry.ready_tasks = telemetry.telemetry.ready_tasks.saturating_sub(1);
+            telemetry.telemetry.running_tasks = telemetry.telemetry.running_tasks.saturating_add(1);
             telemetry.workers_used.insert(worker);
             if let WorkSource::Stolen(batch) = queued.source {
                 let _ = batch;
             }
         }
-        self.refresh_state_counts();
         Ok(Some((cell, task, context)))
     }
 
@@ -978,6 +1420,19 @@ impl SharedScheduler {
         let scheduler = record.scheduler;
         drop(record);
         {
+            let mut telemetry = lock(&self.telemetry);
+            telemetry.telemetry.running_tasks = telemetry.telemetry.running_tasks.saturating_sub(1);
+            if enqueue {
+                telemetry.telemetry.ready_tasks = telemetry.telemetry.ready_tasks.saturating_add(1);
+            } else if terminal_state.is_some() {
+                telemetry.telemetry.terminal_tasks =
+                    telemetry.telemetry.terminal_tasks.saturating_add(1);
+            } else {
+                telemetry.telemetry.suspended_tasks =
+                    telemetry.telemetry.suspended_tasks.saturating_add(1);
+            }
+        }
+        {
             let mut activity = lock(&self.activity);
             activity.running = activity.running.saturating_sub(1);
             if enqueue {
@@ -992,6 +1447,8 @@ impl SharedScheduler {
                 .scheduler_index(scheduler)
                 .expect("task scheduler remains configured");
             lock(&self.queues.local[index]).push_back(id);
+        }
+        if enqueue {
             self.notify_work();
         }
         if suspended && !notified {
@@ -1012,7 +1469,6 @@ impl SharedScheduler {
                 state,
             })?;
         }
-        self.refresh_state_counts();
         Ok(())
     }
 
@@ -1036,47 +1492,39 @@ impl SharedScheduler {
     fn increment_ready(&self) {
         let mut activity = lock(&self.activity);
         activity.ready = activity.ready.saturating_add(1);
+    }
+
+    fn discard_stale_ready_entry(&self) {
+        let mut activity = lock(&self.activity);
+        activity.ready = activity.ready.saturating_sub(1);
+        if activity.ready == 0 && activity.running == 0 {
+            self.idle.notify_all();
+        }
         drop(activity);
-        self.refresh_state_counts();
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.stale_ready_entries =
+            telemetry.telemetry.stale_ready_entries.saturating_add(1);
     }
 
     fn notify_work(&self) {
         let _idle = lock(&self.queues.idle_gate);
-        self.queues.work_available.notify_one();
+        // The correctness scheduler has one shared park set. Broadcasting is
+        // required because a single arbitrary wake can select a worker that
+        // cannot run scheduler-affine work while its owner remains parked.
+        self.queues.work_available.notify_all();
     }
 
     fn record_scheduled(&self, registry: &Registry) {
         let mut telemetry = lock(&self.telemetry);
         telemetry.telemetry.tasks_scheduled = telemetry.telemetry.tasks_scheduled.saturating_add(1);
         telemetry.telemetry.retained_tasks = registry.tasks.len();
+        telemetry.telemetry.ready_tasks = telemetry.telemetry.ready_tasks.saturating_add(1);
     }
 
-    fn refresh_retained(&self, registry: &Registry) {
-        lock(&self.telemetry).telemetry.retained_tasks = registry.tasks.len();
-    }
-
-    fn refresh_state_counts(&self) {
-        let registry = lock(&self.registry);
-        let mut ready = 0;
-        let mut running = 0;
-        let mut suspended = 0;
-        let mut terminal = 0;
-        for cell in registry.tasks.values() {
-            match lock(&cell.record).state.public() {
-                SchedulerTaskState::Ready => ready += 1,
-                SchedulerTaskState::Running => running += 1,
-                SchedulerTaskState::Suspended => suspended += 1,
-                SchedulerTaskState::Completed
-                | SchedulerTaskState::Cancelled
-                | SchedulerTaskState::Panicked => terminal += 1,
-            }
-        }
+    fn record_resumed(&self) {
         let mut telemetry = lock(&self.telemetry);
-        telemetry.telemetry.retained_tasks = registry.tasks.len();
-        telemetry.telemetry.ready_tasks = ready;
-        telemetry.telemetry.running_tasks = running;
-        telemetry.telemetry.suspended_tasks = suspended;
-        telemetry.telemetry.terminal_tasks = terminal;
+        telemetry.telemetry.suspended_tasks = telemetry.telemetry.suspended_tasks.saturating_sub(1);
+        telemetry.telemetry.ready_tasks = telemetry.telemetry.ready_tasks.saturating_add(1);
     }
 
     fn record_worker_used(&self, worker: SchedulerWorkerId) {
@@ -1148,6 +1596,9 @@ fn worker_loop(
         let mut local_polls = 0;
         while let Some(queued) = shared.take_work(worker, scheduler, local_polls)? {
             let local = matches!(queued.source, WorkSource::Local);
+            if matches!(queued.source, WorkSource::Stolen(batch) if batch > 1) {
+                shared.notify_work();
+            }
             let Some((cell, mut task, context)) = shared.begin_poll(&queued, worker)? else {
                 continue;
             };
@@ -1202,6 +1653,62 @@ fn blocking_worker_loop(pool: &BlockingPool, scheduler: &SharedScheduler) {
     }
 }
 
+fn event_driver_loop(driver: &EventDriver, scheduler: &SharedScheduler) {
+    loop {
+        let mut state = lock(&driver.state);
+        let delivery = loop {
+            if state.shutdown {
+                return;
+            }
+            if let Some(event) = state.deliveries.pop_front() {
+                let Some(registration) = state.events.get_mut(&event) else {
+                    continue;
+                };
+                registration.delivered = true;
+                break HostDelivery::ExternalEvent(registration.task);
+            }
+            let now = Instant::now();
+            if let Some((&key, &task)) = state.timers.first_key_value()
+                && key.0 <= now
+            {
+                state.timers.remove(&key);
+                break HostDelivery::Timer(task);
+            }
+            if let Some((&(deadline, _), _)) = state.timers.first_key_value() {
+                let timeout = deadline.saturating_duration_since(now);
+                let (waiting, _) = driver
+                    .changed
+                    .wait_timeout(state, timeout)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = waiting;
+            } else {
+                state = driver
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        };
+        drop(state);
+
+        match delivery {
+            HostDelivery::ExternalEvent(task) => {
+                let _ = scheduler.wake(task);
+                let mut telemetry = lock(&scheduler.telemetry);
+                telemetry.telemetry.external_events_delivered = telemetry
+                    .telemetry
+                    .external_events_delivered
+                    .saturating_add(1);
+            }
+            HostDelivery::Timer(task) => {
+                let _ = scheduler.wake(task);
+                let mut telemetry = lock(&scheduler.telemetry);
+                telemetry.telemetry.timers_delivered =
+                    telemetry.telemetry.timers_delivered.saturating_add(1);
+            }
+        }
+    }
+}
+
 fn remaining_until(deadline: Instant) -> Result<Duration, SchedulerError> {
     deadline
         .checked_duration_since(Instant::now())
@@ -1226,4 +1733,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::WouldBlock) => None,
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+    }
 }

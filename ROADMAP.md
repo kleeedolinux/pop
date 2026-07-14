@@ -262,6 +262,13 @@ Post-baseline library work has begun without widening the release foundation:
     adaptive worker sizing and stealing policy, concurrent card refinement and
     page reclamation, stack watermarks, race/stress proof, and latency
     measurements.
+    - [x] Add the bounded synchronized M:N correctness scheduler, deterministic
+      record/replay, explicit migration refusal, isolated bounded blocking
+      workers, host/virtual timers, external events, failure containment, and
+      initial wake/cancellation/migration stress coverage.
+    - [ ] Bind scheduler transition events to native mutator registration,
+      precise suspended-frame root publication, collector epochs, and the ABI 2
+      writable-root transition before claiming production GC integration.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.

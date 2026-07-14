@@ -25,7 +25,8 @@ The facade is divided into `identity`, `allocation`, `storage`, `text`, `roots`,
 `failure`, `scheduler`, and private `state` modules. The scheduler provides the
 bounded synchronized M:N correctness implementation, deterministic
 record/replay, typed collector-transition hooks, and a separate bounded
-blocking pool specified by the
+blocking pool plus bounded host/virtual timer and external-event delivery
+specified by the
 [scheduler runtime design](../../../architecture/23.1-scheduler-runtime-implementation.md).
 This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.

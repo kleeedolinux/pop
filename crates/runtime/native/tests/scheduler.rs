@@ -34,6 +34,17 @@ impl SchedulerRuntimeTransitions for RecordingRuntimeTransitions {
     }
 }
 
+struct PermitRuntimeTransitions;
+
+impl SchedulerRuntimeTransitions for PermitRuntimeTransitions {
+    fn apply(
+        &self,
+        _transition: SchedulerRuntimeTransition,
+    ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
+        Ok(SchedulerRuntimeTransitionControl::Continue)
+    }
+}
+
 type PollRecord = (u64, u32, u32, bool);
 
 struct StepTask {
@@ -98,6 +109,25 @@ struct ReadyManyTask {
     remaining_ready_polls: usize,
 }
 
+struct SuspendOnceTask {
+    first: bool,
+    completed: Option<mpsc::Sender<()>>,
+}
+
+impl SchedulerTask for SuspendOnceTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        if self.first {
+            self.first = false;
+            SchedulerTaskPoll::Pending
+        } else {
+            if let Some(completed) = self.completed.take() {
+                completed.send(()).expect("report resumed completion");
+            }
+            SchedulerTaskPoll::Complete
+        }
+    }
+}
+
 impl SchedulerTask for ReadyManyTask {
     fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
         if self.remaining_ready_polls == 0 {
@@ -123,6 +153,16 @@ impl SchedulerTask for YieldOnceTask {
 struct BlockingProbeTask {
     started: mpsc::Sender<u32>,
     gate: Arc<(Mutex<bool>, Condvar)>,
+}
+
+struct OpenGateOnDrop(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for OpenGateOnDrop {
+    fn drop(&mut self) {
+        let (open, changed) = &*self.0;
+        *open.lock().expect("cleanup probe gate") = true;
+        changed.notify_all();
+    }
 }
 
 struct WakeDuringPollTask {
@@ -224,6 +264,18 @@ fn scheduler_configuration_rejects_unbounded_zero_limits() {
     assert_eq!(
         bounded.with_blocking_pool(1, 0),
         Err(SchedulerConfigurationError::ZeroBlockingQueueCapacity)
+    );
+    assert_eq!(
+        bounded.with_event_driver(0, 1, 1),
+        Err(SchedulerConfigurationError::ZeroExternalEventCapacity)
+    );
+    assert_eq!(
+        bounded.with_event_driver(1, 0, 1),
+        Err(SchedulerConfigurationError::ZeroTimerCapacity)
+    );
+    assert_eq!(
+        bounded.with_event_driver(1, 1, 0),
+        Err(SchedulerConfigurationError::ZeroEventDeliveryCapacity)
     );
 }
 
@@ -396,6 +448,7 @@ fn bounded_global_injection_rejects_before_retaining_an_unqueueable_task() {
     let scheduler = NativeScheduler::new(configuration).expect("native scheduler");
     let (started_sender, started_receiver) = mpsc::channel();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     scheduler
         .schedule_on(
             SchedulerId::new(1),
@@ -426,9 +479,12 @@ fn bounded_global_injection_rejects_before_retaining_an_unqueueable_task() {
 
 #[test]
 fn idle_workers_steal_ready_work_from_a_blocked_peer_queue() {
-    let scheduler = NativeScheduler::new(configuration(3, 8)).expect("native scheduler");
+    let transitions = Arc::new(PermitRuntimeTransitions);
+    let scheduler = NativeScheduler::new_with_runtime_transitions(configuration(3, 8), transitions)
+        .expect("native scheduler with migration approval");
     let (started_sender, started_receiver) = mpsc::channel();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
     scheduler
         .schedule_on(
             SchedulerId::new(1),
@@ -442,26 +498,37 @@ fn idle_workers_steal_ready_work_from_a_blocked_peer_queue() {
     started_receiver
         .recv_timeout(Duration::from_secs(5))
         .expect("first worker starts probe");
+    let parked_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while scheduler.telemetry().worker_threads_used() != 3 {
+        assert!(
+            std::time::Instant::now() < parked_deadline,
+            "idle workers did not reach their park protocol"
+        );
+        std::thread::yield_now();
+    }
 
     let completions = Arc::new(Mutex::new(0));
-    for _ in 0..4 {
-        scheduler
-            .schedule_on(
-                SchedulerId::new(1),
-                SchedulerTaskMobility::Movable,
-                CompleteTask {
+    scheduler
+        .schedule_batch_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Movable,
+            (0..4)
+                .map(|_| CompleteTask {
                     completions: Arc::clone(&completions),
-                },
-            )
-            .expect("queue peer work");
-    }
+                })
+                .collect(),
+        )
+        .expect("queue peer work batch");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while *completions.lock().expect("completion count") != 4 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "peer work was not stolen"
-        );
+        if std::time::Instant::now() >= deadline {
+            let telemetry = scheduler.telemetry();
+            let (open, changed) = &*gate;
+            *open.lock().expect("probe gate") = true;
+            changed.notify_one();
+            panic!("peer work was not stolen: {telemetry:?}");
+        }
         std::thread::yield_now();
     }
     let (open, changed) = &*gate;
@@ -602,7 +669,10 @@ fn bounded_blocking_pool_runs_off_normal_workers_and_rejects_queue_overflow() {
         .expect("bounded blocking configuration");
     let scheduler = NativeScheduler::new(configuration).expect("native scheduler");
     let wake_target = scheduler
-        .schedule(CancellationTask)
+        .schedule(SuspendOnceTask {
+            first: true,
+            completed: None,
+        })
         .expect("schedule wake target");
     scheduler
         .wait_until_idle(Duration::from_secs(5))
@@ -610,6 +680,7 @@ fn bounded_blocking_pool_runs_off_normal_workers_and_rejects_queue_overflow() {
 
     let (normal_started_sender, normal_started_receiver) = mpsc::channel();
     let normal_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _normal_gate_cleanup = OpenGateOnDrop(Arc::clone(&normal_gate));
     scheduler
         .schedule_on(
             SchedulerId::new(1),
@@ -626,6 +697,7 @@ fn bounded_blocking_pool_runs_off_normal_workers_and_rejects_queue_overflow() {
 
     let (blocking_started_sender, blocking_started_receiver) = mpsc::channel();
     let blocking_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _blocking_gate_cleanup = OpenGateOnDrop(Arc::clone(&blocking_gate));
     let first_gate = Arc::clone(&blocking_gate);
     scheduler
         .submit_blocking(wake_target, move || {
@@ -669,7 +741,10 @@ fn bounded_blocking_pool_runs_off_normal_workers_and_rejects_queue_overflow() {
 fn blocking_operation_panic_is_contained_and_worker_continues() {
     let scheduler = NativeScheduler::new(configuration(1, 4)).expect("native scheduler");
     let wake_target = scheduler
-        .schedule(CancellationTask)
+        .schedule(SuspendOnceTask {
+            first: true,
+            completed: None,
+        })
         .expect("schedule wake target");
     scheduler
         .wait_until_idle(Duration::from_secs(5))
@@ -695,6 +770,207 @@ fn blocking_operation_panic_is_contained_and_worker_continues() {
 
     assert_eq!(*completed.lock().expect("blocking completion count"), 1);
     assert_eq!(scheduler.telemetry().blocking_panics(), 1);
+}
+
+#[test]
+fn host_timer_and_external_event_wake_only_the_exact_registered_tasks() {
+    let configuration = configuration(1, 6)
+        .with_event_driver(2, 2, 2)
+        .expect("bounded event-driver configuration");
+    let scheduler = NativeScheduler::new(configuration).expect("native scheduler");
+    let (timer_sender, timer_receiver) = mpsc::channel();
+    let timer_task = scheduler
+        .schedule(SuspendOnceTask {
+            first: true,
+            completed: Some(timer_sender),
+        })
+        .expect("schedule timer task");
+    let (event_sender, event_receiver) = mpsc::channel();
+    let event_task = scheduler
+        .schedule(SuspendOnceTask {
+            first: true,
+            completed: Some(event_sender),
+        })
+        .expect("schedule event task");
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("event tasks suspend");
+
+    scheduler
+        .schedule_wake_after(timer_task, Duration::from_millis(5))
+        .expect("register timer");
+    let event = scheduler
+        .register_external_event(event_task)
+        .expect("register external event");
+    assert_eq!(scheduler.signal_external_event(event), Ok(true));
+    assert_eq!(scheduler.signal_external_event(event), Ok(false));
+
+    timer_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("timer task resumes");
+    event_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("event task resumes");
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("delivered tasks complete");
+    assert_eq!(
+        scheduler.task_state(timer_task),
+        Ok(SchedulerTaskState::Completed)
+    );
+    assert_eq!(
+        scheduler.task_state(event_task),
+        Ok(SchedulerTaskState::Completed)
+    );
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.timers_delivered(), 1);
+    assert_eq!(telemetry.external_events_delivered(), 1);
+    assert_eq!(telemetry.external_event_signals_coalesced(), 1);
+}
+
+#[test]
+fn deterministic_virtual_timer_never_consults_wall_clock() {
+    let mut scheduler = DeterministicScheduler::recording(configuration(1, 2));
+    let task = scheduler
+        .schedule(SuspendOnceTask {
+            first: true,
+            completed: None,
+        })
+        .expect("schedule virtual timer task");
+    scheduler
+        .run_until_idle(2)
+        .expect("virtual timer task suspends");
+    scheduler
+        .schedule_wake_at(task, 10)
+        .expect("register virtual timer");
+
+    assert_eq!(scheduler.advance_virtual_work(9), Ok(0));
+    assert_eq!(
+        scheduler.task_state(task),
+        Ok(SchedulerTaskState::Suspended)
+    );
+    assert_eq!(scheduler.advance_virtual_work(1), Ok(1));
+    scheduler
+        .run_until_idle(2)
+        .expect("virtual timer task completes");
+    assert_eq!(
+        scheduler.task_state(task),
+        Ok(SchedulerTaskState::Completed)
+    );
+    assert_eq!(scheduler.virtual_work(), 10);
+}
+
+#[test]
+fn deterministic_external_event_is_bounded_and_coalesced() {
+    let configuration = configuration(1, 2)
+        .with_event_driver(1, 1, 1)
+        .expect("bounded deterministic event configuration");
+    let mut scheduler = DeterministicScheduler::recording(configuration);
+    let task = scheduler
+        .schedule(SuspendOnceTask {
+            first: true,
+            completed: None,
+        })
+        .expect("schedule deterministic event task");
+    scheduler
+        .run_until_idle(2)
+        .expect("deterministic event task suspends");
+    let event = scheduler
+        .register_external_event(task)
+        .expect("register deterministic external event");
+    assert_eq!(
+        scheduler.register_external_event(task),
+        Err(SchedulerError::ExternalEventCapacity)
+    );
+    assert_eq!(scheduler.signal_external_event(event), Ok(true));
+    assert_eq!(scheduler.signal_external_event(event), Ok(false));
+    scheduler
+        .run_until_idle(2)
+        .expect("deterministic event task completes");
+    assert_eq!(
+        scheduler.task_state(task),
+        Ok(SchedulerTaskState::Completed)
+    );
+    assert_eq!(scheduler.telemetry().external_events_delivered(), 1);
+    assert_eq!(scheduler.telemetry().external_event_signals_coalesced(), 1);
+    scheduler
+        .release_external_event(event)
+        .expect("release deterministic external event");
+    assert_eq!(
+        scheduler.release_external_event(event),
+        Err(SchedulerError::UnknownExternalEvent(event))
+    );
+}
+
+#[test]
+fn concurrent_wake_and_cancellation_races_do_not_lose_or_duplicate_tasks() {
+    let scheduler = NativeScheduler::new_with_runtime_transitions(
+        configuration(4, 128),
+        Arc::new(PermitRuntimeTransitions),
+    )
+    .expect("native scheduler with migration approval");
+    let mut tasks = Vec::new();
+    for _ in 0..100 {
+        tasks.push(
+            scheduler
+                .schedule(CancellationTask)
+                .expect("schedule cancellation stress task"),
+        );
+    }
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("stress tasks suspend");
+
+    std::thread::scope(|scope| {
+        for worker in 0..4 {
+            let tasks = &tasks;
+            let scheduler = &scheduler;
+            scope.spawn(move || {
+                for (index, task) in tasks.iter().copied().enumerate() {
+                    if index % 4 == worker {
+                        let _ = scheduler.wake(task);
+                        let _ = scheduler.request_cancellation(task);
+                        let _ = scheduler.wake(task);
+                    }
+                }
+            });
+        }
+    });
+    if let Err(error) = scheduler.wait_until_idle(Duration::from_secs(5)) {
+        panic!(
+            "stress tasks failed to observe cancellation: {error:?}; {:?}",
+            scheduler.telemetry()
+        );
+    }
+    for task in tasks {
+        assert_eq!(
+            scheduler.task_state(task),
+            Ok(SchedulerTaskState::Cancelled)
+        );
+    }
+    assert_eq!(scheduler.telemetry().cancellations_observed(), 100);
+    assert_eq!(scheduler.telemetry().stale_ready_entries(), 0);
+}
+
+#[test]
+fn shutdown_cancels_dormant_events_and_timers_without_waiting_for_deadlines() {
+    let scheduler = NativeScheduler::new(configuration(1, 4)).expect("native scheduler");
+    let task = scheduler
+        .schedule(CancellationTask)
+        .expect("schedule dormant task");
+    scheduler
+        .wait_until_idle(Duration::from_secs(5))
+        .expect("dormant task suspends");
+    scheduler
+        .register_external_event(task)
+        .expect("register dormant event");
+    scheduler
+        .schedule_wake_after(task, Duration::from_mins(1))
+        .expect("register dormant timer");
+
+    let started = std::time::Instant::now();
+    scheduler.shutdown().expect("bounded scheduler shutdown");
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]

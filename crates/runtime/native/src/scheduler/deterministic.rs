@@ -6,9 +6,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use pop_runtime_collector::SchedulerId;
 
 use super::{
-    SchedulerConfiguration, SchedulerDecision, SchedulerError, SchedulerTask, SchedulerTaskContext,
-    SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
-    SchedulerTelemetry, SchedulerWorkerId,
+    SchedulerConfiguration, SchedulerDecision, SchedulerError, SchedulerExternalEventId,
+    SchedulerTask, SchedulerTaskContext, SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll,
+    SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
 };
 
 enum ReplayMode {
@@ -36,6 +36,11 @@ pub struct DeterministicScheduler {
     mode: ReplayMode,
     transcript: Vec<SchedulerDecision>,
     telemetry: SchedulerTelemetry,
+    virtual_work: u64,
+    timers: BTreeMap<(u64, SchedulerTimerId), SchedulerTaskId>,
+    next_timer: u64,
+    events: BTreeMap<SchedulerExternalEventId, (SchedulerTaskId, bool)>,
+    next_event: u64,
 }
 
 impl DeterministicScheduler {
@@ -68,6 +73,11 @@ impl DeterministicScheduler {
             mode,
             transcript: Vec::new(),
             telemetry: SchedulerTelemetry::default(),
+            virtual_work: 0,
+            timers: BTreeMap::new(),
+            next_timer: 1,
+            events: BTreeMap::new(),
+            next_event: 1,
         }
     }
 
@@ -214,6 +224,159 @@ impl DeterministicScheduler {
         }
         self.refresh_counts();
         Ok(true)
+    }
+
+    /// Registers one bounded virtual timer at an absolute work count.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown/terminal tasks, timer capacity, past deadlines, or
+    /// typed identity exhaustion.
+    pub fn schedule_wake_at(
+        &mut self,
+        task: SchedulerTaskId,
+        deadline: u64,
+    ) -> Result<SchedulerTimerId, SchedulerError> {
+        let state = self.task_state(task)?;
+        if state.terminal() {
+            return Err(SchedulerError::UnknownTask(task));
+        }
+        if deadline < self.virtual_work {
+            return Err(SchedulerError::ReplayEnabledSetMismatch);
+        }
+        if self.timers.len() >= self.configuration.timer_capacity {
+            return Err(SchedulerError::TimerCapacity);
+        }
+        let id = SchedulerTimerId::new(self.next_timer);
+        self.next_timer = self
+            .next_timer
+            .checked_add(1)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        self.timers.insert((deadline, id), task);
+        self.telemetry.timers_scheduled = self.telemetry.timers_scheduled.saturating_add(1);
+        Ok(id)
+    }
+
+    /// Advances deterministic virtual work and delivers every due timer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects work-counter overflow or a bounded ready-queue failure.
+    pub fn advance_virtual_work(&mut self, work: u64) -> Result<usize, SchedulerError> {
+        self.virtual_work = self
+            .virtual_work
+            .checked_add(work)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        let due = self
+            .timers
+            .range(..=(self.virtual_work, SchedulerTimerId::new(u64::MAX)))
+            .map(|(key, task)| (*key, *task))
+            .collect::<Vec<_>>();
+        let mut delivered = 0;
+        for (key, task) in due {
+            self.timers.remove(&key);
+            if self.wake(task)? {
+                delivered += 1;
+                self.telemetry.timers_delivered = self.telemetry.timers_delivered.saturating_add(1);
+            }
+        }
+        Ok(delivered)
+    }
+
+    #[must_use]
+    pub const fn virtual_work(&self) -> u64 {
+        self.virtual_work
+    }
+
+    /// Cancels one retained virtual timer before delivery.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown or already delivered timer.
+    pub fn cancel_timer(&mut self, timer: SchedulerTimerId) -> Result<(), SchedulerError> {
+        let key = self
+            .timers
+            .keys()
+            .find(|(_, candidate)| *candidate == timer)
+            .copied()
+            .ok_or(SchedulerError::UnknownTimer(timer))?;
+        self.timers.remove(&key);
+        Ok(())
+    }
+
+    /// Registers one bounded deterministic external readiness source.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown/terminal tasks, registration capacity, or identity
+    /// exhaustion before retaining the source.
+    pub fn register_external_event(
+        &mut self,
+        task: SchedulerTaskId,
+    ) -> Result<SchedulerExternalEventId, SchedulerError> {
+        let state = self.task_state(task)?;
+        if state.terminal() {
+            return Err(SchedulerError::UnknownTask(task));
+        }
+        if self.events.len() >= self.configuration.external_event_capacity {
+            return Err(SchedulerError::ExternalEventCapacity);
+        }
+        let event = SchedulerExternalEventId::new(self.next_event);
+        self.next_event = self
+            .next_event
+            .checked_add(1)
+            .ok_or(SchedulerError::IdentityOverflow)?;
+        self.events.insert(event, (task, false));
+        self.telemetry.external_events_registered =
+            self.telemetry.external_events_registered.saturating_add(1);
+        Ok(event)
+    }
+
+    /// Delivers one deterministic external readiness source at most once.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown source or bounded ready-queue failure.
+    pub fn signal_external_event(
+        &mut self,
+        event: SchedulerExternalEventId,
+    ) -> Result<bool, SchedulerError> {
+        let (task, signalled) = self
+            .events
+            .get(&event)
+            .copied()
+            .ok_or(SchedulerError::UnknownExternalEvent(event))?;
+        if signalled {
+            self.telemetry.external_event_signals_coalesced = self
+                .telemetry
+                .external_event_signals_coalesced
+                .saturating_add(1);
+            return Ok(false);
+        }
+        if self.wake(task)? {
+            self.events.insert(event, (task, true));
+            self.telemetry.external_events_delivered =
+                self.telemetry.external_events_delivered.saturating_add(1);
+            Ok(true)
+        } else {
+            self.events.insert(event, (task, true));
+            Ok(false)
+        }
+    }
+
+    /// Releases one deterministic external source.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown source.
+    pub fn release_external_event(
+        &mut self,
+        event: SchedulerExternalEventId,
+    ) -> Result<(), SchedulerError> {
+        self.events
+            .remove(&event)
+            .ok_or(SchedulerError::UnknownExternalEvent(event))?;
+        Ok(())
     }
 
     #[must_use]

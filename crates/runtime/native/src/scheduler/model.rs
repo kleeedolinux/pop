@@ -46,6 +46,34 @@ impl SchedulerBlockingOperationId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SchedulerTimerId(u64);
+
+impl SchedulerTimerId {
+    pub(super) const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SchedulerExternalEventId(u64);
+
+impl SchedulerExternalEventId {
+    pub(super) const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerConfiguration {
     pub(super) scheduler_count: usize,
@@ -56,6 +84,9 @@ pub struct SchedulerConfiguration {
     pub(super) injection_poll_interval: usize,
     pub(super) blocking_worker_count: usize,
     pub(super) blocking_queue_capacity: usize,
+    pub(super) external_event_capacity: usize,
+    pub(super) timer_capacity: usize,
+    pub(super) event_delivery_capacity: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,6 +102,9 @@ pub enum SchedulerConfigurationError {
     IdentityRange,
     ZeroBlockingWorkers,
     ZeroBlockingQueueCapacity,
+    ZeroExternalEventCapacity,
+    ZeroTimerCapacity,
+    ZeroEventDeliveryCapacity,
 }
 
 impl SchedulerConfiguration {
@@ -116,7 +150,35 @@ impl SchedulerConfiguration {
                 injection_poll_interval,
                 blocking_worker_count: 1,
                 blocking_queue_capacity: task_capacity,
+                external_event_capacity: task_capacity,
+                timer_capacity: task_capacity,
+                event_delivery_capacity: task_capacity,
             })
+        }
+    }
+
+    /// Replaces bounded event registrations, timers, and pending deliveries.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every zero capacity.
+    pub const fn with_event_driver(
+        mut self,
+        external_event_capacity: usize,
+        timer_capacity: usize,
+        delivery_capacity: usize,
+    ) -> Result<Self, SchedulerConfigurationError> {
+        if external_event_capacity == 0 {
+            Err(SchedulerConfigurationError::ZeroExternalEventCapacity)
+        } else if timer_capacity == 0 {
+            Err(SchedulerConfigurationError::ZeroTimerCapacity)
+        } else if delivery_capacity == 0 {
+            Err(SchedulerConfigurationError::ZeroEventDeliveryCapacity)
+        } else {
+            self.external_event_capacity = external_event_capacity;
+            self.timer_capacity = timer_capacity;
+            self.event_delivery_capacity = delivery_capacity;
+            Ok(self)
         }
     }
 
@@ -181,6 +243,21 @@ impl SchedulerConfiguration {
     #[must_use]
     pub const fn blocking_queue_capacity(self) -> usize {
         self.blocking_queue_capacity
+    }
+
+    #[must_use]
+    pub const fn external_event_capacity(self) -> usize {
+        self.external_event_capacity
+    }
+
+    #[must_use]
+    pub const fn timer_capacity(self) -> usize {
+        self.timer_capacity
+    }
+
+    #[must_use]
+    pub const fn event_delivery_capacity(self) -> usize {
+        self.event_delivery_capacity
     }
 }
 
@@ -268,6 +345,11 @@ pub enum SchedulerError {
     LocalQueueCapacity,
     InjectionQueueCapacity,
     BlockingQueueCapacity,
+    ExternalEventCapacity,
+    TimerCapacity,
+    EventDeliveryCapacity,
+    UnknownExternalEvent(SchedulerExternalEventId),
+    UnknownTimer(SchedulerTimerId),
     UnknownScheduler(SchedulerId),
     UnknownTask(SchedulerTaskId),
     TaskNotTerminal(SchedulerTaskId),
@@ -308,6 +390,12 @@ pub struct SchedulerTelemetry {
     pub(super) blocking_queue_rejections: u64,
     pub(super) blocking_completions: u64,
     pub(super) blocking_panics: u64,
+    pub(super) timers_scheduled: u64,
+    pub(super) timers_delivered: u64,
+    pub(super) external_events_registered: u64,
+    pub(super) external_events_delivered: u64,
+    pub(super) external_event_signals_coalesced: u64,
+    pub(super) stale_ready_entries: u64,
     pub(super) worker_threads_used: usize,
 }
 
@@ -345,6 +433,12 @@ impl SchedulerTelemetry {
         blocking_queue_rejections: u64,
         blocking_completions: u64,
         blocking_panics: u64,
+        timers_scheduled: u64,
+        timers_delivered: u64,
+        external_events_registered: u64,
+        external_events_delivered: u64,
+        external_event_signals_coalesced: u64,
+        stale_ready_entries: u64,
     }
 
     #[must_use]
@@ -425,9 +519,13 @@ pub(super) struct DetachedSchedulerRuntimeTransitions;
 impl SchedulerRuntimeTransitions for DetachedSchedulerRuntimeTransitions {
     fn apply(
         &self,
-        _transition: SchedulerRuntimeTransition,
+        transition: SchedulerRuntimeTransition,
     ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
-        Ok(SchedulerRuntimeTransitionControl::Continue)
+        if matches!(transition, SchedulerRuntimeTransition::TaskMigration { .. }) {
+            Ok(SchedulerRuntimeTransitionControl::RefuseMigration)
+        } else {
+            Ok(SchedulerRuntimeTransitionControl::Continue)
+        }
     }
 }
 
