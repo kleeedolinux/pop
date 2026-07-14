@@ -35,9 +35,9 @@ impl RelocationRuntime {
                 if let Some(reference) = reference {
                     self.validate_reference(reference)?;
                 }
-                slots.push(SlotValue::Reference(reference));
+                slots.push(SlotValue::reference(reference));
             } else {
-                slots.push(SlotValue::Scalar(value));
+                slots.push(SlotValue::scalar(value));
             }
         }
         self.allocate_initialized(
@@ -60,12 +60,8 @@ impl RelocationRuntime {
         slots
             .try_reserve_exact(object_map.slot_count() as usize)
             .map_err(|_| RuntimeFailure::runtime_invariant())?;
-        for index in 0..object_map.slot_count() {
-            slots.push(if object_map.is_reference_slot(ObjectSlot::new(index)) {
-                SlotValue::Reference(None)
-            } else {
-                SlotValue::Scalar(0)
-            });
+        for _ in 0..object_map.slot_count() {
+            slots.push(SlotValue::scalar(0));
         }
         self.allocate_initialized(type_id, class, kind, object_map, slots)
     }
@@ -89,7 +85,7 @@ impl RelocationRuntime {
                 if !object_map.reference_slots().is_empty() {
                     return Err(RuntimeFailure::runtime_invariant());
                 }
-                slots.resize(length, SlotValue::Scalar(value));
+                slots.resize(length, SlotValue::scalar(value));
             }
             ArrayElementMap::ManagedReference => {
                 if object_map.reference_slots().len() != length {
@@ -99,7 +95,7 @@ impl RelocationRuntime {
                 if let Some(reference) = reference {
                     self.validate_reference(reference)?;
                 }
-                slots.resize(length, SlotValue::Reference(reference));
+                slots.resize(length, SlotValue::reference(reference));
             }
         }
         self.allocate_initialized(

@@ -67,6 +67,9 @@ amortize page metadata, compact token indexes, inline small payload storage, or
 specialize proven barriers. Machine-specific timings are evidence, not a
 portable performance promise; record the before/after JSON outside the checked-
 in `latest` result unless intentionally publishing a complete benchmark run.
+The stable native collector currently stores each logical payload slot as one
+physical word and derives slot kind from precise layout metadata; benchmark
+changes must retain the scalar-equals-token negative tracing coverage.
 
 The default outputs are `results/latest.json` and `results/latest.html`.
 `run` writes JSON only, while `render` can regenerate HTML from an existing

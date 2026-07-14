@@ -86,8 +86,7 @@ impl GenerationalRuntime {
                     }
                     if let Some(work) = self.next_mark_work() {
                         if let Some(task) = self.prepare_mark_task(work)? {
-                            let children = scan_slots(&task.slots)
-                                .map_err(|()| RuntimeFailure::runtime_invariant())?;
+                            let children = scan_slots(&task.slots);
                             self.apply_mark_result(
                                 task.reference,
                                 children,
@@ -354,9 +353,9 @@ impl GenerationalRuntime {
             .next_after(self.major.sweep_cursor)
             .map(|(reference, object)| {
                 (
-                    *reference,
+                    reference,
                     object.generation == CollectorGeneration::Mature
-                        && !self.major.marked_mature.contains(reference),
+                        && !self.major.marked_mature.contains(&reference),
                 )
             });
         let Some((reference, reclaim)) = next else {

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_runtime_interface::{ManagedReference, RootHandle, RootPublication, RuntimeFailure};
 
-use crate::heap::{BootstrapRuntime, SlotValue};
+use crate::heap::BootstrapRuntime;
 use crate::ownership::{
     IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
     PublicationStatistics, SchedulerId,
@@ -117,7 +117,7 @@ impl GenerationalRuntime {
             return Err(RuntimeFailure::runtime_invariant());
         }
         for (reference, object) in self.nursery.objects.iter() {
-            if objects.contains(reference) {
+            if objects.contains(&reference) {
                 continue;
             }
             let mut outgoing = Vec::new();
@@ -148,7 +148,7 @@ impl GenerationalRuntime {
         let region = self.isolation.fresh_region()?;
         self.allocation = next_allocation;
         for (reference, object) in self.nursery.objects.iter_mut() {
-            if objects.contains(reference) {
+            if objects.contains(&reference) {
                 object.ownership = ObjectOwnership::Isolated(region);
                 object.generation = CollectorGeneration::Mature;
             }
@@ -243,7 +243,7 @@ impl GenerationalRuntime {
         }
         self.allocation = next_allocation;
         for (reference, object) in self.nursery.objects.iter_mut() {
-            if record.objects.contains(reference) {
+            if record.objects.contains(&reference) {
                 object.ownership = ObjectOwnership::SchedulerLocal(owner);
             }
         }
@@ -297,12 +297,14 @@ impl GenerationalRuntime {
                 continue;
             }
             for slot in object.allocation.object_map.reference_slots() {
-                match object.allocation.slots.get(slot.raw() as usize) {
-                    Some(SlotValue::Reference(Some(child))) => pending.push(*child),
-                    Some(SlotValue::Reference(None)) => {}
-                    Some(SlotValue::Scalar(_)) | None => {
-                        return Err(RuntimeFailure::runtime_invariant());
-                    }
+                let value = object
+                    .allocation
+                    .slots
+                    .get(slot.raw() as usize)
+                    .copied()
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                if let Some(child) = value.as_reference() {
+                    pending.push(child);
                 }
             }
         }
@@ -382,12 +384,14 @@ fn append_object_references(
     pending: &mut Vec<ManagedReference>,
 ) -> Result<(), RuntimeFailure> {
     for slot in object.allocation.object_map.reference_slots() {
-        match object.allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Reference(Some(reference))) => pending.push(*reference),
-            Some(SlotValue::Reference(None)) => {}
-            Some(SlotValue::Scalar(_)) | None => {
-                return Err(RuntimeFailure::runtime_invariant());
-            }
+        let value = object
+            .allocation
+            .slots
+            .get(slot.raw() as usize)
+            .copied()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if let Some(reference) = value.as_reference() {
+            pending.push(reference);
         }
     }
     Ok(())

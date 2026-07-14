@@ -63,14 +63,8 @@ impl BootstrapRuntime {
             .slots
             .try_reserve_exact(added)
             .map_err(|_| Self::out_of_memory(0, added))?;
-        for slot in old_slots..new_slots {
-            allocation
-                .slots
-                .push(if object_map.is_reference_slot(ObjectSlot::new(slot)) {
-                    SlotValue::Reference(None)
-                } else {
-                    SlotValue::Scalar(0)
-                });
+        for _ in old_slots..new_slots {
+            allocation.slots.push(SlotValue::scalar(0));
         }
         allocation.object_map = object_map;
         self.slot_count += added;

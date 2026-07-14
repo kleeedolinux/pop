@@ -375,9 +375,9 @@ impl GenerationalRuntime {
             .iter()
             .filter_map(|(reference, object)| {
                 self.allocation
-                    .region(*reference)
+                    .region(reference)
                     .filter(|region| selected_regions.contains(region))
-                    .map(|_| (*reference, object))
+                    .map(|_| (reference, object))
             })
             .collect::<Vec<_>>();
         if selected.is_empty()
@@ -458,13 +458,13 @@ impl GenerationalRuntime {
         let mut fields_updated = 0usize;
         let mut next_objects = crate::relocation::table::ObjectTable::new();
         for (reference, object) in self.nursery.objects.iter() {
-            if relocations.contains_key(reference) {
+            if relocations.contains_key(&reference) {
                 continue;
             }
             let mut next_object = object.clone();
             fields_updated = fields_updated
                 .saturating_add(rewrite_object_references(&mut next_object, relocations));
-            if next_objects.insert(*reference, next_object).is_some() {
+            if next_objects.insert(reference, next_object).is_some() {
                 return Err(RuntimeFailure::runtime_invariant());
             }
         }
@@ -494,7 +494,7 @@ impl GenerationalRuntime {
         let mut fields_updated = 0usize;
         let mut next_objects = crate::relocation::table::ObjectTable::new();
         for (reference, object) in self.nursery.objects.iter() {
-            let next_key = relocated(*reference, relocations);
+            let next_key = relocated(reference, relocations);
             let mut next_object = object.clone();
             fields_updated = fields_updated
                 .saturating_add(rewrite_object_references(&mut next_object, relocations));
@@ -547,13 +547,17 @@ impl GenerationalRuntime {
         }
         for object in self.nursery.objects.values() {
             for slot in object.allocation.object_map.reference_slots() {
-                match object.allocation.slots.get(slot.raw() as usize) {
-                    Some(SlotValue::Reference(Some(reference)))
-                        if self.nursery.contains(*reference) => {}
-                    Some(SlotValue::Reference(None)) => {}
-                    Some(SlotValue::Reference(Some(_)) | SlotValue::Scalar(_)) | None => {
-                        return Err(RuntimeFailure::runtime_invariant());
-                    }
+                let value = object
+                    .allocation
+                    .slots
+                    .get(slot.raw() as usize)
+                    .copied()
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                if value
+                    .as_reference()
+                    .is_some_and(|reference| !self.nursery.contains(reference))
+                {
+                    return Err(RuntimeFailure::runtime_invariant());
                 }
             }
         }
@@ -586,11 +590,12 @@ fn rewrite_object_references(
     relocations: &BTreeMap<ManagedReference, ManagedReference>,
 ) -> usize {
     let mut updated = 0usize;
-    for slot in &mut object.allocation.slots {
-        if let SlotValue::Reference(Some(reference)) = slot
-            && let Some(destination) = relocations.get(reference)
+    for slot in object.allocation.object_map.reference_slots() {
+        let value = &mut object.allocation.slots[slot.raw() as usize];
+        if let Some(reference) = value.as_reference()
+            && let Some(destination) = relocations.get(&reference)
         {
-            *reference = *destination;
+            *value = SlotValue::reference(Some(*destination));
             updated = updated.saturating_add(1);
         }
     }

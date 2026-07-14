@@ -38,17 +38,11 @@ impl GenerationalRuntime {
                 allocation.kind,
                 AllocationKind::Array(ArrayElementMap::Scalar)
             )
-            || !allocation
-                .slots
-                .iter()
-                .all(|slot| matches!(slot, SlotValue::Scalar(_)))
+            || !allocation.object_map.reference_slots().is_empty()
         {
             return None;
         }
-        Some(allocation.slots.iter().map(|slot| match slot {
-            SlotValue::Scalar(value) => *value,
-            SlotValue::Reference(_) => unreachable!("scalar array was validated"),
-        }))
+        Some(allocation.slots.iter().map(|slot| slot.raw()))
     }
 
     #[must_use]
@@ -88,7 +82,7 @@ impl GenerationalRuntime {
                 .ok_or_else(RuntimeFailure::runtime_invariant)?
                 .allocation
                 .slots;
-            slots.fill(SlotValue::Scalar(value));
+            slots.fill(SlotValue::scalar(value));
             return Ok(());
         }
         for index in 0..length {
@@ -115,16 +109,20 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        let current = self
+        let allocation = self
             .nursery
             .objects
             .get_mut(&owner)
-            .and_then(|object| object.allocation.slots.get_mut(slot.raw() as usize))
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        if !matches!(current, SlotValue::Scalar(_)) {
+        if allocation.allocation.object_map.is_reference_slot(slot) {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        *current = SlotValue::Scalar(value);
+        let current = allocation
+            .allocation
+            .slots
+            .get_mut(slot.raw() as usize)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        *current = SlotValue::scalar(value);
         Ok(())
     }
 
@@ -156,15 +154,27 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        if !self
+        let element_map = self
             .nursery
             .objects
             .get(&owner)
-            .is_some_and(|object| matches!(object.allocation.kind, AllocationKind::Array(_)))
-        {
+            .and_then(|object| match object.allocation.kind {
+                AllocationKind::Array(element_map) => Some(element_map),
+                AllocationKind::Object | AllocationKind::Table => None,
+            })
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if element_map == ArrayElementMap::Scalar {
+            return self.nursery.store_scalar(owner, slot, value);
+        }
+        let previous = self.nursery.slot_value(owner, slot)?.as_reference();
+        let value = (value != 0).then(|| ManagedReference::new(value));
+        if value.is_some_and(|reference| !self.nursery.contains(reference)) {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        self.store_stable_slot_value(owner, slot, value)
+        self.record_satb(previous);
+        self.record_post_scan_edge(owner, value);
+        self.nursery
+            .store_validated_array_reference(owner, slot, previous, value)
     }
 
     /// Stores a value according to the allocation's precise slot map.
@@ -182,8 +192,7 @@ impl GenerationalRuntime {
             .nursery
             .objects
             .get(&owner)
-            .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
-            .is_some_and(|slot| matches!(slot, SlotValue::Reference(_)));
+            .is_some_and(|object| object.allocation.object_map.is_reference_slot(slot));
         if is_reference {
             self.store_reference(
                 owner,
@@ -201,19 +210,23 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        match self.nursery.slot_value(owner, slot)? {
-            SlotValue::Scalar(_) => self.nursery.store_scalar(owner, slot, value),
-            SlotValue::Reference(previous) => {
-                let value = (value != 0).then(|| ManagedReference::new(value));
-                if value.is_some_and(|reference| !self.nursery.contains(reference)) {
-                    return Err(RuntimeFailure::runtime_invariant());
-                }
-                self.record_satb(previous);
-                self.record_post_scan_edge(owner, value);
-                self.nursery
-                    .store_validated_reference(owner, slot, previous, value)
-            }
+        let is_reference = self
+            .nursery
+            .objects
+            .get(&owner)
+            .is_some_and(|object| object.allocation.object_map.is_reference_slot(slot));
+        if !is_reference {
+            return self.nursery.store_scalar(owner, slot, value);
         }
+        let previous = self.nursery.slot_value(owner, slot)?.as_reference();
+        let value = (value != 0).then(|| ManagedReference::new(value));
+        if value.is_some_and(|reference| !self.nursery.contains(reference)) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        self.record_satb(previous);
+        self.record_post_scan_edge(owner, value);
+        self.nursery
+            .store_validated_reference(owner, slot, previous, value)
     }
 
     /// Loads one scalar slot.
@@ -226,15 +239,21 @@ impl GenerationalRuntime {
         owner: ManagedReference,
         slot: ObjectSlot,
     ) -> Result<u64, RuntimeFailure> {
-        match self
+        let object = self
             .nursery
             .objects
             .get(&owner)
-            .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
-        {
-            Some(SlotValue::Scalar(value)) => Ok(*value),
-            Some(SlotValue::Reference(_)) | None => Err(RuntimeFailure::runtime_invariant()),
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if object.allocation.object_map.is_reference_slot(slot) {
+            return Err(RuntimeFailure::runtime_invariant());
         }
+        object
+            .allocation
+            .slots
+            .get(slot.raw() as usize)
+            .copied()
+            .map(SlotValue::raw)
+            .ok_or_else(RuntimeFailure::runtime_invariant)
     }
 
     /// Loads a typed physical value from an array.
@@ -268,16 +287,13 @@ impl GenerationalRuntime {
         owner: ManagedReference,
         slot: ObjectSlot,
     ) -> Result<u64, RuntimeFailure> {
-        match self
-            .nursery
+        self.nursery
             .objects
             .get(&owner)
             .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
-        {
-            Some(SlotValue::Scalar(value)) => Ok(*value),
-            Some(SlotValue::Reference(value)) => Ok(value.map_or(0, ManagedReference::raw)),
-            None => Err(RuntimeFailure::runtime_invariant()),
-        }
+            .copied()
+            .map(SlotValue::raw)
+            .ok_or_else(RuntimeFailure::runtime_invariant)
     }
 
     #[must_use]
@@ -343,12 +359,8 @@ impl GenerationalRuntime {
         slots
             .try_reserve_exact(added)
             .map_err(|_| RuntimeFailure::runtime_invariant())?;
-        for slot in old_slots..new_slots {
-            slots.push(if object_map.is_reference_slot(ObjectSlot::new(slot)) {
-                SlotValue::Reference(None)
-            } else {
-                SlotValue::Scalar(0)
-            });
+        for _ in old_slots..new_slots {
+            slots.push(SlotValue::scalar(0));
         }
         let mut allocation = self.allocation.clone();
         allocation.remove(owner);

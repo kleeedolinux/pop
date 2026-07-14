@@ -210,9 +210,13 @@ Package for the first release.
     atomically, committed-byte accounting is constant-time, stable mature
     stores skip impossible nursery cards, managed arrays initialize before
     publication, active mature spans retain mutator-local cursors, small
-    payloads remain inline, and object/placement metadata uses deterministic
-    arena-indexed token segments. On the development host this reduced the
-    checksum-validated `objectArray` median from about 408 ms to about 40 ms;
+    payloads remain inline as untagged one-word slots interpreted by precise
+    maps, homogeneous managed arrays classify stores in constant time, and
+    object/placement metadata uses deterministic arena-indexed token segments
+    without duplicate entry tokens. On the development host this reduced the
+    checksum-validated `objectArray` median from about 408 ms to 34.223 ms in a
+    50-sample run (Go: 4.896 ms); the immediately preceding retained-heap slice
+    measured about 38.0 ms. These are host-local optimization results;
     direct page-backed payload access and inline conditional barriers remain
     required before the production throughput gate can close.
   - [x] Add opt-in persistent host workers with bounded owner-FIFO queues,
@@ -272,8 +276,13 @@ Package for the first release.
     safepoint allocation removal is neutral for zero-root churn and about 3%
     better for the retained-root workload under noisy 25-run host sampling.
   - [ ] Reduce repeated native ABI locking/handle lookups for verified managed
-    array and field access, then repeat the same host workloads and add
-    production-collector throughput/tail-latency gates once selectable.
+    array and field access. One-word precise payload slots, constant-time
+    homogeneous-array classification, and token-derived segmented directory
+    entries reduced the checksum-validated 50-sample retained-object median
+    from about 38.0 ms to 34.223 ms (Go: 4.896 ms) on the development host.
+    Direct page-backed access and removal of the process-global common-path
+    mutex remain open; repeat both workloads and add production-collector
+    throughput/tail-latency gates once selectable.
 - [ ] Prove representative programs behave the same through canonical MIR, the
   MIR interpreter, optimized MIR, and LLVM native execution.
 

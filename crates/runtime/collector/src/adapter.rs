@@ -132,8 +132,11 @@ impl RuntimeAdapter for BootstrapRuntime {
             .objects
             .get(&barrier.owner())
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if !allocation.object_map.is_reference_slot(barrier.slot()) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         let current = allocation.slots.get(barrier.slot().raw() as usize);
-        if current != Some(&SlotValue::Reference(barrier.previous())) {
+        if current.copied().map(SlotValue::as_reference) != Some(barrier.previous()) {
             return Err(RuntimeFailure::runtime_invariant());
         }
         Ok(())

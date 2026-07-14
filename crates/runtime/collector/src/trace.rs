@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use pop_runtime_interface::{
-    AllocationClass, CollectionStatistics, ManagedReference, ObjectMap, ObjectSlot, PanicPayload,
+    AllocationClass, CollectionStatistics, ManagedReference, ObjectMap, PanicPayload,
     RootPublication, RuntimeFailure, RuntimeTypeId,
 };
 
@@ -83,16 +83,8 @@ impl BootstrapRuntime {
         slots
             .try_reserve_exact(requested_slots)
             .map_err(|_| Self::out_of_memory(1, requested_slots))?;
-        for index in 0..object_map.slot_count() {
-            slots.push(if object_map.is_reference_slot(ObjectSlot::new(index)) {
-                SlotValue::Reference(
-                    initial_value
-                        .filter(|value| *value != 0)
-                        .map(ManagedReference::new),
-                )
-            } else {
-                SlotValue::Scalar(initial_value.unwrap_or(0))
-            });
+        for _ in 0..object_map.slot_count() {
+            slots.push(SlotValue::scalar(initial_value.unwrap_or(0)));
         }
         self.objects.insert(
             reference,
@@ -147,12 +139,13 @@ impl BootstrapRuntime {
                 .get(&reference)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
             for slot in allocation.object_map.reference_slots() {
-                match allocation.slots.get(slot.raw() as usize) {
-                    Some(SlotValue::Reference(Some(child))) => pending.push(*child),
-                    Some(SlotValue::Reference(None)) => {}
-                    Some(SlotValue::Scalar(_)) | None => {
-                        return Err(RuntimeFailure::runtime_invariant());
-                    }
+                let value = allocation
+                    .slots
+                    .get(slot.raw() as usize)
+                    .copied()
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?;
+                if let Some(child) = value.as_reference() {
+                    pending.push(child);
                 }
             }
         }

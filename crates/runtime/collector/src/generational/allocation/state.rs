@@ -531,8 +531,8 @@ impl AllocationInfrastructure {
         let mut previous = std::mem::take(&mut self.placements);
         let mut next = ObjectTable::new();
         for (reference, object) in objects.iter() {
-            if let Some(placement) = previous.remove(reference) {
-                next.insert(*reference, placement);
+            if let Some(placement) = previous.remove(&reference) {
+                next.insert(reference, placement);
                 continue;
             }
             let old_reference = previous_identities
@@ -558,7 +558,7 @@ impl AllocationInfrastructure {
             };
             let placement =
                 self.place_on_new_page(&layout, size, domain, Some(object_scheduler))?;
-            next.insert(*reference, placement);
+            next.insert(reference, placement);
             self.record_bytes(size);
             match domain {
                 HeapDomain::LocalSurvivor => {

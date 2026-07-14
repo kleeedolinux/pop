@@ -110,7 +110,9 @@ not table or runtime-name lookup.
 - ABI 1.11 atomic initialized-object publication plus profiled retained-graph
   fast paths: cached committed accounting, prepublication managed-array fill,
   stable-stage barrier specialization, mutator-local mature-span cursors,
-  inline small payloads, and deterministic arena-indexed token metadata;
+  inline one-word payload slots, constant-time homogeneous-array
+  classification, and deterministic arena-indexed token metadata without
+  duplicate per-entry tokens;
 - backend-private scalar replacement for non-escaping scalar arrays, including
   read-only loop-local instances, with exact shape/bounds traps, loop safe
   points, and managed, escaping, or mutated-loop negative coverage;

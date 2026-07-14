@@ -524,11 +524,12 @@ fn evacuate(
     relocations: &BTreeMap<ManagedReference, ManagedReference>,
 ) -> WorkerOutcome {
     let mut fields_updated = 0usize;
-    for slot in &mut task.allocation.allocation.slots {
-        if let SlotValue::Reference(Some(reference)) = slot
-            && let Some(destination) = relocations.get(reference)
+    for slot in task.allocation.allocation.object_map.reference_slots() {
+        let value = &mut task.allocation.allocation.slots[slot.raw() as usize];
+        if let Some(reference) = value.as_reference()
+            && let Some(destination) = relocations.get(&reference)
         {
-            *reference = *destination;
+            *value = SlotValue::reference(Some(*destination));
             fields_updated = fields_updated.saturating_add(1);
         }
     }
@@ -542,17 +543,16 @@ fn evacuate(
 fn refine_card(task: &CardRefinementTask, young: &BTreeSet<ManagedReference>) -> WorkerOutcome {
     let mut children = Vec::new();
     for slot in task.allocation.object_map.reference_slots() {
-        match task.allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Reference(Some(reference))) if young.contains(reference) => {
-                children.push(*reference);
-            }
-            Some(SlotValue::Reference(_)) => {}
-            Some(SlotValue::Scalar(_)) | None => {
-                return WorkerOutcome::RefinedCard {
-                    owner: task.owner,
-                    children: Err(()),
-                };
-            }
+        let Some(value) = task.allocation.slots.get(slot.raw() as usize).copied() else {
+            return WorkerOutcome::RefinedCard {
+                owner: task.owner,
+                children: Err(()),
+            };
+        };
+        if let Some(reference) = value.as_reference()
+            && young.contains(&reference)
+        {
+            children.push(reference);
         }
     }
     WorkerOutcome::RefinedCard {
@@ -566,20 +566,18 @@ fn scan(task: &MarkTask) -> WorkerOutcome {
     WorkerOutcome::Mark {
         reference: task.reference,
         large_object_scan_chunk: task.large_object_scan_chunk,
-        children,
+        children: Ok(children),
     }
 }
 
-pub(crate) fn scan_slots(slots: &[SlotValue]) -> Result<Vec<ManagedReference>, ()> {
+pub(crate) fn scan_slots(slots: &[SlotValue]) -> Vec<ManagedReference> {
     let mut children = Vec::with_capacity(slots.len());
     for slot in slots {
-        match slot {
-            SlotValue::Reference(Some(reference)) => children.push(*reference),
-            SlotValue::Reference(None) => {}
-            SlotValue::Scalar(_) => return Err(()),
+        if let Some(reference) = slot.as_reference() {
+            children.push(reference);
         }
     }
-    Ok(children)
+    children
 }
 
 #[cfg(test)]

@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use pop_runtime_interface::ManagedReference;
 
 const SEGMENT_LENGTH: usize = 256;
-type Segment<Value> = Box<[Option<(ManagedReference, Value)>]>;
+type SegmentEntry<Value> = Option<Value>;
+type Segment<Value> = Box<[SegmentEntry<Value>]>;
 type SegmentWindow<Value> = VecDeque<Option<Segment<Value>>>;
 
 #[derive(Clone, Debug)]
@@ -37,12 +38,7 @@ impl<Value> ObjectTable<Value> {
     pub(crate) fn get(&self, reference: &ManagedReference) -> Option<&Value> {
         let (segment, offset) = coordinates(*reference)?;
         let index = self.segment_index(segment)?;
-        self.segments
-            .get(index)?
-            .as_ref()?
-            .get(offset)?
-            .as_ref()
-            .map(|(_, value)| value)
+        self.segments.get(index)?.as_ref()?.get(offset)?.as_ref()
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -54,18 +50,17 @@ impl<Value> ObjectTable<Value> {
             .as_mut()?
             .get_mut(offset)?
             .as_mut()
-            .map(|(_, value)| value)
     }
 
     pub(crate) fn insert(&mut self, reference: ManagedReference, value: Value) -> Option<Value> {
         let (segment, offset) = coordinates(reference).expect("managed references are nonzero");
         let index = self.ensure_segment_index(segment);
         let entries = self.segments[index].get_or_insert_with(empty_segment);
-        let previous = entries[offset].replace((reference, value));
+        let previous = entries[offset].replace(value);
         if previous.is_none() {
             self.length = self.length.saturating_add(1);
         }
-        previous.map(|(_, value)| value)
+        previous
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -85,30 +80,50 @@ impl<Value> ObjectTable<Value> {
             self.segments[index] = None;
             self.trim_empty_edges();
         }
-        removed.map(|(_, value)| value)
+        removed
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&ManagedReference, &Value)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ManagedReference, &Value)> {
+        let base = self.base_segment.unwrap_or(0);
         self.segments
             .iter()
-            .filter_map(Option::as_ref)
-            .flat_map(|entries| {
+            .enumerate()
+            .filter_map(|(relative, segment)| segment.as_ref().map(|entries| (relative, entries)))
+            .flat_map(move |(relative, entries)| {
                 entries
                     .iter()
-                    .filter_map(|entry| entry.as_ref().map(|(reference, value)| (reference, value)))
+                    .enumerate()
+                    .filter_map(move |(offset, entry)| {
+                        entry.as_ref().map(|value| {
+                            (
+                                reference_at(base, relative, offset)
+                                    .expect("stored segment coordinate is representable"),
+                                value,
+                            )
+                        })
+                    })
             })
     }
 
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&ManagedReference, &mut Value)> {
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (ManagedReference, &mut Value)> {
+        let base = self.base_segment.unwrap_or(0);
         self.segments
             .iter_mut()
-            .filter_map(Option::as_mut)
-            .flat_map(|entries| {
-                entries.iter_mut().filter_map(|entry| {
-                    entry
-                        .as_mut()
-                        .map(|(reference, value)| (&*reference, value))
-                })
+            .enumerate()
+            .filter_map(|(relative, segment)| segment.as_mut().map(|entries| (relative, entries)))
+            .flat_map(move |(relative, entries)| {
+                entries
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(move |(offset, entry)| {
+                        entry.as_mut().map(|value| {
+                            (
+                                reference_at(base, relative, offset)
+                                    .expect("stored segment coordinate is representable"),
+                                value,
+                            )
+                        })
+                    })
             })
     }
 
@@ -123,7 +138,7 @@ impl<Value> ObjectTable<Value> {
     pub(crate) fn next_after(
         &self,
         cursor: Option<ManagedReference>,
-    ) -> Option<(&ManagedReference, &Value)> {
+    ) -> Option<(ManagedReference, &Value)> {
         let first_raw = match cursor {
             Some(reference) => reference.raw().checked_add(1)?,
             None => 1,
@@ -143,8 +158,15 @@ impl<Value> ObjectTable<Value> {
             } else {
                 0
             };
-            if let Some(entry) = entries[offset..].iter().find_map(Option::as_ref) {
-                return Some((&entry.0, &entry.1));
+            if let Some((found, value)) = entries[offset..]
+                .iter()
+                .enumerate()
+                .find_map(|(relative, entry)| entry.as_ref().map(|value| (relative, value)))
+            {
+                return Some((
+                    reference_at(base, usize::try_from(segment - base).ok()?, offset + found)?,
+                    value,
+                ));
             }
         }
         None
@@ -202,6 +224,16 @@ fn coordinates(reference: ManagedReference) -> Option<(u64, usize)> {
     Some((segment, offset))
 }
 
+fn reference_at(base: u64, relative: usize, offset: usize) -> Option<ManagedReference> {
+    let segment = base.checked_add(u64::try_from(relative).ok()?)?;
+    let segment_length = u64::try_from(SEGMENT_LENGTH).ok()?;
+    let raw = segment
+        .checked_mul(segment_length)?
+        .checked_add(u64::try_from(offset).ok()?)?
+        .checked_add(1)?;
+    Some(ManagedReference::new(raw))
+}
+
 fn empty_segment<Value>() -> Segment<Value> {
     std::iter::repeat_with(|| None)
         .take(SEGMENT_LENGTH)
@@ -215,6 +247,14 @@ mod tests {
 
     fn reference(raw: u64) -> ManagedReference {
         ManagedReference::new(raw)
+    }
+
+    #[test]
+    fn segment_entries_store_only_the_value_payload() {
+        assert_eq!(
+            std::mem::size_of::<SegmentEntry<u64>>(),
+            std::mem::size_of::<Option<u64>>()
+        );
     }
 
     #[test]

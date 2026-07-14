@@ -4,10 +4,37 @@ use std::ops::{Deref, DerefMut};
 
 use pop_runtime_interface::ManagedReference;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SlotValue {
-    Scalar(u64),
-    Reference(Option<ManagedReference>),
+/// One physical payload word.
+///
+/// The allocation's precise object map, rather than a duplicated per-slot tag,
+/// determines whether this word is a scalar or a managed reference.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(transparent)]
+pub(crate) struct SlotValue(u64);
+
+impl SlotValue {
+    pub(crate) const fn scalar(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn reference(value: Option<ManagedReference>) -> Self {
+        Self(match value {
+            Some(reference) => reference.raw(),
+            None => 0,
+        })
+    }
+
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) const fn as_reference(self) -> Option<ManagedReference> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(ManagedReference::new(self.0))
+        }
+    }
 }
 
 const INLINE_SLOT_CAPACITY: usize = 2;
@@ -25,7 +52,7 @@ impl SlotStorage {
     pub(crate) const fn new() -> Self {
         Self::Inline {
             length: 0,
-            values: [SlotValue::Scalar(0); INLINE_SLOT_CAPACITY],
+            values: [SlotValue::scalar(0); INLINE_SLOT_CAPACITY],
         }
     }
 
@@ -79,7 +106,7 @@ impl Default for SlotStorage {
 impl From<Vec<SlotValue>> for SlotStorage {
     fn from(values: Vec<SlotValue>) -> Self {
         if values.len() <= INLINE_SLOT_CAPACITY {
-            let mut inline = [SlotValue::Scalar(0); INLINE_SLOT_CAPACITY];
+            let mut inline = [SlotValue::scalar(0); INLINE_SLOT_CAPACITY];
             inline[..values.len()].copy_from_slice(&values);
             Self::Inline {
                 length: u8::try_from(values.len()).expect("inline slot length fits u8"),
@@ -135,9 +162,14 @@ mod tests {
 
     #[test]
     fn two_slot_payloads_remain_inline() {
-        let slots = SlotStorage::from(vec![SlotValue::Scalar(1), SlotValue::Scalar(2)]);
+        let slots = SlotStorage::from(vec![SlotValue::scalar(1), SlotValue::scalar(2)]);
 
         assert!(!slots.uses_heap_storage());
-        assert_eq!(&*slots, &[SlotValue::Scalar(1), SlotValue::Scalar(2)]);
+        assert_eq!(&*slots, &[SlotValue::scalar(1), SlotValue::scalar(2)]);
+    }
+
+    #[test]
+    fn physical_slots_use_exactly_one_machine_word() {
+        assert_eq!(std::mem::size_of::<SlotValue>(), std::mem::size_of::<u64>());
     }
 }

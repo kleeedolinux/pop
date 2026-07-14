@@ -191,7 +191,7 @@ impl GenerationalRuntime {
                 .iter()
                 .filter_map(|(reference, object)| {
                     matches!(object.generation, CollectorGeneration::Nursery { .. })
-                        .then_some(*reference)
+                        .then_some(reference)
                         .filter(|_| {
                             object.ownership
                                 == crate::ObjectOwnership::SchedulerLocal(self.scheduler)
@@ -380,7 +380,7 @@ impl RuntimeAdapter for GenerationalRuntime {
             self.nursery
                 .objects
                 .iter()
-                .map(|(reference, object)| (object.identity, *reference))
+                .map(|(reference, object)| (object.identity, reference))
                 .collect()
         } else {
             BTreeMap::new()

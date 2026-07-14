@@ -143,7 +143,7 @@ impl RelocationRuntime {
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        object.allocation.slots[slot.raw() as usize] = SlotValue::Reference(value);
+        object.allocation.slots[slot.raw() as usize] = SlotValue::reference(value);
         Ok(())
     }
 
@@ -166,20 +166,23 @@ impl RelocationRuntime {
         previous: Option<ManagedReference>,
         value: Option<ManagedReference>,
     ) -> Result<(), RuntimeFailure> {
-        let current = self
+        let object = self
             .objects
             .get_mut(&owner)
-            .and_then(|object| object.allocation.slots.get_mut(slot.raw() as usize))
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        match current {
-            SlotValue::Reference(found) if *found == previous => {
-                *found = value;
-                Ok(())
-            }
-            SlotValue::Reference(_) | SlotValue::Scalar(_) => {
-                Err(RuntimeFailure::runtime_invariant())
-            }
+        if !object.allocation.object_map.is_reference_slot(slot) {
+            return Err(RuntimeFailure::runtime_invariant());
         }
+        let current = object
+            .allocation
+            .slots
+            .get_mut(slot.raw() as usize)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if current.as_reference() != previous {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        *current = SlotValue::reference(value);
+        Ok(())
     }
 
     /// Loads a precise managed-reference slot.
@@ -196,10 +199,16 @@ impl RelocationRuntime {
             .objects
             .get(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        match object.allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Reference(value)) => Ok(*value),
-            Some(SlotValue::Scalar(_)) | None => Err(RuntimeFailure::runtime_invariant()),
+        if !object.allocation.object_map.is_reference_slot(slot) {
+            return Err(RuntimeFailure::runtime_invariant());
         }
+        object
+            .allocation
+            .slots
+            .get(slot.raw() as usize)
+            .copied()
+            .map(SlotValue::as_reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)
     }
 
     /// Stores a scalar without dirtying a generational card.
@@ -217,13 +226,16 @@ impl RelocationRuntime {
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        match object.allocation.slots.get_mut(slot.raw() as usize) {
-            Some(current @ SlotValue::Scalar(_)) => {
-                *current = SlotValue::Scalar(value);
-                Ok(())
-            }
-            Some(SlotValue::Reference(_)) | None => Err(RuntimeFailure::runtime_invariant()),
+        if object.allocation.object_map.is_reference_slot(slot) {
+            return Err(RuntimeFailure::runtime_invariant());
         }
+        let current = object
+            .allocation
+            .slots
+            .get_mut(slot.raw() as usize)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        *current = SlotValue::scalar(value);
+        Ok(())
     }
 
     pub(crate) fn discard_unpublished(
@@ -233,9 +245,15 @@ impl RelocationRuntime {
         if self.roots.values().any(|target| *target == reference)
             || self.pins.values().any(|target| *target == reference)
             || self.objects.values().any(|object| {
-                object.allocation.slots.iter().any(|slot| {
-                    matches!(slot, SlotValue::Reference(Some(target)) if *target == reference)
-                })
+                object
+                    .allocation
+                    .object_map
+                    .reference_slots()
+                    .iter()
+                    .any(|slot| {
+                        object.allocation.slots[slot.raw() as usize].as_reference()
+                            == Some(reference)
+                    })
             })
         {
             return Err(RuntimeFailure::runtime_invariant());

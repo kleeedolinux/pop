@@ -53,9 +53,13 @@ scheduler-keyed active-page index with one mutator-local authoritative cursor;
 central page metadata changes only when that active page switches or fills.
 Atomic object construction and scalar or managed-array bulk construction write
 the complete precise payload before publication. Two-slot payloads stay inline,
-and monotonically assigned managed tokens index deterministic sliding segment
-directories for both objects and placements instead of one ordered-tree node
-per allocation. The stable-only reference barrier preserves SATB/post-scan
+use exactly one physical machine word per logical slot, and are interpreted
+only through the exact object map. Monotonically assigned managed tokens index
+deterministic sliding segment directories for both objects and placements;
+directory coordinates recover the token without storing a duplicate token in
+every entry. Homogeneous managed arrays use their allocation descriptor for
+constant-time element classification rather than searching the complete
+pointer map on every store. The stable-only reference barrier preserves SATB/post-scan
 shading while omitting the impossible mature-to-young card path. This wrapper
 never invokes nursery relocation or selective evacuation; those remain gated on
 ABI 2 writable-root proof.
@@ -114,7 +118,7 @@ linker policy, or process-global singleton. See
 
 The bootstrap implementation is divided into `heap`, `access`, `trace`, and
 `adapter` modules. The `relocation` directory separately groups its allocation,
-heap, collection, and adapter ownership; `generational` groups mature-cycle state,
+exact-layout access, heap, collection, and adapter ownership; `generational` groups mature-cycle state,
 mark/sweep work, barriers, page/TLAB allocation, memory control, coordination,
 bounded workers, and its adapter. The allocation, coordination, memory, and
 worker submodules separate public typed descriptors from mutable state.

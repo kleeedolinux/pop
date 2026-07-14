@@ -38,7 +38,7 @@ impl RelocationRuntime {
             if object.generation == CollectorGeneration::Mature
                 || object.ownership != crate::ObjectOwnership::SchedulerLocal(scheduler)
             {
-                next_objects.insert(*reference, object.clone());
+                next_objects.insert(reference, object.clone());
             }
         }
         for old in &live_young {
@@ -62,11 +62,12 @@ impl RelocationRuntime {
         }
 
         for object in next_objects.values_mut() {
-            for slot in &mut object.allocation.slots {
-                if let SlotValue::Reference(Some(reference)) = slot
-                    && let Some(relocated) = relocations.get(reference)
+            for slot in object.allocation.object_map.reference_slots() {
+                let value = &mut object.allocation.slots[slot.raw() as usize];
+                if let Some(reference) = value.as_reference()
+                    && let Some(relocated) = relocations.get(&reference)
                 {
-                    *reference = *relocated;
+                    *value = SlotValue::reference(Some(*relocated));
                 }
             }
         }
@@ -172,12 +173,14 @@ fn append_references(
     pending: &mut Vec<ManagedReference>,
 ) -> Result<(), RuntimeFailure> {
     for slot in object.allocation.object_map.reference_slots() {
-        match object.allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Reference(Some(reference))) => pending.push(*reference),
-            Some(SlotValue::Reference(None)) => {}
-            Some(SlotValue::Scalar(_)) | None => {
-                return Err(RuntimeFailure::runtime_invariant());
-            }
+        let value = object
+            .allocation
+            .slots
+            .get(slot.raw() as usize)
+            .copied()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if let Some(reference) = value.as_reference() {
+            pending.push(reference);
         }
     }
     Ok(())
@@ -205,17 +208,21 @@ fn remembered_cards(
         .iter()
         .filter_map(|(reference, object)| {
             (object.generation == CollectorGeneration::Mature
-                && object.allocation.slots.iter().any(|slot| {
-                    matches!(
-                        slot,
-                        SlotValue::Reference(Some(child))
-                            if objects.get(child).is_some_and(|child| matches!(
-                                child.generation,
-                                CollectorGeneration::Nursery { .. }
-                            ))
-                    )
-                }))
-            .then_some(*reference)
+                && object
+                    .allocation
+                    .object_map
+                    .reference_slots()
+                    .iter()
+                    .any(|slot| {
+                        object.allocation.slots[slot.raw() as usize]
+                            .as_reference()
+                            .is_some_and(|child| {
+                                objects.get(&child).is_some_and(|child| {
+                                    matches!(child.generation, CollectorGeneration::Nursery { .. })
+                                })
+                            })
+                    }))
+            .then_some(reference)
         })
         .collect()
 }
