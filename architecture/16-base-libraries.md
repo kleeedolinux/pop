@@ -156,16 +156,16 @@ Every normal project receives one implicit reference to the toolchain-compatible
 declarations. `@Prelude` is accepted only from the verified reserved identity;
 user Packages cannot inject global names by copying its spelling.
 
-The prelude is deliberately smaller than the catalog. It contains primitive and
-foundation types, `Result`, `Option`, essential collection/iteration protocols,
-task/cancellation values once implemented, and a reviewed set of functions and
-root aliases. A catalog root is not implicitly available merely because it is
-planned. The first exact root list remains an implementation prerequisite in
-[the implementation plan](./22.6-standard-library-implementation-plan.md).
+The prelude is deliberately smaller than the catalog. ADR 0058 freezes its
+exact initial type, function, attribute, and namespace-root bindings. Optional
+values use `T?` rather than a duplicate nominal `Option<T>`. `Sequence` is the
+sole implicit namespace root; a catalog root is not implicitly available merely
+because it is planned.
 
 Prelude bindings have the lowest resolution priority. Locals, current namespace
 declarations, and explicit aliases win. Adding a prelude binding is a public
-compatibility change with collision tests and an API-baseline update.
+compatibility change with collision tests and an API-baseline update under ADR
+0058.
 
 `--no-standard-library` exists only for toolchain/runtime development and
 freestanding targets. Unsafe/native surfaces and optional official Packages are

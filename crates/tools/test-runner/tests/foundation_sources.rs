@@ -207,23 +207,22 @@ fn conventionally_discovered_foundation_contributions_reach_verified_mir() {
         FileId::from_raw(0),
         "src/main.pop",
         "namespace Application\n\
-         using Pop.Sequence\n\
          public function run(): Int\n\
              local values: {Int} = {1, 2, 3}\n\
-             local total = fold(values, 0, function(state: Int, value: Int): Int\n\
+             local total = Sequence.fold(values, 0, function(state: Int, value: Int): Int\n\
                  return state + value\n\
              end)\n\
-             local mapped = map(values, function(value: Int): Int\n\
+             local mapped = Sequence.map(values, function(value: Int): Int\n\
                  return value * 2\n\
              end)\n\
-             local filtered = filter(mapped, function(value: Int): Boolean\n\
+             local filtered = Sequence.filter(mapped, function(value: Int): Boolean\n\
                  return value > 2\n\
              end)\n\
-             local collected = collect(filtered)\n\
-             local labels = map(values, function(value: Int): String\n\
+             local collected = Sequence.collect(filtered)\n\
+             local labels = Sequence.map(values, function(value: Int): String\n\
                  return \"item\"\n\
              end)\n\
-             local collectedLabels = collect(labels)\n\
+             local collectedLabels = Sequence.collect(labels)\n\
              return total + List.length(collected) + List.length(collectedLabels)\n\
          end\n",
     )

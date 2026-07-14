@@ -80,6 +80,13 @@ and does not define the work remaining for `0.1.0`.
 
 - [ ] Freeze the exact `Pop.Standard` prelude, public root inventory, stable
   identities, tier/status metadata, and API baseline.
+  - [x] Accept ADR 0058 and freeze the exact primitive, foundation, protocol,
+    task/cancellation, trusted-attribute, typed-output, and `Sequence` prelude
+    bindings without adding a nominal `Option<T>` beside `T?`.
+  - [x] Add a versioned canonical API baseline with append-only identities,
+    tier/status boundaries, bootstrap cross-checks, and fail-closed loading.
+  - [x] Resolve `Sequence` as the sole trusted low-priority prelude namespace
+    root while preserving nearer declarations and explicit aliases.
 - [ ] Make `Option`, `Result`, essential collections, `Iterable<T>`,
   `Iterator<T>`, `Sequence`, `String`/text, bytes, numeric helpers, and required
   resource/task primitives usable as native Pop APIs.

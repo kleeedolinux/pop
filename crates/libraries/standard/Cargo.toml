@@ -13,5 +13,8 @@ crate-type = ["rlib", "staticlib"]
 pop-internal.workspace = true
 pop-library-bridge.workspace = true
 
+[dev-dependencies]
+pop-types.workspace = true
+
 [lints]
 workspace = true

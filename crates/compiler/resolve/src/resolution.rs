@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use pop_diagnostics::resolution as diagnostics;
 use pop_foundation::{Diagnostic, ModuleId, SourceSpan, SymbolId};
 
@@ -44,17 +46,46 @@ impl Resolution {
 #[derive(Clone, Debug)]
 pub struct ResolutionDatabase {
     index: DeclarationIndex,
+    prelude_namespace_roots: BTreeMap<String, String>,
 }
 
 impl ResolutionDatabase {
     #[must_use]
-    pub const fn new(index: DeclarationIndex) -> Self {
-        Self { index }
+    pub fn new(index: DeclarationIndex) -> Self {
+        Self {
+            index,
+            prelude_namespace_roots: BTreeMap::new(),
+        }
     }
 
     #[must_use]
     pub const fn index(&self) -> &DeclarationIndex {
         &self.index
+    }
+
+    /// Adds one verified, compile-time-only prelude namespace alias.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed or duplicate roots. The resolver never discovers
+    /// these aliases from user source or runtime registration.
+    pub fn with_prelude_namespace_root(
+        mut self,
+        root: impl Into<String>,
+        namespace: impl Into<String>,
+    ) -> Result<Self, PreludeNamespaceError> {
+        let root = root.into();
+        let namespace = namespace.into();
+        if root.is_empty()
+            || root.contains('.')
+            || !root.starts_with(char::is_uppercase)
+            || !namespace.starts_with("Pop.")
+            || self.prelude_namespace_roots.contains_key(&root)
+        {
+            return Err(PreludeNamespaceError);
+        }
+        self.prelude_namespace_roots.insert(root, namespace);
+        Ok(self)
     }
 
     #[must_use]
@@ -69,8 +100,19 @@ impl ResolutionDatabase {
             return unknown(name, use_span);
         };
         if name.contains('.') {
-            let (namespace, simple_name) = expand_qualified_name(context, name);
+            let (namespace, simple_name, explicit_alias) = expand_qualified_name(context, name);
             let group = self.index.lookup(&namespace, &simple_name, space);
+            if explicit_alias || !group.is_empty() {
+                return evaluate_groups(vec![group], module, context.bubble(), name, use_span);
+            }
+            if let Some((root, tail)) = name.split_once('.')
+                && let Some(prelude) = self.prelude_namespace_roots.get(root)
+            {
+                let prelude_name = format!("{prelude}.{tail}");
+                let (namespace, simple_name, _) = expand_qualified_name(context, &prelude_name);
+                let group = self.index.lookup(&namespace, &simple_name, space);
+                return evaluate_groups(vec![group], module, context.bubble(), name, use_span);
+            }
             return evaluate_groups(vec![group], module, context.bubble(), name, use_span);
         }
 
@@ -90,7 +132,13 @@ impl ResolutionDatabase {
     }
 }
 
-fn expand_qualified_name(context: &crate::model::ModuleIndex, name: &str) -> (String, String) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreludeNamespaceError;
+
+fn expand_qualified_name(
+    context: &crate::model::ModuleIndex,
+    name: &str,
+) -> (String, String, bool) {
     let mut components: Vec<_> = name.split('.').collect();
     let simple_name = components.pop().unwrap_or_default().to_owned();
     if let Some(first) = components.first_mut()
@@ -101,9 +149,9 @@ fn expand_qualified_name(context: &crate::model::ModuleIndex, name: &str) -> (St
     {
         let mut namespace: Vec<_> = using.namespace().split('.').collect();
         namespace.extend(components.iter().skip(1).copied());
-        return (namespace.join("."), simple_name);
+        return (namespace.join("."), simple_name, true);
     }
-    (components.join("."), simple_name)
+    (components.join("."), simple_name, false)
 }
 
 fn evaluate_groups(
