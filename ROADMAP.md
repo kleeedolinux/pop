@@ -142,6 +142,10 @@ linking remain ordinary-workflow blockers in section 4.
   - [x] Keep the native `print` overloads and portable `Sequence` callables
     labeled `prototype`; no callable advances to `implemented` or `stable`
     without the complete ADR 0058 evidence gate.
+  - [x] Synchronize the accepted `Actor` and `Cluster` roots across the
+    canonical public inventory, owning system/network catalog, implementation
+    phase, and architecture conformance snapshot without adding either root to
+    the frozen prelude or implemented API baseline.
 
 The broad catalog after the standard foundation remains planned work. It is not
 necessary to implement every format, network, media, data, tooling, or AI
