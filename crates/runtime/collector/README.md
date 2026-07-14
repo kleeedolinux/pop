@@ -7,6 +7,16 @@ single-mutator Stage-2 conformance slice: it copies live young objects, updates
 typed roots, object edges, strong handles, and pins, invalidates old tokens,
 promotes deterministically, and maintains remembered cards.
 
+`GenerationalRuntime` composes that moving nursery with a modular incremental
+mature-heap conformance slice. Its `generational` modules separate PLRI
+adaptation, SATB/publication barriers, cycle state, and bounded mark/sweep work.
+It preserves snapshot edges, shades roots, pins, and new mature objects, and
+defers nursery relocation while a major snapshot still contains physical
+tokens. The implementation deliberately continues to report
+`RelocationConformance`: mature tracing is cooperative and incremental, not yet
+the background-worker, page/TLAB, paced production collector required before
+`ProductionConcurrentGenerational` may be selected.
+
 This crate is reusable by native execution, the MIR interpreter, and a future
 VM. It contains no C exports, native symbol mapping, platform process adapters,
 linker policy, or process-global singleton. See
@@ -14,8 +24,9 @@ linker policy, or process-global singleton. See
 
 The bootstrap implementation is divided into `heap`, `access`, `trace`, and
 `adapter` modules. The `relocation` directory separately groups its heap,
-collection, and adapter ownership. These are static Rust partitions behind the
-same PLRI dependency, not runtime plugins or dynamic dispatch.
+collection, and adapter ownership; `generational` groups mature-cycle state,
+mark/sweep work, barriers, and its adapter. These are static Rust partitions
+behind the same PLRI dependency, not runtime plugins or dynamic dispatch.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and
