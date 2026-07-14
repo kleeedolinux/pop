@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 const EMBEDDED_BASELINE: &str =
     include_str!("../../../../libraries/standard/bootstrap/api-baseline.tsv");
+const MAX_BASELINE_BYTES: usize = 256 * 1024;
+const MAX_ENTRY_BYTES: usize = 4 * 1024;
+const MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ApiKind {
@@ -159,6 +162,9 @@ pub fn standard_api_baseline() -> Result<StandardApiBaseline<'static>, ApiBaseli
 pub fn parse_standard_api_baseline(
     text: &str,
 ) -> Result<StandardApiBaseline<'_>, ApiBaselineError> {
+    if text.len() > MAX_BASELINE_BYTES {
+        return Err(ApiBaselineError::InvalidEntry);
+    }
     if !text.ends_with('\n') {
         return Err(ApiBaselineError::InvalidHeader);
     }
@@ -177,6 +183,9 @@ pub fn parse_standard_api_baseline(
     let mut previous_order = None;
     let mut entries = Vec::new();
     for line in lines {
+        if line.len() > MAX_ENTRY_BYTES || entries.len() == MAX_ENTRIES {
+            return Err(ApiBaselineError::InvalidEntry);
+        }
         let fields = line.split('\t').collect::<Vec<_>>();
         if fields.len() != 10 || fields.iter().any(|field| field.is_empty()) {
             return Err(ApiBaselineError::InvalidEntry);
@@ -204,9 +213,9 @@ pub fn parse_standard_api_baseline(
             _ => return Err(ApiBaselineError::InvalidEntry),
         };
         if !matches!(fields[2], "Pop.Internal" | "Pop.Standard")
-            || !fields[3].starts_with("Pop")
-            || !fields[9].starts_with("architecture/")
-            || (prelude && tier != ApiTier::Prelude)
+            || !is_canonical_namespace(fields[3])
+            || !is_safe_documentation_path(fields[9])
+            || prelude != (tier == ApiTier::Prelude)
             || !identities.insert(fields[0])
             || !signatures.insert((fields[2], fields[3], fields[4], fields[5]))
         {
@@ -250,8 +259,28 @@ fn parse_identity(value: &str, kind: ApiKind) -> Result<u32, ApiBaselineError> {
     let (prefix, number) = value
         .split_once(':')
         .ok_or(ApiBaselineError::InvalidEntry)?;
-    if prefix != kind.identity_prefix() {
+    if prefix != kind.identity_prefix()
+        || number.is_empty()
+        || number.len() > 1 && number.starts_with('0')
+    {
         return Err(ApiBaselineError::InvalidEntry);
     }
     number.parse().map_err(|_| ApiBaselineError::InvalidEntry)
+}
+
+fn is_canonical_namespace(value: &str) -> bool {
+    value == "Pop"
+        || value
+            .strip_prefix("Pop.")
+            .is_some_and(|suffix| !suffix.is_empty() && !suffix.split('.').any(str::is_empty))
+}
+
+fn is_safe_documentation_path(value: &str) -> bool {
+    value.strip_prefix("architecture/").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && !suffix.contains('\\')
+            && suffix
+                .split('/')
+                .all(|component| !matches!(component, "" | "." | ".."))
+    })
 }

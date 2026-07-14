@@ -90,6 +90,8 @@ linking remain ordinary-workflow blockers in section 4.
     bindings without adding a nominal `Option<T>` beside `T?`.
   - [x] Add a versioned canonical API baseline with append-only identities,
     tier/status boundaries, bootstrap cross-checks, and fail-closed loading.
+  - [x] Bound baseline size and reject noncanonical identity, namespace,
+    prelude-tier, and documentation-authority fields before resolution.
   - [x] Resolve `Sequence` as the sole trusted low-priority prelude namespace
     root while preserving nearer declarations and explicit aliases.
 - [x] Make the exact optional `T?`, `Result`, essential collection, iteration,

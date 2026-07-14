@@ -109,3 +109,49 @@ fn standard_api_baseline_rejects_noncanonical_or_unsupported_metadata() {
         );
     }
 }
+
+#[test]
+fn standard_api_baseline_rejects_noncanonical_identity_namespace_and_tier_fields() {
+    let header = "schemaVersion\t1\nidentity\tkind\townerBubble\tnamespace\tname\tsignature\ttier\tstatus\tprelude\tdocumentation\n";
+    for invalid_entry in [
+        "primitive:00\tPrimitive\tPop.Internal\tPop\tBoolean\tBoolean\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md\n",
+        "primitive:0\tPrimitive\tPop.Internal\tPopcorn\tBoolean\tBoolean\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md\n",
+        "primitive:0\tPrimitive\tPop.Internal\tPop\tBoolean\tBoolean\tprelude\timplemented\tfalse\tarchitecture/02-language-model.md\n",
+        "primitive:0\tPrimitive\tPop.Internal\tPop\tBoolean\tBoolean\tprelude\timplemented\ttrue\tarchitecture/../ROADMAP.md\n",
+    ] {
+        assert_eq!(
+            parse_standard_api_baseline(&(header.to_owned() + invalid_entry)),
+            Err(ApiBaselineError::InvalidEntry)
+        );
+    }
+}
+
+#[test]
+fn standard_api_baseline_loading_is_bounded() {
+    let header = "schemaVersion\t1\nidentity\tkind\townerBubble\tnamespace\tname\tsignature\ttier\tstatus\tprelude\tdocumentation\n";
+    let oversized_entry = format!(
+        "primitive:0\tPrimitive\tPop.Internal\tPop\t{}\tBoolean\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md\n",
+        "A".repeat(5_000)
+    );
+    assert_eq!(
+        parse_standard_api_baseline(&(header.to_owned() + &oversized_entry)),
+        Err(ApiBaselineError::InvalidEntry)
+    );
+
+    let mut oversized_inventory = header.to_owned();
+    for identity in 0..1_025 {
+        oversized_inventory.push_str(&format!(
+            "primitive:{identity}\tPrimitive\tPop.Internal\tPop\tBoolean{identity}\tBoolean{identity}\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md\n"
+        ));
+    }
+    assert_eq!(
+        parse_standard_api_baseline(&oversized_inventory),
+        Err(ApiBaselineError::InvalidEntry)
+    );
+
+    let oversized_file = format!("{header}{}", "A".repeat(300_000));
+    assert_eq!(
+        parse_standard_api_baseline(&oversized_file),
+        Err(ApiBaselineError::InvalidEntry)
+    );
+}
