@@ -49,6 +49,14 @@ a backend with verified relocating-root support. ABI 1.x, immutable root spills,
 or a target capability alone cannot satisfy the production profile. Profile/
 ABI mismatch fails before link or load; there is no silent bootstrap fallback.
 
+[ADR 0073](./decisions/0073-native-abi-2-writable-root-coexistence.md)
+keeps ABI 1.11 and ABI 2.0 as distinct closed descriptors. ABI 1 retains
+`pop_rt_gc_safe_point`; ABI 2 uses `pop_rt_gc_safe_point_v2` with an exact
+writable root array and reloads every returned slot before any later managed
+use. `pop_rt_supports_abi(major, minor)` is a defensive typed load/link check,
+not runtime symbol selection. A stable facade continues to report only ABI
+1.11 until a complete moving composition exists.
+
 Under ADR 0070, ABI 1 native execution no longer uses `BootstrapRuntime`.
 Instead it composes the generational allocator and incremental SATB mature
 collector in a `NativeStableGenerationalConformance` stage that places every

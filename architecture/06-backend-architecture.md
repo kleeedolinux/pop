@@ -90,6 +90,13 @@ Production support begins only after statepoint/relocate or equivalent writable-
 root lowering updates every live value across control-flow merges and passes
 emitted-metadata plus forced-relocation execution tests.
 
+ADR 0073 selects the first equivalent lowering: ABI 2 spills opaque managed
+tokens to the exact writable array, calls `pop_rt_gc_safe_point_v2`, reloads new
+backend-private SSA aliases, and rewrites all observably later uses including
+branch arguments, merges, and loop backedges. ABI 1 lowering remains unchanged.
+The presence of this path does not enable the relocation capability until old-
+SSA-use verification and forced native relocation both pass.
+
 ## Experimental C backend
 
 The experimental C backend lowers optimized verified canonical MIR to one
