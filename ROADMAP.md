@@ -147,6 +147,21 @@ The broad catalog after the standard foundation remains planned work. It is not
 necessary to implement every format, network, media, data, tooling, or AI
 Package for the first release.
 
+Post-baseline library work has begun without widening the release foundation:
+
+- [x] Append the first `Sequence` terminal, inspection, visitation, bounded
+  lazy, composition, and checked integer aggregate prototypes to the API
+  baseline with interpreter/LLVM differential coverage.
+- [x] Replace the Rust-only Math prototype with ordinary portable Pop `Int`
+  functions and checked overflow behavior.
+- [x] Add an exact machine-readable public-root/tier/status projection without
+  presenting planned catalog families as implemented.
+- Define view lifetimes before exposing `Bytes` views or `Text.View`.
+- Make reserved `Iteration<T>` exhaustively matchable in ordinary source
+  before adding no-fallback sequence inspection.
+- Complete LLVM aggregate representation for collections whose element is
+  optional; MIR already preserves the typed optional item contract.
+
 ### 3. Make the runtime release-ready
 
 - [ ] Replace bootstrap-only stable handles with the accepted production

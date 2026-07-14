@@ -1,7 +1,8 @@
-# ADR 0057: Typed Async Tasks, Isolated Actors, and Distribution
+# ADR 0068: Typed Async Tasks, Isolated Actors, and Distribution
 
 - Status: accepted
 - Date: 2026-07-14
+- Traceability: originally merged with the duplicate identity ADR 0057
 - Supersedes: the async, awaiting, cancellation, suspended-cleanup, and
   structured-concurrency deferrals in ADRs 0030, 0032, 0052, and 0053
 

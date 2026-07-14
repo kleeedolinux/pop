@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-13
-- Depends on: ADR 0001, ADR 0003, ADR 0005, ADR 0022, ADR 0032, and ADR 0058
+- Depends on: ADR 0001, ADR 0003, ADR 0005, ADR 0022, ADR 0032, and ADR 0069
 
 ## Context
 

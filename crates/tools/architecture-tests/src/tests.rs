@@ -887,12 +887,7 @@ fn foundation_libraries_are_partitioned_by_contributor_ownership() {
 
     let standard_root =
         fs::read_to_string(standard.join("src/lib.rs")).expect("read pop-standard crate root");
-    for declaration in [
-        "mod native_output;",
-        "pub mod math;",
-        "pub mod sequence;",
-        "pub mod text;",
-    ] {
+    for declaration in ["mod native_output;", "pub mod text;"] {
         assert!(
             standard_root.lines().any(|line| line.trim() == declaration),
             "pop-standard must explicitly inventory `{declaration}`"
@@ -915,16 +910,14 @@ fn foundation_libraries_are_partitioned_by_contributor_ownership() {
     assert!(!internal_root.contains("pub mod runtime {"));
 
     for relative in [
-        "standard/src/math.rs",
         "standard/src/native_output.rs",
-        "standard/src/sequence.rs",
         "standard/src/text.rs",
-        "standard/tests/math.rs",
         "standard/tests/native_output.rs",
-        "standard/tests/sequence.rs",
         "standard/tests/text.rs",
         "standard/pop/bubble.toml",
         "standard/pop/src/lib.pop",
+        "standard/pop/src/math.pop",
+        "standard/pop/src/sequence.pop",
         "internal/src/runtime.rs",
         "internal/tests/runtime.rs",
         "internal/pop/bubble.toml",
@@ -1122,6 +1115,102 @@ fn official_extensions_are_absent_from_the_standard_bootstrap() {
 }
 
 #[test]
+fn portable_sequence_algorithms_have_one_pop_implementation() {
+    let root = repository_root();
+    let standard = fs::read_to_string(root.join("crates/libraries/standard/src/lib.rs"))
+        .expect("read Pop.Standard Rust module inventory");
+    let sequence = fs::read_to_string(root.join("crates/libraries/standard/pop/src/sequence.pop"))
+        .expect("read Pop.Sequence source");
+
+    assert!(!standard.contains("pub mod sequence;"));
+    assert!(
+        !root
+            .join("crates/libraries/standard/src/sequence.rs")
+            .exists()
+    );
+    for function in [
+        "map",
+        "filter",
+        "fold",
+        "collect",
+        "any",
+        "all",
+        "count",
+        "isEmpty",
+        "firstOr",
+        "lastOr",
+        "each",
+        "none",
+        "countWhere",
+        "take",
+        "drop",
+        "takeWhile",
+        "dropWhile",
+        "concat",
+        "sum",
+        "product",
+        "minOr",
+        "maxOr",
+    ] {
+        assert!(
+            sequence.contains(&format!("public function {function}<")),
+            "Pop.Sequence must own `{function}` as ordinary Pop source"
+        );
+    }
+}
+
+#[test]
+fn portable_integer_math_has_one_pop_implementation() {
+    let root = repository_root();
+    let standard = fs::read_to_string(root.join("crates/libraries/standard/src/lib.rs"))
+        .expect("read Pop.Standard Rust module inventory");
+    let math_path = root.join("crates/libraries/standard/pop/src/math.pop");
+
+    assert!(!standard.contains("pub mod math;"));
+    assert!(!root.join("crates/libraries/standard/src/math.rs").exists());
+    let math = fs::read_to_string(&math_path).expect("read Pop.Math source");
+    for function in ["min", "max", "abs", "gcd", "sign", "lcm", "coprime"] {
+        assert!(
+            math.contains(&format!("public function {function}(")),
+            "Pop.Math must own `{function}` as ordinary Pop source"
+        );
+    }
+}
+
+#[test]
+fn standard_bootstrap_preserves_the_adr_0058_prelude() {
+    let path = repository_root().join("libraries/standard/bootstrap/prelude-types.tsv");
+    let metadata = fs::read_to_string(&path).expect("read Standard prelude metadata");
+    let rows: Vec<_> = metadata
+        .lines()
+        .skip(2)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    assert_eq!(
+        rows,
+        vec![
+            "100\tResult\tPop.Standard\t2\tNominal\ttrue",
+            "101\tList\tPop.Standard\t1\tNominal\ttrue",
+            "102\tSet\tPop.Standard\t1\tNominal\ttrue",
+            "103\tRange\tPop.Standard\t1\tNominal\ttrue",
+            "104\tTask\tPop.Standard\t1\tNominal\ttrue",
+            "105\tGuid\tPop.Standard\t0\tNominal\ttrue",
+            "106\tIterable\tPop.Standard\t1\tInterface\ttrue",
+            "107\tIterator\tPop.Standard\t1\tInterface\ttrue",
+            "108\tEqual\tPop.Standard\t1\tInterface\ttrue",
+            "109\tOrder\tPop.Standard\t1\tInterface\ttrue",
+            "110\tHash\tPop.Standard\t1\tInterface\ttrue",
+            "111\tClose\tPop.Standard\t0\tInterface\ttrue",
+            "112\tAsyncClose\tPop.Standard\t0\tInterface\ttrue",
+            "113\tIteration\tPop.Standard\t1\tNominal\ttrue",
+            "114\tCancelToken\tPop.Standard\t0\tNominal\ttrue",
+        ],
+        "ADR 0058 prelude inventory drifted"
+    );
+}
+
+#[test]
 fn official_language_server_uses_the_pop_lsp_protocol_boundary() {
     let root = repository_root();
     let manifest = fs::read_to_string(root.join("crates/tools/language-server/Cargo.toml"))
@@ -1192,7 +1281,7 @@ fn public_library_catalog_has_one_complete_root_inventory() {
     let index_path = root.join("architecture/22-public-standard-library-architecture.md");
     let index = fs::read_to_string(&index_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", index_path.display()));
-    let (actual, inventory_tiers, inventory) = parse_root_inventory(&index);
+    let (actual, inventory_tiers, _, inventory) = parse_root_inventory(&index);
     let expected = PUBLIC_LIBRARY_ROOTS
         .iter()
         .map(|name| (*name).to_owned())
@@ -1221,7 +1310,96 @@ fn public_library_catalog_has_one_complete_root_inventory() {
     }
 }
 
-fn parse_root_inventory(index: &str) -> (BTreeSet<String>, BTreeMap<String, String>, &str) {
+#[test]
+fn public_library_root_manifest_matches_the_authoritative_catalog() {
+    let root = repository_root();
+    let architecture =
+        read_required(root.join("architecture/22-public-standard-library-architecture.md"));
+    let (_, tiers, catalogs, _) = parse_root_inventory(&architecture);
+    let manifest = read_required(root.join("libraries/catalog/public-roots.tsv"));
+    let mut lines = manifest.lines();
+    assert_eq!(lines.next(), Some("schemaVersion\t1"));
+    assert_eq!(lines.next(), Some("publicRoot\ttier\tcatalog\tstatus"));
+
+    let allowed_catalogs = [
+        "application/media/science",
+        "core/portable",
+        "data/observability/tooling",
+        "system/network/security",
+    ];
+    let allowed_statuses = ["implemented", "bootstrap", "prototype", "planned"];
+    let mut roots = BTreeSet::new();
+    let mut statuses = BTreeMap::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let columns: Vec<_> = line.split('\t').collect();
+        assert_eq!(columns.len(), 4, "invalid public root manifest row: {line}");
+        let [public_root, tier, catalog, status] = columns.as_slice() else {
+            unreachable!("column count checked above")
+        };
+        assert!(
+            roots.insert((*public_root).to_owned()),
+            "duplicate `{public_root}`"
+        );
+        assert_eq!(tiers.get(*public_root).map(String::as_str), Some(*tier));
+        assert!(
+            allowed_catalogs.contains(catalog),
+            "unknown catalog `{catalog}`"
+        );
+        assert_eq!(
+            catalogs.get(*public_root).map(String::as_str),
+            Some(*catalog),
+            "owning catalog drifted for `{public_root}`"
+        );
+        assert!(
+            allowed_statuses.contains(status),
+            "unknown status `{status}`"
+        );
+        assert!(
+            statuses
+                .insert((*public_root).to_owned(), (*status).to_owned())
+                .is_none(),
+            "duplicate status for `{public_root}`"
+        );
+    }
+    assert_eq!(
+        roots,
+        PUBLIC_LIBRARY_ROOTS
+            .iter()
+            .map(|root| (*root).to_owned())
+            .collect(),
+        "machine-readable root manifest drifted"
+    );
+
+    let bootstrap: BTreeSet<_> = [
+        "Ai", "Cli", "Command", "Data", "Lsp", "Rpc", "Settings", "Source", "Sql", "Store",
+        "Syntax",
+    ]
+    .into_iter()
+    .collect();
+    for public_root in PUBLIC_LIBRARY_ROOTS {
+        let expected = if ["Math", "Sequence", "Text"].contains(public_root) {
+            "prototype"
+        } else if bootstrap.contains(public_root) {
+            "bootstrap"
+        } else {
+            "planned"
+        };
+        assert_eq!(
+            statuses.get(*public_root).map(String::as_str),
+            Some(expected),
+            "status drifted for `{public_root}`"
+        );
+    }
+}
+
+fn parse_root_inventory(
+    index: &str,
+) -> (
+    BTreeSet<String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    &str,
+) {
     let start = index
         .find("<!-- namespace-roots:start -->")
         .expect("namespace root inventory start marker");
@@ -1232,6 +1410,7 @@ fn parse_root_inventory(index: &str) -> (BTreeSet<String>, BTreeMap<String, Stri
 
     let mut actual = BTreeSet::new();
     let mut inventory_tiers = BTreeMap::new();
+    let mut inventory_catalogs = BTreeMap::new();
     for line in inventory.lines().filter(|line| line.starts_with("| `")) {
         let columns: Vec<_> = line.split('|').map(str::trim).collect();
         let name = line
@@ -1248,8 +1427,14 @@ fn parse_root_inventory(index: &str) -> (BTreeSet<String>, BTreeMap<String, Stri
                 .is_none(),
             "duplicate tier assignment for `{name}`"
         );
+        assert!(
+            inventory_catalogs
+                .insert(name.to_owned(), columns[3].to_owned())
+                .is_none(),
+            "duplicate catalog assignment for `{name}`"
+        );
     }
-    (actual, inventory_tiers, inventory)
+    (actual, inventory_tiers, inventory_catalogs, inventory)
 }
 
 fn documented_catalog_roots(

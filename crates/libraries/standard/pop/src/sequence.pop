@@ -42,16 +42,176 @@ private class FilteringIterator<T> implements Iterator<T>
     end
 end
 
---- <summary>Creates a lazy single-pass iterator that transforms source items.</summary>
---- <typeparam name="T">The source item type.</typeparam>
---- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
---- <typeparam name="U">The transformed item type.</typeparam>
---- <param name="source">The statically iterable source.</param>
---- <param name="transform">The function called once for each requested item.</param>
---- <returns>A newly allocated lazy iterator adapter.</returns>
---- <remarks>Iteration is lazy, preserves source order, and uses statically resolved protocol and function calls.</remarks>
---- <allocation>Allocates one small iterator-state object; it does not materialize output items.</allocation>
---- <complexity time="O(1) creation and O(n) total consumption" space="O(1) adapter state"/>
+private class TakingIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private remaining: Int
+
+    public function TakingIterator.new(source: Iterator<T>, remaining: Int): TakingIterator<T>
+        return TakingIterator { source = source, remaining = remaining }
+    end
+
+    public function TakingIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function TakingIterator:next(): Iteration<T>
+        if self.remaining <= 0 then
+            return Iteration.End
+        end
+        for value in self.source do
+            self.remaining -= 1
+            return Iteration.Item(value)
+        end
+        self.remaining = 0
+        return Iteration.End
+    end
+end
+
+private class DroppingIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private remaining: Int
+
+    public function DroppingIterator.new(source: Iterator<T>, remaining: Int): DroppingIterator<T>
+        return DroppingIterator { source = source, remaining = remaining }
+    end
+
+    public function DroppingIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function DroppingIterator:next(): Iteration<T>
+        for value in self.source do
+            if self.remaining > 0 then
+                self.remaining -= 1
+            else
+                return Iteration.Item(value)
+            end
+        end
+        self.remaining = 0
+        return Iteration.End
+    end
+end
+
+private class TakingWhileIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private predicate: function(value: T): Boolean
+    private finished: Boolean
+
+    public function TakingWhileIterator.new(source: Iterator<T>, predicate: function(value: T): Boolean): TakingWhileIterator<T>
+        return TakingWhileIterator { source = source, predicate = predicate, finished = false }
+    end
+
+    public function TakingWhileIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function TakingWhileIterator:next(): Iteration<T>
+        if self.finished then
+            return Iteration.End
+        end
+        for value in self.source do
+            if self.predicate(value) then
+                return Iteration.Item(value)
+            end
+            self.finished = true
+            return Iteration.End
+        end
+        self.finished = true
+        return Iteration.End
+    end
+end
+
+private class DroppingWhileIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private predicate: function(value: T): Boolean
+    private dropping: Boolean
+
+    public function DroppingWhileIterator.new(source: Iterator<T>, predicate: function(value: T): Boolean): DroppingWhileIterator<T>
+        return DroppingWhileIterator { source = source, predicate = predicate, dropping = true }
+    end
+
+    public function DroppingWhileIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function DroppingWhileIterator:next(): Iteration<T>
+        for value in self.source do
+            if not self.dropping or not self.predicate(value) then
+                self.dropping = false
+                return Iteration.Item(value)
+            end
+        end
+        self.dropping = false
+        return Iteration.End
+    end
+end
+
+private class ConcatenatingIterator<T> implements Iterator<T>
+    private first: Iterator<T>
+    private second: Iterator<T>
+    private firstComplete: Boolean
+
+    public function ConcatenatingIterator.new(first: Iterator<T>, second: Iterator<T>): ConcatenatingIterator<T>
+        return ConcatenatingIterator { first = first, second = second, firstComplete = false }
+    end
+
+    public function ConcatenatingIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function ConcatenatingIterator:next(): Iteration<T>
+        if not self.firstComplete then
+            for value in self.first do
+                return Iteration.Item(value)
+            end
+            self.firstComplete = true
+        end
+        for value in self.second do
+            return Iteration.Item(value)
+        end
+        return Iteration.End
+    end
+end
+
+--- <summary>
+--- Creates a lazy single-pass iterator that transforms source items.
+--- </summary>
+---
+--- <typeparam name="T">
+--- The source item type.
+--- </typeparam>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable source type.
+--- </typeparam>
+---
+--- <typeparam name="U">
+--- The transformed item type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="transform">
+--- The function called once for each requested item.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <remarks>
+--- Iteration is lazy, preserves source order, and uses statically resolved protocol and function calls.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; source iterator acquisition retains its documented cost.
+--- Does not materialize source items.
+--- </allocation>
+---
 --- <example>
 --- <code language="pop" test="true">
 --- private function mapExample(): Int
@@ -71,15 +231,41 @@ public function map<T, TSource: Iterable<T>, U>(
     return iterator
 end
 
---- <summary>Creates a lazy single-pass iterator that retains matching items.</summary>
---- <typeparam name="T">The source and result item type.</typeparam>
---- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
---- <param name="source">The statically iterable source.</param>
---- <param name="predicate">The function called at most once per examined item.</param>
---- <returns>A newly allocated lazy iterator adapter.</returns>
---- <remarks>Iteration is lazy, stable in source order, and never performs runtime member lookup.</remarks>
---- <allocation>Allocates one small iterator-state object; it does not materialize matching items.</allocation>
---- <complexity time="O(1) creation and O(n) total consumption" space="O(1) adapter state"/>
+--- <summary>
+--- Creates a lazy single-pass iterator that retains matching items.
+--- </summary>
+---
+--- <typeparam name="T">
+--- The source and result item type.
+--- </typeparam>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable source type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called at most once per examined item.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <remarks>
+--- Iteration is lazy, stable in source order, and never performs runtime member lookup.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; source iterator acquisition retains its documented cost.
+--- Does not materialize source items.
+--- </allocation>
+---
 --- <example>
 --- <code language="pop" test="true">
 --- private function filterExample(): Int
@@ -99,17 +285,200 @@ public function filter<T, TSource: Iterable<T>>(
     return iterator
 end
 
---- <summary>Consumes a sequence from left to right into one state value.</summary>
---- <typeparam name="T">The source item type.</typeparam>
---- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
---- <typeparam name="TState">The accumulated state type.</typeparam>
---- <param name="source">The statically iterable source.</param>
---- <param name="initial">The initial state.</param>
---- <param name="combine">The function called once for each item in order.</param>
---- <returns>The final state.</returns>
---- <remarks>Consumption is eager, single-pass, and uses statically resolved protocol and function calls.</remarks>
---- <allocation>The algorithm itself allocates no collection; the supplied iterator or function may allocate according to its own contract.</allocation>
---- <complexity time="O(n)" space="O(1) algorithm state"/>
+--- <summary>
+--- Creates a lazy iterator limited to a maximum number of source items.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="count">
+--- The maximum number of items, with nonpositive values treated as zero.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; source iterator acquisition retains its documented cost.
+--- Does not materialize source items.
+--- </allocation>
+public function take<T, TSource: Iterable<T>>(source: TSource, count: Int): Iterator<T>
+    local remaining = count
+    if remaining < 0 then
+        remaining = 0
+    end
+    local iterator = TakingIterator.new(source:iterator(), remaining)
+    return iterator
+end
+
+--- <summary>
+--- Creates a lazy iterator that discards a bounded source prefix.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="count">
+--- The maximum number of discarded items, with nonpositive values treated as zero.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; source iterator acquisition retains its documented cost.
+--- Does not materialize source items.
+--- </allocation>
+public function drop<T, TSource: Iterable<T>>(source: TSource, count: Int): Iterator<T>
+    local remaining = count
+    if remaining < 0 then
+        remaining = 0
+    end
+    local iterator = DroppingIterator.new(source:iterator(), remaining)
+    return iterator
+end
+
+--- <summary>
+--- Creates a lazy iterator over the longest matching source prefix.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called until the first false result.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; source iterator acquisition retains its documented cost.
+--- Does not materialize source items.
+--- </allocation>
+public function takeWhile<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Iterator<T>
+    local iterator = TakingWhileIterator.new(source:iterator(), predicate)
+    return iterator
+end
+
+--- <summary>
+--- Creates a lazy iterator that discards the longest matching source prefix.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called until the first false result.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; source iterator acquisition retains its documented cost.
+--- Does not materialize source items.
+--- </allocation>
+public function dropWhile<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Iterator<T>
+    local iterator = DroppingWhileIterator.new(source:iterator(), predicate)
+    return iterator
+end
+
+--- <summary>
+--- Creates a lazy iterator that traverses two sources in order.
+--- </summary>
+---
+--- <param name="first">
+--- The source traversed first.
+--- </param>
+---
+--- <param name="second">
+--- The source traversed after the first is exhausted.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object; both source iterator acquisitions retain their documented costs.
+--- Does not materialize source items.
+--- </allocation>
+public function concat<T, TFirst: Iterable<T>, TSecond: Iterable<T>>(
+    first: TFirst,
+    second: TSecond
+): Iterator<T>
+    local iterator = ConcatenatingIterator.new(first:iterator(), second:iterator())
+    return iterator
+end
+
+--- <summary>
+--- Consumes a sequence from left to right into one state value.
+--- </summary>
+---
+--- <typeparam name="T">
+--- The source item type.
+--- </typeparam>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable source type.
+--- </typeparam>
+---
+--- <typeparam name="TState">
+--- The accumulated state type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="initial">
+--- The initial state.
+--- </param>
+---
+--- <param name="combine">
+--- The function called once for each item in order.
+--- </param>
+---
+--- <returns>
+--- The final state.
+--- </returns>
+---
+--- <remarks>
+--- Consumption is eager, single-pass, and uses statically resolved protocol and function calls.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+---
 --- <example>
 --- <code language="pop" test="true">
 --- private function foldExample(): Int
@@ -132,14 +501,36 @@ public function fold<T, TSource: Iterable<T>, TState>(
     return state
 end
 
---- <summary>Consumes a sequence into a new growable list in source order.</summary>
---- <typeparam name="T">The source and collected item type.</typeparam>
---- <typeparam name="TSource">The exact statically iterable source type.</typeparam>
---- <param name="source">The statically iterable source.</param>
---- <returns>A newly allocated list containing every source item.</returns>
---- <remarks>Consumption is eager and materializes every item in stable source order.</remarks>
---- <allocation>Allocates one list and may grow its backing storage as items are appended.</allocation>
---- <complexity time="O(n)" space="O(n) owned result"/>
+--- <summary>
+--- Consumes a sequence into a new growable list in source order.
+--- </summary>
+---
+--- <typeparam name="T">
+--- The source and collected item type.
+--- </typeparam>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable source type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <returns>
+--- A newly allocated list containing every source item.
+--- </returns>
+---
+--- <remarks>
+--- Consumption is eager and materializes every item in stable source order.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(n)"/>
+---
+--- <allocation>
+--- Allocates and grows one list containing the source items.
+--- </allocation>
+---
 --- <example>
 --- <code language="pop" test="true">
 --- private function collectExample(): Int
@@ -155,4 +546,409 @@ public function collect<T, TSource: Iterable<T>>(source: TSource): List<T>
         List.add(values, value)
     end
     return values
+end
+
+--- <summary>
+--- Tests whether at least one source item satisfies a predicate.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called in order until it returns true.
+--- </param>
+---
+--- <returns>
+--- True at the first matching item; otherwise false.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function any<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Boolean
+    for value in source do
+        if predicate(value) then
+            return true
+        end
+    end
+    return false
+end
+
+--- <summary>
+--- Tests whether every source item satisfies a predicate.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called in order until it returns false.
+--- </param>
+---
+--- <returns>
+--- False at the first nonmatching item; otherwise true.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function all<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Boolean
+    for value in source do
+        if not predicate(value) then
+            return false
+        end
+    end
+    return true
+end
+
+--- <summary>
+--- Counts every item in a source using checked integer arithmetic.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <returns>
+--- The number of source items.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function count<T, TSource: Iterable<T>>(source: TSource): Int
+    local total = 0
+    for value in source do
+        total += 1
+    end
+    return total
+end
+
+--- <summary>
+--- Tests whether a source contains no remaining items.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <returns>
+--- True when the source is exhausted; otherwise false.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function isEmpty<T, TSource: Iterable<T>>(source: TSource): Boolean
+    for value in source do
+        return false
+    end
+    return true
+end
+
+--- <summary>
+--- Returns the first remaining item or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when the source is empty.
+--- </param>
+---
+--- <returns>
+--- The first item, or the fallback when the source is empty.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function firstOr<T, TSource: Iterable<T>>(source: TSource, fallback: T): T
+    for value in source do
+        return value
+    end
+    return fallback
+end
+
+--- <summary>
+--- Returns the last remaining item or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when the source is empty.
+--- </param>
+---
+--- <returns>
+--- The last item, or the fallback when the source is empty.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function lastOr<T, TSource: Iterable<T>>(source: TSource, fallback: T): T
+    local result = fallback
+    for value in source do
+        result = value
+    end
+    return result
+end
+
+--- <summary>
+--- Calls an action once for every source item in order.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="action">
+--- The function called for each item.
+--- </param>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function each<T, TSource: Iterable<T>>(
+    source: TSource,
+    action: function(value: T)
+)
+    for value in source do
+        action(value)
+    end
+end
+
+--- <summary>
+--- Tests whether no source item satisfies a predicate.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called in order until it returns true.
+--- </param>
+---
+--- <returns>
+--- False at the first matching item; otherwise true.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function none<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Boolean
+    for value in source do
+        if predicate(value) then
+            return false
+        end
+    end
+    return true
+end
+
+--- <summary>
+--- Counts source items that satisfy a predicate.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called once for each item.
+--- </param>
+---
+--- <returns>
+--- The number of matching items.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function countWhere<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean
+): Int
+    local total = 0
+    for value in source do
+        if predicate(value) then
+            total += 1
+        end
+    end
+    return total
+end
+
+--- <summary>
+--- Adds every integer in source order using checked arithmetic.
+--- </summary>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable integer source type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The integer source.
+--- </param>
+---
+--- <returns>
+--- The checked sum, or zero when the source is empty.
+--- </returns>
+---
+--- <remarks>
+--- Evaluation is eager, single-pass, and left to right.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function sum<TSource: Iterable<Int>>(source: TSource): Int
+    local total = 0
+    for value in source do
+        total += value
+    end
+    return total
+end
+
+--- <summary>
+--- Multiplies every integer in source order using checked arithmetic.
+--- </summary>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable integer source type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The integer source.
+--- </param>
+---
+--- <returns>
+--- The checked product, or one when the source is empty.
+--- </returns>
+---
+--- <remarks>
+--- Evaluation is eager, single-pass, and left to right.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function product<TSource: Iterable<Int>>(source: TSource): Int
+    local result = 1
+    for value in source do
+        result *= value
+    end
+    return result
+end
+
+--- <summary>
+--- Returns the least integer or an explicit fallback for an empty source.
+--- </summary>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable integer source type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The integer source.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned only when the source is empty.
+--- </param>
+---
+--- <returns>
+--- The least source item, or the fallback when empty.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function minOr<TSource: Iterable<Int>>(source: TSource, fallback: Int): Int
+    local result = fallback
+    local found = false
+    for value in source do
+        if not found or value < result then
+            result = value
+            found = true
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Returns the greatest integer or an explicit fallback for an empty source.
+--- </summary>
+---
+--- <typeparam name="TSource">
+--- The exact statically iterable integer source type.
+--- </typeparam>
+---
+--- <param name="source">
+--- The integer source.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned only when the source is empty.
+--- </param>
+---
+--- <returns>
+--- The greatest source item, or the fallback when empty.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function maxOr<TSource: Iterable<Int>>(source: TSource, fallback: Int): Int
+    local result = fallback
+    local found = false
+    for value in source do
+        if not found or value > result then
+            result = value
+            found = true
+        end
+    end
+    return result
 end
