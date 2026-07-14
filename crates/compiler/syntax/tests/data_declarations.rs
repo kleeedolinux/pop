@@ -171,6 +171,38 @@ fn records_and_unions_preserve_ordered_type_parameters() {
 }
 
 #[test]
+fn generic_data_parameters_preserve_nominal_bounds() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/boundedData.pop",
+        "namespace BoundedData\n\
+         private record Source<T, TValues: Iterable<T>>\n\
+             values: TValues\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    assert!(syntax.diagnostics().is_empty(), "structural syntax");
+    let record_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::RecordDeclaration)
+        .expect("record");
+    let record =
+        parse_record_declaration(&source, &syntax, record_node).expect("record declaration");
+
+    assert!(record.type_parameters()[0].bound().is_none());
+    assert!(matches!(
+        record.type_parameters()[1]
+            .bound()
+            .map(pop_syntax::TypeSyntax::kind),
+        Some(TypeSyntaxKind::Named { path, arguments })
+            if path == &["Iterable"] && arguments.len() == 1
+    ));
+}
+
+#[test]
 fn malformed_record_fields_are_rejected_without_untyped_recovery() {
     let source = SourceFile::new(
         FileId::from_raw(0),

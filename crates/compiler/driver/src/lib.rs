@@ -12,6 +12,7 @@
 //! - diagnostic helpers provide deterministic structured reporting.
 
 mod api;
+mod artifact;
 mod attributes;
 mod compile_time;
 mod front_end;
@@ -19,4 +20,5 @@ mod reference;
 mod work;
 
 pub use api::*;
+pub use artifact::*;
 pub use front_end::*;

@@ -40,6 +40,7 @@ pub enum TokenKind {
     Repeat,
     Until,
     For,
+    In,
     Break,
     Continue,
     Do,
@@ -203,16 +204,7 @@ impl Lexer<'_> {
             return;
         };
         if first_character.is_alphabetic() || first_character == '_' {
-            while let Some(character) = self.source.text()[self.cursor..self.end].chars().next() {
-                if !(character.is_alphanumeric() || character == '_') {
-                    break;
-                }
-                self.cursor += character.len_utf8();
-            }
-            self.tokens.push(Token {
-                kind: keyword(&self.source.text()[start..self.cursor]),
-                range: Self::range(start, self.cursor),
-            });
+            self.scan_identifier(start);
             return;
         }
 
@@ -304,6 +296,23 @@ impl Lexer<'_> {
                 })
             }
         };
+        self.push_token(kind, start);
+    }
+
+    fn scan_identifier(&mut self, start: usize) {
+        while let Some(character) = self.source.text()[self.cursor..self.end].chars().next() {
+            if !(character.is_alphanumeric() || character == '_') {
+                break;
+            }
+            self.cursor += character.len_utf8();
+        }
+        self.tokens.push(Token {
+            kind: keyword(&self.source.text()[start..self.cursor]),
+            range: Self::range(start, self.cursor),
+        });
+    }
+
+    fn push_token(&mut self, kind: TokenKind, start: usize) {
         self.tokens.push(Token {
             kind,
             range: Self::range(start, self.cursor),
@@ -433,6 +442,7 @@ fn keyword(text: &str) -> TokenKind {
         "repeat" => TokenKind::Repeat,
         "until" => TokenKind::Until,
         "for" => TokenKind::For,
+        "in" => TokenKind::In,
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
         "do" => TokenKind::Do,

@@ -420,6 +420,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::OptionalWhile { .. }
         | TypedStatementKind::RepeatUntil { .. }
         | TypedStatementKind::NumericFor { .. }
+        | TypedStatementKind::GeneralizedFor { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue => UnsupportedCompileTimeConstruct::Loop,
         TypedStatementKind::LocalSet { .. }
@@ -429,6 +430,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::FieldSet { .. }
         | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::ListSet { .. }
         | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
@@ -443,7 +445,8 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
             }
             TypedCallDispatch::Referenced { .. } => UnsupportedCompileTimeConstruct::ReferencedCall,
             TypedCallDispatch::DirectMethod { .. } => UnsupportedCompileTimeConstruct::MethodCall,
-            TypedCallDispatch::InterfaceMethod { .. } => {
+            TypedCallDispatch::InterfaceMethod { .. }
+            | TypedCallDispatch::BuiltinInterfaceMethod { .. } => {
                 UnsupportedCompileTimeConstruct::InterfaceDispatch
             }
             TypedCallDispatch::Indirect { .. } => UnsupportedCompileTimeConstruct::IndirectCall,
@@ -487,6 +490,13 @@ fn unsupported_compile_time_construct(
             UnsupportedCompileTimeConstruct::Array
         }
         TypedExpressionKind::ArrayFill { .. } => UnsupportedCompileTimeConstruct::Mutation,
+        TypedExpressionKind::ListCreate { .. } => UnsupportedCompileTimeConstruct::Array,
+        TypedExpressionKind::ListLength { .. }
+        | TypedExpressionKind::ListGet { .. }
+        | TypedExpressionKind::ListGetChecked { .. } => {
+            UnsupportedCompileTimeConstruct::ArrayAccess
+        }
+        TypedExpressionKind::ListAdd { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedExpressionKind::Record { .. } => UnsupportedCompileTimeConstruct::Record,
         TypedExpressionKind::ClassConstruct { .. } => {
             UnsupportedCompileTimeConstruct::ClassConstruction
@@ -495,7 +505,9 @@ fn unsupported_compile_time_construct(
         TypedExpressionKind::Table(_) | TypedExpressionKind::TableGet { .. } => {
             UnsupportedCompileTimeConstruct::Table
         }
-        TypedExpressionKind::UnionCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
+        TypedExpressionKind::UnionCase { .. } | TypedExpressionKind::IterationCase { .. } => {
+            UnsupportedCompileTimeConstruct::UnionCase
+        }
         TypedExpressionKind::ResultCase { .. }
         | TypedExpressionKind::ErrorCase { .. }
         | TypedExpressionKind::ResultPropagate { .. } => {
@@ -503,7 +515,8 @@ fn unsupported_compile_time_construct(
         }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
-        TypedExpressionKind::InterfaceMethodCall { .. } => {
+        TypedExpressionKind::InterfaceMethodCall { .. }
+        | TypedExpressionKind::BuiltinInterfaceMethodCall { .. } => {
             UnsupportedCompileTimeConstruct::InterfaceDispatch
         }
         TypedExpressionKind::InterfaceUpcast { .. } => {

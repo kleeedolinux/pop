@@ -26,6 +26,7 @@ Tuple(elements, optional typed variadic tail)
 Function(type parameters, parameters, results, effects)
 Record(fields, openness policy)
 Array(element)
+List(element)
 Table(key, value, table policy)
 Class(ClassId, arguments)
 Interface(InterfaceId, arguments)
@@ -78,6 +79,17 @@ references cannot contain `nil`.
 Flow analysis narrows optionals after checks. Mutation, aliasing, closure
 capture, calls with relevant effects, and suspension points invalidate facts
 that are no longer provable.
+
+## Nominal iteration
+
+Generalized iteration requires one exact reserved `Iterable<T>` or
+`Iterator<T>` implementation. `Iteration<T>` is a nominal step union, so
+`Iteration.Item(nil)` remains distinct from `Iteration.End` when `T` itself is
+optional. One binding receives `T`; multiple loop bindings require a fixed
+tuple `T` with exactly matching arity. Protocol acquisition and stepping resolve
+stable method slots during type checking and never become runtime member-name
+selection. Generic sources require a proven nominal constraint rather than an
+unresolved inference variable. See ADR 0053.
 
 An equality comparison with `nil` creates complementary facts for a stable
 versioned place. Optional pattern binding in `if local`/`while local` accepts
@@ -204,9 +216,18 @@ the underlying ability to type-check the call.
 ## Generics
 
 The semantic checker treats generics parametrically and records constraints on
-type parameters. Lowering is hybrid: value/performance-critical instantiations
-specialize, while representation-compatible reference instantiations may share
-typed dictionary/witness-based code. The choice cannot change accepted programs.
+type parameters. A type parameter may have one exact nominal interface bound,
+written with Luau-shaped colon syntax such as `<T, TSource: Iterable<T>>`.
+Functions, records, tagged unions, errors, classes, and interfaces use ordered
+invariant parameters. Generic class fields, methods, and `implements` entries
+may use their owning parameters; each concrete class instance has a specialized
+layout and exact witness mapping. See ADR 0054.
+
+Lowering uses full concrete specialization as the required correctness path.
+Representation-compatible instances may later share typed dictionary/witness
+code only when MIR verification proves the same representation, GC maps,
+calling convention, dispatch, effects, and failures. Sharing cannot change
+accepted programs and is not required for `0.1.0`.
 
 Generic instantiation:
 
@@ -216,12 +237,19 @@ Generic instantiation:
 4. solves and validates all remaining variables;
 5. records canonical generic arguments in HIR.
 
-The bootstrap subset currently requires explicit function and tagged-union case
-type arguments, supports ordered invariant parameters on functions, records,
-and tagged unions, and fully specializes every reachable concrete instance in
-MIR. Equivalent instances are deduplicated. Type-argument inference, portable
-generic reference metadata, and representation-compatible typed code sharing
-remain later extensions of the same semantic model. See ADR 0050.
+Normal direct generic calls infer all type arguments from expected results,
+arguments, exact type constructors, callable signatures, and nominal bounds.
+Every parameter must have one unique canonical solution; ambiguity or conflict
+is a static diagnostic. Explicit double-angle calls remain available, but
+partial explicit argument lists are not supported. HIR always records the full
+canonical argument list.
+
+Public generic signatures and their verified portable specialization capsules
+cross Bubble boundaries through typed reference metadata. The capsule retains
+the source `SymbolIdentity` and the opaque transitive implementation closure;
+it never enters dependency declarations into consumer name resolution. MIR
+fully specializes reachable local and referenced instances and deduplicates
+equivalent source-identity/argument pairs. See ADR 0050 and ADR 0054.
 
 Compile-time generic code may branch on permitted type/attribute queries. Each
 accepted branch still produces ordinary fully typed HIR.

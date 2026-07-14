@@ -530,6 +530,12 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
              Array.fill(numbers, 7)\n\
              local count = Array.length(numbers)\n\
              local first = Array.get(numbers, 1)\n\
+             local values = List.withCapacity<<Int>>(4)\n\
+             List.add(values, first)\n\
+             local maybeValue = values[1]\n\
+             local value = List.get(values, 1)\n\
+             values[1] = value\n\
+             local listCount = List.length(values)\n\
              return (names, scores)\n\
          end\n",
     )
@@ -622,6 +628,35 @@ fn typed_collections_survive_hir_in_source_evaluation_order() {
         hir.body()[7].kind(),
         HirStatementKind::Local { initializer, .. }
             if matches!(initializer.kind(), HirExpressionKind::ArrayGetChecked { .. })
+    ));
+    assert!(matches!(
+        hir.body()[8].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ListCreate { capacity: Some(_) })
+    ));
+    assert!(matches!(
+        hir.body()[9].kind(),
+        HirStatementKind::Expression(expression)
+            if matches!(expression.kind(), HirExpressionKind::ListAdd { .. })
+    ));
+    assert!(matches!(
+        hir.body()[10].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ListGet { .. })
+    ));
+    assert!(matches!(
+        hir.body()[11].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ListGetChecked { .. })
+    ));
+    assert!(matches!(
+        hir.body()[12].kind(),
+        HirStatementKind::ListSet { .. }
+    ));
+    assert!(matches!(
+        hir.body()[13].kind(),
+        HirStatementKind::Local { initializer, .. }
+            if matches!(initializer.kind(), HirExpressionKind::ListLength { .. })
     ));
 }
 

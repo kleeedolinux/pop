@@ -46,10 +46,26 @@ and does not define the work remaining for `0.1.0`.
 - [ ] Finish generalized `for` over the nominal `Iterable<T>` and `Iterator<T>`
   protocols, including deterministic `Sequence` adapters. Keep arrays
   fixed-length; provide growth through the accepted growable collection type.
-- [ ] Complete generic behavior needed across Bubble boundaries: portable
+  - [x] Accept ADR 0053 and implement reserved `Iterable<T>`, `Iterator<T>`, and
+    `Iteration<T>` identities with exact static protocol calls.
+  - [x] Execute array, table, `List<T>`, and nominal iterator traversal through
+    the MIR interpreter and LLVM with deterministic order.
+  - [x] Implement ordinary lazy `Sequence.map`/`filter`, eager `fold`, and
+    materializing `collect` in `Pop.Standard` Pop source.
+  - [x] Reject statically proven structural mutation of the directly iterated
+    collection while preserving typed indexed replacement.
+- [x] Complete generic behavior needed across Bubble boundaries: portable
   reference metadata, type-argument inference, constraints, and the accepted
   typed sharing/specialization policy. Preserve full specialization as a valid
   bootstrap strategy.
+  - [x] Accept ADR 0054 and implement complete call-site inference with exact
+    nominal bounds and deterministic failure diagnostics.
+  - [x] Specialize generic classes, interfaces, fields, methods, and exact
+    witnesses without erased or dynamic fallback.
+  - [x] Emit and consume logical portable specialization capsules containing
+    private transitive helpers without widening Bubble visibility.
+  - [x] Execute cross-Bubble generic capsules through the MIR interpreter and
+    LLVM, including ordinary `Sequence` implementations.
 - [ ] Complete coroutines, async functions, awaiting, cancellation, and scoped
   cleanup with one backend-neutral HIR/MIR contract.
 - [ ] Close the remaining accepted first-release gaps for FFI, view lifetimes,
@@ -65,12 +81,27 @@ and does not define the work remaining for `0.1.0`.
   resource/task primitives usable as native Pop APIs.
 - [ ] Move portable implementations into ordinary `.pop` Modules so adding an
   algorithm does not require compiler or backend changes.
+  - [x] Move deterministic `Sequence` adapters into the conventionally
+    discovered `Pop.Standard` `sequence.pop` Module.
 - [ ] Emit, verify, load, and link deterministic `.poplib` artifacts containing
   manifests, public reference metadata, checked documentation, target
   implementations, hashes, ABI requirements, and exact Bubble dependencies.
+  - [x] Implement the verified logical public reference-metadata model and
+    source-free cross-Bubble consumption path.
+  - [x] Accept ADR 0055 for canonical JSON control files, SHA-256 inventories,
+    bounded loading, and versioned lock/artifact/capsule schemas.
+  - [x] Round-trip canonical public reference metadata with SHA-256-verified
+    portable generic HIR/type capsules and source-free specialization.
+  - [x] Emit and load bounded `.poplib` directories with canonical manifests,
+    checked file inventories, documentation, and opaque target implementations;
+    reject malformed, missing, extra, traversal, and corrupted content.
+  - [x] Emit deterministic schema-versioned `documentation.xml` from checked
+    symbol-owned XML fragments.
 - [ ] Complete checked public XML documentation, compiled examples, allocation
   and cost notes, and interpreter/LLVM differential tests for every stabilized
   API.
+  - [x] Preserve checked public documentation by stable `SymbolIdentity` and
+    reject duplicate output member IDs deterministically.
 
 The broad catalog after the standard foundation remains planned work. It is not
 necessary to implement every format, network, media, data, tooling, or AI
@@ -97,11 +128,28 @@ Package for the first release.
 - [ ] Finish deterministic Package, Bubble, and Workspace discovery;
   `bubble.toml`; one `bubble.lock`; dependency resolution; features; target
   selection; and reproducible caching.
+  - [x] Parse canonical Package manifests, structured registry/local/exact-Git
+    requirements, development/platform scopes, and combined Package/Workspace
+    roots.
+  - [x] Discover conventional Bubbles and restricted Workspace members with
+    non-overlapping ownership and deterministic default-member selection.
+  - [x] Resolve, cycle-check, analyze, and link exact local-path Package
+    dependencies through public Bubble metadata.
+  - [x] Generate one canonical SHA-256-backed `bubble.lock` for selected local
+    Package graphs, round-trip it fail-closed, write it atomically, and enforce
+    `--locked`, `--offline`, and `--frozen` update policy.
+  - [x] Use one shared Workspace `target/` root without widening visibility.
 - [ ] Make the supported `pop check`, `pop build`, `pop run`, `pop test`,
   `pop documentation`, `pop format`, `pop lint`, and `pop fix` workflows operate
   on real Packages and Workspaces with structured machine output.
+  - [x] Make `pop check`, `pop build`, and `pop run` operate on manifest-selected
+    Packages and virtual Workspace default members.
+  - [x] Make `pop documentation` emit checked deterministic public XML for
+    selected library Bubbles.
 - [ ] Complete deterministic native linking, test/example/benchmark Bubbles,
   public reference loading, initialization order, and clear capability errors.
+  - [x] Link Package library and binary Bubbles by exact public
+    `SymbolIdentity`, including generic consumer specialization.
 - [ ] Implement stable structured diagnostics with `POP####` codes, warning
   policy, semantic fixes, atomic safe fix-all, JSON/LSP rendering, and bounded
   error recovery.

@@ -4,7 +4,9 @@
 //! exact argument/result types, and no unknown-effect or runtime lookup path.
 
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
-use pop_foundation::{ResultCaseId, SourceSpan};
+use std::collections::BTreeMap;
+
+use pop_foundation::{BuiltinTypeId, ParameterId, ResultCaseId, SourceSpan, TypeId};
 use pop_resolve::SymbolSpace;
 use pop_syntax::{ExpressionSyntax, ExpressionSyntaxKind};
 
@@ -28,7 +30,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         {
             return self.check_result_case(path, arguments, expected, span);
         }
-        match self.check_call_invocation(callee, arguments, span)? {
+        match self.check_call_invocation(callee, arguments, expected, span)? {
             CheckedInvocation::Call(checked) => self.checked_call_expression(checked),
             CheckedInvocation::Value(value) => Some(value),
         }
@@ -88,6 +90,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         &mut self,
         callee: &ExpressionSyntax,
         arguments: &[ExpressionSyntax],
+        expected: Option<ExpectedExpressionType>,
         span: SourceSpan,
     ) -> Option<CheckedInvocation> {
         if let ExpressionSyntaxKind::Name(path) = callee.kind() {
@@ -115,10 +118,30 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .check_array_invocation(path, arguments, span)
                     .map(CheckedInvocation::Value);
             }
+            if matches!(
+                path.as_slice(),
+                [iteration, item] if iteration == "Iteration" && item == "Item"
+            ) {
+                return self
+                    .check_iteration_item_invocation(arguments, expected, span)
+                    .map(CheckedInvocation::Value);
+            }
+            if matches!(
+                path.as_slice(),
+                [list, operation]
+                    if list == "List"
+                        && matches!(operation.as_str(), "add" | "length" | "get")
+            ) {
+                return self
+                    .check_list_invocation(path, arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if let Some(checked) = self.check_standard_invocation(path, arguments, span) {
                 return Some(CheckedInvocation::Call(checked));
             }
-            if let Some(checked) = self.check_static_method_invocation(path, arguments, span) {
+            if let Some(checked) =
+                self.check_static_method_invocation(path, arguments, expected, span)
+            {
                 return Some(CheckedInvocation::Call(checked));
             }
             match self.lookup_union_case(path, callee.span()) {
@@ -138,6 +161,21 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 }
                 ErrorCaseLookup::Missing => return None,
                 ErrorCaseLookup::NotError => {}
+            }
+            let name = path.join(".");
+            let resolution = self.resolver.database().resolve(
+                self.module,
+                &name,
+                SymbolSpace::Value,
+                callee.span(),
+            );
+            if let Some(symbol) = resolution.symbol()
+                && let Some(signature) = self.signatures.get(&symbol).cloned()
+                && !signature.type_parameters().is_empty()
+            {
+                return self
+                    .check_inferred_generic_call(symbol, &signature, arguments, expected, span)
+                    .map(CheckedInvocation::Call);
             }
         }
         let callee = self.check_expression(callee)?;
@@ -200,6 +238,428 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn check_inferred_generic_call(
+        &mut self,
+        symbol: pop_foundation::SymbolId,
+        signature: &crate::ResolvedFunctionSignature,
+        arguments: &[ExpressionSyntax],
+        expected: Option<ExpectedExpressionType>,
+        span: SourceSpan,
+    ) -> Option<CheckedCall> {
+        if signature.parameters().len() != arguments.len() {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                signature.name(),
+                signature.parameters().len(),
+                arguments.len(),
+            ));
+            return None;
+        }
+
+        let mut substitutions = BTreeMap::new();
+        if let Some(expected) = expected
+            && let [result] = signature.results()
+            && !self.infer_type_pattern(result.type_id()?, expected.type_id, &mut substitutions)
+        {
+            self.diagnostics
+                .push(type_diagnostics::generic_inference_failure(
+                    span,
+                    signature
+                        .type_parameters()
+                        .first()
+                        .map_or("T", crate::ResolvedTypeParameter::name),
+                    "expected result conflicts with call",
+                ));
+            return None;
+        }
+
+        let mut typed_arguments = Vec::with_capacity(arguments.len());
+        for (argument, parameter) in arguments.iter().zip(signature.parameters()) {
+            let typed = self.check_expression(argument)?;
+            if !self.infer_type_pattern(
+                parameter.parameter_type().type_id()?,
+                typed.type_id(),
+                &mut substitutions,
+            ) {
+                let parameter_name = signature
+                    .type_parameters()
+                    .iter()
+                    .find(|parameter| substitutions.contains_key(&parameter.parameter()))
+                    .map_or("T", crate::ResolvedTypeParameter::name);
+                self.diagnostics
+                    .push(type_diagnostics::generic_inference_failure(
+                        argument.span(),
+                        parameter_name,
+                        "argument constraints conflict",
+                    ));
+                return None;
+            }
+            typed_arguments.push(typed);
+        }
+
+        for parameter in signature.type_parameters() {
+            if let (Some(actual), Some(bound)) = (
+                substitutions.get(&parameter.parameter()).copied(),
+                parameter.bound(),
+            ) && !self.infer_type_pattern(bound, actual, &mut substitutions)
+            {
+                self.diagnostics
+                    .push(type_diagnostics::generic_inference_failure(
+                        span,
+                        parameter.name(),
+                        "nominal interface bound is not satisfied",
+                    ));
+                return None;
+            }
+        }
+
+        let mut type_arguments = Vec::with_capacity(signature.type_parameters().len());
+        for parameter in signature.type_parameters() {
+            let Some(argument) = substitutions.get(&parameter.parameter()).copied() else {
+                self.diagnostics
+                    .push(type_diagnostics::generic_inference_failure(
+                        span,
+                        parameter.name(),
+                        "type argument is ambiguous",
+                    ));
+                return None;
+            };
+            type_arguments.push(argument);
+        }
+        let substitution_map: BTreeMap<_, _> = signature
+            .type_parameters()
+            .iter()
+            .zip(&type_arguments)
+            .map(|(parameter, argument)| (parameter.parameter(), *argument))
+            .collect();
+        self.resolver
+            .materialize_class_instances_for_substitutions(&substitution_map)?;
+        for parameter in signature.type_parameters() {
+            if let Some(bound) = parameter.bound() {
+                self.materialize_generic_bound_types(bound, &substitution_map)?;
+            }
+        }
+        let parameter_types = signature
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                self.resolver.substitute_type_parameters(
+                    parameter.parameter_type().type_id()?,
+                    &substitution_map,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        for ((typed, expected), source) in
+            typed_arguments.iter().zip(&parameter_types).zip(arguments)
+        {
+            self.require_same_type(*expected, typed.type_id(), typed.span(), source.span());
+        }
+        let results = signature
+            .results()
+            .iter()
+            .map(|result| {
+                self.resolver
+                    .substitute_type_parameters(result.type_id()?, &substitution_map)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let dispatch = self
+            .resolver
+            .database()
+            .index()
+            .declaration(symbol)
+            .and_then(pop_resolve::Declaration::reference_identity)
+            .map_or(TypedCallDispatch::Direct { function: symbol }, |function| {
+                TypedCallDispatch::Referenced { function }
+            });
+        Some(CheckedCall {
+            call: TypedCall {
+                dispatch,
+                type_arguments,
+                arguments: typed_arguments,
+                span,
+            },
+            results,
+        })
+    }
+
+    pub(crate) fn infer_type_pattern(
+        &mut self,
+        pattern: TypeId,
+        actual: TypeId,
+        substitutions: &mut BTreeMap<ParameterId, TypeId>,
+    ) -> bool {
+        if pattern == actual {
+            return true;
+        }
+        let Some(pattern_type) = self.resolver.arena().get(pattern).cloned() else {
+            return false;
+        };
+        if let SemanticType::TypeParameter(parameter) = pattern_type {
+            return substitutions
+                .get(&parameter)
+                .is_none_or(|known| *known == actual)
+                && {
+                    substitutions.entry(parameter).or_insert(actual);
+                    true
+                };
+        }
+        let Some(actual_type) = self.resolver.arena().get(actual).cloned() else {
+            return false;
+        };
+
+        if let SemanticType::Builtin {
+            definition,
+            arguments,
+        } = &pattern_type
+            && let Some(protocol) = self.resolver.schema().iteration_protocol()
+            && *definition == protocol.iterable()
+            && arguments.len() == 1
+            && let Some(item) = self.iteration_item_type(actual, &actual_type)
+        {
+            return self.infer_type_pattern(arguments[0], item, substitutions);
+        }
+
+        match (pattern_type, actual_type) {
+            (SemanticType::Primitive(left), SemanticType::Primitive(right)) => left == right,
+            (SemanticType::Tuple(left), SemanticType::Tuple(right))
+            | (SemanticType::Union(left), SemanticType::Union(right)) => {
+                self.infer_type_lists(&left, &right, substitutions)
+            }
+            (
+                SemanticType::Function {
+                    parameters: left_parameters,
+                    results: left_results,
+                    effects: left_effects,
+                },
+                SemanticType::Function {
+                    parameters: right_parameters,
+                    results: right_results,
+                    effects: right_effects,
+                },
+            ) => {
+                left_effects == right_effects
+                    && self.infer_type_lists(&left_parameters, &right_parameters, substitutions)
+                    && self.infer_type_lists(&left_results, &right_results, substitutions)
+            }
+            (SemanticType::Array(left), SemanticType::Array(right))
+            | (SemanticType::Optional(left), SemanticType::Optional(right)) => {
+                self.infer_type_pattern(left, right, substitutions)
+            }
+            (
+                SemanticType::Table {
+                    key: left_key,
+                    value: left_value,
+                },
+                SemanticType::Table {
+                    key: right_key,
+                    value: right_value,
+                },
+            ) => {
+                self.infer_type_pattern(left_key, right_key, substitutions)
+                    && self.infer_type_pattern(left_value, right_value, substitutions)
+            }
+            (
+                SemanticType::Class {
+                    class: left,
+                    arguments: left_arguments,
+                },
+                SemanticType::Class {
+                    class: right,
+                    arguments: right_arguments,
+                },
+            ) => {
+                (left == right
+                    || matches!(
+                        (
+                            self.resolver.class_source_identity(left),
+                            self.resolver.class_source_identity(right),
+                        ),
+                        (Some(left), Some(right)) if left == right
+                    ))
+                    && self.infer_type_lists(&left_arguments, &right_arguments, substitutions)
+            }
+            (
+                SemanticType::Interface {
+                    interface: left,
+                    arguments: left_arguments,
+                },
+                SemanticType::Interface {
+                    interface: right,
+                    arguments: right_arguments,
+                },
+            ) => {
+                (left == right
+                    || matches!(
+                        (
+                            self.resolver.interface_source_identity(left),
+                            self.resolver.interface_source_identity(right),
+                        ),
+                        (Some(left), Some(right)) if left == right
+                    ))
+                    && self.infer_type_lists(&left_arguments, &right_arguments, substitutions)
+            }
+            (
+                SemanticType::Interface {
+                    interface: pattern_interface,
+                    ..
+                },
+                SemanticType::Class { .. },
+            ) => self
+                .resolver
+                .class_definition_for_type(actual)
+                .and_then(|class| {
+                    class.interfaces().iter().find(|implementation| {
+                        self.resolver
+                            .interface_definition_for_type(implementation.interface_type())
+                            .is_some_and(|implemented| {
+                                self.resolver
+                                    .interface_source_identity(implemented.interface())
+                                    == self.resolver.interface_source_identity(pattern_interface)
+                            })
+                    })
+                })
+                .map(|implementation| implementation.interface_type())
+                .is_some_and(|implemented| {
+                    self.infer_type_pattern(pattern, implemented, substitutions)
+                }),
+            (
+                SemanticType::Builtin {
+                    definition: left,
+                    arguments: left_arguments,
+                },
+                SemanticType::Builtin {
+                    definition: right,
+                    arguments: right_arguments,
+                },
+            ) => {
+                left == right
+                    && self.infer_type_lists(&left_arguments, &right_arguments, substitutions)
+            }
+            (
+                SemanticType::TaggedUnion {
+                    source: left,
+                    arguments: left_arguments,
+                    ..
+                },
+                SemanticType::TaggedUnion {
+                    source: right,
+                    arguments: right_arguments,
+                    ..
+                },
+            ) => {
+                left == right
+                    && self.infer_type_lists(&left_arguments, &right_arguments, substitutions)
+            }
+            (
+                SemanticType::ErrorUnion {
+                    source: left,
+                    arguments: left_arguments,
+                    ..
+                },
+                SemanticType::ErrorUnion {
+                    source: right,
+                    arguments: right_arguments,
+                    ..
+                },
+            ) => {
+                left == right
+                    && self.infer_type_lists(&left_arguments, &right_arguments, substitutions)
+            }
+            (SemanticType::Record(left), SemanticType::Record(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|((left_name, left), (right_name, right))| {
+                            left_name == &right_name
+                                && self.infer_type_pattern(*left, right, substitutions)
+                        })
+            }
+            (SemanticType::Enum { definition: left }, SemanticType::Enum { definition: right }) => {
+                left == right
+            }
+            (SemanticType::Opaque(left), SemanticType::Opaque(right)) => left == right,
+            (SemanticType::Error, SemanticType::Error) => true,
+            _ => false,
+        }
+    }
+
+    fn infer_type_lists(
+        &mut self,
+        patterns: &[TypeId],
+        actual: &[TypeId],
+        substitutions: &mut BTreeMap<ParameterId, TypeId>,
+    ) -> bool {
+        patterns.len() == actual.len()
+            && patterns
+                .iter()
+                .zip(actual)
+                .all(|(pattern, actual)| self.infer_type_pattern(*pattern, *actual, substitutions))
+    }
+
+    fn iteration_item_type(&mut self, actual: TypeId, semantic: &SemanticType) -> Option<TypeId> {
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        match semantic {
+            SemanticType::Array(element) => Some(*element),
+            SemanticType::Table { key, value } => self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Tuple(vec![*key, *value]))
+                .ok(),
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if arguments.len() == 1
+                && matches!(
+                    *definition,
+                    definition
+                        if definition == protocol.list()
+                            || definition == protocol.iterable()
+                            || definition == protocol.iterator()
+                ) =>
+            {
+                Some(arguments[0])
+            }
+            _ => {
+                let _ = actual;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn materialize_generic_bound_types(
+        &mut self,
+        bound: TypeId,
+        substitutions: &BTreeMap<ParameterId, TypeId>,
+    ) -> Option<()> {
+        let concrete = self
+            .resolver
+            .substitute_type_parameters(bound, substitutions)?;
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        let SemanticType::Builtin {
+            definition,
+            arguments,
+        } = self.resolver.arena().get(concrete)?.clone()
+        else {
+            return Some(());
+        };
+        if arguments.len() != 1
+            || (definition != protocol.iterable() && definition != protocol.iterator())
+        {
+            return Some(());
+        }
+        for definition in [protocol.iterator(), protocol.iteration()] {
+            self.resolver
+                .arena_mut()
+                .intern(SemanticType::Builtin {
+                    definition,
+                    arguments: arguments.clone(),
+                })
+                .ok()?;
+        }
+        Some(())
     }
 
     fn check_string_conversion(
@@ -477,6 +937,237 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
     }
 
+    pub(crate) fn check_list_create(
+        &mut self,
+        path: &[String],
+        type_arguments: &[pop_syntax::TypeSyntax],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let operation = path.get(1)?.as_str();
+        if type_arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                span,
+                format!("List.{operation}"),
+                1,
+                type_arguments.len(),
+            ));
+            return None;
+        }
+        let expected_arguments = usize::from(operation == "withCapacity");
+        if arguments.len() != expected_arguments {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                format!("List.{operation}"),
+                expected_arguments,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let signature = self.signature_stack.last()?.clone();
+        let (resolved, diagnostics) =
+            self.resolver
+                .resolve_annotation(self.module, &type_arguments[0], &signature);
+        self.diagnostics.extend(diagnostics);
+        let element_type = resolved?.type_id()?;
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        let list_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.list(),
+                arguments: vec![element_type],
+            })
+            .ok()?;
+        let capacity = if operation == "withCapacity" {
+            let integer = self.resolver.arena().source_type("Int")?;
+            let value = self.check_expression_expected(
+                &arguments[0],
+                Some(ExpectedExpressionType::plain(integer)),
+            )?;
+            self.require_same_type(integer, value.type_id(), value.span(), arguments[0].span());
+            Some(Box::new(value))
+        } else {
+            None
+        };
+        Some(TypedExpression {
+            kind: TypedExpressionKind::ListCreate { capacity },
+            type_id: list_type,
+            span,
+        })
+    }
+
+    pub(crate) fn check_list_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let operation = path.get(1)?.as_str();
+        let expected_arity = 1 + usize::from(matches!(operation, "add" | "get"));
+        if arguments.len() != expected_arity {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                format!("List.{operation}"),
+                expected_arity,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let list = self.check_expression(&arguments[0])?;
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        let Some(SemanticType::Builtin {
+            definition,
+            arguments: list_arguments,
+        }) = self.resolver.arena().get(list.type_id()).cloned()
+        else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                arguments[0].span(),
+                "List<T>",
+                self.type_name(list.type_id()),
+                span,
+            ));
+            return None;
+        };
+        if definition != protocol.list() || list_arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                arguments[0].span(),
+                "List<T>",
+                self.type_name(list.type_id()),
+                span,
+            ));
+            return None;
+        }
+        let element_type = list_arguments[0];
+        match operation {
+            "length" => Some(TypedExpression {
+                kind: TypedExpressionKind::ListLength {
+                    list: Box::new(list),
+                },
+                type_id: self.resolver.arena().source_type("Int")?,
+                span,
+            }),
+            "get" => {
+                let integer = self.resolver.arena().source_type("Int")?;
+                let index = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(integer)),
+                )?;
+                self.require_same_type(integer, index.type_id(), index.span(), arguments[1].span());
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ListGetChecked {
+                        list: Box::new(list),
+                        index: Box::new(index),
+                    },
+                    type_id: element_type,
+                    span,
+                })
+            }
+            "add" => {
+                let active = match list.kind() {
+                    TypedExpressionKind::Local(local) => Some(
+                        crate::body_checking::ActiveCollectionIteration::Local(*local),
+                    ),
+                    TypedExpressionKind::Parameter(parameter) => Some(
+                        crate::body_checking::ActiveCollectionIteration::Parameter(*parameter),
+                    ),
+                    TypedExpressionKind::Capture(capture) => Some(
+                        crate::body_checking::ActiveCollectionIteration::Capture(*capture),
+                    ),
+                    _ => None,
+                };
+                if active.is_some_and(|active| self.active_collection_iterations.contains(&active))
+                {
+                    self.diagnostics
+                        .push(type_diagnostics::structural_mutation_during_iteration(
+                            span, "List.add",
+                        ));
+                }
+                let value = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(element_type)),
+                )?;
+                self.require_same_type(
+                    element_type,
+                    value.type_id(),
+                    value.span(),
+                    arguments[1].span(),
+                );
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ListAdd {
+                        list: Box::new(list),
+                        value: Box::new(value),
+                    },
+                    type_id: self.resolver.arena().source_type("nil")?,
+                    span,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn check_iteration_item_invocation(
+        &mut self,
+        arguments: &[ExpressionSyntax],
+        expected: Option<ExpectedExpressionType>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "Iteration.Item",
+                1,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        let expected_item =
+            expected.and_then(
+                |expected| match self.resolver.arena().get(expected.type_id) {
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if *definition == protocol.iteration() && arguments.len() == 1 => {
+                        Some(arguments[0])
+                    }
+                    _ => None,
+                },
+            );
+        let value = self.check_expression_expected(
+            &arguments[0],
+            expected_item.map(ExpectedExpressionType::plain),
+        )?;
+        if let Some(expected_item) = expected_item {
+            self.require_same_type(
+                expected_item,
+                value.type_id(),
+                value.span(),
+                arguments[0].span(),
+            );
+        }
+        let iteration_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: protocol.iteration(),
+                arguments: vec![value.type_id()],
+            })
+            .ok()?;
+        if let Some(expected) = expected {
+            self.require_same_type(expected.type_id, iteration_type, span, span);
+        }
+        Some(TypedExpression {
+            kind: TypedExpressionKind::IterationCase {
+                iteration: protocol.iteration(),
+                case: protocol.item_case(),
+                arguments: vec![value],
+            },
+            type_id: iteration_type,
+            span,
+        })
+    }
+
     pub(crate) fn check_standard_invocation(
         &mut self,
         path: &[String],
@@ -574,6 +1265,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         &mut self,
         path: &[String],
         arguments: &[ExpressionSyntax],
+        expected: Option<ExpectedExpressionType>,
         span: SourceSpan,
     ) -> Option<CheckedCall> {
         let (method_name, class_path) = path.split_last()?;
@@ -607,6 +1299,54 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 ));
             return None;
         }
+        if !definition.type_parameters().is_empty() {
+            let signature = self.resolver.method_signature(&definition, &method);
+            let inferred = self.check_inferred_generic_call(
+                definition.symbol(),
+                &signature,
+                arguments,
+                expected,
+                span,
+            )?;
+            let symbolic = inferred
+                .call
+                .type_arguments
+                .iter()
+                .any(|argument| self.resolver.arena().contains_type_parameter(*argument));
+            let instance = self
+                .resolver
+                .instantiate_class(definition.symbol(), &inferred.call.type_arguments)?;
+            let instance_method = instance.methods().iter().find(|candidate| {
+                candidate.name() == method.name()
+                    && candidate.dispatch() == crate::ClassMethodDispatch::Static
+            })?;
+            if symbolic {
+                return Some(CheckedCall {
+                    call: TypedCall {
+                        dispatch: TypedCallDispatch::DirectMethod {
+                            method: method.method(),
+                            receiver: None,
+                        },
+                        type_arguments: Vec::new(),
+                        arguments: inferred.call.arguments,
+                        span,
+                    },
+                    results: instance_method.results().to_vec(),
+                });
+            }
+            return Some(CheckedCall {
+                call: TypedCall {
+                    dispatch: TypedCallDispatch::DirectMethod {
+                        method: instance_method.method(),
+                        receiver: None,
+                    },
+                    type_arguments: Vec::new(),
+                    arguments: inferred.call.arguments,
+                    span,
+                },
+                results: instance_method.results().to_vec(),
+            });
+        }
         self.check_direct_method_invocation(&method, None, arguments, span)
     }
 
@@ -630,11 +1370,74 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<CheckedCall> {
         let receiver = self.check_expression(receiver)?;
-        if let Some(interface) = self
+        if let Some((interface, item_type)) = self.builtin_iteration_interface(receiver.type_id()) {
+            let protocol = self.resolver.schema().iteration_protocol()?;
+            let (method, result_definition) = match (interface, method_name) {
+                (candidate, "iterator")
+                    if candidate == protocol.iterable() || candidate == protocol.iterator() =>
+                {
+                    (protocol.iterator_method(), protocol.iterator())
+                }
+                (candidate, "next") if candidate == protocol.iterator() => {
+                    (protocol.next_method(), protocol.iteration())
+                }
+                _ => {
+                    self.diagnostics
+                        .push(type_diagnostics::unknown_record_field(span, method_name));
+                    return None;
+                }
+            };
+            if !arguments.is_empty() {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    span,
+                    "iteration protocol method call",
+                    0,
+                    arguments.len(),
+                ));
+                return None;
+            }
+            let result = self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Builtin {
+                    definition: result_definition,
+                    arguments: vec![item_type],
+                })
+                .ok()?;
+            return Some(CheckedCall {
+                call: TypedCall {
+                    dispatch: TypedCallDispatch::BuiltinInterfaceMethod {
+                        interface,
+                        method,
+                        receiver: Box::new(receiver),
+                    },
+                    type_arguments: Vec::new(),
+                    arguments: Vec::new(),
+                    span,
+                },
+                results: vec![result],
+            });
+        }
+        let interface = self
             .resolver
             .interface_definition_for_type(receiver.type_id())
             .cloned()
-        {
+            .or_else(|| {
+                let SemanticType::TypeParameter(parameter) =
+                    self.resolver.arena().get(receiver.type_id())?
+                else {
+                    return None;
+                };
+                let bound = self
+                    .signature_stack
+                    .last()?
+                    .type_parameters()
+                    .iter()
+                    .find(|candidate| candidate.parameter() == *parameter)?
+                    .bound()?;
+                self.resolver.interface_definition_for_type(bound).cloned()
+            });
+        if let Some(interface) = interface {
             let Some(method) = interface
                 .methods()
                 .iter()
@@ -811,6 +1614,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             TypedCallDispatch::Referenced { function } => TypedExpressionKind::ReferencedCall {
                 function,
+                type_arguments,
                 arguments,
             },
             TypedCallDispatch::DirectMethod { method, receiver } => {
@@ -830,6 +1634,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 receiver,
                 arguments,
             },
+            TypedCallDispatch::BuiltinInterfaceMethod {
+                interface,
+                method,
+                receiver,
+            } => TypedExpressionKind::BuiltinInterfaceMethodCall {
+                interface,
+                method,
+                receiver,
+                arguments,
+            },
             TypedCallDispatch::Indirect { callee } => {
                 TypedExpressionKind::IndirectCall { callee, arguments }
             }
@@ -839,5 +1653,32 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id: result_type,
             span,
         })
+    }
+}
+
+impl BodyChecker<'_, '_> {
+    fn builtin_iteration_interface(&self, type_id: TypeId) -> Option<(BuiltinTypeId, TypeId)> {
+        let semantic = self.resolver.arena().get(type_id)?;
+        let bound = if let SemanticType::TypeParameter(parameter) = semantic {
+            self.signature_stack
+                .last()?
+                .type_parameters()
+                .iter()
+                .find(|candidate| candidate.parameter() == *parameter)?
+                .bound()?
+        } else {
+            type_id
+        };
+        let SemanticType::Builtin {
+            definition,
+            arguments,
+        } = self.resolver.arena().get(bound)?
+        else {
+            return None;
+        };
+        let protocol = self.resolver.schema().iteration_protocol()?;
+        ((*definition == protocol.iterable() || *definition == protocol.iterator())
+            && arguments.len() == 1)
+            .then_some((*definition, arguments[0]))
     }
 }

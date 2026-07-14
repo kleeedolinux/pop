@@ -111,6 +111,22 @@ pub(crate) fn dump_declaration(
                     );
                 }
             }
+            for implementation in &class.builtin_interfaces {
+                let _ = write!(
+                    output,
+                    " implements b{}:{}",
+                    implementation.interface.raw(),
+                    type_text(implementation.interface_type, arena)
+                );
+                for mapping in &implementation.methods {
+                    let _ = write!(
+                        output,
+                        " [iterationMethod#{} => m{}]",
+                        mapping.protocol_method.raw(),
+                        mapping.class_method.raw()
+                    );
+                }
+            }
         }
         HirDeclarationKind::Interface(interface) => {
             let _ = write!(
@@ -440,6 +456,52 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::GeneralizedFor {
+                protocol,
+                source,
+                item_type,
+                iterator_type,
+                iteration_type,
+                bindings,
+                iterable,
+                body,
+            } => {
+                let _ = write!(
+                    output,
+                    "generalizedFor {:?} item:{} iterator:{} step:{} protocol(iteration#{}, iterable#{}, iterator#{}, list#{}, cases {}:{}, methods {}:{}) ",
+                    source,
+                    type_text(*item_type, arena),
+                    type_text(*iterator_type, arena),
+                    type_text(*iteration_type, arena),
+                    protocol.iteration().raw(),
+                    protocol.iterable().raw(),
+                    protocol.iterator().raw(),
+                    protocol.list().raw(),
+                    protocol.item_case().raw(),
+                    protocol.end_case().raw(),
+                    protocol.iterator_method().raw(),
+                    protocol.next_method().raw(),
+                );
+                for (index, binding) in bindings.iter().enumerate() {
+                    if index != 0 {
+                        output.push_str(", ");
+                    }
+                    let _ = write!(
+                        output,
+                        "bind#{} l{} {}:{}",
+                        binding.binding.raw(),
+                        binding.local.raw(),
+                        binding.name,
+                        type_text(binding.local_type, arena)
+                    );
+                }
+                output.push_str(" in ");
+                dump_expression(output, iterable, arena);
+                output.push('\n');
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::Break => output.push_str("break\n"),
             HirStatementKind::Continue => output.push_str("continue\n"),
             HirStatementKind::Match {
@@ -555,6 +617,15 @@ fn dump_statements(
                 dump_expression(output, value, arena);
                 output.push('\n');
             }
+            HirStatementKind::ListSet { list, index, value } => {
+                output.push_str("list.set ");
+                dump_expression(output, list, arena);
+                output.push('[');
+                dump_expression(output, index, arena);
+                output.push_str("] = ");
+                dump_expression(output, value, arena);
+                output.push('\n');
+            }
             HirStatementKind::TableSet { table, key, value } => {
                 output.push_str("table.set ");
                 dump_expression(output, table, arena);
@@ -612,6 +683,12 @@ fn dump_assignment_target(output: &mut String, target: &HirAssignmentTarget, are
         }
         HirAssignmentTarget::Array { array, index, .. } => {
             dump_array_get(output, array, index, arena);
+        }
+        HirAssignmentTarget::List { list, index, .. } => {
+            dump_expression(output, list, arena);
+            output.push('[');
+            dump_expression(output, index, arena);
+            output.push(']');
         }
         HirAssignmentTarget::Table { table, key, .. } => {
             dump_expression(output, table, arena);
@@ -735,6 +812,35 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             output.push(' ');
             dump_expression(output, value, arena);
         }
+        HirExpressionKind::ListCreate { capacity } => {
+            output.push_str("list.create");
+            if let Some(capacity) = capacity {
+                output.push(' ');
+                dump_expression(output, capacity, arena);
+            }
+        }
+        HirExpressionKind::ListLength { list } => {
+            output.push_str("list.length ");
+            dump_expression(output, list, arena);
+        }
+        HirExpressionKind::ListGet { list, index } => {
+            output.push_str("list.get ");
+            dump_expression(output, list, arena);
+            output.push(' ');
+            dump_expression(output, index, arena);
+        }
+        HirExpressionKind::ListGetChecked { list, index } => {
+            output.push_str("list.get.checked ");
+            dump_expression(output, list, arena);
+            output.push(' ');
+            dump_expression(output, index, arena);
+        }
+        HirExpressionKind::ListAdd { list, value } => {
+            output.push_str("list.add ");
+            dump_expression(output, list, arena);
+            output.push(' ');
+            dump_expression(output, value, arena);
+        }
         HirExpressionKind::Record { record, fields } => {
             let _ = write!(output, "record s{} ", record.raw());
             dump_fields(output, fields, arena);
@@ -778,6 +884,20 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
                 output,
                 "result.case builtin#{} case#{}(",
                 result.raw(),
+                case.raw()
+            );
+            dump_expression_list(output, arguments, arena);
+            output.push(')');
+        }
+        HirExpressionKind::IterationCase {
+            iteration,
+            case,
+            arguments,
+        } => {
+            let _ = write!(
+                output,
+                "iteration.case builtin#{} case#{}(",
+                iteration.raw(),
                 case.raw()
             );
             dump_expression_list(output, arguments, arena);
@@ -905,7 +1025,14 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_call(output, dispatch, type_arguments, arguments, arena);
         }
         HirExpressionKind::InterfaceUpcast { value, interface } => {
-            let _ = write!(output, "convert.interface i{} ", interface.raw());
+            match interface {
+                pop_foundation::NominalInterfaceId::User(interface) => {
+                    let _ = write!(output, "convert.interface i{} ", interface.raw());
+                }
+                pop_foundation::NominalInterfaceId::Builtin(interface) => {
+                    let _ = write!(output, "convert.interface b{} ", interface.raw());
+                }
+            }
             dump_expression(output, value, arena);
         }
         HirExpressionKind::NumericConvert { value, conversion } => {
@@ -965,6 +1092,14 @@ fn dump_call(
                 interface.raw(),
                 method.raw(),
                 slot
+            );
+        }
+        HirCallDispatch::BuiltinInterfaceMethod { interface, method } => {
+            let _ = write!(
+                output,
+                "call.builtin-interface b{} iterationMethod#{}",
+                interface.raw(),
+                method.raw()
             );
         }
         HirCallDispatch::Indirect { callee } => {

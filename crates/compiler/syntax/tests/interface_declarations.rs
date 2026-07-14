@@ -61,6 +61,68 @@ fn parses_public_instance_interface_signatures_and_explicit_class_implementation
 }
 
 #[test]
+fn generic_classes_and_interfaces_preserve_ordered_parameters_and_bounds() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/genericIterator.pop",
+        "namespace Iteration\n\
+         public interface Producer<T>\n\
+             function next(): T?\n\
+         end\n\
+         private class MappingIterator<T, TSource: Producer<T>> implements Producer<T>\n\
+             source: TSource\n\
+             public function MappingIterator:next(): T?\n\
+                 return nil\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    assert!(syntax.diagnostics().is_empty(), "structural syntax");
+
+    let interface_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::InterfaceDeclaration)
+        .expect("interface");
+    let interface = parse_interface_declaration(&source, &syntax, interface_node)
+        .expect("generic interface syntax");
+    assert_eq!(interface.type_parameters().len(), 1);
+    assert_eq!(interface.type_parameters()[0].name(), "T");
+
+    let class_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::ClassDeclaration)
+        .expect("class");
+    let class =
+        parse_class_declaration(&source, &syntax, class_node).expect("generic class syntax");
+    assert_eq!(
+        class
+            .type_parameters()
+            .iter()
+            .map(pop_syntax::GenericParameterSyntax::name)
+            .collect::<Vec<_>>(),
+        ["T", "TSource"]
+    );
+    assert!(class.type_parameters()[0].bound().is_none());
+    assert!(matches!(
+        class.type_parameters()[1]
+            .bound()
+            .map(pop_syntax::TypeSyntax::kind),
+        Some(TypeSyntaxKind::Named { path, arguments })
+            if path == &["Producer"] && arguments.len() == 1
+    ));
+    assert!(matches!(
+        class.interfaces()[0].kind(),
+        TypeSyntaxKind::Named { path, arguments }
+            if path == &["Producer"] && arguments.len() == 1
+    ));
+}
+
+#[test]
 fn interface_members_reject_visibility_fields_and_bodies() {
     for invalid in [
         "namespace Example\npublic interface Reader\npublic function read()\nend\n",

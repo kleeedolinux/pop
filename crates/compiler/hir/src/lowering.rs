@@ -15,8 +15,8 @@ use pop_types::{
     CaptureMode, CaptureSource, ClassDefinition, ClassInterfaceImplementation,
     ClassMethodDefinition, InterfaceDefinition, ResolvedAttribute, ResolvedFunctionSignature,
     TypeArena, TypedAssignmentTarget, TypedBody, TypedCall, TypedCallDispatch, TypedCapture,
-    TypedClosure, TypedExpression, TypedExpressionKind, TypedFieldValue, TypedMatchArm,
-    TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry,
+    TypedClosure, TypedExpression, TypedExpressionKind, TypedFieldValue, TypedIterationSource,
+    TypedMatchArm, TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry,
 };
 
 use crate::ir::*;
@@ -203,6 +203,16 @@ pub fn build_hir_function_with_known_callables_and_attributes(
             .type_parameters()
             .iter()
             .map(pop_types::ResolvedTypeParameter::type_id)
+            .collect(),
+        type_parameter_names: signature
+            .type_parameters()
+            .iter()
+            .map(|parameter| parameter.name().to_owned())
+            .collect(),
+        type_parameter_bounds: signature
+            .type_parameters()
+            .iter()
+            .map(pop_types::ResolvedTypeParameter::bound)
             .collect(),
         parameters,
         results,
@@ -409,6 +419,66 @@ fn lower_statement(
                 .map(|statement| lower_statement(statement, interface_slots))
                 .collect(),
         },
+        TypedStatementKind::GeneralizedFor {
+            protocol,
+            source,
+            item_type,
+            iterator_type,
+            iteration_type,
+            bindings,
+            iterable,
+            body,
+        } => HirStatementKind::GeneralizedFor {
+            protocol: HirIterationProtocol {
+                iteration: protocol.iteration(),
+                iterable: protocol.iterable(),
+                iterator: protocol.iterator(),
+                list: protocol.list(),
+                item_case: protocol.item_case(),
+                end_case: protocol.end_case(),
+                iterator_method: protocol.iterator_method(),
+                next_method: protocol.next_method(),
+            },
+            source: match source {
+                TypedIterationSource::Array => HirIterationSource::Array,
+                TypedIterationSource::List => HirIterationSource::List,
+                TypedIterationSource::Table => HirIterationSource::Table,
+                TypedIterationSource::Iterable => HirIterationSource::Iterable,
+                TypedIterationSource::Iterator => HirIterationSource::Iterator,
+                TypedIterationSource::BoundIterable => HirIterationSource::BoundIterable,
+                TypedIterationSource::BoundIterator => HirIterationSource::BoundIterator,
+                TypedIterationSource::ClassIterable { iterator_method } => {
+                    HirIterationSource::ClassIterable {
+                        iterator_method: *iterator_method,
+                    }
+                }
+                TypedIterationSource::ClassIterator {
+                    iterator_method,
+                    next_method,
+                } => HirIterationSource::ClassIterator {
+                    iterator_method: *iterator_method,
+                    next_method: *next_method,
+                },
+            },
+            item_type: *item_type,
+            iterator_type: *iterator_type,
+            iteration_type: *iteration_type,
+            bindings: bindings
+                .iter()
+                .map(|binding| HirLocalBinding {
+                    binding: binding.binding(),
+                    local: binding.local(),
+                    name: binding.name().to_owned(),
+                    local_type: binding.local_type(),
+                    span: binding.span(),
+                })
+                .collect(),
+            iterable: lower_expression(iterable, interface_slots),
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
         TypedStatementKind::Break => HirStatementKind::Break,
         TypedStatementKind::Continue => HirStatementKind::Continue,
         TypedStatementKind::Match {
@@ -501,6 +571,11 @@ fn lower_statement(
             index: lower_expression(index, interface_slots),
             value: lower_expression(value, interface_slots),
         },
+        TypedStatementKind::ListSet { list, index, value } => HirStatementKind::ListSet {
+            list: lower_expression(list, interface_slots),
+            index: lower_expression(index, interface_slots),
+            value: lower_expression(value, interface_slots),
+        },
         TypedStatementKind::TableSet { table, key, value } => HirStatementKind::TableSet {
             table: lower_expression(table, interface_slots),
             key: lower_expression(key, interface_slots),
@@ -580,6 +655,15 @@ fn lower_assignment_target(
             index: lower_expression(index, interface_slots),
             element_type: *element_type,
         },
+        TypedAssignmentTarget::List {
+            list,
+            index,
+            element_type,
+        } => HirAssignmentTarget::List {
+            list: lower_expression(list, interface_slots),
+            index: lower_expression(index, interface_slots),
+            element_type: *element_type,
+        },
         TypedAssignmentTarget::Table {
             table,
             key,
@@ -629,6 +713,27 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                     interface: *interface,
                     method: *method,
                     slot: interface_slots[&(*interface, *method)],
+                },
+                type_arguments: call.type_arguments().to_vec(),
+                arguments: std::iter::once(lower_expression(receiver, interface_slots))
+                    .chain(
+                        call.arguments()
+                            .iter()
+                            .map(|argument| lower_expression(argument, interface_slots)),
+                    )
+                    .collect(),
+                span: call.span(),
+            };
+        }
+        TypedCallDispatch::BuiltinInterfaceMethod {
+            interface,
+            method,
+            receiver,
+        } => {
+            return HirCall {
+                dispatch: HirCallDispatch::BuiltinInterfaceMethod {
+                    interface: *interface,
+                    method: *method,
                 },
                 type_arguments: call.type_arguments().to_vec(),
                 arguments: std::iter::once(lower_expression(receiver, interface_slots))
@@ -715,6 +820,26 @@ fn lower_expression(
             array: Box::new(lower_expression(array, interface_slots)),
             value: Box::new(lower_expression(value, interface_slots)),
         },
+        TypedExpressionKind::ListCreate { capacity } => HirExpressionKind::ListCreate {
+            capacity: capacity
+                .as_ref()
+                .map(|capacity| Box::new(lower_expression(capacity, interface_slots))),
+        },
+        TypedExpressionKind::ListLength { list } => HirExpressionKind::ListLength {
+            list: Box::new(lower_expression(list, interface_slots)),
+        },
+        TypedExpressionKind::ListGet { list, index } => HirExpressionKind::ListGet {
+            list: Box::new(lower_expression(list, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::ListGetChecked { list, index } => HirExpressionKind::ListGetChecked {
+            list: Box::new(lower_expression(list, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::ListAdd { list, value } => HirExpressionKind::ListAdd {
+            list: Box::new(lower_expression(list, interface_slots)),
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
         TypedExpressionKind::Record { record, fields } => HirExpressionKind::Record {
             record: *record,
             fields: fields
@@ -776,6 +901,18 @@ fn lower_expression(
             arguments,
         } => HirExpressionKind::ResultCase {
             result: *result,
+            case: *case,
+            arguments: arguments
+                .iter()
+                .map(|argument| lower_expression(argument, interface_slots))
+                .collect(),
+        },
+        TypedExpressionKind::IterationCase {
+            iteration,
+            case,
+            arguments,
+        } => HirExpressionKind::IterationCase {
+            iteration: *iteration,
             case: *case,
             arguments: arguments
                 .iter()
@@ -873,7 +1010,8 @@ fn lower_expression(
         | TypedExpressionKind::ReferencedCall { .. }
         | TypedExpressionKind::IndirectCall { .. }
         | TypedExpressionKind::DirectMethodCall { .. }
-        | TypedExpressionKind::InterfaceMethodCall { .. }) => {
+        | TypedExpressionKind::InterfaceMethodCall { .. }
+        | TypedExpressionKind::BuiltinInterfaceMethodCall { .. }) => {
             lower_call_expression(call, interface_slots)
         }
         TypedExpressionKind::InterfaceUpcast { value, interface } => {
@@ -930,12 +1068,13 @@ fn lower_call_expression(
         },
         TypedExpressionKind::ReferencedCall {
             function,
+            type_arguments,
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Referenced {
                 function: *function,
             },
-            type_arguments: Vec::new(),
+            type_arguments: type_arguments.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
@@ -978,6 +1117,25 @@ fn lower_call_expression(
                 interface: *interface,
                 method: *method,
                 slot: interface_slots[&(*interface, *method)],
+            },
+            type_arguments: Vec::new(),
+            arguments: std::iter::once(lower_expression(receiver, interface_slots))
+                .chain(
+                    arguments
+                        .iter()
+                        .map(|argument| lower_expression(argument, interface_slots)),
+                )
+                .collect(),
+        },
+        TypedExpressionKind::BuiltinInterfaceMethodCall {
+            interface,
+            method,
+            receiver,
+            arguments,
+        } => HirExpressionKind::Call {
+            dispatch: HirCallDispatch::BuiltinInterfaceMethod {
+                interface: *interface,
+                method: *method,
             },
             type_arguments: Vec::new(),
             arguments: std::iter::once(lower_expression(receiver, interface_slots))
@@ -1148,6 +1306,10 @@ fn first_unknown_interface_call(
                 .or_else(|| first_unknown_interface_expression(last, slots))
                 .or_else(|| first_unknown_interface_expression(step, slots))
                 .or_else(|| first_unknown_interface_call(body, slots)),
+            TypedStatementKind::GeneralizedFor { iterable, body, .. } => {
+                first_unknown_interface_expression(iterable, slots)
+                    .or_else(|| first_unknown_interface_call(body, slots))
+            }
             TypedStatementKind::Break | TypedStatementKind::Continue => None,
             TypedStatementKind::Match {
                 scrutinee, arms, ..
@@ -1183,6 +1345,11 @@ fn first_unknown_interface_call(
             } => first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
                 .or_else(|| first_unknown_interface_expression(value, slots)),
+            TypedStatementKind::ListSet { list, index, value } => {
+                first_unknown_interface_expression(list, slots)
+                    .or_else(|| first_unknown_interface_expression(index, slots))
+                    .or_else(|| first_unknown_interface_expression(value, slots))
+            }
             TypedStatementKind::TableSet { table, key, value } => {
                 first_unknown_interface_expression(table, slots)
                     .or_else(|| first_unknown_interface_expression(key, slots))
@@ -1218,6 +1385,9 @@ fn first_unknown_interface_call(
                         TypedCallDispatch::InterfaceMethod { receiver, .. } => {
                             first_unknown_interface_expression(receiver, slots)
                         }
+                        TypedCallDispatch::BuiltinInterfaceMethod { receiver, .. } => {
+                            first_unknown_interface_expression(receiver, slots)
+                        }
                         TypedCallDispatch::Indirect { callee } => {
                             first_unknown_interface_expression(callee, slots)
                         }
@@ -1250,6 +1420,10 @@ fn first_unknown_interface_target(
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
         }
+        TypedAssignmentTarget::List { list, index, .. } => {
+            first_unknown_interface_expression(list, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
         TypedAssignmentTarget::Table { table, key, .. } => {
             first_unknown_interface_expression(table, slots)
                 .or_else(|| first_unknown_interface_expression(key, slots))
@@ -1277,6 +1451,15 @@ fn first_unknown_interface_expression(
                     .find_map(|argument| first_unknown_interface_expression(argument, slots))
             })
         }
+        TypedExpressionKind::BuiltinInterfaceMethodCall {
+            receiver,
+            arguments,
+            ..
+        } => first_unknown_interface_expression(receiver, slots).or_else(|| {
+            arguments
+                .iter()
+                .find_map(|argument| first_unknown_interface_expression(argument, slots))
+        }),
         TypedExpressionKind::Closure(closure) => {
             first_unknown_interface_call(closure.body().statements(), slots)
         }
@@ -1285,7 +1468,9 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Record { fields, .. } => fields
             .iter()
             .find_map(|field| first_unknown_interface_expression(field.value(), slots)),
-        TypedExpressionKind::ArrayGet { array, index } => {
+        TypedExpressionKind::ArrayGet { array, index }
+        | TypedExpressionKind::ListGet { list: array, index }
+        | TypedExpressionKind::ListGetChecked { list: array, index } => {
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
         }
@@ -1312,6 +1497,14 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(array, slots)
                 .or_else(|| first_unknown_interface_expression(value, slots))
         }
+        TypedExpressionKind::ListCreate { capacity } => capacity
+            .as_deref()
+            .and_then(|capacity| first_unknown_interface_expression(capacity, slots)),
+        TypedExpressionKind::ListLength { list } => first_unknown_interface_expression(list, slots),
+        TypedExpressionKind::ListAdd { list, value } => {
+            first_unknown_interface_expression(list, slots)
+                .or_else(|| first_unknown_interface_expression(value, slots))
+        }
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             first_unknown_interface_expression(base, slots).or_else(|| {
                 fields
@@ -1328,6 +1521,7 @@ fn first_unknown_interface_expression(
         }),
         TypedExpressionKind::UnionCase { arguments, .. }
         | TypedExpressionKind::ResultCase { arguments, .. }
+        | TypedExpressionKind::IterationCase { arguments, .. }
         | TypedExpressionKind::ErrorCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
         | TypedExpressionKind::ReferencedCall { arguments, .. }
@@ -1459,6 +1653,10 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 .or_else(|| first_compile_time_only_expression(last))
                 .or_else(|| first_compile_time_only_expression(step))
                 .or_else(|| first_compile_time_only_statement(body)),
+            TypedStatementKind::GeneralizedFor { iterable, body, .. } => {
+                first_compile_time_only_expression(iterable)
+                    .or_else(|| first_compile_time_only_statement(body))
+            }
             TypedStatementKind::Break | TypedStatementKind::Continue => None,
             TypedStatementKind::Match {
                 scrutinee, arms, ..
@@ -1494,6 +1692,11 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
             } => first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
                 .or_else(|| first_compile_time_only_expression(value)),
+            TypedStatementKind::ListSet { list, index, value } => {
+                first_compile_time_only_expression(list)
+                    .or_else(|| first_compile_time_only_expression(index))
+                    .or_else(|| first_compile_time_only_expression(value))
+            }
             TypedStatementKind::TableSet { table, key, value } => {
                 first_compile_time_only_expression(table)
                     .or_else(|| first_compile_time_only_expression(key))
@@ -1528,6 +1731,8 @@ fn first_compile_time_only_target(target: &TypedAssignmentTarget) -> Option<Sour
             first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(index))
         }
+        TypedAssignmentTarget::List { list, index, .. } => first_compile_time_only_expression(list)
+            .or_else(|| first_compile_time_only_expression(index)),
         TypedAssignmentTarget::Table { table, key, .. } => {
             first_compile_time_only_expression(table)
                 .or_else(|| first_compile_time_only_expression(key))
@@ -1544,6 +1749,9 @@ fn first_compile_time_only_call(call: &TypedCall) -> Option<SourceSpan> {
             .as_deref()
             .and_then(first_compile_time_only_expression),
         TypedCallDispatch::InterfaceMethod { receiver, .. } => {
+            first_compile_time_only_expression(receiver)
+        }
+        TypedCallDispatch::BuiltinInterfaceMethod { receiver, .. } => {
             first_compile_time_only_expression(receiver)
         }
         TypedCallDispatch::Indirect { callee } => first_compile_time_only_expression(callee),
@@ -1567,8 +1775,12 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Record { fields, .. } => fields
             .iter()
             .find_map(|field| first_compile_time_only_expression(field.value())),
-        TypedExpressionKind::ArrayGet { array, index } => first_compile_time_only_expression(array)
-            .or_else(|| first_compile_time_only_expression(index)),
+        TypedExpressionKind::ArrayGet { array, index }
+        | TypedExpressionKind::ListGet { list: array, index }
+        | TypedExpressionKind::ListGetChecked { list: array, index } => {
+            first_compile_time_only_expression(array)
+                .or_else(|| first_compile_time_only_expression(index))
+        }
         TypedExpressionKind::TableGet { table, key } => first_compile_time_only_expression(table)
             .or_else(|| first_compile_time_only_expression(key)),
         TypedExpressionKind::TupleGet { tuple, .. } => first_compile_time_only_expression(tuple),
@@ -1586,6 +1798,12 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             first_compile_time_only_expression(array)
                 .or_else(|| first_compile_time_only_expression(value))
         }
+        TypedExpressionKind::ListCreate { capacity } => capacity
+            .as_deref()
+            .and_then(first_compile_time_only_expression),
+        TypedExpressionKind::ListLength { list } => first_compile_time_only_expression(list),
+        TypedExpressionKind::ListAdd { list, value } => first_compile_time_only_expression(list)
+            .or_else(|| first_compile_time_only_expression(value)),
         TypedExpressionKind::RecordUpdate { base, fields, .. } => {
             first_compile_time_only_expression(base).or_else(|| {
                 fields
@@ -1602,6 +1820,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         }),
         TypedExpressionKind::UnionCase { arguments, .. }
         | TypedExpressionKind::ResultCase { arguments, .. }
+        | TypedExpressionKind::IterationCase { arguments, .. }
         | TypedExpressionKind::ErrorCase { arguments, .. }
         | TypedExpressionKind::DirectCall { arguments, .. }
         | TypedExpressionKind::ReferencedCall { arguments, .. }
@@ -1656,6 +1875,11 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
                     .find_map(first_compile_time_only_expression)
             }),
         TypedExpressionKind::InterfaceMethodCall {
+            receiver,
+            arguments,
+            ..
+        }
+        | TypedExpressionKind::BuiltinInterfaceMethodCall {
             receiver,
             arguments,
             ..

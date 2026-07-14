@@ -6,10 +6,11 @@
 
 use pop_foundation::{
     AttributeId, BindingId, BuiltinTypeId, CaptureId, ClassId, Diagnostic, EnumCaseId, ErrorCaseId,
-    ErrorId, FieldId, InterfaceId, InterfaceMethodId, LocalId, MethodId, ModuleId,
-    NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
-    TypeId, UnionCaseId, ValueParameterId,
+    ErrorId, FieldId, InterfaceId, InterfaceMethodId, IterationProtocolMethodId, LocalId, MethodId,
+    ModuleId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId,
+    SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, NumericConversionKind,
@@ -113,6 +114,16 @@ pub enum TypedStatementKind {
         step: TypedExpression,
         body: Vec<TypedStatement>,
     },
+    GeneralizedFor {
+        protocol: crate::BootstrapIterationProtocol,
+        source: TypedIterationSource,
+        item_type: TypeId,
+        iterator_type: TypeId,
+        iteration_type: TypeId,
+        bindings: Vec<TypedLocalBinding>,
+        iterable: TypedExpression,
+        body: Vec<TypedStatement>,
+    },
     Break,
     Continue,
     Match {
@@ -151,6 +162,11 @@ pub enum TypedStatementKind {
         index: TypedExpression,
         value: TypedExpression,
     },
+    ListSet {
+        list: TypedExpression,
+        index: TypedExpression,
+        value: TypedExpression,
+    },
     TableSet {
         table: TypedExpression,
         key: TypedExpression,
@@ -169,6 +185,24 @@ pub enum TypedStatementKind {
     },
     Call(TypedCall),
     Expression(TypedExpression),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypedIterationSource {
+    Array,
+    List,
+    Table,
+    Iterable,
+    Iterator,
+    BoundIterable,
+    BoundIterator,
+    ClassIterable {
+        iterator_method: MethodId,
+    },
+    ClassIterator {
+        iterator_method: MethodId,
+        next_method: MethodId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,6 +263,11 @@ pub enum TypedAssignmentTarget {
         index: TypedExpression,
         element_type: TypeId,
     },
+    List {
+        list: TypedExpression,
+        index: TypedExpression,
+        element_type: TypeId,
+    },
     Table {
         table: TypedExpression,
         key: TypedExpression,
@@ -244,7 +283,7 @@ impl TypedAssignmentTarget {
             | Self::Capture { value_type, .. }
             | Self::Field { value_type, .. }
             | Self::Table { value_type, .. } => *value_type,
-            Self::Array { element_type, .. } => *element_type,
+            Self::Array { element_type, .. } | Self::List { element_type, .. } => *element_type,
         }
     }
 }
@@ -297,6 +336,11 @@ pub enum TypedCallDispatch {
     InterfaceMethod {
         interface: InterfaceId,
         method: InterfaceMethodId,
+        receiver: Box<TypedExpression>,
+    },
+    BuiltinInterfaceMethod {
+        interface: BuiltinTypeId,
+        method: IterationProtocolMethodId,
         receiver: Box<TypedExpression>,
     },
     Indirect {
@@ -386,6 +430,24 @@ pub enum TypedExpressionKind {
         array: Box<TypedExpression>,
         value: Box<TypedExpression>,
     },
+    ListCreate {
+        capacity: Option<Box<TypedExpression>>,
+    },
+    ListLength {
+        list: Box<TypedExpression>,
+    },
+    ListGet {
+        list: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+    },
+    ListGetChecked {
+        list: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+    },
+    ListAdd {
+        list: Box<TypedExpression>,
+        value: Box<TypedExpression>,
+    },
     Record {
         record: SymbolId,
         fields: Vec<TypedFieldValue>,
@@ -405,6 +467,11 @@ pub enum TypedExpressionKind {
     ResultCase {
         result: BuiltinTypeId,
         case: ResultCaseId,
+        arguments: Vec<TypedExpression>,
+    },
+    IterationCase {
+        iteration: BuiltinTypeId,
+        case: pop_foundation::IterationCaseId,
         arguments: Vec<TypedExpression>,
     },
     ErrorCase {
@@ -465,6 +532,7 @@ pub enum TypedExpressionKind {
     },
     ReferencedCall {
         function: SymbolIdentity,
+        type_arguments: Vec<TypeId>,
         arguments: Vec<TypedExpression>,
     },
     StandardCall {
@@ -486,9 +554,15 @@ pub enum TypedExpressionKind {
         receiver: Box<TypedExpression>,
         arguments: Vec<TypedExpression>,
     },
+    BuiltinInterfaceMethodCall {
+        interface: BuiltinTypeId,
+        method: IterationProtocolMethodId,
+        receiver: Box<TypedExpression>,
+        arguments: Vec<TypedExpression>,
+    },
     InterfaceUpcast {
         value: Box<TypedExpression>,
-        interface: InterfaceId,
+        interface: NominalInterfaceId,
     },
     NumericConvert {
         value: Box<TypedExpression>,
@@ -809,13 +883,13 @@ impl TypedFieldValue {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TypedUnaryOperator {
     Not,
     Negate,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TypedBinaryOperator {
     Or,
     And,
@@ -832,7 +906,7 @@ pub enum TypedBinaryOperator {
     Remainder,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TypedCompoundOperator {
     Add,
     Subtract,
@@ -842,7 +916,7 @@ pub enum TypedCompoundOperator {
     Concat,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum StringFormatKind {
     Boolean,
     Integer(IntegerKind),

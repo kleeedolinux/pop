@@ -1,4 +1,7 @@
-use pop_driver::{FrontEndBubbleInput, FrontEndModule, ReferenceMetadataError, analyze_bubble};
+use pop_driver::{
+    FrontEndBubbleInput, FrontEndModule, ReferenceMetadataDecodeError, ReferenceMetadataError,
+    analyze_bubble, decode_reference_metadata, encode_reference_metadata,
+};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolIdentity};
 use pop_mir::{lower_hir_bubble, parse_mir_dump, verify_mir_bubble};
 use pop_source::SourceFile;
@@ -22,6 +25,9 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
                 0,
                 "src/contribution.pop",
                 "namespace Pop.Math\n\
+                 --- <summary>Returns the supplied value.</summary>\n\
+                 --- <param name=\"value\">The value to return.</param>\n\
+                 --- <returns>The unchanged value.</returns>\n\
                  public function contributorIdentity(value: Int): Int\n\
                      return value\n\
                  end\n",
@@ -64,6 +70,11 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
     assert_eq!(function.name(), "contributorIdentity");
     assert_eq!(function.parameters().len(), 1);
     assert_eq!(function.results().len(), 1);
+    let [documentation] = standard.checked_documentation() else {
+        panic!("one public checked documentation member");
+    };
+    assert_eq!(documentation.identity(), function.identity());
+    assert_eq!(documentation.fragment().children().len(), 3);
 
     let application_bubble = BubbleId::from_raw(7);
     let application = analyze_bubble(
@@ -176,7 +187,7 @@ fn dependency_metadata_keeps_visibility_types_and_edges_closed() {
 }
 
 #[test]
-fn unsupported_public_signature_types_fail_reference_emission() {
+fn unsupported_nominal_public_signature_types_fail_reference_emission() {
     let bubble = BubbleId::from_raw(2);
     let result = analyze_bubble(FrontEndBubbleInput::new(
         bubble,
@@ -186,8 +197,11 @@ fn unsupported_public_signature_types_fail_reference_emission() {
             0,
             "src/unsupported.pop",
             "namespace Pop.Sequence\n\
-             public function first(values: Array<Int>): Int\n\
-                 return 0\n\
+             public record Token\n\
+                 value: Int\n\
+             end\n\
+             public function identity(value: Token): Token\n\
+                 return value\n\
              end\n",
         )],
     ));
@@ -195,6 +209,285 @@ fn unsupported_public_signature_types_fail_reference_emission() {
     assert!(matches!(
         result.reference_metadata(),
         Err(ReferenceMetadataError::UnsupportedPublicType { function, .. })
-            if function == SymbolIdentity::new(bubble, pop_foundation::SymbolId::from_raw(0))
+            if function == SymbolIdentity::new(bubble, pop_foundation::SymbolId::from_raw(1))
     ));
+}
+
+#[test]
+fn generic_reference_metadata_preserves_bounds_and_infers_consumer_calls() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![module(
+            0,
+            "src/generics.pop",
+            "namespace Pop.Sequence\n\
+             public function identity<T>(value: T): T\n\
+                 return value\n\
+             end\n\
+             public function select<T, TSource: Iterable<T>>(source: TSource, value: T): T\n\
+                 return value\n\
+             end\n",
+        )],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let metadata = library.reference_metadata().expect("generic metadata");
+    assert_eq!(metadata.functions().len(), 2);
+    let identity = metadata
+        .functions()
+        .iter()
+        .find(|function| function.name() == "identity")
+        .expect("identity metadata");
+    assert_eq!(identity.type_parameters().len(), 1);
+    assert!(identity.type_parameters()[0].bound().is_none());
+    let select = metadata
+        .functions()
+        .iter()
+        .find(|function| function.name() == "select")
+        .expect("select metadata");
+    assert_eq!(select.type_parameters().len(), 2);
+    assert_eq!(select.type_parameters()[1].name(), "TSource");
+    assert!(select.type_parameters()[1].bound().is_some());
+
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Pop.Sequence\n\
+                 public function run(): Int\n\
+                     local values: {Int} = {1, 2}\n\
+                     return identity(select(values, 7))\n\
+                 end\n",
+            )],
+        )
+        .with_reference_metadata(vec![metadata.clone()]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let dump = application
+        .hir()
+        .expect("generic consumer HIR")
+        .dump(application.types());
+    assert_eq!(dump.matches("call.reference b2:").count(), 2);
+    assert!(dump.contains("<<t"), "{dump}");
+}
+
+#[test]
+fn portable_generic_capsules_specialize_private_helpers_without_widening_visibility() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![module(
+            0,
+            "src/generics.pop",
+            "namespace Pop.Sequence\n\
+             private function privateIdentity<T>(value: T): T\n\
+                 return value\n\
+             end\n\
+             public function portableIdentity<T>(value: T): T\n\
+                 return privateIdentity(value)\n\
+             end\n",
+        )],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let metadata = library.reference_metadata().expect("generic metadata");
+    let [function] = metadata.functions() else {
+        panic!("private capsule helpers must not enter public metadata");
+    };
+    let capsule = function
+        .specialization_capsule()
+        .expect("public generic body requires a portable capsule");
+    assert_eq!(capsule.schema_version(), 1);
+    assert_eq!(capsule.content_sha256().len(), 64);
+    assert!(
+        capsule
+            .content_sha256()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert_eq!(capsule.function_count(), 2);
+
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Pop.Sequence\n\
+                 public function run(): Int\n\
+                     return portableIdentity(42)\n\
+                 end\n",
+            )],
+        )
+        .with_reference_metadata(vec![metadata.clone()]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let hir = application.hir().expect("consumer HIR");
+    assert!(hir.dump(application.types()).contains("call.reference b2:"));
+    let mir = lower_hir_bubble(hir, application.types()).expect("specialized consumer MIR");
+    let dump = mir.dump();
+    assert!(!dump.contains("callReference b2:"), "{dump}");
+    assert_eq!(dump.matches("function s").count(), 3, "{dump}");
+}
+
+#[test]
+fn portable_generic_capsules_remap_recursive_types_into_the_consumer_arena() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![module(
+            0,
+            "src/arrays.pop",
+            "namespace Pop.Sequence\n\
+             private function privateFirst<T>(values: {T}, value: T): T\n\
+                 return value\n\
+             end\n\
+             public function first<T>(values: {T}, value: T): T\n\
+                 return privateFirst(values, value)\n\
+             end\n",
+        )],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let metadata = library.reference_metadata().expect("array capsule").clone();
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Pop.Sequence\n\
+                 private function localIdentity<T>(value: T): T\n\
+                     return value\n\
+                 end\n\
+                 public function run(): Int\n\
+                     local values: {Int} = {42}\n\
+                     return first(values, 42)\n\
+                 end\n",
+            )],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(
+        application.hir().expect("consumer HIR"),
+        application.types(),
+    )
+    .expect("recursive capsule types remap before specialization");
+    assert!(!mir.dump().contains("callReference b2:"));
+}
+
+#[test]
+fn canonical_reference_metadata_round_trips_portable_generic_capsules() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![module(
+            0,
+            "src/generics.pop",
+            "namespace Pop.Sequence\n\
+             private function privateFirst<T>(values: {T}, value: T): T\n\
+                 return value\n\
+             end\n\
+             public function first<T>(values: {T}, value: T): T\n\
+                 return privateFirst(values, value)\n\
+             end\n",
+        )],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let metadata = library.reference_metadata().expect("generic metadata");
+    let first = encode_reference_metadata(metadata).expect("canonical reference metadata");
+    let second = encode_reference_metadata(metadata).expect("stable reference metadata");
+    assert_eq!(first, second);
+    assert_eq!(first.last(), Some(&b'\n'));
+    assert!(!first[..first.len() - 1].contains(&b'\n'));
+
+    let decoded = decode_reference_metadata(&first).expect("verified reference metadata");
+    assert_eq!(&decoded, metadata);
+    assert_eq!(
+        encode_reference_metadata(&decoded).expect("canonical re-encoding"),
+        first
+    );
+
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Pop.Sequence\n\
+                 public function run(): Int\n\
+                     local values: {Int} = {42}\n\
+                     return first(values, 42)\n\
+                 end\n",
+            )],
+        )
+        .with_reference_metadata(vec![decoded]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(
+        application.hir().expect("consumer HIR"),
+        application.types(),
+    )
+    .expect("decoded capsule specializes");
+    assert!(!mir.dump().contains("callReference b2:"));
+
+    let mut noncanonical = first;
+    noncanonical.insert(1, b' ');
+    assert_eq!(
+        decode_reference_metadata(&noncanonical),
+        Err(ReferenceMetadataDecodeError::NonCanonical)
+    );
 }

@@ -4,10 +4,14 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 macro_rules! typed_id {
     ($($name:ident),+ $(,)?) => {
         $(
-            #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+            #[derive(
+                Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+            )]
             pub struct $name(u32);
 
             impl $name {
@@ -45,6 +49,8 @@ typed_id!(
     ErrorId,
     ErrorCaseId,
     ResultCaseId,
+    IterationCaseId,
+    IterationProtocolMethodId,
     MethodId,
     ParameterId,
     ValueParameterId,
@@ -61,8 +67,16 @@ typed_id!(
     ValueId,
 );
 
+/// Exact nominal interface identity without collapsing user and reserved ID
+/// domains.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum NominalInterfaceId {
+    User(InterfaceId),
+    Builtin(BuiltinTypeId),
+}
+
 /// Stable identity of one declaration inside its owning Bubble.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct SymbolIdentity {
     bubble: BubbleId,
     symbol: SymbolId,
@@ -86,7 +100,9 @@ impl SymbolIdentity {
 }
 
 /// A UTF-8 byte offset in a source file.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct TextSize(u32);
 
 impl TextSize {
@@ -112,7 +128,7 @@ impl TextSize {
 }
 
 /// A validated half-open byte range.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TextRange {
     start: TextSize,
     end: TextSize,
@@ -158,7 +174,7 @@ impl TextRange {
 }
 
 /// A source location with an optional generated-origin link.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SourceSpan {
     file: FileId,
     range: TextRange,

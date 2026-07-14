@@ -3,13 +3,14 @@ use std::cmp::Ordering;
 use pop_diagnostics::{compile_time as compile_time_diagnostics, types as type_diagnostics};
 use pop_foundation::{Diagnostic, TypeId};
 use pop_syntax::{BinaryOperator, ExpressionSyntax, ExpressionSyntaxKind, UnaryOperator};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     FloatKind, FloatValue, IntegerValue, NumericError, PrimitiveType, SemanticType, TypeArena,
 };
 
 /// A typed immutable field default retained by semantic analysis.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FieldDefault {
     Nil,
     Boolean(bool),

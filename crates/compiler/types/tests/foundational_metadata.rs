@@ -25,6 +25,9 @@ fn standard_prelude_types_and_protocols_are_explicit_not_user_injectable() {
     let result = schema.type_by_source_name("Result").expect("Result");
     let iterable = schema.type_by_source_name("Iterable").expect("Iterable");
     let iterator = schema.type_by_source_name("Iterator").expect("Iterator");
+    let iteration = schema.type_by_source_name("Iteration").expect("Iteration");
+    let list = schema.type_by_source_name("List").expect("List");
+    let protocol = schema.iteration_protocol().expect("iteration protocol");
 
     assert_eq!(result.owner_bubble(), "Pop.Standard");
     assert_eq!(result.arity(), 2);
@@ -32,6 +35,17 @@ fn standard_prelude_types_and_protocols_are_explicit_not_user_injectable() {
     assert_eq!(iterator.role(), BootstrapTypeRole::Interface);
     assert_eq!(iterable.arity(), 1);
     assert_eq!(iterator.arity(), 1);
+    assert_eq!(iteration.id().raw(), 113);
+    assert_eq!(iteration.role(), BootstrapTypeRole::Nominal);
+    assert_eq!(iteration.arity(), 1);
+    assert_eq!(protocol.iteration(), iteration.id());
+    assert_eq!(protocol.iterable(), iterable.id());
+    assert_eq!(protocol.iterator(), iterator.id());
+    assert_eq!(protocol.list(), list.id());
+    assert_eq!(protocol.item_case().raw(), 0);
+    assert_eq!(protocol.end_case().raw(), 1);
+    assert_eq!(protocol.iterator_method().raw(), 0);
+    assert_eq!(protocol.next_method().raw(), 1);
 }
 
 #[test]

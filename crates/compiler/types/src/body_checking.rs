@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
 use pop_foundation::{
-    BindingId, CaptureId, Diagnostic, FieldId, LocalId, ModuleId, NestedFunctionId, ResultCaseId,
-    SourceSpan, SymbolId, TypeId, ValueParameterId,
+    BindingId, CaptureId, Diagnostic, FieldId, LocalId, ModuleId, NestedFunctionId,
+    NominalInterfaceId, ResultCaseId, SourceSpan, SymbolId, TypeId, ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -55,6 +55,13 @@ pub(crate) enum BindingKind {
     LoopLocal(LocalId),
     ImmutableLocal(LocalId),
     Parameter(ValueParameterId),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ActiveCollectionIteration {
+    Local(LocalId),
+    Parameter(ValueParameterId),
+    Capture(CaptureId),
 }
 
 impl BindingKind {
@@ -165,6 +172,7 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) signature_stack: Vec<ResolvedFunctionSignature>,
     pub(crate) loop_depth: u32,
     pub(crate) flow_narrowings: Vec<BTreeMap<BindingId, TypeId>>,
+    pub(crate) active_collection_iterations: Vec<ActiveCollectionIteration>,
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
@@ -190,6 +198,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             signature_stack: Vec::new(),
             loop_depth: 0,
             flow_narrowings: Vec::new(),
+            active_collection_iterations: Vec::new(),
         }
     }
 
@@ -343,7 +352,25 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return Some(TypedExpression {
                 kind: TypedExpressionKind::InterfaceUpcast {
                     value: Box::new(typed),
-                    interface: *interface,
+                    interface: NominalInterfaceId::User(*interface),
+                },
+                type_id: expected.type_id,
+                span: expression.span(),
+            });
+        }
+        if self
+            .resolver
+            .is_class_to_builtin_interface_upcast(typed.type_id(), expected.type_id)
+        {
+            let SemanticType::Builtin { definition, .. } =
+                self.resolver.arena().get(expected.type_id)?
+            else {
+                return None;
+            };
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::InterfaceUpcast {
+                    value: Box::new(typed),
+                    interface: NominalInterfaceId::Builtin(*definition),
                 },
                 type_id: expected.type_id,
                 span: expression.span(),
@@ -388,7 +415,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 let signature = self.signature_stack.last()?.clone();
                 self.check_closure_expression(&signature, function)
             }
-            ExpressionSyntaxKind::Name(path) => self.check_name(path, span),
+            ExpressionSyntaxKind::Name(path) => self.check_name(path, expected, span),
             ExpressionSyntaxKind::Index { base, index } => self.check_array_get(base, index, span),
             ExpressionSyntaxKind::Construct { type_name, fields } => self.check_class_construct(
                 type_name,
@@ -511,6 +538,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         };
         if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
             return self.check_array_create(type_arguments, arguments, span);
+        }
+        if matches!(path.as_slice(), [list, operation]
+            if list == "List" && matches!(operation.as_str(), "create" | "withCapacity"))
+        {
+            return self.check_list_create(path, type_arguments, arguments, span);
         }
         if matches!(path.as_slice(), [result, case] if result == "Result" && matches!(case.as_str(), "Ok" | "Error"))
         {
@@ -685,6 +717,26 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .zip(&resolved_arguments)
                 .map(|(parameter, argument)| (parameter.parameter(), *argument))
                 .collect();
+            let mut bound_substitutions = substitutions.clone();
+            for (parameter, argument) in signature.type_parameters().iter().zip(&resolved_arguments)
+            {
+                if let Some(bound) = parameter.bound()
+                    && !self.infer_type_pattern(bound, *argument, &mut bound_substitutions)
+                {
+                    self.diagnostics
+                        .push(type_diagnostics::generic_inference_failure(
+                            span,
+                            parameter.name(),
+                            "nominal interface bound is not satisfied",
+                        ));
+                    return None;
+                }
+            }
+            for parameter in signature.type_parameters() {
+                if let Some(bound) = parameter.bound() {
+                    self.materialize_generic_bound_types(bound, &substitutions)?;
+                }
+            }
             let parameter_types = signature
                 .parameters()
                 .iter()
@@ -1005,6 +1057,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_name(
         &mut self,
         path: &[String],
+        expected: Option<ExpectedExpressionType>,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
         match self.check_bound_path(path, span) {
@@ -1013,6 +1066,40 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             BoundPathLookup::NotBound => {}
         }
         if path.len() >= 2 {
+            if matches!(path, [iteration, end] if iteration == "Iteration" && end == "End") {
+                let Some(expected) = expected else {
+                    self.diagnostics
+                        .push(type_diagnostics::generic_inference_failure(
+                            span,
+                            "T",
+                            "Iteration.End requires an expected Iteration<T> type",
+                        ));
+                    return None;
+                };
+                let protocol = self.resolver.schema().iteration_protocol()?;
+                if !matches!(
+                    self.resolver.arena().get(expected.type_id),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == protocol.iteration() && arguments.len() == 1
+                ) {
+                    self.diagnostics.push(type_diagnostics::type_mismatch(
+                        span,
+                        "Iteration<T>",
+                        self.type_name(expected.type_id),
+                        span,
+                    ));
+                    return None;
+                }
+                return Some(TypedExpression {
+                    kind: TypedExpressionKind::IterationCase {
+                        iteration: protocol.iteration(),
+                        case: protocol.end_case(),
+                        arguments: Vec::new(),
+                    },
+                    type_id: expected.type_id,
+                    span,
+                });
+            }
             let type_name = path[..path.len() - 1].join(".");
             let resolution =
                 self.resolver
@@ -1531,12 +1618,14 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::While { .. }
         | TypedStatementKind::OptionalWhile { .. }
         | TypedStatementKind::NumericFor { .. }
+        | TypedStatementKind::GeneralizedFor { .. }
         | TypedStatementKind::Defer { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }
         | TypedStatementKind::CompoundFieldSet { .. }
         | TypedStatementKind::ArraySet { .. }
+        | TypedStatementKind::ListSet { .. }
         | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. }
         | TypedStatementKind::MultipleAssignment { .. }

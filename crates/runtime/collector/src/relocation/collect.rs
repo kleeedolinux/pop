@@ -15,52 +15,8 @@ impl RelocationRuntime {
         &mut self,
         publication: &mut RootPublication,
     ) -> Result<CollectionStatistics, RuntimeFailure> {
-        let stack_roots: Vec<_> = publication.managed_references().collect();
-        let handle_roots: Vec<_> = self.roots.values().copied().collect();
-        let pin_roots: Vec<_> = self.pins.values().copied().collect();
-        for reference in stack_roots.iter().chain(&handle_roots).chain(&pin_roots) {
-            self.validate_reference(*reference)?;
-        }
-
-        let mut pending = stack_roots;
-        pending.extend(handle_roots);
-        pending.extend(pin_roots);
-        for owner in &self.dirty_cards {
-            let object = self
-                .objects
-                .get(owner)
-                .filter(|object| object.generation == CollectorGeneration::Mature)
-                .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            for slot in object.allocation.object_map.reference_slots() {
-                match object.allocation.slots.get(slot.raw() as usize) {
-                    Some(SlotValue::Reference(Some(reference))) => pending.push(*reference),
-                    Some(SlotValue::Reference(None)) => {}
-                    Some(SlotValue::Scalar(_)) | None => {
-                        return Err(RuntimeFailure::runtime_invariant());
-                    }
-                }
-            }
-        }
-
-        let mut live_young = BTreeSet::new();
-        while let Some(reference) = pending.pop() {
-            let object = self
-                .objects
-                .get(&reference)
-                .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            if object.generation == CollectorGeneration::Mature || !live_young.insert(reference) {
-                continue;
-            }
-            for slot in object.allocation.object_map.reference_slots() {
-                match object.allocation.slots.get(slot.raw() as usize) {
-                    Some(SlotValue::Reference(Some(child))) => pending.push(*child),
-                    Some(SlotValue::Reference(None)) => {}
-                    Some(SlotValue::Scalar(_)) | None => {
-                        return Err(RuntimeFailure::runtime_invariant());
-                    }
-                }
-            }
-        }
+        let pending = self.minor_collection_roots(publication)?;
+        let live_young = self.trace_live_young(pending)?;
 
         let young_before = self
             .objects
@@ -136,6 +92,65 @@ impl RelocationRuntime {
             .record_collection(statistics.reclaimed_objects(), statistics.scanned_objects());
         Ok(statistics)
     }
+
+    fn minor_collection_roots(
+        &self,
+        publication: &RootPublication,
+    ) -> Result<Vec<ManagedReference>, RuntimeFailure> {
+        let stack_roots: Vec<_> = publication.managed_references().collect();
+        let handle_roots: Vec<_> = self.roots.values().copied().collect();
+        let pin_roots: Vec<_> = self.pins.values().copied().collect();
+        for reference in stack_roots.iter().chain(&handle_roots).chain(&pin_roots) {
+            self.validate_reference(*reference)?;
+        }
+
+        let mut pending = stack_roots;
+        pending.extend(handle_roots);
+        pending.extend(pin_roots);
+        for owner in &self.dirty_cards {
+            let object = self
+                .objects
+                .get(owner)
+                .filter(|object| object.generation == CollectorGeneration::Mature)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            append_references(object, &mut pending)?;
+        }
+        Ok(pending)
+    }
+
+    fn trace_live_young(
+        &self,
+        mut pending: Vec<ManagedReference>,
+    ) -> Result<BTreeSet<ManagedReference>, RuntimeFailure> {
+        let mut live_young = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            let object = self
+                .objects
+                .get(&reference)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            if object.generation == CollectorGeneration::Mature || !live_young.insert(reference) {
+                continue;
+            }
+            append_references(object, &mut pending)?;
+        }
+        Ok(live_young)
+    }
+}
+
+fn append_references(
+    object: &super::heap::RelocationAllocation,
+    pending: &mut Vec<ManagedReference>,
+) -> Result<(), RuntimeFailure> {
+    for slot in object.allocation.object_map.reference_slots() {
+        match object.allocation.slots.get(slot.raw() as usize) {
+            Some(SlotValue::Reference(Some(reference))) => pending.push(*reference),
+            Some(SlotValue::Reference(None)) => {}
+            Some(SlotValue::Scalar(_)) | None => {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn relocate_handles<Handle: Copy + Ord>(

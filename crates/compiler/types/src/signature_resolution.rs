@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
-    BuiltinTypeId, Diagnostic, EnumCaseId, ErrorCaseId, ErrorId, FieldId, ModuleId, ParameterId,
-    SourceSpan, SymbolId, TypeId, UnionCaseId,
+    BuiltinTypeId, ClassId, Diagnostic, EnumCaseId, ErrorCaseId, ErrorId, FieldId, InterfaceId,
+    MethodId, ModuleId, ParameterId, SourceSpan, SymbolId, TypeId, UnionCaseId,
 };
 use pop_resolve::{ResolutionDatabase, SymbolSpace};
 use pop_syntax::{
@@ -85,6 +85,7 @@ pub struct ResolvedTypeParameter {
     parameter: ParameterId,
     name: String,
     type_id: TypeId,
+    bound: Option<TypeId>,
     span: SourceSpan,
 }
 
@@ -102,6 +103,11 @@ impl ResolvedTypeParameter {
     #[must_use]
     pub const fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    #[must_use]
+    pub const fn bound(&self) -> Option<TypeId> {
+        self.bound
     }
 
     #[must_use]
@@ -151,10 +157,20 @@ impl ResolvedFunctionSignature {
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
     ) -> Self {
+        Self::canonical_generic(symbol, name, Vec::new(), parameters, results)
+    }
+
+    pub(crate) fn canonical_generic(
+        symbol: SymbolId,
+        name: String,
+        type_parameters: Vec<ResolvedTypeParameter>,
+        parameters: Vec<(String, TypeId, SourceSpan)>,
+        results: Vec<(TypeId, SourceSpan)>,
+    ) -> Self {
         Self {
             symbol,
             name,
-            type_parameters: Vec::new(),
+            type_parameters,
             parameters: parameters
                 .into_iter()
                 .map(|(name, type_id, span)| ResolvedFunctionParameter {
@@ -182,6 +198,22 @@ impl ResolvedFunctionSignature {
         effects: crate::EffectSummary,
     ) -> Self {
         let mut signature = Self::canonical(symbol, name.into(), parameters, results);
+        signature.effects = effects;
+        signature
+    }
+
+    /// Rehydrates one verified generic reference signature.
+    #[must_use]
+    pub fn referenced_generic(
+        symbol: SymbolId,
+        name: impl Into<String>,
+        type_parameters: Vec<ResolvedTypeParameter>,
+        parameters: Vec<(String, TypeId, SourceSpan)>,
+        results: Vec<(TypeId, SourceSpan)>,
+        effects: crate::EffectSummary,
+    ) -> Self {
+        let mut signature = Self::canonical(symbol, name.into(), parameters, results);
+        signature.type_parameters = type_parameters;
         signature.effects = effects;
         signature
     }
@@ -615,7 +647,7 @@ pub struct SignatureResolver<'index> {
     pub(crate) next_interface: u32,
     pub(crate) next_interface_method: u32,
     pub(crate) next_attribute: u32,
-    next_instance_symbol: u32,
+    pub(crate) next_instance_symbol: u32,
     record_definitions: BTreeMap<SymbolId, RecordDefinition>,
     record_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
     record_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
@@ -632,9 +664,18 @@ pub struct SignatureResolver<'index> {
     error_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
     enum_definitions: BTreeMap<SymbolId, EnumDefinition>,
     pub(crate) class_types: BTreeMap<SymbolId, TypeId>,
+    pub(crate) class_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
+    pub(crate) class_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    pub(crate) class_instance_sources: BTreeMap<SymbolId, SymbolId>,
+    pub(crate) generic_call_substitutions: Vec<BTreeMap<ParameterId, TypeId>>,
+    pub(crate) active_class_specializations: BTreeMap<(ClassId, Vec<TypeId>), TypeId>,
     pub(crate) class_definitions: BTreeMap<SymbolId, crate::ClassDefinition>,
     pub(crate) classes_by_type: BTreeMap<TypeId, SymbolId>,
     pub(crate) interface_types: BTreeMap<SymbolId, TypeId>,
+    pub(crate) interface_type_parameters: BTreeMap<SymbolId, Vec<ResolvedTypeParameter>>,
+    pub(crate) interface_instances: BTreeMap<(SymbolId, Vec<TypeId>), SymbolId>,
+    pub(crate) interface_instance_sources: BTreeMap<SymbolId, SymbolId>,
+    pub(crate) interface_sources_by_id: BTreeMap<InterfaceId, SymbolId>,
     pub(crate) interface_definitions: BTreeMap<SymbolId, crate::InterfaceDefinition>,
     type_aliases: BTreeMap<SymbolId, (ModuleId, TypeSyntax)>,
     resolving_aliases: BTreeMap<SymbolId, SourceSpan>,
@@ -685,9 +726,18 @@ impl<'index> SignatureResolver<'index> {
             error_instances: BTreeMap::new(),
             enum_definitions: BTreeMap::new(),
             class_types: BTreeMap::new(),
+            class_type_parameters: BTreeMap::new(),
+            class_instances: BTreeMap::new(),
+            class_instance_sources: BTreeMap::new(),
+            generic_call_substitutions: Vec::new(),
+            active_class_specializations: BTreeMap::new(),
             class_definitions: BTreeMap::new(),
             classes_by_type: BTreeMap::new(),
             interface_types: BTreeMap::new(),
+            interface_type_parameters: BTreeMap::new(),
+            interface_instances: BTreeMap::new(),
+            interface_instance_sources: BTreeMap::new(),
+            interface_sources_by_id: BTreeMap::new(),
             interface_definitions: BTreeMap::new(),
             type_aliases: BTreeMap::new(),
             resolving_aliases: BTreeMap::new(),
@@ -699,6 +749,39 @@ impl<'index> SignatureResolver<'index> {
     #[must_use]
     pub const fn arena(&self) -> &TypeArena {
         &self.arena
+    }
+
+    #[doc(hidden)]
+    pub fn allocate_capsule_class(&mut self) -> ClassId {
+        let id = ClassId::from_raw(self.next_class);
+        self.next_class = self.next_class.saturating_add(1);
+        id
+    }
+
+    #[doc(hidden)]
+    pub fn allocate_capsule_field(&mut self) -> FieldId {
+        let id = FieldId::from_raw(self.next_field);
+        self.next_field = self.next_field.saturating_add(1);
+        id
+    }
+
+    #[doc(hidden)]
+    pub fn allocate_capsule_method(&mut self) -> MethodId {
+        let id = MethodId::from_raw(self.next_method);
+        self.next_method = self.next_method.saturating_add(1);
+        id
+    }
+
+    #[doc(hidden)]
+    pub fn reserve_capsule_identifiers(
+        &mut self,
+        next_class: u32,
+        next_field: u32,
+        next_method: u32,
+    ) {
+        self.next_class = self.next_class.max(next_class);
+        self.next_field = self.next_field.max(next_field);
+        self.next_method = self.next_method.max(next_method);
     }
 
     pub(crate) const fn schema(&self) -> &BootstrapSchema {
@@ -743,8 +826,32 @@ impl<'index> SignatureResolver<'index> {
         self.database
     }
 
-    pub(crate) fn arena_mut(&mut self) -> &mut TypeArena {
+    pub fn arena_mut(&mut self) -> &mut TypeArena {
         &mut self.arena
+    }
+
+    /// Allocates one metadata-owned type parameter in this isolated analysis
+    /// session. Published identity remains its ordered metadata position.
+    #[must_use]
+    pub fn referenced_type_parameter(
+        &mut self,
+        name: impl Into<String>,
+        bound: Option<TypeId>,
+        span: SourceSpan,
+    ) -> ResolvedTypeParameter {
+        let parameter = ParameterId::from_raw(self.next_parameter);
+        self.next_parameter = self.next_parameter.saturating_add(1);
+        let type_id = self
+            .arena
+            .intern(SemanticType::TypeParameter(parameter))
+            .expect("fresh referenced type parameter is canonical");
+        ResolvedTypeParameter {
+            parameter,
+            name: name.into(),
+            type_id,
+            bound,
+            span,
+        }
     }
 
     pub fn substitute_type_parameters(
@@ -850,23 +957,40 @@ impl<'index> SignatureResolver<'index> {
                     .collect::<Option<_>>()?,
                 effects,
             },
-            SemanticType::Class { class, arguments } => SemanticType::Class {
-                class,
-                arguments: arguments
+            SemanticType::Class { class, arguments } => {
+                let arguments = arguments
                     .into_iter()
                     .map(|argument| self.substitute_type_parameters(argument, substitutions))
-                    .collect::<Option<_>>()?,
-            },
+                    .collect::<Option<Vec<_>>>()?;
+                if let Some(type_id) = self
+                    .active_class_specializations
+                    .get(&(class, arguments.clone()))
+                    .copied()
+                {
+                    return Some(type_id);
+                }
+                SemanticType::Class { class, arguments }
+            }
             SemanticType::Interface {
                 interface,
                 arguments,
-            } => SemanticType::Interface {
-                interface,
-                arguments: arguments
+            } => {
+                let arguments = arguments
                     .into_iter()
                     .map(|argument| self.substitute_type_parameters(argument, substitutions))
-                    .collect::<Option<_>>()?,
-            },
+                    .collect::<Option<Vec<_>>>()?;
+                if let Some(source) = self.interface_sources_by_id.get(&interface).copied()
+                    && self.interface_type_parameters.contains_key(&source)
+                {
+                    return self
+                        .instantiate_interface(source, &arguments)
+                        .map(|instance| instance.type_id());
+                }
+                SemanticType::Interface {
+                    interface,
+                    arguments,
+                }
+            }
             SemanticType::Builtin {
                 definition,
                 arguments,
@@ -1284,7 +1408,7 @@ impl<'index> SignatureResolver<'index> {
     ) -> RecordDefinitionResult {
         let mut diagnostics = Vec::new();
         let (type_parameters, generics) =
-            self.resolve_data_type_parameters(syntax.type_parameters(), &mut diagnostics);
+            self.resolve_data_type_parameters(module, syntax.type_parameters(), &mut diagnostics);
         let mut pending_fields = Vec::new();
         let mut semantic_fields = Vec::new();
         let mut names = BTreeMap::new();
@@ -1430,7 +1554,7 @@ impl<'index> SignatureResolver<'index> {
     ) -> UnionDefinitionResult {
         let mut diagnostics = Vec::new();
         let (type_parameters, generics) =
-            self.resolve_data_type_parameters(syntax.type_parameters(), &mut diagnostics);
+            self.resolve_data_type_parameters(module, syntax.type_parameters(), &mut diagnostics);
         let mut cases = Vec::new();
         let mut names = BTreeMap::new();
         for case in syntax.cases() {
@@ -1508,7 +1632,7 @@ impl<'index> SignatureResolver<'index> {
     ) -> ErrorDefinitionResult {
         let mut diagnostics = Vec::new();
         let (type_parameters, generics) =
-            self.resolve_data_type_parameters(syntax.type_parameters(), &mut diagnostics);
+            self.resolve_data_type_parameters(module, syntax.type_parameters(), &mut diagnostics);
         let error = ErrorId::from_raw(self.next_error);
         self.next_error = self.next_error.saturating_add(1);
         let mut cases = Vec::new();
@@ -1582,40 +1706,14 @@ impl<'index> SignatureResolver<'index> {
 
     fn resolve_data_type_parameters(
         &mut self,
+        module: ModuleId,
         syntax: &[GenericParameterSyntax],
         diagnostics: &mut Vec<Diagnostic>,
     ) -> (
         Vec<ResolvedTypeParameter>,
         BTreeMap<String, (ParameterId, TypeId)>,
     ) {
-        let mut resolved = Vec::new();
-        let mut by_name = BTreeMap::new();
-        let mut spans = BTreeMap::new();
-        for parameter in syntax {
-            if let Some(original) = spans.get(parameter.name()) {
-                diagnostics.push(type_diagnostics::duplicate_type_parameter(
-                    parameter.span(),
-                    parameter.name(),
-                    *original,
-                ));
-                continue;
-            }
-            let id = ParameterId::from_raw(self.next_parameter);
-            self.next_parameter = self.next_parameter.saturating_add(1);
-            let type_id = self
-                .arena
-                .intern(SemanticType::TypeParameter(id))
-                .expect("new data type parameter is canonical");
-            spans.insert(parameter.name().to_owned(), parameter.span());
-            by_name.insert(parameter.name().to_owned(), (id, type_id));
-            resolved.push(ResolvedTypeParameter {
-                parameter: id,
-                name: parameter.name().to_owned(),
-                type_id,
-                span: parameter.span(),
-            });
-        }
-        (resolved, by_name)
+        self.resolve_generic_parameters(module, syntax, diagnostics)
     }
 
     pub(crate) fn resolve_annotation(
@@ -1648,7 +1746,7 @@ impl<'index> SignatureResolver<'index> {
     ) -> ResolvedSignatureResult {
         let mut diagnostics = Vec::new();
         let (type_parameters, generic_types) =
-            self.resolve_type_parameters(syntax, &mut diagnostics);
+            self.resolve_type_parameters(module, syntax, &mut diagnostics);
         let parameters = syntax
             .parameters()
             .iter()
@@ -1697,7 +1795,20 @@ impl<'index> SignatureResolver<'index> {
 
     fn resolve_type_parameters(
         &mut self,
+        module: ModuleId,
         syntax: &FunctionSignatureSyntax,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> (
+        Vec<ResolvedTypeParameter>,
+        BTreeMap<String, (ParameterId, TypeId)>,
+    ) {
+        self.resolve_generic_parameters(module, syntax.type_parameters(), diagnostics)
+    }
+
+    pub(crate) fn resolve_generic_parameters(
+        &mut self,
+        module: ModuleId,
+        syntax: &[GenericParameterSyntax],
         diagnostics: &mut Vec<Diagnostic>,
     ) -> (
         Vec<ResolvedTypeParameter>,
@@ -1706,7 +1817,7 @@ impl<'index> SignatureResolver<'index> {
         let mut resolved = Vec::new();
         let mut by_name = BTreeMap::new();
         let mut spans = BTreeMap::new();
-        for parameter in syntax.type_parameters() {
+        for parameter in syntax {
             if let Some(original) = spans.get(parameter.name()) {
                 diagnostics.push(type_diagnostics::duplicate_type_parameter(
                     parameter.span(),
@@ -1715,6 +1826,29 @@ impl<'index> SignatureResolver<'index> {
                 ));
                 continue;
             }
+            let bound = parameter.bound().and_then(|bound| {
+                let resolved = self.resolve_type(module, bound, &by_name, diagnostics)?;
+                let bound_type = resolved.type_id()?;
+                let valid = match self.arena.get(bound_type) {
+                    Some(SemanticType::Interface { .. }) => true,
+                    Some(SemanticType::Builtin { definition, .. }) => {
+                        self.schema.types().iter().any(|entry| {
+                            entry.id() == *definition
+                                && entry.role() == BootstrapTypeRole::Interface
+                        })
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    diagnostics.push(type_diagnostics::invalid_generic_bound(
+                        bound.span(),
+                        parameter.name(),
+                        "nominal interface",
+                    ));
+                    return None;
+                }
+                Some(bound_type)
+            });
             let id = ParameterId::from_raw(self.next_parameter);
             self.next_parameter = self.next_parameter.saturating_add(1);
             let type_id = self
@@ -1727,6 +1861,7 @@ impl<'index> SignatureResolver<'index> {
                 parameter: id,
                 name: parameter.name().to_owned(),
                 type_id,
+                bound,
                 span: parameter.span(),
             });
         }
@@ -1987,6 +2122,81 @@ impl<'index> SignatureResolver<'index> {
                 self.error_definitions.get(&symbol).cloned()
             } else {
                 self.instantiate_error(symbol, &canonical_arguments)
+            }?;
+            return Some(resolved(
+                ResolvedTypeKind::Declaration {
+                    symbol: definition.symbol(),
+                    arguments,
+                },
+                Some(definition.type_id()),
+                syntax.span(),
+            ));
+        }
+        if let Some(parameters) = self.class_type_parameters.get(&symbol).cloned() {
+            if parameters.len() != arguments.len() {
+                diagnostics.push(type_diagnostics::wrong_type_arity(
+                    syntax.span(),
+                    &name,
+                    u16::try_from(parameters.len()).unwrap_or(u16::MAX),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            if !self.validate_class_arguments(
+                symbol,
+                &canonical_arguments,
+                syntax.span(),
+                diagnostics,
+            ) {
+                return None;
+            }
+            let template_arguments: Vec<_> = parameters
+                .iter()
+                .map(ResolvedTypeParameter::type_id)
+                .collect();
+            if canonical_arguments == template_arguments {
+                return Some(resolved(
+                    ResolvedTypeKind::Declaration { symbol, arguments },
+                    self.class_types.get(&symbol).copied(),
+                    syntax.span(),
+                ));
+            }
+            let definition = self.instantiate_class(symbol, &canonical_arguments)?;
+            return Some(resolved(
+                ResolvedTypeKind::Declaration {
+                    symbol: definition.symbol(),
+                    arguments,
+                },
+                Some(definition.type_id()),
+                syntax.span(),
+            ));
+        }
+        if let Some(parameters) = self.interface_type_parameters.get(&symbol).cloned() {
+            if parameters.len() != arguments.len() {
+                diagnostics.push(type_diagnostics::wrong_type_arity(
+                    syntax.span(),
+                    &name,
+                    u16::try_from(parameters.len()).unwrap_or(u16::MAX),
+                    arguments.len(),
+                ));
+                return None;
+            }
+            if !self.validate_interface_arguments(
+                symbol,
+                &canonical_arguments,
+                syntax.span(),
+                diagnostics,
+            ) {
+                return None;
+            }
+            let template_arguments: Vec<_> = parameters
+                .iter()
+                .map(ResolvedTypeParameter::type_id)
+                .collect();
+            let definition = if canonical_arguments == template_arguments {
+                self.interface_definitions.get(&symbol).cloned()
+            } else {
+                self.instantiate_interface(symbol, &canonical_arguments)
             }?;
             return Some(resolved(
                 ResolvedTypeKind::Declaration {

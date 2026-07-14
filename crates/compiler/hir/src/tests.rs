@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use super::*;
 use pop_foundation::{
-    BindingId, BubbleId, CaptureId, ClassId, FieldId, FileId, FunctionId, InterfaceId,
-    InterfaceMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId, SourceSpan,
-    SymbolId, TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
+    BindingId, BubbleId, BuiltinTypeId, CaptureId, ClassId, FieldId, FileId, FunctionId,
+    InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, LocalId, MethodId,
+    ModuleId, NamespaceId, NestedFunctionId, ParameterId, SourceSpan, SymbolId, TextRange,
+    TextSize, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -29,6 +30,8 @@ fn verifier_rejects_collection_elements_with_inconsistent_types() {
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
         type_parameters: Vec::new(),
+        type_parameter_names: Vec::new(),
+        type_parameter_bounds: Vec::new(),
         parameters: Vec::new(),
         results: Vec::new(),
         body: vec![HirStatement {
@@ -74,6 +77,8 @@ fn verifier_rejects_array_access_on_a_non_array_base() {
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
         type_parameters: Vec::new(),
+        type_parameter_names: Vec::new(),
+        type_parameter_bounds: Vec::new(),
         parameters: Vec::new(),
         results: Vec::new(),
         body: vec![HirStatement {
@@ -610,6 +615,7 @@ fn bubble_verifier_checks_receiver_method_signatures_against_class_schema() {
             type_id: class_type,
             is_open: false,
             interfaces: Vec::new(),
+            builtin_interfaces: Vec::new(),
             fields: Vec::new(),
             methods: vec![HirClassMethod {
                 method,
@@ -1087,6 +1093,12 @@ fn interface_verifier_rejects_wrong_slots_mappings_arguments_and_results() {
             arguments: Vec::new(),
         })
         .expect("interface type");
+    let iterator_type = arena
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(107),
+            arguments: vec![integer],
+        })
+        .expect("iterator type");
     let class_id = ClassId::from_raw(0);
     let class_type = arena
         .intern(SemanticType::Class {
@@ -1138,6 +1150,14 @@ fn interface_verifier_rejects_wrong_slots_mappings_arguments_and_results() {
                 methods: vec![HirInterfaceMethodImplementation {
                     interface_method,
                     slot: 9,
+                    class_method,
+                }],
+            }],
+            builtin_interfaces: vec![HirBuiltinInterfaceImplementation {
+                interface: BuiltinTypeId::from_raw(107),
+                interface_type: iterator_type,
+                methods: vec![HirBuiltinInterfaceMethodImplementation {
+                    protocol_method: IterationProtocolMethodId::from_raw(9),
                     class_method,
                 }],
             }],
@@ -1238,8 +1258,85 @@ fn interface_verifier_rejects_wrong_slots_mappings_arguments_and_results() {
                     found,
                     ..
                 } if *expected == string && *found == integer
+            )) && errors.iter().any(|error| matches!(
+                error,
+                HirVerificationError::InvalidBuiltinInterfaceImplementation {
+                    class,
+                    interface,
+                } if *class == class_id && *interface == BuiltinTypeId::from_raw(107)
             ))
     ));
+}
+
+#[test]
+fn verifier_rejects_spoofed_iteration_case_and_method_identities() {
+    let mut arena = TypeArena::new();
+    let item_type = arena.source_type("Int").expect("Int");
+    let array_type = arena
+        .intern(SemanticType::Array(item_type))
+        .expect("array type");
+    let iterator_type = arena
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(107),
+            arguments: vec![item_type],
+        })
+        .expect("iterator type");
+    let iteration_type = arena
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(113),
+            arguments: vec![item_type],
+        })
+        .expect("iteration type");
+    let span = test_span();
+    let statement = |item_case, next_method| HirStatement {
+        kind: HirStatementKind::GeneralizedFor {
+            protocol: HirIterationProtocol {
+                iteration: BuiltinTypeId::from_raw(113),
+                iterable: BuiltinTypeId::from_raw(106),
+                iterator: BuiltinTypeId::from_raw(107),
+                list: BuiltinTypeId::from_raw(101),
+                item_case,
+                end_case: IterationCaseId::from_raw(1),
+                iterator_method: IterationProtocolMethodId::from_raw(0),
+                next_method,
+            },
+            source: HirIterationSource::Array,
+            item_type,
+            iterator_type,
+            iteration_type,
+            bindings: vec![HirLocalBinding {
+                binding: BindingId::from_raw(1),
+                local: LocalId::from_raw(0),
+                name: "value".to_owned(),
+                local_type: item_type,
+                span,
+            }],
+            iterable: parameter_expression(0, array_type, span),
+            body: Vec::new(),
+        },
+        span,
+    };
+
+    for invalid in [
+        statement(
+            IterationCaseId::from_raw(9),
+            IterationProtocolMethodId::from_raw(1),
+        ),
+        statement(
+            IterationCaseId::from_raw(0),
+            IterationProtocolMethodId::from_raw(9),
+        ),
+    ] {
+        let function = hir_function(
+            vec![hir_parameter(0, "values", array_type, span)],
+            Vec::new(),
+            vec![invalid],
+        );
+        assert!(matches!(
+            verify_hir_function(&function, &arena, &BTreeSet::new()),
+            Err(errors) if errors.contains(&HirVerificationError::InvalidIterationProtocol { span })
+        ));
+    }
 }
 
 fn hir_function(
@@ -1264,6 +1361,8 @@ fn hir_function_with_symbol(
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
         type_parameters: Vec::new(),
+        type_parameter_names: Vec::new(),
+        type_parameter_bounds: Vec::new(),
         parameters,
         results,
         body,
@@ -1344,6 +1443,8 @@ fn verify_expression_statement(
         visibility: Visibility::Private,
         name: "invalid".to_owned(),
         type_parameters: Vec::new(),
+        type_parameter_names: Vec::new(),
+        type_parameter_bounds: Vec::new(),
         parameters: Vec::new(),
         results: Vec::new(),
         body: vec![HirStatement {
@@ -1354,4 +1455,36 @@ fn verify_expression_statement(
         effects: pop_types::EffectSummary::empty(),
     };
     verify_hir_function(&function, arena, &BTreeSet::new())
+}
+
+#[test]
+fn verifier_rejects_generic_parameter_bound_arity_mismatch() {
+    let mut arena = TypeArena::new();
+    let parameter = arena
+        .intern(SemanticType::TypeParameter(ParameterId::from_raw(0)))
+        .expect("type parameter");
+    let function = HirFunction {
+        function: FunctionId::from_raw(0),
+        symbol: SymbolId::from_raw(0),
+        module: ModuleId::from_raw(0),
+        bubble: BubbleId::from_raw(0),
+        visibility: Visibility::Private,
+        name: "invalidBounds".to_owned(),
+        type_parameters: vec![parameter],
+        type_parameter_names: vec!["T".to_owned()],
+        type_parameter_bounds: Vec::new(),
+        parameters: Vec::new(),
+        results: Vec::new(),
+        body: Vec::new(),
+        attributes: Vec::new(),
+        effects: pop_types::EffectSummary::empty(),
+    };
+
+    let errors =
+        verify_hir_function(&function, &arena, &BTreeSet::new()).expect_err("bound arity mismatch");
+    assert!(matches!(
+        errors.as_slice(),
+        [HirVerificationError::InvalidGenericBounds { function: found, .. }]
+            if *found == SymbolId::from_raw(0)
+    ));
 }

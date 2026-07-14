@@ -112,6 +112,21 @@ pub fn invalid_operator(
 }
 
 #[must_use]
+pub fn structural_mutation_during_iteration(
+    span: SourceSpan,
+    operation: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2029"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.structuralMutationDuringIteration"),
+        vec![DiagnosticArgument::Identifier(operation.into())],
+        span,
+    )
+}
+
+#[must_use]
 pub fn not_all_paths_return(span: SourceSpan) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::new("POP2006"),
@@ -457,6 +472,44 @@ pub fn illegal_cleanup_control(span: SourceSpan, control: impl Into<String>) -> 
         DiagnosticCategory::Type,
         MessageKey::new("types.illegalCleanupControl"),
         vec![DiagnosticArgument::Identifier(control.into())],
+        span,
+    )
+}
+
+#[must_use]
+pub fn invalid_generic_bound(
+    span: SourceSpan,
+    parameter: impl Into<String>,
+    bound: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2027"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.invalidGenericBound"),
+        vec![
+            DiagnosticArgument::Identifier(parameter.into()),
+            DiagnosticArgument::Identifier(bound.into()),
+        ],
+        span,
+    )
+}
+
+#[must_use]
+pub fn generic_inference_failure(
+    span: SourceSpan,
+    parameter: impl Into<String>,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2028"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.genericInferenceFailure"),
+        vec![
+            DiagnosticArgument::Identifier(parameter.into()),
+            DiagnosticArgument::Identifier(reason.into()),
+        ],
         span,
     )
 }

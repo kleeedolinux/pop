@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt;
 
-use pop_foundation::{AttributeId, BuiltinTypeId, StandardFunctionId};
+use pop_foundation::{
+    AttributeId, BuiltinTypeId, IterationCaseId, IterationProtocolMethodId, StandardFunctionId,
+};
 
 use crate::PrimitiveType;
 
@@ -221,6 +223,56 @@ pub struct BootstrapTypeEntry {
     prelude: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapIterationProtocol {
+    iteration: BuiltinTypeId,
+    iterable: BuiltinTypeId,
+    iterator: BuiltinTypeId,
+    list: BuiltinTypeId,
+}
+
+impl BootstrapIterationProtocol {
+    #[must_use]
+    pub const fn iteration(self) -> BuiltinTypeId {
+        self.iteration
+    }
+
+    #[must_use]
+    pub const fn iterable(self) -> BuiltinTypeId {
+        self.iterable
+    }
+
+    #[must_use]
+    pub const fn iterator(self) -> BuiltinTypeId {
+        self.iterator
+    }
+
+    #[must_use]
+    pub const fn list(self) -> BuiltinTypeId {
+        self.list
+    }
+
+    #[must_use]
+    pub const fn item_case(self) -> IterationCaseId {
+        IterationCaseId::from_raw(0)
+    }
+
+    #[must_use]
+    pub const fn end_case(self) -> IterationCaseId {
+        IterationCaseId::from_raw(1)
+    }
+
+    #[must_use]
+    pub const fn iterator_method(self) -> IterationProtocolMethodId {
+        IterationProtocolMethodId::from_raw(0)
+    }
+
+    #[must_use]
+    pub const fn next_method(self) -> IterationProtocolMethodId {
+        IterationProtocolMethodId::from_raw(1)
+    }
+}
+
 impl BootstrapTypeEntry {
     #[must_use]
     pub const fn id(self) -> BuiltinTypeId {
@@ -290,6 +342,28 @@ impl BootstrapSchema {
     #[must_use]
     pub fn type_by_source_name(&self, name: &str) -> Option<&BootstrapTypeEntry> {
         self.types.iter().find(|entry| entry.source_name == name)
+    }
+
+    #[must_use]
+    pub fn iteration_protocol(&self) -> Option<BootstrapIterationProtocol> {
+        let iteration = self.type_by_source_name("Iteration")?;
+        let iterable = self.type_by_source_name("Iterable")?;
+        let iterator = self.type_by_source_name("Iterator")?;
+        let list = self.type_by_source_name("List")?;
+        (iteration.arity == 1
+            && iteration.role == BootstrapTypeRole::Nominal
+            && iterable.arity == 1
+            && iterable.role == BootstrapTypeRole::Interface
+            && iterator.arity == 1
+            && iterator.role == BootstrapTypeRole::Interface
+            && list.arity == 1
+            && list.role == BootstrapTypeRole::Nominal)
+            .then_some(BootstrapIterationProtocol {
+                iteration: iteration.id,
+                iterable: iterable.id,
+                iterator: iterator.id,
+                list: list.id,
+            })
     }
 
     #[must_use]

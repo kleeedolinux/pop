@@ -21,8 +21,25 @@ impl NativeAbiVersion {
     }
 }
 
-pub const NATIVE_ABI_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 7);
+pub const NATIVE_ABI_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 9);
 pub const INVALID_HANDLE: u64 = 0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IterationCollectionKind {
+    Array = 0,
+    Table = 1,
+    List = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IterationStatus {
+    Failure = 0,
+    Item = 1,
+    End = 2,
+    ConcurrentModification = 3,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]

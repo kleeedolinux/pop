@@ -91,6 +91,11 @@ pub enum StatementSyntaxKind {
         step: Option<ExpressionSyntax>,
         body: Vec<StatementSyntax>,
     },
+    GeneralizedFor {
+        bindings: Vec<String>,
+        iterable: ExpressionSyntax,
+        body: Vec<StatementSyntax>,
+    },
     Break,
     Continue,
     Match {
@@ -495,6 +500,11 @@ pub(crate) fn parse_expression_prefix(
     Ok(expression)
 }
 
+enum AssignmentOperator {
+    Assign,
+    Compound(BinaryOperator),
+}
+
 pub(crate) struct BodyParser<'source> {
     pub(crate) source: &'source SourceFile,
     pub(crate) file: FileId,
@@ -531,7 +541,7 @@ impl BodyParser<'_> {
             Some(TokenKind::If) => self.parse_if(),
             Some(TokenKind::While) => self.parse_while(),
             Some(TokenKind::Repeat) => self.parse_repeat_until(),
-            Some(TokenKind::For) => self.parse_numeric_for(),
+            Some(TokenKind::For) => self.parse_for(),
             Some(TokenKind::Break) => self.parse_loop_control(StatementSyntaxKind::Break),
             Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
@@ -563,6 +573,10 @@ impl BodyParser<'_> {
                     });
                 }
                 if let Some(operator) = self.consume_assignment_operator() {
+                    let operator = match operator {
+                        AssignmentOperator::Assign => None,
+                        AssignmentOperator::Compound(operator) => Some(operator),
+                    };
                     let value = self.parse_expression(0)?;
                     let span = SourceSpan::new(
                         self.file,
@@ -589,15 +603,15 @@ impl BodyParser<'_> {
         }
     }
 
-    fn consume_assignment_operator(&mut self) -> Option<Option<BinaryOperator>> {
+    fn consume_assignment_operator(&mut self) -> Option<AssignmentOperator> {
         let operator = match self.current_kind()? {
-            TokenKind::Equal => None,
-            TokenKind::PlusEqual => Some(BinaryOperator::Add),
-            TokenKind::MinusEqual => Some(BinaryOperator::Subtract),
-            TokenKind::StarEqual => Some(BinaryOperator::Multiply),
-            TokenKind::SlashEqual => Some(BinaryOperator::Divide),
-            TokenKind::PercentEqual => Some(BinaryOperator::Remainder),
-            TokenKind::DotDotEqual => Some(BinaryOperator::Concat),
+            TokenKind::Equal => AssignmentOperator::Assign,
+            TokenKind::PlusEqual => AssignmentOperator::Compound(BinaryOperator::Add),
+            TokenKind::MinusEqual => AssignmentOperator::Compound(BinaryOperator::Subtract),
+            TokenKind::StarEqual => AssignmentOperator::Compound(BinaryOperator::Multiply),
+            TokenKind::SlashEqual => AssignmentOperator::Compound(BinaryOperator::Divide),
+            TokenKind::PercentEqual => AssignmentOperator::Compound(BinaryOperator::Remainder),
+            TokenKind::DotDotEqual => AssignmentOperator::Compound(BinaryOperator::Concat),
             _ => return None,
         };
         self.position = self.position.saturating_add(1);
@@ -853,11 +867,37 @@ impl BodyParser<'_> {
         })
     }
 
-    fn parse_numeric_for(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
+    fn parse_for(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
         let start = self.expect(TokenKind::For, "`for`")?.range().start();
-        let name = self.expect(TokenKind::Identifier, "numeric `for` binding")?;
-        let name = name.text(self.source).to_owned();
-        self.expect(TokenKind::Equal, "`=` in numeric `for`")?;
+        let first_binding = self.expect(TokenKind::Identifier, "`for` binding")?;
+        let mut bindings = vec![first_binding.text(self.source).to_owned()];
+        while self.consume(TokenKind::Comma).is_some() {
+            let binding = self.expect(TokenKind::Identifier, "`for` binding after `,`")?;
+            bindings.push(binding.text(self.source).to_owned());
+        }
+        if self.consume(TokenKind::Equal).is_none() {
+            self.expect(TokenKind::In, "`in` after generalized `for` bindings")?;
+            let iterable = self.parse_expression(0)?;
+            self.expect(TokenKind::Do, "`do` after generalized `for` source")?;
+            self.expect(TokenKind::Newline, "line break after `do`")?;
+            let body = self.parse_statement_list(&[TokenKind::End])?;
+            let end = self
+                .expect(TokenKind::End, "generalized `for` `end`")?
+                .range()
+                .end();
+            return Ok(StatementSyntax {
+                kind: StatementSyntaxKind::GeneralizedFor {
+                    bindings,
+                    iterable,
+                    body,
+                },
+                span: SourceSpan::new(self.file, ordered_range(start, end)),
+            });
+        }
+        if bindings.len() != 1 {
+            return Err(self.error("one binding before `=` in numeric `for`"));
+        }
+        let name = bindings.pop().expect("numeric `for` has one binding");
         let first = self.parse_expression(0)?;
         self.expect(TokenKind::Comma, "`,` after numeric `for` first value")?;
         let last = self.parse_expression(0)?;

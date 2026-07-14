@@ -7,6 +7,7 @@ use pop_syntax::{
     AttributeDeclarationSyntax, AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind,
     UnaryOperator,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::required_constants::attribute_constant_matches_type;
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
     SemanticType, SignatureResolver,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AttributeConstant {
     Nil,
     Boolean(bool),

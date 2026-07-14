@@ -283,6 +283,13 @@ Workspace rules:
 - `--workspace`, `--package <name>`, and `--bubble <name>` make selection explicit;
 - duplicate Package identities or overlapping member roots are errors.
 
+ADR 0055 fixes `bubble.lock` schema version 1 as bounded canonical UTF-8 JSON.
+It records the resolver/platform inputs, exact Package sources and SHA-256
+content digests, sorted feature sets, selected Bubbles, exact direct Bubble
+edges, and verified artifact/API/ABI/capability facts. It contains no
+credentials, absolute checkout paths, timestamps, or human output. Canonical
+bytes are stable across input enumeration order and checkout location.
+
 This supports large monorepos without turning the Workspace into one giant
 visibility or compilation boundary.
 
@@ -338,6 +345,11 @@ Resolution rules:
 `--frozen` requires both. Builds never modify a lockfile implicitly when one of
 those modes is active. Credentials never appear in `bubble.toml`, `bubble.lock`,
 diagnostics, or cache keys.
+
+Lock replacement is atomic and occurs only after the complete graph and all
+content hashes verify. `--locked` compares canonical bytes; `--offline` may use
+only local paths and already verified cache entries; `--frozen` applies both
+constraints.
 
 ## Unified `pop` CLI
 

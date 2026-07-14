@@ -103,6 +103,44 @@ fn specialized_generics_execute_identically_before_and_after_optimization() {
 }
 
 #[test]
+fn generic_nominal_iterator_executes_identically_before_and_after_optimization() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private class ArrayIterator<T> implements Iterator<T>\n\
+             private values: {T}\n\
+             private index: Int\n\
+             public function ArrayIterator.new(values: {T}): ArrayIterator<T>\n\
+                 return ArrayIterator { values = values, index = 1 }\n\
+             end\n\
+             public function ArrayIterator:iterator(): Iterator<T>\n\
+                 return self\n\
+             end\n\
+             public function ArrayIterator:next(): Iteration<T>\n\
+                 if self.index > Array.length(self.values) then\n\
+                     return Iteration.End\n\
+                 end\n\
+                 local value = Array.get(self.values, self.index)\n\
+                 self.index += 1\n\
+                 return Iteration.Item(value)\n\
+             end\n\
+         end\n\
+         public function run(): Int\n\
+             local values: {Int} = {1, 2, 3}\n\
+             local iterator: ArrayIterator<Int> = ArrayIterator.new(values)\n\
+             local total = 0\n\
+             for value in iterator do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("6")]);
+    assert!(!mir.dump().to_ascii_lowercase().contains("lookup name"));
+}
+
+#[test]
 fn escaping_mutating_closure_uses_shared_cells_and_portable_allocation_events() {
     let (mir, arena, entry) = lower(
         "namespace Main\n\

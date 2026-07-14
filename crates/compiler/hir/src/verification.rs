@@ -7,20 +7,25 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, CaptureId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, InterfaceId,
-    InterfaceMethodId, LocalId, MethodId, NestedFunctionId, ResultCaseId, SourceSpan, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    BindingId, BuiltinTypeId, CaptureId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId,
+    InterfaceId, InterfaceMethodId, IterationCaseId, LocalId, MethodId, NestedFunctionId,
+    NominalInterfaceId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
     ClassMethodDispatch, FloatKind, NumericConversionKind, PrimitiveType, SemanticType, TypeArena,
-    TypedBinaryOperator, TypedUnaryOperator,
+    TypedBinaryOperator, TypedUnaryOperator, embedded_bootstrap_schema,
 };
 
 use crate::ir::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirVerificationError {
+    InvalidGenericBounds {
+        function: SymbolId,
+        span: SourceSpan,
+    },
     CompileTimeOnlyExpression {
         span: SourceSpan,
     },
@@ -74,6 +79,10 @@ pub enum HirVerificationError {
         method: MethodId,
         span: SourceSpan,
     },
+    InvalidBuiltinInterfaceCall {
+        interface: BuiltinTypeId,
+        span: SourceSpan,
+    },
     InvalidCollectionType {
         type_id: TypeId,
         span: SourceSpan,
@@ -125,11 +134,22 @@ pub enum HirVerificationError {
         type_id: TypeId,
         span: SourceSpan,
     },
+    InvalidIterationProtocol {
+        span: SourceSpan,
+    },
+    InvalidIterationSource {
+        type_id: TypeId,
+        span: SourceSpan,
+    },
+    InvalidIterationBindings {
+        span: SourceSpan,
+    },
     DuplicateSymbol(SymbolId),
     DuplicateClass(ClassId),
     DuplicateInterface(InterfaceId),
     DuplicateInterfaceMethod(InterfaceMethodId),
     DuplicateInterfaceImplementation(InterfaceId),
+    DuplicateBuiltinInterfaceImplementation(BuiltinTypeId),
     DuplicateDeclaredField(FieldId),
     DuplicateUnionCase {
         union: SymbolId,
@@ -151,6 +171,10 @@ pub enum HirVerificationError {
     },
     InvalidResultCase {
         case: ResultCaseId,
+        span: SourceSpan,
+    },
+    InvalidIterationCase {
+        case: IterationCaseId,
         span: SourceSpan,
     },
     InvalidResultPropagation {
@@ -212,8 +236,12 @@ pub enum HirVerificationError {
         class_method: MethodId,
         span: SourceSpan,
     },
+    InvalidBuiltinInterfaceImplementation {
+        class: ClassId,
+        interface: BuiltinTypeId,
+    },
     InvalidInterfaceUpcast {
-        interface: InterfaceId,
+        interface: NominalInterfaceId,
         source: TypeId,
         target: TypeId,
         span: SourceSpan,
@@ -340,6 +368,7 @@ pub type HirBuildError = HirVerificationError;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HirCallableSignature {
     type_parameters: Vec<TypeId>,
+    type_parameter_bounds: Vec<Option<TypeId>>,
     parameters: Vec<TypeId>,
     results: Vec<TypeId>,
 }
@@ -348,6 +377,7 @@ impl HirCallableSignature {
     fn from_function(function: &HirFunction) -> Self {
         Self {
             type_parameters: function.type_parameters().to_vec(),
+            type_parameter_bounds: function.type_parameter_bounds().to_vec(),
             parameters: function
                 .parameters()
                 .iter()
@@ -381,6 +411,7 @@ struct HirClassSchema {
     type_id: TypeId,
     fields: BTreeMap<FieldId, TypeId>,
     interfaces: BTreeMap<InterfaceId, HirInterfaceImplementation>,
+    builtin_interfaces: BTreeMap<BuiltinTypeId, HirBuiltinInterfaceImplementation>,
 }
 
 #[derive(Clone)]
@@ -470,13 +501,14 @@ impl HirSchema {
             schema.function_references.insert(
                 reference.identity(),
                 HirCallableSignature {
-                    type_parameters: Vec::new(),
+                    type_parameters: reference.type_parameters().to_vec(),
+                    type_parameter_bounds: reference.type_parameter_bounds().to_vec(),
                     parameters: reference.parameters().to_vec(),
                     results: reference.results().to_vec(),
                 },
             );
         }
-        schema.verify_class_interfaces(errors);
+        schema.verify_class_interfaces(arena, errors);
         schema.collect_method_bodies(bubble.methods(), errors);
         schema
     }
@@ -618,12 +650,11 @@ impl HirSchema {
                         verify_schema_type(arena, *result, method.span, errors);
                     }
                 }
-                if arena.get(class.type_id)
-                    != Some(&SemanticType::Class {
-                        class: class.class,
-                        arguments: Vec::new(),
-                    })
-                {
+                if !matches!(
+                    arena.get(class.type_id),
+                    Some(SemanticType::Class { class: identity, .. })
+                        if *identity == class.class
+                ) {
                     errors.push(HirVerificationError::InvalidDeclarationType {
                         symbol: declaration.symbol(),
                         type_id: class.type_id,
@@ -642,6 +673,19 @@ impl HirSchema {
                         ));
                     }
                 }
+                let mut builtin_interfaces = BTreeMap::new();
+                for implementation in &class.builtin_interfaces {
+                    if builtin_interfaces
+                        .insert(implementation.interface, implementation.clone())
+                        .is_some()
+                    {
+                        errors.push(
+                            HirVerificationError::DuplicateBuiltinInterfaceImplementation(
+                                implementation.interface,
+                            ),
+                        );
+                    }
+                }
                 if self
                     .classes
                     .insert(
@@ -651,6 +695,7 @@ impl HirSchema {
                             type_id: class.type_id,
                             fields,
                             interfaces,
+                            builtin_interfaces,
                         },
                     )
                     .is_some()
@@ -660,12 +705,11 @@ impl HirSchema {
                 self.collect_declared_methods(declaration.symbol(), class, errors);
             }
             HirDeclarationKind::Interface(interface) => {
-                if arena.get(interface.type_id)
-                    != Some(&SemanticType::Interface {
-                        interface: interface.interface,
-                        arguments: Vec::new(),
-                    })
-                {
+                if !matches!(
+                    arena.get(interface.type_id),
+                    Some(SemanticType::Interface { interface: identity, .. })
+                        if *identity == interface.interface
+                ) {
                     errors.push(HirVerificationError::InvalidDeclarationType {
                         symbol: declaration.symbol(),
                         type_id: interface.type_id,
@@ -700,6 +744,7 @@ impl HirSchema {
                                     slot: method.slot,
                                     signature: HirCallableSignature {
                                         type_parameters: Vec::new(),
+                                        type_parameter_bounds: Vec::new(),
                                         parameters: method
                                             .parameters
                                             .iter()
@@ -821,6 +866,7 @@ impl HirSchema {
                 definition,
                 signature: HirCallableSignature {
                     type_parameters: Vec::new(),
+                    type_parameter_bounds: Vec::new(),
                     parameters,
                     results: method.results.clone(),
                 },
@@ -842,7 +888,10 @@ impl HirSchema {
         }
     }
 
-    fn verify_class_interfaces(&self, errors: &mut Vec<HirVerificationError>) {
+    fn verify_class_interfaces(&self, arena: &TypeArena, errors: &mut Vec<HirVerificationError>) {
+        let protocol = embedded_bootstrap_schema()
+            .ok()
+            .and_then(|schema| schema.iteration_protocol());
         for (class_id, class) in &self.classes {
             let mut seen = BTreeSet::new();
             for implementation in class.interfaces.values() {
@@ -921,6 +970,84 @@ impl HirSchema {
                             span: interface.methods[required].span,
                         });
                     }
+                }
+            }
+            let Some(protocol) = protocol else {
+                continue;
+            };
+            for implementation in class.builtin_interfaces.values() {
+                let item_type = match arena.get(implementation.interface_type) {
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if *definition == implementation.interface && arguments.len() == 1 => {
+                        arguments[0]
+                    }
+                    _ => {
+                        errors.push(
+                            HirVerificationError::InvalidBuiltinInterfaceImplementation {
+                                class: *class_id,
+                                interface: implementation.interface,
+                            },
+                        );
+                        continue;
+                    }
+                };
+                let expected_methods = if implementation.interface == protocol.iterable() {
+                    vec![protocol.iterator_method()]
+                } else if implementation.interface == protocol.iterator() {
+                    vec![protocol.iterator_method(), protocol.next_method()]
+                } else {
+                    Vec::new()
+                };
+                let iterator_type = arena.find(&SemanticType::Builtin {
+                    definition: protocol.iterator(),
+                    arguments: vec![item_type],
+                });
+                let iteration_type = arena.find(&SemanticType::Builtin {
+                    definition: protocol.iteration(),
+                    arguments: vec![item_type],
+                });
+                let mut mapped = BTreeSet::new();
+                let valid = !expected_methods.is_empty()
+                    && implementation.methods.len() == expected_methods.len()
+                    && implementation.methods.iter().all(|mapping| {
+                        let expected_result =
+                            if mapping.protocol_method == protocol.iterator_method() {
+                                iterator_type
+                            } else if mapping.protocol_method == protocol.next_method()
+                                && implementation.interface == protocol.iterator()
+                            {
+                                iteration_type
+                            } else {
+                                None
+                            };
+                        mapped.insert(mapping.protocol_method)
+                            && expected_methods.contains(&mapping.protocol_method)
+                            && expected_result.is_some_and(|expected_result| {
+                                self.declared_methods
+                                    .get(&mapping.class_method)
+                                    .is_some_and(|method| {
+                                        method.class == *class_id
+                                            && method.visibility == Visibility::Public
+                                            && method.dispatch == ClassMethodDispatch::Receiver
+                                            && method.signature.parameters.as_slice()
+                                                == [class.type_id]
+                                            && method.signature.results.as_slice()
+                                                == [expected_result]
+                                    })
+                            })
+                    })
+                    && expected_methods
+                        .iter()
+                        .all(|method| mapped.contains(method));
+                if !valid {
+                    errors.push(
+                        HirVerificationError::InvalidBuiltinInterfaceImplementation {
+                            class: *class_id,
+                            interface: implementation.interface,
+                        },
+                    );
                 }
             }
         }
@@ -1057,6 +1184,26 @@ fn verify_hir_callable_with_schema(
     known_methods: &BTreeSet<MethodId>,
     schema: Option<&HirSchema>,
 ) -> Result<(), Vec<HirVerificationError>> {
+    if function.type_parameters.len() != function.type_parameter_names.len()
+        || function.type_parameters.len() != function.type_parameter_bounds.len()
+        || function
+            .type_parameters
+            .iter()
+            .any(|parameter| !matches!(arena.get(*parameter), Some(SemanticType::TypeParameter(_))))
+        || function
+            .type_parameter_bounds
+            .iter()
+            .flatten()
+            .any(|bound| !arena.is_valid_hir_type(*bound))
+    {
+        return Err(vec![HirVerificationError::InvalidGenericBounds {
+            function: function.symbol,
+            span: function
+                .parameters
+                .first()
+                .map_or_else(empty_span, |parameter| parameter.span),
+        }]);
+    }
     let parameter_bindings: Vec<_> = function
         .parameters
         .iter()
@@ -1073,6 +1220,13 @@ fn verify_hir_callable_with_schema(
         known_functions,
         known_methods,
         schema,
+        parameter_bounds: function
+            .type_parameters
+            .iter()
+            .copied()
+            .zip(function.type_parameter_bounds.iter().copied())
+            .filter_map(|(parameter, bound)| bound.map(|bound| (parameter, bound)))
+            .collect(),
         parameter_types: function
             .parameters
             .iter()
@@ -1129,6 +1283,7 @@ struct Verifier<'arena> {
     known_functions: &'arena BTreeSet<SymbolId>,
     known_methods: &'arena BTreeSet<MethodId>,
     schema: Option<&'arena HirSchema>,
+    parameter_bounds: BTreeMap<TypeId, TypeId>,
     parameter_types: Vec<TypeId>,
     parameter_bindings: Vec<BindingId>,
     results: Vec<TypeId>,
@@ -1386,6 +1541,226 @@ impl Verifier<'_> {
                     self.verify_statements(body, &body_visible);
                     self.loop_depth = self.loop_depth.saturating_sub(1);
                 }
+                HirStatementKind::GeneralizedFor {
+                    protocol,
+                    source,
+                    item_type,
+                    iterator_type,
+                    iteration_type,
+                    bindings,
+                    iterable,
+                    body,
+                } => {
+                    self.verify_type(*item_type, statement.span());
+                    self.verify_type(*iterator_type, statement.span());
+                    self.verify_type(*iteration_type, statement.span());
+                    self.verify_expression(iterable, &visible);
+                    let protocol_identities = [
+                        protocol.iteration(),
+                        protocol.iterable(),
+                        protocol.iterator(),
+                        protocol.list(),
+                    ];
+                    let unique_protocol_identities: BTreeSet<_> =
+                        protocol_identities.into_iter().collect();
+                    if unique_protocol_identities.len() != protocol_identities.len()
+                        || protocol.item_case().raw() != 0
+                        || protocol.end_case().raw() != 1
+                        || protocol.iterator_method().raw() != 0
+                        || protocol.next_method().raw() != 1
+                    {
+                        self.errors
+                            .push(HirVerificationError::InvalidIterationProtocol {
+                                span: statement.span(),
+                            });
+                    }
+                    let valid_source = match (source, self.arena.get(iterable.type_id())) {
+                        (HirIterationSource::Array, Some(SemanticType::Array(element))) => {
+                            *element == *item_type
+                        }
+                        (HirIterationSource::Table, Some(SemanticType::Table { key, value })) => {
+                            matches!(
+                                self.arena.get(*item_type),
+                                Some(SemanticType::Tuple(elements))
+                                    if elements.as_slice() == [*key, *value]
+                            )
+                        }
+                        (
+                            HirIterationSource::List,
+                            Some(SemanticType::Builtin {
+                                definition,
+                                arguments,
+                            }),
+                        ) => *definition == protocol.list() && arguments.as_slice() == [*item_type],
+                        (
+                            HirIterationSource::Iterable,
+                            Some(SemanticType::Builtin {
+                                definition,
+                                arguments,
+                            }),
+                        ) => {
+                            *definition == protocol.iterable()
+                                && arguments.as_slice() == [*item_type]
+                        }
+                        (
+                            HirIterationSource::Iterator,
+                            Some(SemanticType::Builtin {
+                                definition,
+                                arguments,
+                            }),
+                        ) => {
+                            *definition == protocol.iterator()
+                                && arguments.as_slice() == [*item_type]
+                        }
+                        (
+                            HirIterationSource::BoundIterable,
+                            Some(SemanticType::TypeParameter(_)),
+                        ) => self
+                            .parameter_bounds
+                            .get(&iterable.type_id())
+                            .is_some_and(|bound| {
+                                matches!(
+                                    self.arena.get(*bound),
+                                    Some(SemanticType::Builtin { definition, arguments })
+                                        if *definition == protocol.iterable()
+                                            && arguments.as_slice() == [*item_type]
+                                )
+                            }),
+                        (
+                            HirIterationSource::BoundIterator,
+                            Some(SemanticType::TypeParameter(_)),
+                        ) => self
+                            .parameter_bounds
+                            .get(&iterable.type_id())
+                            .is_some_and(|bound| {
+                                matches!(
+                                self.arena.get(*bound),
+                                Some(SemanticType::Builtin { definition, arguments })
+                                    if *definition == protocol.iterator()
+                                        && arguments.as_slice() == [*item_type]
+                                )
+                            }),
+                        (
+                            HirIterationSource::ClassIterable { iterator_method },
+                            Some(SemanticType::Class { class, .. }),
+                        ) => self.schema.map_or_else(
+                            || self.known_methods.contains(iterator_method),
+                            |schema| {
+                                schema.classes.get(class).is_some_and(|class| {
+                                    class
+                                        .builtin_interfaces
+                                        .get(&protocol.iterable())
+                                        .is_some_and(|implementation| {
+                                            matches!(
+                                                self.arena.get(implementation.interface_type),
+                                                Some(SemanticType::Builtin { arguments, .. })
+                                                    if arguments.as_slice() == [*item_type]
+                                            ) && implementation.methods.iter().any(|method| {
+                                                method.protocol_method == protocol.iterator_method()
+                                                    && method.class_method == *iterator_method
+                                            })
+                                        })
+                                })
+                            },
+                        ),
+                        (
+                            HirIterationSource::ClassIterator {
+                                iterator_method,
+                                next_method,
+                            },
+                            Some(SemanticType::Class { class, .. }),
+                        ) => self.schema.map_or_else(
+                            || {
+                                self.known_methods.contains(iterator_method)
+                                    && self.known_methods.contains(next_method)
+                            },
+                            |schema| {
+                                schema.classes.get(class).is_some_and(|class| {
+                                    class
+                                        .builtin_interfaces
+                                        .get(&protocol.iterator())
+                                        .is_some_and(|implementation| {
+                                            matches!(
+                                                self.arena.get(implementation.interface_type),
+                                                Some(SemanticType::Builtin { arguments, .. })
+                                                    if arguments.as_slice() == [*item_type]
+                                            ) && implementation.methods.iter().any(|method| {
+                                                method.protocol_method == protocol.iterator_method()
+                                                    && method.class_method == *iterator_method
+                                            }) && implementation.methods.iter().any(|method| {
+                                                method.protocol_method == protocol.next_method()
+                                                    && method.class_method == *next_method
+                                            })
+                                        })
+                                })
+                            },
+                        ),
+                        _ => false,
+                    };
+                    if !valid_source {
+                        self.errors
+                            .push(HirVerificationError::InvalidIterationSource {
+                                type_id: iterable.type_id(),
+                                span: statement.span(),
+                            });
+                    }
+                    for (type_id, definition) in [
+                        (*iterator_type, protocol.iterator()),
+                        (*iteration_type, protocol.iteration()),
+                    ] {
+                        if !matches!(
+                            self.arena.get(type_id),
+                            Some(SemanticType::Builtin {
+                                definition: actual,
+                                arguments,
+                            }) if *actual == definition && arguments.as_slice() == [*item_type]
+                        ) {
+                            self.errors
+                                .push(HirVerificationError::InvalidIterationProtocol {
+                                    span: statement.span(),
+                                });
+                        }
+                    }
+                    let binding_types_valid = if bindings.len() == 1 {
+                        bindings[0].local_type == *item_type
+                    } else {
+                        matches!(
+                            self.arena.get(*item_type),
+                            Some(SemanticType::Tuple(elements))
+                                if elements.len() == bindings.len()
+                                    && elements.iter().zip(bindings).all(|(element, binding)| {
+                                        *element == binding.local_type
+                                    })
+                        )
+                    };
+                    if bindings.is_empty() || !binding_types_valid {
+                        self.errors
+                            .push(HirVerificationError::InvalidIterationBindings {
+                                span: statement.span(),
+                            });
+                    }
+                    let mut body_visible = visible.clone();
+                    for binding in bindings {
+                        self.verify_type(binding.local_type, binding.span);
+                        if self
+                            .local_types
+                            .insert(binding.local, binding.local_type)
+                            .is_some()
+                        {
+                            self.errors
+                                .push(HirVerificationError::DuplicateLocal(binding.local));
+                        }
+                        self.local_bindings.insert(binding.local, binding.binding);
+                        if !self.bindings.insert(binding.binding) {
+                            self.errors
+                                .push(HirVerificationError::DuplicateBinding(binding.binding));
+                        }
+                        body_visible.insert(binding.local);
+                    }
+                    self.loop_depth = self.loop_depth.saturating_add(1);
+                    self.verify_statements(body, &body_visible);
+                    self.loop_depth = self.loop_depth.saturating_sub(1);
+                }
                 HirStatementKind::Break | HirStatementKind::Continue => {
                     if self.cleanup_depth != 0 {
                         self.errors
@@ -1461,6 +1836,13 @@ impl Verifier<'_> {
                     self.verify_expression(value, &visible);
                     if let Some(SemanticType::Array(element)) = self.arena.get(array.type_id()) {
                         self.verify_expression_type(*element, value);
+                    }
+                }
+                HirStatementKind::ListSet { list, index, value } => {
+                    let element = self.verify_list_get(list, index, &visible);
+                    self.verify_expression(value, &visible);
+                    if let Some(element) = element {
+                        self.verify_expression_type(element, value);
                     }
                 }
                 HirStatementKind::TableSet { table, key, value } => {
@@ -1625,6 +2007,19 @@ impl Verifier<'_> {
                 }
                 Some(*element_type)
             }
+            HirAssignmentTarget::List {
+                list,
+                index,
+                element_type,
+            } => {
+                let actual = self.verify_list_get(list, index, visible);
+                self.verify_type(*element_type, span);
+                if actual != Some(*element_type) {
+                    self.errors
+                        .push(HirVerificationError::InvalidFixedPack { span });
+                }
+                Some(*element_type)
+            }
             HirAssignmentTarget::Table {
                 table,
                 key,
@@ -1705,6 +2100,11 @@ impl Verifier<'_> {
                 case,
                 arguments,
             } => self.verify_result_case(*result, *case, arguments, expression, visible),
+            HirExpressionKind::IterationCase {
+                iteration,
+                case,
+                arguments,
+            } => self.verify_iteration_case(*iteration, *case, arguments, expression, visible),
             HirExpressionKind::ErrorCase {
                 error,
                 case,
@@ -1848,6 +2248,74 @@ impl Verifier<'_> {
                         .push(HirVerificationError::InvalidCollectionType {
                             type_id: array.type_id(),
                             span: array.span(),
+                        });
+                }
+                if let Some(nil) = self.arena.source_type("nil") {
+                    self.verify_expression_type(nil, expression);
+                }
+            }
+            HirExpressionKind::ListCreate { capacity } => {
+                if let Some(capacity) = capacity {
+                    self.verify_expression(capacity, visible);
+                    if let Some(integer) = self.arena.source_type("Int") {
+                        self.verify_expression_type(integer, capacity);
+                    }
+                }
+                if self.list_element_type(expression.type_id()).is_none() {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: expression.type_id(),
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::ListLength { list } => {
+                self.verify_expression(list, visible);
+                if self.list_element_type(list.type_id()).is_none() {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: list.type_id(),
+                            span: list.span(),
+                        });
+                }
+                if let Some(integer) = self.arena.source_type("Int") {
+                    self.verify_expression_type(integer, expression);
+                }
+            }
+            HirExpressionKind::ListGet { list, index } => {
+                if let Some(element) = self.verify_list_get(list, index, visible) {
+                    let nil = self.arena.source_type("nil");
+                    let valid_result = matches!(
+                        self.arena.get(expression.type_id()),
+                        Some(SemanticType::Union(members))
+                            if members.len() == 2
+                                && members.contains(&element)
+                                && nil.is_some_and(|nil| members.contains(&nil))
+                    );
+                    if !valid_result {
+                        self.errors
+                            .push(HirVerificationError::InvalidCollectionType {
+                                type_id: expression.type_id(),
+                                span: expression.span(),
+                            });
+                    }
+                }
+            }
+            HirExpressionKind::ListGetChecked { list, index } => {
+                if let Some(element) = self.verify_list_get(list, index, visible) {
+                    self.verify_expression_type(element, expression);
+                }
+            }
+            HirExpressionKind::ListAdd { list, value } => {
+                self.verify_expression(list, visible);
+                self.verify_expression(value, visible);
+                if let Some(element) = self.list_element_type(list.type_id()) {
+                    self.verify_expression_type(element, value);
+                } else {
+                    self.errors
+                        .push(HirVerificationError::InvalidCollectionType {
+                            type_id: list.type_id(),
+                            span: list.span(),
                         });
                 }
                 if let Some(nil) = self.arena.source_type("nil") {
@@ -2592,6 +3060,38 @@ impl Verifier<'_> {
         }
     }
 
+    fn verify_iteration_case(
+        &mut self,
+        iteration: BuiltinTypeId,
+        case: IterationCaseId,
+        arguments: &[HirExpression],
+        expression: &HirExpression,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        for argument in arguments {
+            self.verify_expression(argument, visible);
+        }
+        let valid = match self.arena.get(expression.type_id()) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments: type_arguments,
+            }) if *definition == iteration && type_arguments.len() == 1 => {
+                (case.raw() == 0
+                    && arguments.len() == 1
+                    && arguments[0].type_id() == type_arguments[0])
+                    || (case.raw() == 1 && arguments.is_empty())
+            }
+            _ => false,
+        };
+        if !valid {
+            self.errors
+                .push(HirVerificationError::InvalidIterationCase {
+                    case,
+                    span: expression.span(),
+                });
+        }
+    }
+
     fn verify_error_case(
         &mut self,
         error: ErrorId,
@@ -2629,26 +3129,38 @@ impl Verifier<'_> {
 
     fn verify_interface_upcast(
         &mut self,
-        interface_id: InterfaceId,
+        interface_id: NominalInterfaceId,
         value: &HirExpression,
         expression: &HirExpression,
     ) {
         let Some(schema) = self.schema else {
             return;
         };
-        let Some(interface) = schema.interfaces.get(&interface_id) else {
-            self.errors.push(HirVerificationError::UnknownInterface {
-                interface: interface_id,
-                span: expression.span(),
-            });
-            return;
-        };
         let source_class = schema
             .classes
             .values()
             .find(|class| class.type_id == value.type_id());
-        let valid = source_class.is_some_and(|class| class.interfaces.contains_key(&interface_id))
-            && expression.type_id() == interface.type_id;
+        let valid = match interface_id {
+            NominalInterfaceId::User(interface_id) => {
+                let Some(interface) = schema.interfaces.get(&interface_id) else {
+                    self.errors.push(HirVerificationError::UnknownInterface {
+                        interface: interface_id,
+                        span: expression.span(),
+                    });
+                    return;
+                };
+                source_class.is_some_and(|class| class.interfaces.contains_key(&interface_id))
+                    && expression.type_id() == interface.type_id
+            }
+            NominalInterfaceId::Builtin(interface_id) => source_class.is_some_and(|class| {
+                class
+                    .builtin_interfaces
+                    .get(&interface_id)
+                    .is_some_and(|implementation| {
+                        implementation.interface_type == expression.type_id()
+                    })
+            }),
+        };
         if !valid {
             self.errors
                 .push(HirVerificationError::InvalidInterfaceUpcast {
@@ -2893,6 +3405,7 @@ impl Verifier<'_> {
                         .source_type("Int")
                         .map(|int| HirCallableSignature {
                             type_parameters: Vec::new(),
+                            type_parameter_bounds: Vec::new(),
                             parameters: vec![int],
                             results: Vec::new(),
                         })
@@ -2956,9 +3469,15 @@ impl Verifier<'_> {
                             });
                     }
                     let mut parameters = vec![receiver_type];
+                    if let Some(receiver) = arguments.first()
+                        && self.parameter_bounds.get(&receiver.type_id()) == Some(&receiver_type)
+                    {
+                        parameters[0] = receiver.type_id();
+                    }
                     parameters.extend(method_schema.signature.parameters);
                     Some(HirCallableSignature {
                         type_parameters: Vec::new(),
+                        type_parameter_bounds: Vec::new(),
                         parameters,
                         results: method_schema.signature.results,
                     })
@@ -2974,6 +3493,59 @@ impl Verifier<'_> {
                     None
                 }
             }
+            HirCallDispatch::BuiltinInterfaceMethod { interface, method } => {
+                let signature = arguments.first().and_then(|receiver| {
+                    let receiver_contract = self
+                        .parameter_bounds
+                        .get(&receiver.type_id())
+                        .copied()
+                        .unwrap_or(receiver.type_id());
+                    let SemanticType::Builtin {
+                        definition,
+                        arguments: interface_arguments,
+                    } = self.arena.get(receiver_contract)?
+                    else {
+                        return None;
+                    };
+                    let [item_type] = interface_arguments.as_slice() else {
+                        return None;
+                    };
+                    let protocol = embedded_bootstrap_schema()
+                        .ok()
+                        .and_then(|schema| schema.iteration_protocol())?;
+                    if definition != interface {
+                        return None;
+                    }
+                    let result_definition = if *method == protocol.iterator_method()
+                        && (*interface == protocol.iterable() || *interface == protocol.iterator())
+                    {
+                        protocol.iterator()
+                    } else if *method == protocol.next_method() && *interface == protocol.iterator()
+                    {
+                        protocol.iteration()
+                    } else {
+                        return None;
+                    };
+                    let result = self.arena.find(&SemanticType::Builtin {
+                        definition: result_definition,
+                        arguments: vec![*item_type],
+                    })?;
+                    Some(HirCallableSignature {
+                        type_parameters: Vec::new(),
+                        type_parameter_bounds: Vec::new(),
+                        parameters: vec![receiver.type_id()],
+                        results: vec![result],
+                    })
+                });
+                if signature.is_none() {
+                    self.errors
+                        .push(HirVerificationError::InvalidBuiltinInterfaceCall {
+                            interface: *interface,
+                            span,
+                        });
+                }
+                signature
+            }
             HirCallDispatch::Indirect { callee } => {
                 self.verify_expression(callee, visible);
                 if let Some(SemanticType::Function {
@@ -2984,6 +3556,7 @@ impl Verifier<'_> {
                 {
                     Some(HirCallableSignature {
                         type_parameters: Vec::new(),
+                        type_parameter_bounds: Vec::new(),
                         parameters,
                         results,
                     })
@@ -3357,6 +3930,40 @@ impl Verifier<'_> {
         }
     }
 
+    fn list_element_type(&self, type_id: TypeId) -> Option<TypeId> {
+        let schema = pop_types::embedded_bootstrap_schema().ok()?;
+        let list = schema.iteration_protocol()?.list();
+        match self.arena.get(type_id)? {
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if *definition == list && arguments.len() == 1 => Some(arguments[0]),
+            _ => None,
+        }
+    }
+
+    fn verify_list_get(
+        &mut self,
+        list: &HirExpression,
+        index: &HirExpression,
+        visible: &BTreeSet<LocalId>,
+    ) -> Option<TypeId> {
+        self.verify_expression(list, visible);
+        self.verify_expression(index, visible);
+        let element = self.list_element_type(list.type_id());
+        if element.is_none() {
+            self.errors
+                .push(HirVerificationError::InvalidCollectionType {
+                    type_id: list.type_id(),
+                    span: list.span(),
+                });
+        }
+        if let Some(integer) = self.arena.source_type("Int") {
+            self.verify_expression_type(integer, index);
+        }
+        element
+    }
+
     fn verify_array(
         &mut self,
         expression: &HirExpression,
@@ -3702,6 +4309,12 @@ fn collect_local_binding_map(
                 local_bindings.insert(*local, *binding);
                 collect_local_binding_map(body, local_bindings);
             }
+            HirStatementKind::GeneralizedFor { bindings, body, .. } => {
+                for binding in bindings {
+                    local_bindings.insert(binding.local, binding.binding);
+                }
+                collect_local_binding_map(body, local_bindings);
+            }
             HirStatementKind::Match { arms, .. } => {
                 for arm in arms {
                     for binding in &arm.bindings {
@@ -3742,6 +4355,7 @@ fn collect_local_binding_map(
             | HirStatementKind::FieldSet { .. }
             | HirStatementKind::CompoundFieldSet { .. }
             | HirStatementKind::ArraySet { .. }
+            | HirStatementKind::ListSet { .. }
             | HirStatementKind::TableSet { .. }
             | HirStatementKind::CompoundArraySet { .. }
             | HirStatementKind::MultipleAssignment { .. }
@@ -3885,6 +4499,16 @@ fn collect_written_bindings(
                     written,
                 );
             }
+            HirStatementKind::GeneralizedFor { iterable, body, .. } => {
+                collect_cell_captures(iterable, written);
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                );
+            }
             HirStatementKind::Break | HirStatementKind::Continue => {}
             HirStatementKind::Match {
                 scrutinee, arms, ..
@@ -3952,6 +4576,11 @@ fn collect_written_bindings(
                 collect_cell_captures(index, written);
                 collect_cell_captures(value, written);
             }
+            HirStatementKind::ListSet { list, index, value } => {
+                collect_cell_captures(list, written);
+                collect_cell_captures(index, written);
+                collect_cell_captures(value, written);
+            }
             HirStatementKind::TableSet { table, key, value } => {
                 collect_cell_captures(table, written);
                 collect_cell_captures(key, written);
@@ -3979,6 +4608,10 @@ fn collect_written_bindings(
                         }
                         HirAssignmentTarget::Array { array, index, .. } => {
                             collect_cell_captures(array, written);
+                            collect_cell_captures(index, written);
+                        }
+                        HirAssignmentTarget::List { list, index, .. } => {
+                            collect_cell_captures(list, written);
                             collect_cell_captures(index, written);
                         }
                         HirAssignmentTarget::Table { table, key, .. } => {
@@ -4016,7 +4649,9 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
         HirExpressionKind::TupleGet { tuple, .. } => collect_cell_captures(tuple, written),
         HirExpressionKind::ArrayGet { array, index }
-        | HirExpressionKind::ArrayGetChecked { array, index } => {
+        | HirExpressionKind::ArrayGetChecked { array, index }
+        | HirExpressionKind::ListGet { list: array, index }
+        | HirExpressionKind::ListGetChecked { list: array, index } => {
             collect_cell_captures(array, written);
             collect_cell_captures(index, written);
         }
@@ -4032,6 +4667,16 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             collect_cell_captures(initial_value, written);
         }
         HirExpressionKind::ArrayLength { array } => collect_cell_captures(array, written),
+        HirExpressionKind::ListCreate { capacity } => {
+            if let Some(capacity) = capacity {
+                collect_cell_captures(capacity, written);
+            }
+        }
+        HirExpressionKind::ListLength { list } => collect_cell_captures(list, written),
+        HirExpressionKind::ListAdd { list, value } => {
+            collect_cell_captures(list, written);
+            collect_cell_captures(value, written);
+        }
         HirExpressionKind::ArrayFill { array, value } => {
             collect_cell_captures(array, written);
             collect_cell_captures(value, written);
@@ -4061,6 +4706,7 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         }
         HirExpressionKind::UnionCase { arguments, .. }
         | HirExpressionKind::ResultCase { arguments, .. }
+        | HirExpressionKind::IterationCase { arguments, .. }
         | HirExpressionKind::ErrorCase { arguments, .. }
         | HirExpressionKind::Call { arguments, .. } => {
             for argument in arguments {

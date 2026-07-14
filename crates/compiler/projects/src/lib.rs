@@ -6,11 +6,17 @@ use std::fmt;
 
 use pop_foundation::{BubbleId, FileId, ModuleId, PackageId, WorkspaceId};
 
+mod lock;
 mod manifest;
 
+pub use lock::{
+    BubbleLock, LockError, LockMode, LockedBubble, LockedBubbleIdentity, LockedPackage,
+    LockedSource, apply_lock_policy, decode_lock, encode_lock, sha256_hex,
+};
 pub use manifest::{
-    BubbleKind, DependencyRequirement, DiscoveredBubble, ManifestError, PackageManifest,
-    discover_conventional_bubbles, parse_package_manifest,
+    BubbleKind, DependencyRequirement, DependencySource, DiscoveredBubble, ManifestError,
+    PackageManifest, PlatformDependencies, WorkspaceManifest, discover_conventional_bubbles,
+    discover_workspace_members, parse_package_manifest, parse_workspace_manifest,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

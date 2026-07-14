@@ -9,9 +9,10 @@ use std::fmt::Write;
 
 use pop_foundation::{
     BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId, EnumCaseId,
-    ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, MethodId,
-    NamespaceId, NestedFunctionId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId,
+    IterationProtocolMethodId, MethodId, NamespaceId, NestedFunctionId, NominalInterfaceId,
+    ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
@@ -393,6 +394,7 @@ pub struct MirClassDeclaration {
     pub(crate) fields: Vec<MirField>,
     pub(crate) methods: Vec<MethodId>,
     pub(crate) interfaces: Vec<MirInterfaceImplementation>,
+    pub(crate) builtin_interfaces: Vec<MirBuiltinInterfaceImplementation>,
 }
 
 impl MirClassDeclaration {
@@ -419,6 +421,53 @@ impl MirClassDeclaration {
     #[must_use]
     pub fn interfaces(&self) -> &[MirInterfaceImplementation] {
         &self.interfaces
+    }
+
+    #[must_use]
+    pub fn builtin_interfaces(&self) -> &[MirBuiltinInterfaceImplementation] {
+        &self.builtin_interfaces
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirBuiltinInterfaceImplementation {
+    pub(crate) interface: BuiltinTypeId,
+    pub(crate) interface_type: TypeId,
+    pub(crate) methods: Vec<MirBuiltinInterfaceMethodImplementation>,
+}
+
+impl MirBuiltinInterfaceImplementation {
+    #[must_use]
+    pub const fn interface(&self) -> BuiltinTypeId {
+        self.interface
+    }
+
+    #[must_use]
+    pub const fn interface_type(&self) -> TypeId {
+        self.interface_type
+    }
+
+    #[must_use]
+    pub fn methods(&self) -> &[MirBuiltinInterfaceMethodImplementation] {
+        &self.methods
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirBuiltinInterfaceMethodImplementation {
+    pub(crate) protocol_method: IterationProtocolMethodId,
+    pub(crate) class_method: MethodId,
+}
+
+impl MirBuiltinInterfaceMethodImplementation {
+    #[must_use]
+    pub const fn protocol_method(&self) -> IterationProtocolMethodId {
+        self.protocol_method
+    }
+
+    #[must_use]
+    pub const fn class_method(&self) -> MethodId {
+        self.class_method
     }
 }
 
@@ -893,6 +942,11 @@ pub enum MirInstructionKind {
         case: ResultCaseId,
         arguments: Vec<ValueId>,
     },
+    IterationMake {
+        iteration: BuiltinTypeId,
+        case: IterationCaseId,
+        arguments: Vec<ValueId>,
+    },
     ErrorMake {
         error: ErrorId,
         case: ErrorCaseId,
@@ -965,6 +1019,32 @@ pub enum MirInstructionKind {
     },
     ArrayFill {
         array: ValueId,
+        value: ValueId,
+        element_map: ArrayElementMap,
+    },
+    ListCreate {
+        capacity: Option<ValueId>,
+        element_map: ArrayElementMap,
+    },
+    ListLength {
+        list: ValueId,
+    },
+    ListGet {
+        list: ValueId,
+        index: ValueId,
+    },
+    ListGetChecked {
+        list: ValueId,
+        index: ValueId,
+    },
+    ListSet {
+        list: ValueId,
+        index: ValueId,
+        value: ValueId,
+        element_map: ArrayElementMap,
+    },
+    ListAdd {
+        list: ValueId,
         value: ValueId,
         element_map: ArrayElementMap,
     },
@@ -1131,6 +1211,13 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
+    CallBuiltinInterface {
+        interface: BuiltinTypeId,
+        method: IterationProtocolMethodId,
+        arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
     CallIndirect {
         callee: ValueId,
         arguments: Vec<ValueId>,
@@ -1165,9 +1252,20 @@ pub enum MirInstructionKind {
         case: UnionCaseId,
         arguments: Vec<ValueId>,
     },
+    IterationIsItem {
+        iteration: ValueId,
+        definition: BuiltinTypeId,
+        item_case: IterationCaseId,
+        end_case: IterationCaseId,
+    },
+    IterationGetItem {
+        iteration: ValueId,
+        definition: BuiltinTypeId,
+        item_case: IterationCaseId,
+    },
     InterfaceUpcast {
         value: ValueId,
-        interface: InterfaceId,
+        interface: NominalInterfaceId,
     },
     CaptureCellAllocate {
         binding: BindingId,
@@ -1493,6 +1591,23 @@ pub enum MirVerificationError {
     },
     InvalidResultOperation {
         instruction: ValueId,
+    },
+    InvalidIterationOperation {
+        instruction: ValueId,
+    },
+    InvalidBuiltinInterfaceImplementation {
+        class: ClassId,
+        interface: BuiltinTypeId,
+    },
+    InvalidInterfaceImplementation {
+        class: ClassId,
+        interface: InterfaceId,
+    },
+    InvalidInterfaceUpcast {
+        instruction: ValueId,
+        interface: NominalInterfaceId,
+        source: TypeId,
+        target: TypeId,
     },
     InvalidErrorOperation {
         instruction: ValueId,

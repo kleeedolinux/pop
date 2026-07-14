@@ -279,6 +279,65 @@ fn exact_explicit_class_implementation_records_nominal_slot_mappings_and_upcast(
 }
 
 #[test]
+fn reserved_iterator_implementation_keeps_builtin_protocol_ids_and_exact_slots() {
+    with_program(
+        "namespace Example\n\
+         private class IntegerIterator implements Iterator<Int>\n\
+             public function IntegerIterator:iterator(): Iterator<Int>\n\
+                 return self\n\
+             end\n\
+             public function IntegerIterator:next(): Iteration<Int>\n\
+                 return Iteration.End\n\
+             end\n\
+         end\n",
+        |source, syntax, module, database, resolver| {
+            let class_syntax = parse_class_declaration(
+                source,
+                syntax,
+                declaration_node(syntax, NodeKind::ClassDeclaration, 0),
+            )
+            .expect("class syntax");
+            let class_symbol = type_symbol(database, "Example.IntegerIterator");
+            let result = resolver.define_class(module, class_symbol, &class_syntax);
+
+            assert!(
+                result.diagnostics().is_empty(),
+                "{}",
+                result.diagnostic_snapshot()
+            );
+            let class = result.definition().expect("class");
+            assert!(class.interfaces().is_empty(), "not a user InterfaceId");
+            let implementation = class
+                .builtin_interfaces()
+                .first()
+                .expect("reserved iterator witness");
+            let protocol = embedded_bootstrap_schema()
+                .expect("bootstrap")
+                .iteration_protocol()
+                .expect("iteration protocol");
+            assert_eq!(implementation.interface(), protocol.iterator());
+            assert_eq!(implementation.methods().len(), 2);
+            assert_eq!(
+                implementation.methods()[0].protocol_method(),
+                protocol.iterator_method()
+            );
+            assert_eq!(
+                implementation.methods()[1].protocol_method(),
+                protocol.next_method()
+            );
+            assert_eq!(
+                implementation.methods()[0].class_method(),
+                class.methods()[0].method()
+            );
+            assert_eq!(
+                implementation.methods()[1].class_method(),
+                class.methods()[1].method()
+            );
+        },
+    );
+}
+
+#[test]
 fn missing_mismatched_static_and_inaccessible_methods_are_rejected() {
     for (method, expected) in [
         ("", "POP2018"),

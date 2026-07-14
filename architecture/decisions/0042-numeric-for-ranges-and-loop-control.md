@@ -55,10 +55,11 @@ conditional branches, block arguments, traps, and backedges. It adds no range,
 iterator, `break`, or `continue` opcode. Backedge safe-point requirements remain
 unchanged and apply equally to explicit `continue` edges.
 
-Generalized `for binding in iterable do` remains deferred until the nominal
-iteration protocol, specialization, disposal, and multiple-binding behavior
-are accepted together. This decision does not make a range a runtime object or
-add a range operator; `..` remains string concatenation.
+This ADR originally deferred generalized `for binding in iterable do` until the
+nominal iteration protocol, specialization, disposal, and multiple-binding
+behavior were accepted together. ADR 0053 now closes that later contract. This
+decision still does not make a range a runtime object or add a range operator;
+`..` remains string concatenation.
 
 ## Consequences
 

@@ -2,7 +2,7 @@ use pop_foundation::{FileId, SourceSpan, TextRange, TextSize};
 use pop_source::SourceFile;
 
 use crate::body::{parse_body_range, parse_expression_prefix};
-use crate::signature::parse_type_prefix;
+use crate::signature::{GenericParameterSyntax, parse_type_prefix};
 use crate::{
     ExpressionSyntax, FunctionBodyError, FunctionBodySyntax, NodeKind, SyntaxNode, SyntaxTree,
     Token, TokenKind, TypeSyntax,
@@ -24,6 +24,7 @@ pub enum ClassMethodDispatchSyntax {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClassDeclarationSyntax {
     name: String,
+    type_parameters: Vec<GenericParameterSyntax>,
     is_open: bool,
     interfaces: Vec<TypeSyntax>,
     fields: Vec<ClassFieldSyntax>,
@@ -35,6 +36,11 @@ impl ClassDeclarationSyntax {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub fn type_parameters(&self) -> &[GenericParameterSyntax] {
+        &self.type_parameters
     }
 
     #[must_use]
@@ -271,6 +277,7 @@ impl ClassParser<'_> {
         self.expect(TokenKind::Class, "`class`")?;
         let name = self.expect(TokenKind::Identifier, "class name")?;
         let name = name.text(self.source).to_owned();
+        let type_parameters = self.parse_type_parameters()?;
         let mut interfaces = Vec::new();
         if self.consume(TokenKind::Implements).is_some() {
             loop {
@@ -296,12 +303,40 @@ impl ClassParser<'_> {
         let end = self.expect(TokenKind::End, "`end`")?.range().end();
         Ok(ClassDeclarationSyntax {
             name,
+            type_parameters,
             is_open,
             interfaces,
             fields,
             methods,
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
+    }
+
+    fn parse_type_parameters(
+        &mut self,
+    ) -> Result<Vec<GenericParameterSyntax>, ClassDeclarationError> {
+        if self.consume(TokenKind::LessThan).is_none() {
+            return Ok(Vec::new());
+        }
+        let mut parameters = Vec::new();
+        loop {
+            let token = self.expect(TokenKind::Identifier, "type parameter")?;
+            let bound = if self.consume(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            parameters.push(GenericParameterSyntax::new(
+                token.text(self.source).to_owned(),
+                bound,
+                SourceSpan::new(self.file, token.range()),
+            ));
+            if self.consume(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::GreaterThan, "`>`")?;
+        Ok(parameters)
     }
 
     fn parse_field(

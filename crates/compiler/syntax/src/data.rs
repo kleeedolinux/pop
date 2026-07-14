@@ -594,8 +594,14 @@ impl<'source> DataParser<'source> {
         let mut parameters = Vec::new();
         loop {
             let token = self.expect(TokenKind::Identifier, "type parameter")?;
+            let bound = if self.consume(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
             parameters.push(GenericParameterSyntax::new(
                 token.text(self.source).to_owned(),
+                bound,
                 SourceSpan::new(self.file, token.range()),
             ));
             if self.consume(TokenKind::Comma).is_none() {

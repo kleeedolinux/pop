@@ -255,6 +255,12 @@ fully initialized array, `Array.length(array)` queries its length,
 `Array.fill(array, value)` replaces every element. Ordinary `array[index]`
 reads remain optional. See ADR 0034.
 
+`List<T>` is the distinct one-based growable sequential collection. Its
+`create`, `withCapacity`, `add`, `length`, optional indexing, checked `get`, and
+checked replacement operations preserve invariant element typing and stable
+managed identity. Array assignment never acquires list growth semantics. See
+ADR 0053.
+
 ## Control flow and loops
 
 Conditions are exactly `Boolean`. Statement `if` supports Luau-shaped `elseif`
@@ -288,8 +294,24 @@ identical integer type. The loop binding is immutable and body-local. Positive
 steps use `<=`, negative steps use `>=`, zero raises `InvalidRangeStep`, and
 progression is checked.
 `break` exits the innermost loop; `continue` reaches the `while` condition, the
-`repeat` condition, or numeric-range advancement as appropriate. Generalized
-iteration remains a separate typed-protocol feature. See ADR 0032 and ADR 0042.
+`repeat` condition, numeric-range advancement, or the next iterator step as
+appropriate.
+
+Generalized iteration uses one source expression and the exact nominal
+`Iterable<T>`/`Iterator<T>` protocol:
+
+```luau
+for value in values do
+    visit(value)
+end
+```
+
+The source is evaluated once, `iterator()` is acquired once when required, and
+each iteration performs one `next()` returning `Iteration.Item(value)` or
+`Iteration.End`. Multiple bindings destructure one fixed tuple item exactly.
+No member name is looked up dynamically and no iterator is closed implicitly;
+resource-backed iteration uses explicit lexical `defer`. See ADR 0032, ADR
+0042, and ADR 0053.
 
 ## Namespaces, using directives, Modules, and Bubbles
 

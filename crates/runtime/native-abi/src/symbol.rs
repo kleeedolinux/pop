@@ -1,9 +1,9 @@
 use pop_runtime_interface::RuntimeOperation;
 
-/// ABI 1.7 lookup adapter that separates presence from a scalar payload.
+/// ABI 1.9 lookup adapter that separates presence from a scalar payload.
 pub const TABLE_GET_CHECKED_SYMBOL: &str = "pop_rt_table_get_checked";
 
-/// Returns the native C symbol for an operation implemented by ABI 1.7.
+/// Returns the native C symbol for an operation implemented by ABI 1.9.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.
@@ -22,6 +22,14 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::ArrayGetChecked => Some("pop_rt_array_get_checked"),
         RuntimeOperation::ArraySet => Some("pop_rt_array_set"),
         RuntimeOperation::ArrayFill => Some("pop_rt_array_fill"),
+        RuntimeOperation::ListCreate => Some("pop_rt_list_create"),
+        RuntimeOperation::ListLength => Some("pop_rt_list_length"),
+        RuntimeOperation::ListGet => Some("pop_rt_list_get"),
+        RuntimeOperation::ListGetChecked => Some("pop_rt_list_get_checked"),
+        RuntimeOperation::ListSet => Some("pop_rt_list_set"),
+        RuntimeOperation::ListAdd => Some("pop_rt_list_add"),
+        RuntimeOperation::IterationAcquire => Some("pop_rt_iteration_acquire"),
+        RuntimeOperation::IterationNext => Some("pop_rt_iteration_next"),
         RuntimeOperation::FieldGet => Some("pop_rt_field_get"),
         RuntimeOperation::FieldSet => Some("pop_rt_field_set"),
         RuntimeOperation::StringConcat => Some("pop_rt_string_concat"),

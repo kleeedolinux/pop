@@ -144,6 +144,14 @@ The directory form may later be packed without changing the logical format.
 Binary/test/example/benchmark Bubbles emit their corresponding executable and
 debug/test metadata rather than pretending to be libraries.
 
+ADR 0055 fixes the version-1 physical control files as bounded canonical UTF-8
+JSON with identity-sorted arrays and exactly one trailing newline. Every
+inventoried file has a recorded size and lowercase hexadecimal SHA-256 digest.
+Paths are normalized relative paths and cannot traverse or escape the artifact.
+`documentation.xml` and opaque target implementation files retain their native
+formats. Emission verifies a complete temporary artifact through the normal
+loader before atomic publication.
+
 ### Bubble identity
 
 A `BubbleIdentity` contains:
@@ -185,18 +193,36 @@ verification occurs before executable content is mapped.
 - public constants;
 - referenced `BubbleIdentity` values.
 
-It excludes `internal`/`private` bodies and UDAs, runtime reflection, compiler
-arenas, backend objects, and unrelated implementation details. Reference-only
-artifacts never execute. XML documentation is separate and does not alter the
-public API hash.
+It excludes ordinary `internal`/`private` declarations and UDAs, runtime
+reflection, compiler arenas, backend objects, and unrelated implementation
+details. A public generic callable may carry one verified portable
+specialization capsule containing its opaque transitive implementation closure.
+Capsule-private identities are not entered into consumer name resolution and do
+not widen visibility. Reference-only artifacts never execute. XML documentation
+is separate and does not alter the public API hash. See ADR 0054.
 
 Cross-Bubble declarations use
 `SymbolIdentity { bubble: BubbleId, symbol: SymbolId }` under
 [ADR 0036](./decisions/0036-typed-cross-bubble-function-references.md). The
 first implementation emits public namespace functions with closed primitive
-parameter/result signatures and effects. Unsupported public signature types
-reject metadata emission rather than becoming erased or dynamic. HIR/MIR retain
-the complete identity after any session-local metadata remapping.
+parameter/result signatures and effects. The generic extension uses a closed
+recursive typed schema for parameters, bounds, aggregate/callable types, nominal
+identities, and reserved built-in identities. Unsupported public signature or
+capsule types reject metadata emission rather than becoming erased or dynamic.
+HIR/MIR retain complete identities after any session-local metadata remapping.
+
+Portable capsule loading verifies the owner, schema, hash, type graph, effects,
+dependencies, HIR invariants, visibility closure, and specialization budget.
+Specialized identity derives from the source `SymbolIdentity` plus canonical
+type arguments; loading never merges the dependency's Modules or namespace into
+the consumer Bubble.
+
+The version-1 capsule payload is encoded inline in canonical
+`reference.metadata`. Its logical model is the already verified HIR/type
+capsule; serialization cannot introduce names, types, effects, or dependencies.
+The capsule and enclosing file have independent SHA-256 digests and explicit
+resource counts. Unsupported or noncanonical encodings fail before the capsule
+enters a consumer arena.
 
 ## Compile-time resolution algorithm
 

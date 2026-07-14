@@ -1,7 +1,7 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
-use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
+use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, NominalInterfaceId};
 use pop_hir::{HirCallDispatch, HirDeclarationKind, HirExpressionKind, HirStatementKind};
-use pop_mir::lower_hir_bubble;
+use pop_mir::{MirDeclarationKind, MirVerificationError, lower_hir_bubble};
 use pop_source::SourceFile;
 
 #[test]
@@ -87,7 +87,6 @@ fn explicit_generic_functions_records_and_unions_reach_concrete_mir() {
 #[test]
 fn generic_calls_and_data_require_exact_static_type_arguments() {
     for source_text in [
-        "namespace Main\nprivate function identity<T>(value: T): T\n    return value\nend\npublic function run(): Int\n    return identity(1)\nend\n",
         "namespace Main\nprivate function identity<T>(value: T): T\n    return value\nend\npublic function run(): Int\n    return identity<<Int, String>>(1)\nend\n",
         "namespace Main\nprivate record Box<T>\n    value: T\nend\npublic function run(value: Box<Int, String>): Int\n    return 0\nend\n",
         "namespace Main\nprivate union Choice<T>\n    Value(value: T)\nend\npublic function run(): Choice<Int>\n    return Choice.Value<<Int>>(\"wrong\")\nend\n",
@@ -107,6 +106,195 @@ fn generic_calls_and_data_require_exact_static_type_arguments() {
         );
         assert!(!result.diagnostics().is_empty());
     }
+}
+
+#[test]
+fn normal_generic_calls_infer_one_complete_static_argument_list() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/inferredGeneric.pop",
+        "namespace Main\n\
+         private function identity<T>(value: T): T\n\
+             return value\n\
+         end\n\
+         private function select<T, TSource: Iterable<T>>(values: TSource, value: T): T\n\
+             return value\n\
+         end\n\
+         public function run(): Int\n\
+             local values: {Int} = {1, 2}\n\
+             local selected = select(values, 1)\n\
+             return identity(selected)\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("typed HIR");
+    let integer = result.types().source_type("Int").expect("Int");
+    let run = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run");
+    let HirStatementKind::Local {
+        initializer: first_call,
+        ..
+    } = run.body()[1].kind()
+    else {
+        panic!("first call local");
+    };
+    assert!(matches!(
+        first_call.kind(),
+        HirExpressionKind::Call { type_arguments, .. }
+            if type_arguments.len() == 2 && type_arguments[0] == integer
+    ));
+    let HirStatementKind::Return { values } = run.body()[2].kind() else {
+        panic!("identity return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        HirExpressionKind::Call { type_arguments, .. } if type_arguments == &[integer]
+    ));
+}
+
+#[test]
+fn generic_inference_rejects_ambiguity_conflicts_and_failed_bounds() {
+    for source_text in [
+        "namespace Main\nprivate function choose<T>(): T?\n    return nil\nend\npublic function run()\n    local value = choose()\nend\n",
+        "namespace Main\nprivate function same<T>(left: T, right: T): T\n    return left\nend\npublic function run(): Int\n    return same(1, \"wrong\")\nend\n",
+        "namespace Main\nprivate function consume<T, TSource: Iterable<T>>(source: TSource)\nend\npublic function run()\n    consume(1)\nend\n",
+    ] {
+        let source = SourceFile::new(FileId::from_raw(0), "src/invalidInference.pop", source_text)
+            .expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+
+        assert!(
+            !result.diagnostics().is_empty(),
+            "inference must fail closed"
+        );
+        assert!(
+            result.hir().is_none(),
+            "invalid inference must not reach HIR"
+        );
+    }
+}
+
+#[test]
+fn explicit_generic_arguments_cannot_bypass_nominal_bounds() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/explicitBound.pop",
+        "namespace Main\n\
+         private function consume<T, TSource: Iterable<T>>(source: TSource): TSource\n\
+             return source\n\
+         end\n\
+         public function run(): Int\n\
+             return consume<<Int, Int>>(1)\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(result.hir().is_none(), "failed bound must not reach HIR");
+    assert!(
+        result
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code().as_str() == "POP2028"),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn generalized_for_uses_a_proven_generic_iterable_bound() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/genericIteration.pop",
+        "namespace Main\n\
+         private function last<T, TSource: Iterable<T>>(source: TSource, fallback: T): T\n\
+             for value in source do\n\
+                 local checked: T = value\n\
+             end\n\
+             return fallback\n\
+         end\n\
+         public function run(): Int\n\
+             local values: {Int} = {1, 2}\n\
+             return last(values, 0)\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("bounded generic HIR");
+    let last = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "last")
+        .expect("last");
+    assert!(matches!(
+        last.body()[0].kind(),
+        HirStatementKind::GeneralizedFor {
+            source: pop_hir::HirIterationSource::BoundIterable,
+            ..
+        }
+    ));
+    let mir = lower_hir_bubble(hir, result.types()).expect("specialized generic iteration MIR");
+    assert!(mir.dump().contains("call.builtinInterface"));
+    assert!(!mir.dump().contains("type-parameter"));
+}
+
+#[test]
+fn generalized_for_rejects_an_unbounded_generic_source() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/unboundedIteration.pop",
+        "namespace Main\n\
+         private function invalid<TSource>(source: TSource)\n\
+             for value in source do\n\
+             end\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(result.hir().is_none());
+    assert!(!result.diagnostics().is_empty());
 }
 
 #[test]
@@ -609,6 +797,281 @@ fn native_class_construction_reaches_hir_as_a_class_operation() {
 }
 
 #[test]
+fn generic_class_layouts_and_methods_reach_mir_only_as_concrete_instances() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/box.pop",
+        "namespace Main\n\
+         private class Box<T>\n\
+             private value: T\n\
+             public function Box.new(value: T): Box<T>\n\
+                 return Box { value = value }\n\
+             end\n\
+             public function Box:get(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         public function read(value: Int): Int\n\
+             local box: Box<Int> = Box.new(value)\n\
+             return box:get()\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("verified HIR");
+    assert_eq!(
+        hir.methods().len(),
+        4,
+        "template and concrete method bodies"
+    );
+    assert_eq!(
+        hir.declarations()
+            .iter()
+            .filter(|declaration| matches!(declaration.kind(), HirDeclarationKind::Class(_)))
+            .count(),
+        2,
+        "template and concrete layouts"
+    );
+
+    let mir = lower_hir_bubble(hir, result.types()).expect("concrete class MIR");
+    assert_eq!(
+        mir.methods().len(),
+        2,
+        "only reachable concrete methods remain"
+    );
+    assert!(mir.methods().iter().all(|method| {
+        method
+            .function()
+            .parameters()
+            .iter()
+            .chain(method.function().results())
+            .all(|type_id| !result.types().contains_type_parameter(*type_id))
+    }));
+    assert!(mir.declarations().iter().all(|declaration| {
+        !matches!(
+            declaration.kind(),
+            MirDeclarationKind::Class(class)
+                if result.types().contains_type_parameter(class.type_id())
+        )
+    }));
+}
+
+#[test]
+fn generic_interface_instances_specialize_exact_class_witnesses_and_dispatch() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/genericReader.pop",
+        "namespace Main\n\
+         private interface Reader<T>\n\
+             function read(): T\n\
+         end\n\
+         private class Box<T> implements Reader<T>\n\
+             private value: T\n\
+             public function Box.new(value: T): Box<T>\n\
+                 return Box { value = value }\n\
+             end\n\
+             public function Box:read(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         private function readBound<T, TReader: Reader<T>>(reader: TReader): T\n\
+             return reader:read()\n\
+         end\n\
+         public function readInt(value: Int): Int\n\
+             local box: Box<Int> = Box.new(value)\n\
+             local reader: Reader<Int> = box\n\
+             local direct = reader:read()\n\
+             return direct + readBound(box)\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("generic interface HIR");
+    assert!(hir.declarations().iter().any(|declaration| {
+        matches!(
+            declaration.kind(),
+            HirDeclarationKind::Interface(interface)
+                if !result.types().contains_type_parameter(interface.type_id())
+        )
+    }));
+    let mir = lower_hir_bubble(hir, result.types()).expect("concrete generic interface MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("call.interface"));
+    assert!(!dump.contains("type-parameter"));
+    let malformed = pop_mir::parse_mir_dump(&dump.replacen("@0=", "@9=", 1))
+        .expect("structurally valid malformed generic interface witness");
+    assert!(matches!(
+        pop_mir::verify_mir_bubble(&malformed, result.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidInterfaceImplementation { .. }
+        ))
+    ));
+}
+
+#[test]
+fn generic_interface_arguments_require_exact_arity_and_nominal_bounds() {
+    for invalid_type in ["Reader", "Reader<Int>"] {
+        let source = SourceFile::new(
+            FileId::from_raw(0),
+            "src/invalidGenericReader.pop",
+            format!(
+                "namespace Main\n\
+                 private interface Reader<T: Iterable<Int>>\n\
+                     function read(): T\n\
+                 end\n\
+                 private function invalid(reader: {invalid_type})\n\
+                 end\n"
+            ),
+        )
+        .expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+        assert!(
+            result.hir().is_none(),
+            "{invalid_type} unexpectedly accepted"
+        );
+        assert!(!result.diagnostics().is_empty());
+    }
+}
+
+#[test]
+fn reserved_iteration_protocol_methods_are_statically_callable_from_exact_bounds() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/protocolCalls.pop",
+        "namespace Main\n\
+         private function acquire<T, TSource: Iterable<T>>(source: TSource): Iterator<T>\n\
+             return source:iterator()\n\
+         end\n\
+         private function step<T, TIterator: Iterator<T>>(iterator: TIterator): Iteration<T>\n\
+             return iterator:next()\n\
+         end\n\
+         public function consume(values: {Int}): Int\n\
+             local iterator = acquire(values)\n\
+             local item = step(iterator)\n\
+             return 42\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(result.hir().expect("protocol call HIR"), result.types())
+        .expect("protocol call MIR");
+    assert!(mir.dump().contains("call.builtinInterface"));
+}
+
+#[test]
+fn nominal_iterator_class_drives_generalized_for_through_exact_witnesses() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/integerIterator.pop",
+        "namespace Main\n\
+         private class ArrayIterator<T> implements Iterator<T>\n\
+             private values: {T}\n\
+             private index: Int\n\
+             public function ArrayIterator.new(values: {T}): ArrayIterator<T>\n\
+                 return ArrayIterator { values = values, index = 1 }\n\
+             end\n\
+             public function ArrayIterator:iterator(): Iterator<T>\n\
+                 return self\n\
+             end\n\
+             public function ArrayIterator:next(): Iteration<T>\n\
+                 if self.index > Array.length(self.values) then\n\
+                     return Iteration.End\n\
+                 end\n\
+                 local value = Array.get(self.values, self.index)\n\
+                 self.index += 1\n\
+                 return Iteration.Item(value)\n\
+             end\n\
+         end\n\
+         public function sum(values: {Int}): Int\n\
+             local iterator: ArrayIterator<Int> = ArrayIterator.new(values)\n\
+             local total = 0\n\
+             for value in iterator do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result
+        .hir()
+        .unwrap_or_else(|| panic!("{:#?}", result.hir_build_errors()));
+    let hir_dump = hir.dump(result.types());
+    assert!(hir_dump.contains("implements b"), "{hir_dump}");
+    assert!(hir_dump.contains("iterationMethod#"), "{hir_dump}");
+    let mir = lower_hir_bubble(hir, result.types()).expect("iterator witness MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callDirectMethod"));
+    assert!(dump.contains("iterationMake"));
+    assert!(dump.contains("implementsBuiltin"));
+    assert!(!dump.contains("call.dynamic"));
+    let reparsed = pop_mir::parse_mir_dump(&dump).expect("iterator witness MIR parses");
+    assert_eq!(reparsed.dump(), dump);
+    pop_mir::verify_mir_bubble(&reparsed, result.types())
+        .expect("reparsed iterator witness MIR verifies");
+
+    let malformed =
+        pop_mir::parse_mir_dump(&dump.replacen("iterationMethod#1=", "iterationMethod#9=", 1))
+            .expect("structurally valid malformed iterator witness MIR");
+    assert!(matches!(
+        pop_mir::verify_mir_bubble(&malformed, result.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidBuiltinInterfaceImplementation { .. }
+        ))
+    ));
+}
+
+#[test]
 fn private_class_members_stop_at_the_declaring_module() {
     for body in [
         "return Vault.secret()",
@@ -849,7 +1312,7 @@ fn source_interfaces_are_nominal_and_dispatch_by_resolved_slot() {
     assert!(matches!(
         initializer.kind(),
         HirExpressionKind::InterfaceUpcast { interface, .. }
-            if *interface == reader.interface()
+            if *interface == NominalInterfaceId::User(reader.interface())
     ));
     let HirStatementKind::Return { values } = hir.functions()[0].body()[1].kind() else {
         panic!("interface call return");
@@ -1263,4 +1726,49 @@ fn typed_error_documentation_rejects_inheritance_cycles() {
         .collect();
     assert!(codes.contains(&"POP6407"), "{codes:?}");
     assert_eq!(codes.iter().filter(|code| **code == "POP6403").count(), 2);
+}
+
+#[test]
+fn generalized_for_preserves_nominal_protocol_identity_in_verified_hir() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/iteration.pop",
+        "namespace Main\n\
+         public function sum(values: {Int}): Int\n\
+             local total = 0\n\
+             for value in values do\n\
+                 total += value\n\
+             end\n\
+             return total\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let function = &result.hir().expect("verified HIR").functions()[0];
+    let HirStatementKind::GeneralizedFor {
+        protocol,
+        source,
+        bindings,
+        ..
+    } = function.body()[1].kind()
+    else {
+        panic!("generalized loop HIR");
+    };
+    assert_eq!(*source, pop_hir::HirIterationSource::Array);
+    assert_eq!(protocol.item_case().raw(), 0);
+    assert_eq!(protocol.end_case().raw(), 1);
+    assert_eq!(protocol.iterator_method().raw(), 0);
+    assert_eq!(protocol.next_method().raw(), 1);
+    assert_eq!(bindings.len(), 1);
 }

@@ -42,17 +42,23 @@ impl FunctionSignatureSyntax {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenericParameterSyntax {
     name: String,
+    bound: Option<TypeSyntax>,
     span: SourceSpan,
 }
 
 impl GenericParameterSyntax {
-    pub(crate) fn new(name: String, span: SourceSpan) -> Self {
-        Self { name, span }
+    pub(crate) fn new(name: String, bound: Option<TypeSyntax>, span: SourceSpan) -> Self {
+        Self { name, bound, span }
     }
 
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    #[must_use]
+    pub const fn bound(&self) -> Option<&TypeSyntax> {
+        self.bound.as_ref()
     }
 
     #[must_use]
@@ -264,8 +270,14 @@ impl SignatureParser<'_> {
         let mut parameters = Vec::new();
         loop {
             let token = self.expect(TokenKind::Identifier, "type parameter")?;
+            let bound = if self.consume(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
             parameters.push(GenericParameterSyntax::new(
                 token.text(self.source).to_owned(),
+                bound,
                 SourceSpan::new(self.file, token.range()),
             ));
             if self.consume(TokenKind::Comma).is_none() {
