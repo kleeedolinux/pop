@@ -8,14 +8,14 @@ use std::thread::{self, JoinHandle};
 use pop_runtime_interface::{ManagedReference, RuntimeFailure};
 
 use crate::heap::{Allocation, SlotValue};
-use crate::relocation::CollectorGeneration;
 
+use super::super::heap::LargeObjectScanChunk;
 use super::model::{BackgroundWorkerConfig, BackgroundWorkerStartError, BackgroundWorkerTelemetry};
 
 pub(crate) struct MarkTask {
     pub(crate) reference: ManagedReference,
-    pub(crate) generation: CollectorGeneration,
-    pub(crate) allocation: Allocation,
+    pub(crate) slots: Vec<SlotValue>,
+    pub(crate) large_object_scan_chunk: Option<LargeObjectScanChunk>,
 }
 
 pub(crate) struct CardRefinementTask {
@@ -43,7 +43,7 @@ enum WorkerCommand {
 enum WorkerOutcome {
     Mark {
         reference: ManagedReference,
-        mature: bool,
+        large_object_scan_chunk: Option<LargeObjectScanChunk>,
         children: Result<Vec<ManagedReference>, ()>,
     },
     RefinedCard {
@@ -61,7 +61,7 @@ struct WorkerResult {
 
 pub(crate) struct MarkResult {
     pub(crate) reference: ManagedReference,
-    pub(crate) mature: bool,
+    pub(crate) large_object_scan_chunk: Option<LargeObjectScanChunk>,
     pub(crate) children: Vec<ManagedReference>,
 }
 
@@ -125,12 +125,12 @@ impl BackgroundWorkerPool {
             match result.outcome {
                 WorkerOutcome::Mark {
                     reference,
-                    mature,
+                    large_object_scan_chunk,
                     children,
                 } => {
                     marked.push(MarkResult {
                         reference,
-                        mature,
+                        large_object_scan_chunk,
                         children: children.map_err(|()| RuntimeFailure::runtime_invariant())?,
                     });
                     self.telemetry.mark_jobs_completed =
@@ -341,23 +341,22 @@ fn refine_card(task: &CardRefinementTask, young: &BTreeSet<ManagedReference>) ->
 }
 
 fn scan(task: &MarkTask) -> WorkerOutcome {
-    let mut children = Vec::with_capacity(task.allocation.object_map.reference_slots().len());
-    for slot in task.allocation.object_map.reference_slots() {
-        match task.allocation.slots.get(slot.raw() as usize) {
-            Some(SlotValue::Reference(Some(reference))) => children.push(*reference),
-            Some(SlotValue::Reference(None)) => {}
-            Some(SlotValue::Scalar(_)) | None => {
-                return WorkerOutcome::Mark {
-                    reference: task.reference,
-                    mature: task.generation == CollectorGeneration::Mature,
-                    children: Err(()),
-                };
-            }
-        }
-    }
+    let children = scan_slots(&task.slots);
     WorkerOutcome::Mark {
         reference: task.reference,
-        mature: task.generation == CollectorGeneration::Mature,
-        children: Ok(children),
+        large_object_scan_chunk: task.large_object_scan_chunk,
+        children,
     }
+}
+
+pub(crate) fn scan_slots(slots: &[SlotValue]) -> Result<Vec<ManagedReference>, ()> {
+    let mut children = Vec::with_capacity(slots.len());
+    for slot in slots {
+        match slot {
+            SlotValue::Reference(Some(reference)) => children.push(*reference),
+            SlotValue::Reference(None) => {}
+            SlotValue::Scalar(_) => return Err(()),
+        }
+    }
+    Ok(children)
 }

@@ -190,6 +190,10 @@ Package for the first release.
     parallel exact object-map and collecting-safe-point remembered-card scans,
     deterministic result application, sweep dispatch, worker telemetry, and
     joined shutdown.
+  - [x] Divide large pointer, mixed-layout, and large pinned scans into bounded
+    precise-slot chunks with one continuation per object, skip field tracing for
+    pointer-free large objects, and preserve SATB/post-scan mutation barriers in
+    cooperative and worker modes.
   - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
     adaptive worker sizing/work stealing, concurrent card refinement and page
     reclamation, stack watermarks, race/stress proof, and latency measurements.

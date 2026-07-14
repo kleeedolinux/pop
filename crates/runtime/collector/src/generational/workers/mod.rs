@@ -7,4 +7,4 @@ pub use model::{
     BackgroundWorkerConfig, BackgroundWorkerConfigError, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,
 };
-pub(crate) use state::{BackgroundWorkerPool, CardRefinementTask, MarkTask};
+pub(crate) use state::{BackgroundWorkerPool, CardRefinementTask, MarkTask, scan_slots};

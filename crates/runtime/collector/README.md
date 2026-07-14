@@ -18,9 +18,13 @@ then changes ownership; shared-to-local stores fail before any SATB/card or heap
 mutation. The bounded coordinator registers managed and foreign execution
 states, collects exact once-only root/TLAB/barrier publications, and completes
 protocol epochs without heap tracing in the handshake. Persistent named worker
-threads receive immutable object snapshots through bounded per-worker queues,
-scan exact object maps and remembered cards in parallel, and return
-sequence-ordered results for collector-owned mutation. Refined cards become
+threads receive immutable precise-slot snapshots through bounded per-worker
+queues, scan exact object maps and remembered cards in parallel, and return
+sequence-ordered results for collector-owned mutation. Large pointer and mixed
+layouts advance through one bounded scan-range continuation at a time, so
+neither discovery nor a worker job scales with the complete pointer array;
+pointer-free large objects perform no field tracing after liveness is
+established. Refined cards become
 precise young roots immediately inside the collecting safe point, where no
 mutator store can invalidate the snapshot. Mature sweeping advances through the
 ordered heap by a bounded cursor; the mark/sweep transition builds no heap-sized
@@ -36,9 +40,9 @@ slice rather than tracing concurrently with mutator execution, so
 The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
 pointer layouts, scheduler-indexed Eden pointer bumps and TLAB cursors, separate
-mature/large/
-pinned domains, survivor-copy placement, deterministic promotion, and immediate
-pinned-space placement. A separate memory controller enforces a byte hard limit
+mature, large, and pinned domains, survivor-copy placement, deterministic
+promotion, and immediate pinned-space placement. A separate memory controller
+enforces a byte hard limit
 before heap mutation, protects emergency and evacuation reserves, accounts
 typed stack/code/metadata/native/arena/isolated usage, adapts the collection
 target, performs bounded mature-cycle assists, returns empty logical pages, and
@@ -71,11 +75,13 @@ is protocol infrastructure, not a claim that background collection or native
 scheduler handshakes are complete.
 
 The `generational::workers` partition owns persistent host threads, bounded
-per-worker queues, immutable mark snapshots, deterministic result ordering,
-telemetry, and joined shutdown. It performs parallel marking, remembered-card
-refinement, and sweep dispatch only when explicitly configured; it does not
-claim adaptive sizing, work stealing, mutator-concurrent tracing/refinement, or
-concurrent heap mutation.
+per-worker queues, immutable bounded mark-slot snapshots, deterministic result
+ordering, telemetry, and joined shutdown. It performs parallel marking,
+remembered-card refinement, and sweep dispatch only when explicitly configured;
+it does not claim adaptive sizing, work stealing, mutator-concurrent
+tracing/refinement, or concurrent heap mutation. Major telemetry records
+completed large-object scan chunks, the maximum slots per chunk, pending chunk
+queue depth, and pointer-free large objects without exposing heap contents.
 
 The ownership foundation implements scheduler-local/shared publication and
 isolated regions as separate mechanisms. Isolation verifies a unique registered

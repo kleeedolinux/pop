@@ -21,8 +21,9 @@ pub use generational::{
     EpochCoordinator, EpochCoordinatorConfig, EpochCoordinatorConfigError, EpochCoordinatorError,
     EpochCoordinatorTelemetry, EpochProgress, GenerationalMemoryConfig,
     GenerationalMemoryConfigError, GenerationalMemoryTelemetry, GenerationalRuntime, HeapDomain,
-    MajorCollectorConfig, MajorCyclePhase, MutatorExecutionState, MutatorId, MutatorPublication,
-    NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor, PageId, RegionId,
+    MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase, MutatorExecutionState,
+    MutatorId, MutatorPublication, NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor,
+    PageId, RegionId,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use ownership::{

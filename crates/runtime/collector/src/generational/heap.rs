@@ -26,19 +26,38 @@ use super::workers::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MajorCollectorConfig {
     work_budget: usize,
+    large_object_scan_chunk_slots: usize,
 }
 
 impl MajorCollectorConfig {
     #[must_use]
     pub const fn new(work_budget: usize) -> Self {
+        Self::with_large_object_scan_chunk_slots(work_budget, 256)
+    }
+
+    #[must_use]
+    pub const fn with_large_object_scan_chunk_slots(
+        work_budget: usize,
+        large_object_scan_chunk_slots: usize,
+    ) -> Self {
         Self {
             work_budget: if work_budget == 0 { 1 } else { work_budget },
+            large_object_scan_chunk_slots: if large_object_scan_chunk_slots == 0 {
+                1
+            } else {
+                large_object_scan_chunk_slots
+            },
         }
     }
 
     #[must_use]
     pub const fn work_budget(self) -> usize {
         self.work_budget
+    }
+
+    #[must_use]
+    pub const fn large_object_scan_chunk_slots(self) -> usize {
+        self.large_object_scan_chunk_slots
     }
 }
 
@@ -56,9 +75,71 @@ pub enum MajorCyclePhase {
     Sweeping,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MajorCollectionTelemetry {
+    large_object_scan_chunks_completed: u64,
+    maximum_large_object_scan_chunk_slots: usize,
+    maximum_pending_large_object_scan_chunks: usize,
+    pointer_free_large_objects_seen: u64,
+}
+
+impl MajorCollectionTelemetry {
+    #[must_use]
+    pub const fn large_object_scan_chunks_completed(self) -> u64 {
+        self.large_object_scan_chunks_completed
+    }
+
+    #[must_use]
+    pub const fn maximum_large_object_scan_chunk_slots(self) -> usize {
+        self.maximum_large_object_scan_chunk_slots
+    }
+
+    #[must_use]
+    pub const fn maximum_pending_large_object_scan_chunks(self) -> usize {
+        self.maximum_pending_large_object_scan_chunks
+    }
+
+    #[must_use]
+    pub const fn pointer_free_large_objects_seen(self) -> u64 {
+        self.pointer_free_large_objects_seen
+    }
+
+    pub(crate) fn record_large_object_scan_chunk(&mut self, slots: usize) {
+        self.large_object_scan_chunks_completed =
+            self.large_object_scan_chunks_completed.saturating_add(1);
+        self.maximum_large_object_scan_chunk_slots =
+            self.maximum_large_object_scan_chunk_slots.max(slots);
+    }
+
+    pub(crate) fn record_pointer_free_large_object(&mut self) {
+        self.pointer_free_large_objects_seen =
+            self.pointer_free_large_objects_seen.saturating_add(1);
+    }
+
+    pub(crate) fn record_large_object_scan_queue_depth(&mut self, depth: usize) {
+        self.maximum_pending_large_object_scan_chunks =
+            self.maximum_pending_large_object_scan_chunks.max(depth);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LargeObjectScanChunk {
+    pub(crate) reference: ManagedReference,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+impl LargeObjectScanChunk {
+    pub(crate) const fn slots(self) -> usize {
+        self.end - self.start
+    }
+}
+
 pub(crate) struct MajorCycle {
     pub(crate) phase: MajorCyclePhase,
     pub(crate) pending: Vec<ManagedReference>,
+    pub(crate) pending_large_object_scan_chunks: Vec<LargeObjectScanChunk>,
+    pub(crate) prefer_large_object_scan_chunk: bool,
     pub(crate) satb: Vec<ManagedReference>,
     pub(crate) seen: BTreeSet<ManagedReference>,
     pub(crate) marked_mature: BTreeSet<ManagedReference>,
@@ -74,6 +155,8 @@ impl MajorCycle {
         Self {
             phase: MajorCyclePhase::Idle,
             pending: Vec::new(),
+            pending_large_object_scan_chunks: Vec::new(),
+            prefer_large_object_scan_chunk: true,
             satb: Vec::new(),
             seen: BTreeSet::new(),
             marked_mature: BTreeSet::new(),
@@ -94,6 +177,7 @@ pub struct GenerationalRuntime {
     pub(crate) nursery: RelocationRuntime,
     pub(crate) allocation: AllocationInfrastructure,
     pub(crate) major: MajorCycle,
+    pub(crate) major_telemetry: MajorCollectionTelemetry,
     pub(crate) config: MajorCollectorConfig,
     pub(crate) memory: MemoryController,
     pub(crate) workers: Option<BackgroundWorkerPool>,
@@ -133,6 +217,7 @@ impl GenerationalRuntime {
             nursery: RelocationRuntime::new(),
             allocation: AllocationInfrastructure::new(allocation),
             major: MajorCycle::idle(),
+            major_telemetry: MajorCollectionTelemetry::default(),
             config,
             memory: MemoryController::new(memory),
             workers: None,
@@ -192,6 +277,11 @@ impl GenerationalRuntime {
     #[must_use]
     pub const fn major_sweep_entries_examined(&self) -> u64 {
         self.major.sweep_entries_examined
+    }
+
+    #[must_use]
+    pub const fn major_collection_telemetry(&self) -> MajorCollectionTelemetry {
+        self.major_telemetry
     }
 
     #[must_use]

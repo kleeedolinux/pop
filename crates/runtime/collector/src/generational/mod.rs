@@ -20,7 +20,9 @@ pub use coordination::{
     EpochCoordinatorConfigError, EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress,
     MutatorExecutionState, MutatorId, MutatorPublication,
 };
-pub use heap::{GenerationalRuntime, MajorCollectorConfig, MajorCyclePhase};
+pub use heap::{
+    GenerationalRuntime, MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase,
+};
 pub use memory::{
     GenerationalMemoryConfig, GenerationalMemoryConfigError, GenerationalMemoryTelemetry,
     NonHeapMemoryUsage, NonHeapMemoryUsageError,
