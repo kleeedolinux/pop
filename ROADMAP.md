@@ -301,6 +301,9 @@ Post-baseline library work has begun without widening the release foundation:
     - [x] Add work-budget exhaustion, event/timer poll and delivery-delay,
       blocking shutdown-delay, ready-to-run percentile, and scheduler migration
       telemetry before treating observability as complete.
+    - [x] Remove fixed-neighbor steal bias with deterministic per-worker search
+      rounds that vary the first victim while covering every eligible peer
+      exactly once and preserving bounded simultaneous search admission.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.

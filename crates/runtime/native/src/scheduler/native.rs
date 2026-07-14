@@ -92,6 +92,7 @@ struct SharedScheduler {
     telemetry: Mutex<TelemetryState>,
     shutdown: AtomicBool,
     searchers: AtomicUsize,
+    steal_rounds: Vec<AtomicU64>,
     migration_enabled: bool,
     submissions_active: AtomicUsize,
     observation_work: AtomicU64,
@@ -850,6 +851,9 @@ impl SharedScheduler {
             }),
             shutdown: AtomicBool::new(false),
             searchers: AtomicUsize::new(0),
+            steal_rounds: (0..configuration.scheduler_count)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
             migration_enabled,
             submissions_active: AtomicUsize::new(0),
             observation_work: AtomicU64::new(0),
@@ -1542,8 +1546,8 @@ impl SharedScheduler {
         }
         let mut result = None;
         let mut victims_examined = 0;
-        for offset in 1..self.configuration.scheduler_count {
-            let victim = (thief + offset) % self.configuration.scheduler_count;
+        let round = self.steal_rounds[thief].fetch_add(1, Ordering::Relaxed);
+        for victim in steal_victims(thief, self.configuration.scheduler_count, round) {
             victims_examined += 1;
             let Some(mut victim_queue) = try_lock(&self.queues.local[victim]) else {
                 continue;
@@ -2381,6 +2385,91 @@ fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
         Ok(guard) => Some(guard),
         Err(TryLockError::WouldBlock) => None,
         Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+    }
+}
+
+struct StealVictims {
+    thief: usize,
+    scheduler_count: usize,
+    first_offset: usize,
+    examined: usize,
+}
+
+impl Iterator for StealVictims {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let peer_count = self.scheduler_count.checked_sub(1)?;
+        if self.examined >= peer_count {
+            return None;
+        }
+        let offset = 1 + (self.first_offset + self.examined) % peer_count;
+        self.examined += 1;
+        Some((self.thief + offset) % self.scheduler_count)
+    }
+}
+
+fn steal_victims(thief: usize, scheduler_count: usize, round: u64) -> StealVictims {
+    let peer_count = scheduler_count.saturating_sub(1);
+    let mut mixed = round
+        ^ u64::try_from(thief)
+            .unwrap_or(u64::MAX)
+            .wrapping_add(1)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    let first_offset = if peer_count == 0 {
+        0
+    } else {
+        usize::try_from(mixed % u64::try_from(peer_count).unwrap_or(u64::MAX)).unwrap_or(0)
+    };
+    StealVictims {
+        thief,
+        scheduler_count,
+        first_offset,
+        examined: 0,
+    }
+}
+
+#[cfg(test)]
+mod steal_victim_tests {
+    use super::steal_victims;
+
+    #[test]
+    fn victim_order_is_a_deterministic_complete_peer_permutation() {
+        for scheduler_count in 2..=16 {
+            for thief in 0..scheduler_count {
+                for round in 0..32 {
+                    let first = steal_victims(thief, scheduler_count, round).collect::<Vec<_>>();
+                    let second = steal_victims(thief, scheduler_count, round).collect::<Vec<_>>();
+                    assert_eq!(first, second);
+                    assert_eq!(first.len(), scheduler_count - 1);
+                    assert!(!first.contains(&thief));
+                    let mut sorted = first;
+                    sorted.sort_unstable();
+                    assert_eq!(
+                        sorted,
+                        (0..scheduler_count)
+                            .filter(|candidate| *candidate != thief)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn successive_search_rounds_do_not_keep_one_fixed_first_victim() {
+        for thief in 0..8 {
+            let first_victims = (0..32)
+                .map(|round| steal_victims(thief, 8, round).next().expect("seven peers"))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(
+                first_victims.len() > 1,
+                "worker {thief} retained a fixed first victim"
+            );
+        }
     }
 }
 
