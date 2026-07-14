@@ -11,6 +11,18 @@
 //! Backend-specific representations and target instructions do not belong in
 //! any of these modules.
 
+// MIR owns large lowering, optimization, rendering, and verification passes
+// that predate the Rust 1.96 clippy gate. Keep the baseline explicit until
+// those passes are split deliberately.
+#![allow(
+    clippy::match_same_arms,
+    clippy::needless_pass_by_value,
+    clippy::redundant_closure_for_method_calls,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::wildcard_imports
+)]
+
 mod ir;
 mod lowering;
 mod optimize;

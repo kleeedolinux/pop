@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use pop_standard::{
     ApiBaselineError, ApiKind, ApiStatus, parse_standard_api_baseline, standard_api_baseline,
 };
@@ -176,9 +178,10 @@ fn standard_api_baseline_loading_is_bounded() {
 
     let mut oversized_inventory = header.to_owned();
     for identity in 0..1_025 {
-        oversized_inventory.push_str(&format!(
-            "primitive:{identity}\tPrimitive\tPop.Internal\tPop\tBoolean{identity}\tBoolean{identity}\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md\n"
-        ));
+        let _ = writeln!(
+            oversized_inventory,
+            "primitive:{identity}\tPrimitive\tPop.Internal\tPop\tBoolean{identity}\tBoolean{identity}\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md"
+        );
     }
     assert_eq!(
         parse_standard_api_baseline(&oversized_inventory),

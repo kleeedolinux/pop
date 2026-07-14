@@ -265,6 +265,7 @@ dependencies = [
 name = "pop-driver"
 version = "0.1.0"
 dependencies = [
+ "pop-backend-api",
  "pop-backend-c",
  "pop-backend-llvm",
  "pop-compile-time",

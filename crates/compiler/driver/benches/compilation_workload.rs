@@ -1,3 +1,10 @@
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::single_match_else
+)]
+
 use std::fmt::Write as _;
 
 use pop_backend_c::{CLoweringOptions, lower_mir_to_c};

@@ -11,6 +11,14 @@
 //! None of these modules may access ambient I/O, parse source, or invoke a
 //! backend. Keeping that isolation visible is part of the language contract.
 
+// These modules predate the repository-wide Rust 1.96 clippy gate. Keep the
+// baseline explicit until the evaluator is split into smaller passes.
+#![allow(
+    clippy::match_same_arms,
+    clippy::too_many_lines,
+    clippy::wildcard_imports
+)]
+
 mod evaluation;
 mod interpreter;
 mod lowering;

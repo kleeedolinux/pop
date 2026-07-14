@@ -424,7 +424,7 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
         let local =
             line.starts_with("pop-") && line.contains(" = { path = \"") && line.ends_with("\" }");
         let approved_inkwell = line
-            == "inkwell = { version = \"0.9.0\", default-features = false, features = [\"llvm22-1-prefer-dynamic\", \"target-x86\"] }";
+            == "inkwell = { version = \"0.9.0\", default-features = false, features = [\"llvm22-1-prefer-dynamic\", \"target-x86\", \"target-bpf\"] }";
         let approved_artifact_dependency = matches!(
             line,
             "serde = { version = \"1.0.228\", features = [\"derive\"] }"

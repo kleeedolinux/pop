@@ -9,7 +9,12 @@
 //! New MIR operations should remain backend-neutral. Put execution sequencing in
 //! `interpreter`, value semantics in `evaluation`, and runtime capabilities behind
 //! `RuntimeAdapter`; never reconstruct source semantics or perform string lookup.
-#![allow(clippy::too_many_lines)]
+#![allow(
+    clippy::match_same_arms,
+    clippy::redundant_closure_for_method_calls,
+    clippy::too_many_lines,
+    clippy::wildcard_imports
+)]
 
 mod evaluation;
 mod interpreter;

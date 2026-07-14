@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use pop_driver::{
     FrontEndBubbleInput, FrontEndModule, ReferenceMetadataDecodeError, ReferenceMetadataError,
     analyze_bubble, decode_reference_metadata, encode_reference_metadata,

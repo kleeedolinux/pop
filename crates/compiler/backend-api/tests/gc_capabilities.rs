@@ -11,7 +11,7 @@ fn target(capabilities: &[TargetCapability]) -> TargetSpec {
             TargetSpec::builder("x86_64-unknown-linux-gnu")
                 .pointer_width(PointerWidth::Bits64)
                 .endianness(Endianness::Little),
-            |builder, capability| builder.capability(capability),
+            pop_target::TargetSpecBuilder::capability,
         )
         .build()
         .expect("complete target")

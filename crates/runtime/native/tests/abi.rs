@@ -141,7 +141,10 @@ fn allocation_churn_uses_the_native_stable_generational_path() {
         );
         total = total.checked_add(value).expect("benchmark checksum");
         if index.is_multiple_of(8_192) {
-            assert_eq!(abi_safe_point(index as u32, &[]), 1);
+            assert_eq!(
+                abi_safe_point(u32::try_from(index).expect("test range fits u32"), &[]),
+                1
+            );
         }
     }
     assert_eq!(total, 200_010_000);

@@ -28,6 +28,18 @@ pub enum TargetCapability {
     RelocatingNursery,
     SharedLibraries,
     DebugInformation,
+    LlvmBpf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectFormat {
+    Elf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperatingSystem {
+    None,
+    Linux,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +47,8 @@ pub struct TargetSpec {
     triple: String,
     pointer_width: PointerWidth,
     endianness: Endianness,
+    object_format: ObjectFormat,
+    operating_system: OperatingSystem,
     capabilities: BTreeSet<TargetCapability>,
 }
 
@@ -45,7 +59,43 @@ impl TargetSpec {
             triple: triple.into(),
             pointer_width: None,
             endianness: None,
+            object_format: None,
+            operating_system: None,
             capabilities: BTreeSet::new(),
+        }
+    }
+
+    /// Returns the built-in target description for a supported triple.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TargetSpecError::UnknownTriple`] when the triple is not part
+    /// of Pop Lang's target inventory.
+    pub fn for_triple(triple: &str) -> Result<Self, TargetSpecError> {
+        match triple {
+            "x86_64-unknown-linux-gnu" => Self::builder(triple)
+                .pointer_width(PointerWidth::Bits64)
+                .endianness(Endianness::Little)
+                .object_format(ObjectFormat::Elf)
+                .operating_system(OperatingSystem::Linux)
+                .capability(TargetCapability::Threads)
+                .capability(TargetCapability::PreciseStackMaps)
+                .build(),
+            "bpfel-unknown-none" => Self::builder(triple)
+                .pointer_width(PointerWidth::Bits64)
+                .endianness(Endianness::Little)
+                .object_format(ObjectFormat::Elf)
+                .operating_system(OperatingSystem::None)
+                .capability(TargetCapability::LlvmBpf)
+                .build(),
+            "bpfeb-unknown-none" => Self::builder(triple)
+                .pointer_width(PointerWidth::Bits64)
+                .endianness(Endianness::Big)
+                .object_format(ObjectFormat::Elf)
+                .operating_system(OperatingSystem::None)
+                .capability(TargetCapability::LlvmBpf)
+                .build(),
+            _ => Err(TargetSpecError::UnknownTriple),
         }
     }
 
@@ -65,6 +115,16 @@ impl TargetSpec {
     }
 
     #[must_use]
+    pub const fn object_format(&self) -> ObjectFormat {
+        self.object_format
+    }
+
+    #[must_use]
+    pub const fn operating_system(&self) -> OperatingSystem {
+        self.operating_system
+    }
+
+    #[must_use]
     pub fn supports(&self, capability: TargetCapability) -> bool {
         self.capabilities.contains(&capability)
     }
@@ -75,6 +135,8 @@ pub struct TargetSpecBuilder {
     triple: String,
     pointer_width: Option<PointerWidth>,
     endianness: Option<Endianness>,
+    object_format: Option<ObjectFormat>,
+    operating_system: Option<OperatingSystem>,
     capabilities: BTreeSet<TargetCapability>,
 }
 
@@ -88,6 +150,18 @@ impl TargetSpecBuilder {
     #[must_use]
     pub fn endianness(mut self, endianness: Endianness) -> Self {
         self.endianness = Some(endianness);
+        self
+    }
+
+    #[must_use]
+    pub fn object_format(mut self, object_format: ObjectFormat) -> Self {
+        self.object_format = Some(object_format);
+        self
+    }
+
+    #[must_use]
+    pub fn operating_system(mut self, operating_system: OperatingSystem) -> Self {
+        self.operating_system = Some(operating_system);
         self
     }
 
@@ -113,6 +187,8 @@ impl TargetSpecBuilder {
                 .pointer_width
                 .ok_or(TargetSpecError::MissingPointerWidth)?,
             endianness: self.endianness.ok_or(TargetSpecError::MissingEndianness)?,
+            object_format: self.object_format.unwrap_or(ObjectFormat::Elf),
+            operating_system: self.operating_system.unwrap_or(OperatingSystem::None),
             capabilities: self.capabilities,
         })
     }
@@ -123,6 +199,7 @@ pub enum TargetSpecError {
     EmptyTriple,
     MissingPointerWidth,
     MissingEndianness,
+    UnknownTriple,
 }
 
 impl fmt::Display for TargetSpecError {
@@ -131,6 +208,7 @@ impl fmt::Display for TargetSpecError {
             Self::EmptyTriple => formatter.write_str("target triple cannot be empty"),
             Self::MissingPointerWidth => formatter.write_str("target pointer width is required"),
             Self::MissingEndianness => formatter.write_str("target endianness is required"),
+            Self::UnknownTriple => formatter.write_str("unknown Pop Lang target triple"),
         }
     }
 }
