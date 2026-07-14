@@ -613,9 +613,17 @@ impl DeterministicScheduler {
             record.scheduler,
             SchedulerWorkerId::new(record.scheduler.raw()),
             record.cancellation_requested,
+            self.configuration.dispatch_work_budget,
         );
         self.telemetry.polls = self.telemetry.polls.saturating_add(1);
-        let result = catch_unwind(AssertUnwindSafe(|| record.task.poll(&context)));
+        let mut result = catch_unwind(AssertUnwindSafe(|| record.task.poll(&context)));
+        if context.work_budget_exhausted() {
+            self.telemetry.work_budget_exhaustions =
+                self.telemetry.work_budget_exhaustions.saturating_add(1);
+            if matches!(result, Ok(SchedulerTaskPoll::Pending)) {
+                result = Ok(SchedulerTaskPoll::Ready);
+            }
+        }
         match result {
             Ok(SchedulerTaskPoll::Ready) => {
                 let publication =

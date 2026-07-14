@@ -8,9 +8,9 @@ use pop_runtime_native::{
     SchedulerError, SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
     SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
     SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskFrameFailure,
-    SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, abi_safe_point,
-    native_epoch_telemetry, pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root,
-    request_abi_collection,
+    SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
+    SchedulerWorkBudgetError, SchedulerWorkBudgetStatus, abi_safe_point, native_epoch_telemetry,
+    pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root, request_abi_collection,
 };
 
 #[derive(Default)]
@@ -202,6 +202,41 @@ impl SchedulerTask for EpochPollingTask {
         assert!(request_abi_collection());
         assert_eq!(abi_safe_point(931, &[]), 1);
         assert_eq!(abi_safe_point(932, &[]), 1);
+        SchedulerTaskPoll::Complete
+    }
+}
+
+struct BudgetExhaustionTask {
+    polls: Arc<Mutex<Vec<&'static str>>>,
+    first: bool,
+}
+
+impl SchedulerTask for BudgetExhaustionTask {
+    fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        self.polls.lock().expect("budget poll log").push("budget");
+        if self.first {
+            self.first = false;
+            assert_eq!(
+                context.consume_work(0),
+                Err(SchedulerWorkBudgetError::ZeroWorkUnits)
+            );
+            assert_eq!(context.remaining_work(), 2);
+            assert_eq!(
+                context.consume_work(2),
+                Ok(SchedulerWorkBudgetStatus::Exhausted)
+            );
+        }
+        SchedulerTaskPoll::Pending
+    }
+}
+
+struct OrderedCompleteTask {
+    polls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl SchedulerTask for OrderedCompleteTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        self.polls.lock().expect("budget poll log").push("peer");
         SchedulerTaskPoll::Complete
     }
 }
@@ -467,6 +502,8 @@ impl_explicit_rootless_frame!(SuspendOnceTask, 916);
 impl_explicit_rootless_frame!(WakeDuringPollTask, 917);
 impl_explicit_rootless_frame!(BlockingProbeTask, 918);
 impl_explicit_rootless_frame!(EpochPollingTask, 920);
+impl_explicit_rootless_frame!(BudgetExhaustionTask, 921);
+impl_explicit_rootless_frame!(OrderedCompleteTask, 922);
 
 fn configuration(scheduler_count: usize, task_capacity: usize) -> SchedulerConfiguration {
     SchedulerConfiguration::new(
@@ -858,6 +895,104 @@ fn scheduler_configuration_rejects_unbounded_zero_limits() {
         bounded.with_event_driver(1, 1, 0),
         Err(SchedulerConfigurationError::ZeroEventDeliveryCapacity)
     );
+    assert_eq!(
+        bounded.with_dispatch_work_budget(0),
+        Err(SchedulerConfigurationError::ZeroDispatchWorkBudget)
+    );
+}
+
+#[test]
+fn work_budget_exhaustion_requeues_at_the_ready_tail_before_suspension() {
+    let configuration = configuration(1, 4)
+        .with_dispatch_work_budget(2)
+        .expect("bounded dispatch work");
+    let polls = Arc::new(Mutex::new(Vec::new()));
+    let mut scheduler = DeterministicScheduler::recording(configuration);
+    let budget = scheduler
+        .schedule(BudgetExhaustionTask {
+            polls: Arc::clone(&polls),
+            first: true,
+        })
+        .expect("schedule budget task");
+    scheduler
+        .schedule(OrderedCompleteTask {
+            polls: Arc::clone(&polls),
+        })
+        .expect("schedule peer");
+
+    scheduler
+        .run_until_idle(3)
+        .expect("budget yield and later suspension");
+    assert_eq!(
+        *polls.lock().expect("budget poll log"),
+        ["budget", "peer", "budget"]
+    );
+    assert_eq!(
+        scheduler.task_state(budget),
+        Ok(SchedulerTaskState::Suspended)
+    );
+    assert_eq!(scheduler.telemetry().work_budget_exhaustions(), 1);
+}
+
+#[test]
+fn native_work_budget_exhaustion_preserves_peer_progress() {
+    let configuration = configuration(1, 4)
+        .with_dispatch_work_budget(2)
+        .expect("bounded dispatch work");
+    let scheduler = NativeScheduler::new(configuration).expect("native scheduler");
+    let (started, observed) = mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let _gate_cleanup = OpenGateOnDrop(Arc::clone(&gate));
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            BlockingProbeTask {
+                started,
+                gate: Arc::clone(&gate),
+            },
+        )
+        .expect("occupy worker while publishing peers");
+    observed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker occupied");
+
+    let polls = Arc::new(Mutex::new(Vec::new()));
+    let budget = scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            BudgetExhaustionTask {
+                polls: Arc::clone(&polls),
+                first: true,
+            },
+        )
+        .expect("schedule budget task");
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            OrderedCompleteTask {
+                polls: Arc::clone(&polls),
+            },
+        )
+        .expect("schedule peer");
+    let (open, changed) = &*gate;
+    *open.lock().expect("worker gate") = true;
+    changed.notify_one();
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("budget task suspends after peer progress");
+
+    assert_eq!(
+        *polls.lock().expect("budget poll log"),
+        ["budget", "peer", "budget"]
+    );
+    assert_eq!(
+        scheduler.task_state(budget),
+        Ok(SchedulerTaskState::Suspended)
+    );
+    assert_eq!(scheduler.telemetry().work_budget_exhaustions(), 1);
 }
 
 #[test]

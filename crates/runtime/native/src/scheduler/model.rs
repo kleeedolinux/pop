@@ -1,5 +1,7 @@
 //! Scheduler identities, configuration, task transitions, and telemetry.
 
+use std::cell::Cell;
+
 use pop_runtime_collector::SchedulerId;
 use pop_runtime_interface::{RootPublication, StackMap};
 
@@ -88,6 +90,7 @@ pub struct SchedulerConfiguration {
     pub(super) external_event_capacity: usize,
     pub(super) timer_capacity: usize,
     pub(super) event_delivery_capacity: usize,
+    pub(super) dispatch_work_budget: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +109,7 @@ pub enum SchedulerConfigurationError {
     ZeroExternalEventCapacity,
     ZeroTimerCapacity,
     ZeroEventDeliveryCapacity,
+    ZeroDispatchWorkBudget,
 }
 
 impl SchedulerConfiguration {
@@ -154,6 +158,7 @@ impl SchedulerConfiguration {
                 external_event_capacity: task_capacity,
                 timer_capacity: task_capacity,
                 event_delivery_capacity: task_capacity,
+                dispatch_work_budget: 128,
             })
         }
     }
@@ -202,6 +207,24 @@ impl SchedulerConfiguration {
         } else {
             self.blocking_worker_count = worker_count;
             self.blocking_queue_capacity = queue_capacity;
+            Ok(self)
+        }
+    }
+
+    /// Replaces the deterministic work units available to each dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero budget because it could make every task permanently
+    /// ineligible to perform useful work.
+    pub const fn with_dispatch_work_budget(
+        mut self,
+        work_units: usize,
+    ) -> Result<Self, SchedulerConfigurationError> {
+        if work_units == 0 {
+            Err(SchedulerConfigurationError::ZeroDispatchWorkBudget)
+        } else {
+            self.dispatch_work_budget = work_units;
             Ok(self)
         }
     }
@@ -260,6 +283,11 @@ impl SchedulerConfiguration {
     pub const fn event_delivery_capacity(self) -> usize {
         self.event_delivery_capacity
     }
+
+    #[must_use]
+    pub const fn dispatch_work_budget(self) -> usize {
+        self.dispatch_work_budget
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +326,19 @@ pub struct SchedulerTaskContext {
     scheduler: SchedulerId,
     worker: SchedulerWorkerId,
     cancellation_requested: bool,
+    remaining_work: Cell<usize>,
+    work_budget_exhausted: Cell<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerWorkBudgetStatus {
+    Available,
+    Exhausted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerWorkBudgetError {
+    ZeroWorkUnits,
 }
 
 impl SchedulerTaskContext {
@@ -306,12 +347,15 @@ impl SchedulerTaskContext {
         scheduler: SchedulerId,
         worker: SchedulerWorkerId,
         cancellation_requested: bool,
+        work_budget: usize,
     ) -> Self {
         Self {
             task,
             scheduler,
             worker,
             cancellation_requested,
+            remaining_work: Cell::new(work_budget),
+            work_budget_exhausted: Cell::new(false),
         }
     }
 
@@ -333,6 +377,39 @@ impl SchedulerTaskContext {
     #[must_use]
     pub const fn cancellation_requested(&self) -> bool {
         self.cancellation_requested
+    }
+
+    /// Charges deterministic work units to the current dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero-unit charge, which cannot represent compiler or runtime
+    /// progress.
+    pub fn consume_work(
+        &self,
+        work_units: usize,
+    ) -> Result<SchedulerWorkBudgetStatus, SchedulerWorkBudgetError> {
+        if work_units == 0 {
+            return Err(SchedulerWorkBudgetError::ZeroWorkUnits);
+        }
+        let remaining = self.remaining_work.get();
+        if work_units >= remaining {
+            self.remaining_work.set(0);
+            self.work_budget_exhausted.set(true);
+            Ok(SchedulerWorkBudgetStatus::Exhausted)
+        } else {
+            self.remaining_work.set(remaining - work_units);
+            Ok(SchedulerWorkBudgetStatus::Available)
+        }
+    }
+
+    #[must_use]
+    pub fn remaining_work(&self) -> usize {
+        self.remaining_work.get()
+    }
+
+    pub(super) fn work_budget_exhausted(&self) -> bool {
+        self.work_budget_exhausted.get()
     }
 }
 
@@ -479,6 +556,7 @@ pub struct SchedulerTelemetry {
     pub(super) managed_mutator_transitions: u64,
     pub(super) detached_mutator_transitions: u64,
     pub(super) mutator_unregistrations: u64,
+    pub(super) work_budget_exhaustions: u64,
 }
 
 macro_rules! telemetry_accessors {
@@ -548,6 +626,7 @@ impl SchedulerTelemetry {
         managed_mutator_transitions: u64,
         detached_mutator_transitions: u64,
         mutator_unregistrations: u64,
+        work_budget_exhaustions: u64,
     }
 
     #[must_use]

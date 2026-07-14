@@ -1685,6 +1685,7 @@ impl SharedScheduler {
             record.scheduler,
             worker,
             record.cancellation_requested,
+            self.configuration.dispatch_work_budget,
         );
         drop(record);
         {
@@ -2026,6 +2027,14 @@ impl SharedScheduler {
         telemetry.telemetry.worker_stops = telemetry.telemetry.worker_stops.saturating_add(1);
     }
 
+    fn record_work_budget_exhaustion(&self) {
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.work_budget_exhaustions = telemetry
+            .telemetry
+            .work_budget_exhaustions
+            .saturating_add(1);
+    }
+
     fn record_scheduled(&self, registry: &Registry) {
         let mut telemetry = lock(&self.telemetry);
         telemetry.telemetry.tasks_scheduled = telemetry.telemetry.tasks_scheduled.saturating_add(1);
@@ -2121,7 +2130,13 @@ fn worker_loop(
             else {
                 continue;
             };
-            let result = catch_unwind(AssertUnwindSafe(|| task.poll(&context)));
+            let mut result = catch_unwind(AssertUnwindSafe(|| task.poll(&context)));
+            if context.work_budget_exhausted() {
+                shared.record_work_budget_exhaustion();
+                if matches!(result, Ok(SchedulerTaskPoll::Pending)) {
+                    result = Ok(SchedulerTaskPoll::Ready);
+                }
+            }
             shared.finish_poll(queued.id, &cell, worker, mutator, task, result)?;
             if local {
                 local_polls = local_polls.saturating_add(1);
