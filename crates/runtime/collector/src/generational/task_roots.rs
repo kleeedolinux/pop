@@ -326,6 +326,27 @@ impl GenerationalRuntime {
         scheduler: SchedulerId,
         expected: &StackMap,
     ) -> Result<RootPublication, TaskFrameRootError> {
+        let publication = self.prepare_task_frame_root_restore(identity, scheduler, expected)?;
+        self.complete_task_frame_root_restore(identity, scheduler)?;
+        Ok(publication)
+    }
+
+    /// Reads the current relocated values while keeping their container live.
+    ///
+    /// A scheduler uses this phase before asking the compiler-generated frame
+    /// adapter to install values. Failure or rejection leaves the same
+    /// container available for a retry or explicit cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Wrong ownership, shape, identity, or missing private root handles leave
+    /// the last valid container retained.
+    pub fn prepare_task_frame_root_restore(
+        &mut self,
+        identity: TaskFrameRootId,
+        scheduler: SchedulerId,
+        expected: &StackMap,
+    ) -> Result<RootPublication, TaskFrameRootError> {
         let Some(record) = self.task_frame_roots.records.get(&identity) else {
             self.record_restoration_failure();
             return Err(TaskFrameRootError::UnknownContainer(identity));
@@ -361,13 +382,40 @@ impl GenerationalRuntime {
         }
         let publication = RootPublication::new(stack_map, values)
             .map_err(|_| TaskFrameRootError::StackMapMismatch)?;
+        Ok(publication)
+    }
+
+    /// Commits successful installation by releasing the retained container.
+    ///
+    /// # Errors
+    ///
+    /// Unknown identities, foreign scheduler owners, or missing private roots
+    /// fail without releasing a partial container.
+    pub fn complete_task_frame_root_restore(
+        &mut self,
+        identity: TaskFrameRootId,
+        scheduler: SchedulerId,
+    ) -> Result<(), TaskFrameRootError> {
+        let Some(record) = self.task_frame_roots.records.get(&identity) else {
+            self.record_restoration_failure();
+            return Err(TaskFrameRootError::UnknownContainer(identity));
+        };
+        if record.scheduler != scheduler {
+            let expected = record.scheduler;
+            self.record_restoration_failure();
+            return Err(TaskFrameRootError::SchedulerMismatch {
+                expected,
+                found: scheduler,
+            });
+        }
+        let handles = record.handles.clone();
         self.remove_task_frame_root_record(identity, &handles)?;
         self.task_frame_roots.telemetry.containers_restored = self
             .task_frame_roots
             .telemetry
             .containers_restored
             .saturating_add(1);
-        Ok(publication)
+        Ok(())
     }
 
     /// Releases an abandoned or terminal task frame without restoring it.

@@ -58,6 +58,35 @@ impl StableGenerationalRuntime {
             .restore_task_frame_roots(identity, scheduler, expected)
     }
 
+    /// Prepares relocated roots without releasing their last valid container.
+    ///
+    /// # Errors
+    ///
+    /// Forwards identity, owner, shape, and private-root failures.
+    pub fn prepare_task_frame_root_restore(
+        &mut self,
+        identity: TaskFrameRootId,
+        scheduler: SchedulerId,
+        expected: &StackMap,
+    ) -> Result<RootPublication, TaskFrameRootError> {
+        self.inner
+            .prepare_task_frame_root_restore(identity, scheduler, expected)
+    }
+
+    /// Commits a successful native frame installation.
+    ///
+    /// # Errors
+    ///
+    /// Forwards stale identity, owner, and private-root failures.
+    pub fn complete_task_frame_root_restore(
+        &mut self,
+        identity: TaskFrameRootId,
+        scheduler: SchedulerId,
+    ) -> Result<(), TaskFrameRootError> {
+        self.inner
+            .complete_task_frame_root_restore(identity, scheduler)
+    }
+
     /// Releases roots for a terminal or abandoned native task frame.
     ///
     /// # Errors

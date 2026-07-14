@@ -243,6 +243,46 @@ fn restore_mismatch_and_duplicate_restore_fail_closed_without_losing_container()
 }
 
 #[test]
+fn prepared_restore_keeps_last_valid_container_until_installation_commits() {
+    let scheduler = SchedulerId::new(1);
+    let mut runtime = GenerationalRuntime::new();
+    let value = runtime
+        .allocate_object(&object(AllocationClass::Mature, 0, &[]))
+        .expect("frame value");
+    let map = stack_map(45, &[2]);
+    let frame = runtime
+        .retain_task_frame_roots(
+            scheduler,
+            &RootPublication::new(map.clone(), vec![Some(value)]).expect("publication"),
+        )
+        .expect("retain roots");
+
+    let first = runtime
+        .prepare_task_frame_root_restore(frame, scheduler, &map)
+        .expect("prepare first installation");
+    assert_eq!(first.managed_references().next(), Some(value));
+    assert_eq!(runtime.task_frame_root_telemetry().current_containers(), 1);
+    assert_eq!(runtime.task_frame_root_telemetry().containers_restored(), 0);
+
+    finish_major(&mut runtime, 46);
+    assert!(runtime.contains(value));
+    let retry = runtime
+        .prepare_task_frame_root_restore(frame, scheduler, &map)
+        .expect("retry after rejected task installation");
+    assert_eq!(retry, first);
+
+    runtime
+        .complete_task_frame_root_restore(frame, scheduler)
+        .expect("commit installed frame");
+    assert_eq!(runtime.task_frame_root_telemetry().current_containers(), 0);
+    assert_eq!(runtime.task_frame_root_telemetry().containers_restored(), 1);
+    assert_eq!(
+        runtime.complete_task_frame_root_restore(frame, scheduler),
+        Err(TaskFrameRootError::UnknownContainer(frame))
+    );
+}
+
+#[test]
 fn migration_changes_exact_container_owner_once_and_refusal_preserves_source() {
     let source = SchedulerId::new(8);
     let destination = SchedulerId::new(9);
