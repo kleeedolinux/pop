@@ -6,6 +6,7 @@ use pop_runtime_interface::{
     CollectionStatistics, ManagedReference, RootPublication, RuntimeFailure,
 };
 
+use crate::SchedulerId;
 use crate::relocation::RelocationRuntime;
 
 use super::allocation::{
@@ -96,7 +97,8 @@ pub struct GenerationalRuntime {
     pub(crate) memory: MemoryController,
     pub(crate) workers: Option<BackgroundWorkerPool>,
     pub(crate) isolation: IsolationState,
-    pub(crate) minor_requested: bool,
+    pub(crate) scheduler: SchedulerId,
+    pub(crate) minor_requested: BTreeSet<SchedulerId>,
     pub(crate) major_requested: bool,
 }
 
@@ -133,9 +135,19 @@ impl GenerationalRuntime {
             memory: MemoryController::new(memory),
             workers: None,
             isolation: IsolationState::new(),
-            minor_requested: false,
+            scheduler: SchedulerId::new(1),
+            minor_requested: BTreeSet::new(),
             major_requested: false,
         }
+    }
+
+    pub fn select_scheduler(&mut self, scheduler: SchedulerId) {
+        self.scheduler = scheduler;
+    }
+
+    #[must_use]
+    pub const fn active_scheduler(&self) -> SchedulerId {
+        self.scheduler
     }
 
     /// Creates a collector with persistent bounded host-worker queues.
@@ -152,8 +164,7 @@ impl GenerationalRuntime {
     }
 
     pub fn request_minor_collection(&mut self) {
-        if !self.minor_requested {
-            self.minor_requested = true;
+        if self.minor_requested.insert(self.scheduler) {
             self.memory.record_minor_request();
         }
     }

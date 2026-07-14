@@ -234,6 +234,7 @@ impl GenerationalRuntime {
                 *reference,
                 object.allocation.type_id,
                 &object.allocation.object_map,
+                owner,
             )?;
         }
         if !self.memory.admits(next_allocation.committed_bytes()) {

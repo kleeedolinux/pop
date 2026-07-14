@@ -35,7 +35,8 @@ slice rather than tracing concurrently with mutator execution, so
 
 The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
-pointer layouts, scheduler-local Eden pointer bumps, separate mature/large/
+pointer layouts, scheduler-indexed Eden pointer bumps and TLAB cursors, separate
+mature/large/
 pinned domains, survivor-copy placement, deterministic promotion, and immediate
 pinned-space placement. A separate memory controller enforces a byte hard limit
 before heap mutation, protects emergency and evacuation reserves, accounts
@@ -83,6 +84,13 @@ before transactionally assigning a distinct region and placement. Transfer
 changes only the owner scheduler; dissolution returns the graph to local mature
 ownership. Scheduler-indexed local heaps, scoped arenas, borrowing integration,
 and compiler-proved barrier elimination remain separate required work.
+
+Scheduler-local allocation records the owning scheduler in object ownership and
+page metadata. Each scheduler retains an independent TLAB cursor and minor
+request; local evacuation traces, relocates, and reclaims only that scheduler's
+nursery, preserving other schedulers' tokens and pages. Direct local edges
+between scheduler heaps are rejected before mutation. Parallel scheduler
+execution and parallel local evacuation remain unfinished production work.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and

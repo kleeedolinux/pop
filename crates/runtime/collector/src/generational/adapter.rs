@@ -25,9 +25,9 @@ impl GenerationalRuntime {
     ) -> Result<(), RuntimeFailure> {
         let requested_slots = usize::try_from(object_map.slot_count())
             .map_err(|_| BootstrapRuntime::out_of_memory(1, usize::MAX))?;
-        let requirement = self
-            .allocation
-            .placement_requirement(type_id, class, object_map)?;
+        let requirement =
+            self.allocation
+                .placement_requirement(type_id, class, object_map, self.scheduler)?;
         let committed_after = self
             .allocation
             .committed_bytes()
@@ -52,9 +52,9 @@ impl GenerationalRuntime {
             }
         }
 
-        let requirement = self
-            .allocation
-            .placement_requirement(type_id, class, object_map)?;
+        let requirement =
+            self.allocation
+                .placement_requirement(type_id, class, object_map, self.scheduler)?;
         let committed_after = self
             .allocation
             .committed_bytes()
@@ -77,10 +77,19 @@ impl GenerationalRuntime {
         class: pop_runtime_interface::AllocationClass,
         object_map: &ObjectMap,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        if let Err(error) = self.allocation.place(reference, type_id, class, object_map) {
+        if let Err(error) =
+            self.allocation
+                .place(reference, type_id, class, object_map, self.scheduler)
+        {
             self.nursery.discard_unpublished(reference)?;
             return Err(error);
         }
+        let object = self
+            .nursery
+            .objects
+            .get_mut(&reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        object.ownership = crate::ownership::ObjectOwnership::SchedulerLocal(self.scheduler);
         self.mark_new_allocation(reference);
         self.memory
             .observe_committed(self.allocation.committed_bytes());
@@ -122,6 +131,10 @@ impl GenerationalRuntime {
                 .filter_map(|(reference, object)| {
                     matches!(object.generation, CollectorGeneration::Nursery { .. })
                         .then_some(*reference)
+                        .filter(|_| {
+                            object.ownership
+                                == crate::ObjectOwnership::SchedulerLocal(self.scheduler)
+                        })
                 })
                 .collect::<BTreeSet<_>>(),
         );
@@ -129,6 +142,11 @@ impl GenerationalRuntime {
             .nursery
             .dirty_cards
             .iter()
+            .filter(|owner| {
+                self.nursery.objects.get(owner).is_some_and(|object| {
+                    object.ownership == crate::ObjectOwnership::SchedulerLocal(self.scheduler)
+                })
+            })
             .map(|owner| {
                 let object = self
                     .nursery
@@ -281,7 +299,8 @@ impl RuntimeAdapter for GenerationalRuntime {
         &mut self,
         roots: &mut RootPublication,
     ) -> Result<SafePointOutcome, RuntimeFailure> {
-        let servicing_minor = self.minor_requested && !self.major_cycle_active();
+        let servicing_minor =
+            self.minor_requested.contains(&self.scheduler) && !self.major_cycle_active();
         let identities_before: BTreeMap<_, _> = if servicing_minor {
             self.nursery
                 .objects
@@ -293,13 +312,16 @@ impl RuntimeAdapter for GenerationalRuntime {
         };
         if servicing_minor {
             self.refine_cards_for_minor()?;
-            self.nursery.request_minor_collection();
-            self.minor_requested = false;
+            self.nursery.request_minor_collection_for(self.scheduler);
+            self.minor_requested.remove(&self.scheduler);
         }
         let minor = self.nursery.safe_point(roots)?;
         if servicing_minor && minor.collection().is_some() {
-            self.allocation
-                .reconcile_after_minor(&identities_before, &self.nursery.objects)?;
+            self.allocation.reconcile_after_minor(
+                &identities_before,
+                &self.nursery.objects,
+                self.scheduler,
+            )?;
             self.update_memory_target();
         }
         if self.major_requested && !self.major_cycle_active() {

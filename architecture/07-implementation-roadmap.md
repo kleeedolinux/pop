@@ -136,7 +136,8 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   mark/card/sweep dispatch; the runtime also has distinct ownership metadata,
   whole-graph local-to-shared publication, ownership barrier enforcement, and
   exact-one-owner isolated-region construction/transfer/dissolution, while
-  scheduler-indexed local heaps and scheduler/runtime integration remain open;
+  scheduler-indexed TLABs/local collection now preserve heap independence;
+  parallel scheduler execution and scheduler/runtime integration remain open;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.

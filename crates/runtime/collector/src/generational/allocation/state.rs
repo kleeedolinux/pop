@@ -8,6 +8,7 @@ use pop_runtime_interface::{
 };
 
 use crate::relocation::{CollectorGeneration, CollectorObjectId, RelocationAllocation};
+use crate::{ObjectOwnership, SchedulerId};
 
 use super::model::{
     AllocationInfrastructureConfig, AllocationMetrics, AllocationPlacement, HeapDomain,
@@ -34,7 +35,7 @@ pub(crate) struct AllocationInfrastructure {
     config: AllocationInfrastructureConfig,
     pages: BTreeMap<PageId, PageDescriptor>,
     placements: BTreeMap<ManagedReference, AllocationPlacement>,
-    tlab: Option<Tlab>,
+    tlabs: BTreeMap<SchedulerId, Tlab>,
     next_page: u64,
     metrics: AllocationMetrics,
 }
@@ -51,7 +52,7 @@ impl AllocationInfrastructure {
             config,
             pages: BTreeMap::new(),
             placements: BTreeMap::new(),
-            tlab: None,
+            tlabs: BTreeMap::new(),
             next_page: 1,
             metrics: AllocationMetrics::default(),
         }
@@ -63,13 +64,16 @@ impl AllocationInfrastructure {
         type_id: RuntimeTypeId,
         class: AllocationClass,
         object_map: &ObjectMap,
+        scheduler: SchedulerId,
     ) -> Result<(), RuntimeFailure> {
         let layout = layout(type_id, object_map);
         let size = object_size(object_map.slot_count())?;
         let placement = if class == AllocationClass::NurseryEligible {
-            self.place_in_tlab(&layout, size)?
+            self.place_in_tlab(&layout, size, scheduler)?
         } else {
-            self.place_on_new_page(&layout, size, domain_for_class(class))?
+            let domain = domain_for_class(class);
+            let page_scheduler = (domain == HeapDomain::LocalMature).then_some(scheduler);
+            self.place_on_new_page(&layout, size, domain, page_scheduler)?
         };
         self.record_bytes(size);
         self.placements.insert(reference, placement);
@@ -81,11 +85,12 @@ impl AllocationInfrastructure {
         type_id: RuntimeTypeId,
         class: AllocationClass,
         object_map: &ObjectMap,
+        scheduler: SchedulerId,
     ) -> Result<PlacementRequirement, RuntimeFailure> {
         let layout = layout(type_id, object_map);
         let object_bytes = object_size(object_map.slot_count())?;
         let additional_committed_bytes = if class == AllocationClass::NurseryEligible
-            && self.tlab.as_ref().is_some_and(|tlab| {
+            && self.tlabs.get(&scheduler).is_some_and(|tlab| {
                 tlab.layout == layout && tlab.cursor.saturating_add(object_bytes) <= tlab.limit
             }) {
             0
@@ -102,8 +107,9 @@ impl AllocationInfrastructure {
         &mut self,
         layout: &LayoutKey,
         size: usize,
+        scheduler: SchedulerId,
     ) -> Result<AllocationPlacement, RuntimeFailure> {
-        let refill = self.tlab.as_ref().is_none_or(|tlab| {
+        let refill = self.tlabs.get(&scheduler).is_none_or(|tlab| {
             &tlab.layout != layout || tlab.cursor.saturating_add(size) > tlab.limit
         });
         if refill {
@@ -111,18 +117,22 @@ impl AllocationInfrastructure {
                 layout,
                 HeapDomain::LocalEden,
                 self.config.page_bytes.max(size),
+                Some(scheduler),
             )?;
-            self.tlab = Some(Tlab {
-                page,
-                layout: layout.clone(),
-                cursor: 0,
-                limit: self.config.tlab_bytes.max(size),
-            });
+            self.tlabs.insert(
+                scheduler,
+                Tlab {
+                    page,
+                    layout: layout.clone(),
+                    cursor: 0,
+                    limit: self.config.tlab_bytes.max(size),
+                },
+            );
             self.metrics.tlab_refills = self.metrics.tlab_refills.saturating_add(1);
         }
         let tlab = self
-            .tlab
-            .as_mut()
+            .tlabs
+            .get_mut(&scheduler)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         let offset = tlab.cursor;
         tlab.cursor = tlab
@@ -143,8 +153,9 @@ impl AllocationInfrastructure {
         layout: &LayoutKey,
         size: usize,
         domain: HeapDomain,
+        scheduler: Option<SchedulerId>,
     ) -> Result<AllocationPlacement, RuntimeFailure> {
-        let page = self.create_page(layout, domain, self.config.page_bytes.max(size))?;
+        let page = self.create_page(layout, domain, self.config.page_bytes.max(size), scheduler)?;
         Ok(AllocationPlacement {
             page,
             offset_bytes: 0,
@@ -158,6 +169,7 @@ impl AllocationInfrastructure {
         layout: &LayoutKey,
         domain: HeapDomain,
         capacity_bytes: usize,
+        scheduler: Option<SchedulerId>,
     ) -> Result<PageId, RuntimeFailure> {
         let id = PageId(self.next_page);
         self.next_page = self
@@ -177,6 +189,7 @@ impl AllocationInfrastructure {
                 id,
                 region,
                 domain,
+                scheduler,
                 type_id: layout.type_id,
                 slot_count: layout.slot_count,
                 reference_slots: layout.reference_slots.clone(),
@@ -240,7 +253,7 @@ impl AllocationInfrastructure {
         }
         let layout = layout(type_id, object_map);
         let size = object_size(layout.slot_count)?;
-        let placement = self.place_on_new_page(&layout, size, HeapDomain::Pinned)?;
+        let placement = self.place_on_new_page(&layout, size, HeapDomain::Pinned, None)?;
         self.placements.insert(reference, placement);
         self.reclaim_empty_pages();
         Ok(())
@@ -263,7 +276,7 @@ impl AllocationInfrastructure {
         }
         let layout = layout(type_id, object_map);
         let size = object_size(layout.slot_count)?;
-        let placement = self.place_on_new_page(&layout, size, HeapDomain::Shared)?;
+        let placement = self.place_on_new_page(&layout, size, HeapDomain::Shared, None)?;
         self.placements.insert(reference, placement);
         self.reclaim_empty_pages();
         Ok(())
@@ -286,7 +299,7 @@ impl AllocationInfrastructure {
         }
         let layout = layout(type_id, object_map);
         let size = object_size(layout.slot_count)?;
-        let placement = self.place_on_new_page(&layout, size, HeapDomain::Isolated)?;
+        let placement = self.place_on_new_page(&layout, size, HeapDomain::Isolated, None)?;
         self.placements.insert(reference, placement);
         self.reclaim_empty_pages();
         Ok(())
@@ -297,6 +310,7 @@ impl AllocationInfrastructure {
         reference: ManagedReference,
         type_id: RuntimeTypeId,
         object_map: &ObjectMap,
+        scheduler: SchedulerId,
     ) -> Result<(), RuntimeFailure> {
         let Some(previous) = self.placements.get(&reference).copied() else {
             return Err(RuntimeFailure::runtime_invariant());
@@ -309,7 +323,8 @@ impl AllocationInfrastructure {
         }
         let layout = layout(type_id, object_map);
         let size = object_size(layout.slot_count)?;
-        let placement = self.place_on_new_page(&layout, size, HeapDomain::LocalMature)?;
+        let placement =
+            self.place_on_new_page(&layout, size, HeapDomain::LocalMature, Some(scheduler))?;
         self.placements.insert(reference, placement);
         self.reclaim_empty_pages();
         Ok(())
@@ -319,6 +334,7 @@ impl AllocationInfrastructure {
         &mut self,
         previous_identities: &BTreeMap<CollectorObjectId, ManagedReference>,
         objects: &BTreeMap<ManagedReference, RelocationAllocation>,
+        scheduler: SchedulerId,
     ) -> Result<(), RuntimeFailure> {
         let mut previous = std::mem::take(&mut self.placements);
         let mut next = BTreeMap::new();
@@ -340,7 +356,16 @@ impl AllocationInfrastructure {
             };
             let layout = layout(object.allocation.type_id, &object.allocation.object_map);
             let size = object_size(layout.slot_count)?;
-            let placement = self.place_on_new_page(&layout, size, domain)?;
+            let object_scheduler = match object.ownership {
+                ObjectOwnership::SchedulerLocal(owner) if owner == scheduler => owner,
+                ObjectOwnership::SchedulerLocal(_)
+                | ObjectOwnership::Isolated(_)
+                | ObjectOwnership::Shared => {
+                    return Err(RuntimeFailure::runtime_invariant());
+                }
+            };
+            let placement =
+                self.place_on_new_page(&layout, size, domain, Some(object_scheduler))?;
             next.insert(*reference, placement);
             self.record_bytes(size);
             match domain {
@@ -358,7 +383,7 @@ impl AllocationInfrastructure {
             }
         }
         self.placements = next;
-        self.tlab = None;
+        self.tlabs.remove(&scheduler);
         self.reclaim_empty_pages();
         Ok(())
     }
@@ -383,13 +408,8 @@ impl AllocationInfrastructure {
             .metrics
             .pages_returned
             .saturating_add(u64::try_from(returned).unwrap_or(u64::MAX));
-        if self
-            .tlab
-            .as_ref()
-            .is_some_and(|tlab| !self.pages.contains_key(&tlab.page))
-        {
-            self.tlab = None;
-        }
+        self.tlabs
+            .retain(|_, tlab| self.pages.contains_key(&tlab.page));
     }
 }
 

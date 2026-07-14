@@ -14,14 +14,18 @@ impl RelocationRuntime {
     pub(super) fn collect_minor(
         &mut self,
         publication: &mut RootPublication,
+        scheduler: crate::SchedulerId,
     ) -> Result<CollectionStatistics, RuntimeFailure> {
-        let pending = self.minor_collection_roots(publication)?;
-        let live_young = self.trace_live_young(pending)?;
+        let pending = self.minor_collection_roots(publication, scheduler)?;
+        let live_young = self.trace_live_young(pending, scheduler)?;
 
         let young_before = self
             .objects
             .values()
-            .filter(|object| matches!(object.generation, CollectorGeneration::Nursery { .. }))
+            .filter(|object| {
+                matches!(object.generation, CollectorGeneration::Nursery { .. })
+                    && object.ownership == crate::ObjectOwnership::SchedulerLocal(scheduler)
+            })
             .count();
         let pinned: BTreeSet<_> = self.pins.values().copied().collect();
         let mut relocations = BTreeMap::new();
@@ -31,7 +35,9 @@ impl RelocationRuntime {
 
         let mut next_objects = BTreeMap::new();
         for (reference, object) in &self.objects {
-            if object.generation == CollectorGeneration::Mature {
+            if object.generation == CollectorGeneration::Mature
+                || object.ownership != crate::ObjectOwnership::SchedulerLocal(scheduler)
+            {
                 next_objects.insert(*reference, object.clone());
             }
         }
@@ -97,6 +103,7 @@ impl RelocationRuntime {
     fn minor_collection_roots(
         &self,
         publication: &RootPublication,
+        scheduler: crate::SchedulerId,
     ) -> Result<Vec<ManagedReference>, RuntimeFailure> {
         let stack_roots: Vec<_> = publication.managed_references().collect();
         let handle_roots: Vec<_> = self.roots.values().copied().collect();
@@ -108,17 +115,24 @@ impl RelocationRuntime {
         let mut pending = stack_roots;
         pending.extend(handle_roots);
         pending.extend(pin_roots);
+        let relevant_cards: BTreeSet<_> = self
+            .dirty_cards
+            .iter()
+            .copied()
+            .filter(|owner| {
+                self.objects.get(owner).is_some_and(|object| {
+                    object.generation == CollectorGeneration::Mature
+                        && object.ownership == crate::ObjectOwnership::SchedulerLocal(scheduler)
+                })
+            })
+            .collect();
         if let Some(refined) = &self.refined_cards {
-            if refined.len() != self.dirty_cards.len()
-                || refined
-                    .keys()
-                    .any(|owner| !self.dirty_cards.contains(owner))
-            {
+            if refined.keys().copied().collect::<BTreeSet<_>>() != relevant_cards {
                 return Err(RuntimeFailure::runtime_invariant());
             }
             pending.extend(refined.values().flatten().copied());
         } else {
-            for owner in &self.dirty_cards {
+            for owner in &relevant_cards {
                 let object = self
                     .objects
                     .get(owner)
@@ -133,6 +147,7 @@ impl RelocationRuntime {
     fn trace_live_young(
         &self,
         mut pending: Vec<ManagedReference>,
+        scheduler: crate::SchedulerId,
     ) -> Result<BTreeSet<ManagedReference>, RuntimeFailure> {
         let mut live_young = BTreeSet::new();
         while let Some(reference) = pending.pop() {
@@ -140,7 +155,10 @@ impl RelocationRuntime {
                 .objects
                 .get(&reference)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            if object.generation == CollectorGeneration::Mature || !live_young.insert(reference) {
+            if object.generation == CollectorGeneration::Mature
+                || object.ownership != crate::ObjectOwnership::SchedulerLocal(scheduler)
+                || !live_young.insert(reference)
+            {
                 continue;
             }
             append_references(object, &mut pending)?;

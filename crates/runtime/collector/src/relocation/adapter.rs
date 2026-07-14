@@ -107,11 +107,11 @@ impl RuntimeAdapter for RelocationRuntime {
         for reference in roots.managed_references() {
             self.validate_reference(reference)?;
         }
-        if !self.collection_requested {
+        let Some(scheduler) = self.collection_requested else {
             return Ok(SafePointOutcome::no_collection());
-        }
-        let statistics = self.collect_minor(roots)?;
-        self.collection_requested = false;
+        };
+        let statistics = self.collect_minor(roots, scheduler)?;
+        self.collection_requested = None;
         Ok(SafePointOutcome::collected(statistics))
     }
 

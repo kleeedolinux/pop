@@ -161,8 +161,11 @@ Package for the first release.
   - [x] Add exact-one-owner isolated-region construction, distinct placement and
     accounting, zero-copy scheduler transfer, protected owner capabilities,
     external-edge/root/pin rejection, and explicit dissolution.
-  - [ ] Add scheduler-indexed local heaps, scoped arenas, shared immutability
-    proofs, and capability-driven barrier elimination.
+  - [x] Add scheduler-indexed object/page ownership, independent TLAB cursors,
+    per-scheduler minor requests and evacuation scope, and cross-scheduler local
+    edge rejection.
+  - [ ] Add scoped arenas, shared immutability proofs, and capability-driven
+    barrier elimination.
   - [ ] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.
 - [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,

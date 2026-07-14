@@ -2,6 +2,8 @@
 
 use pop_runtime_interface::{ObjectSlot, RuntimeTypeId};
 
+use crate::ownership::SchedulerId;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_field_names)]
 pub struct AllocationInfrastructureConfig {
@@ -126,6 +128,7 @@ pub struct PageDescriptor {
     pub(super) id: PageId,
     pub(super) region: RegionId,
     pub(super) domain: HeapDomain,
+    pub(super) scheduler: Option<SchedulerId>,
     pub(super) type_id: RuntimeTypeId,
     pub(super) slot_count: u32,
     pub(super) reference_slots: Vec<ObjectSlot>,
@@ -146,6 +149,11 @@ impl PageDescriptor {
     #[must_use]
     pub const fn domain(&self) -> HeapDomain {
         self.domain
+    }
+
+    #[must_use]
+    pub const fn scheduler(&self) -> Option<SchedulerId> {
+        self.scheduler
     }
 
     #[must_use]

@@ -37,7 +37,7 @@ pub struct RelocationRuntime {
     pub(super) next_identity: u64,
     pub(super) next_root: u64,
     pub(super) next_pin: u64,
-    pub(super) collection_requested: bool,
+    pub(super) collection_requested: Option<crate::SchedulerId>,
     pub(crate) metrics: CollectorMetrics,
 }
 
@@ -54,13 +54,17 @@ impl RelocationRuntime {
             next_identity: 1,
             next_root: 1,
             next_pin: 1,
-            collection_requested: false,
+            collection_requested: None,
             metrics: CollectorMetrics::default(),
         }
     }
 
-    pub const fn request_minor_collection(&mut self) {
-        self.collection_requested = true;
+    pub fn request_minor_collection(&mut self) {
+        self.collection_requested = Some(crate::SchedulerId::new(1));
+    }
+
+    pub(crate) fn request_minor_collection_for(&mut self, scheduler: crate::SchedulerId) {
+        self.collection_requested = Some(scheduler);
     }
 
     #[must_use]
@@ -82,10 +86,9 @@ impl RelocationRuntime {
         &mut self,
         refined: BTreeMap<ManagedReference, Vec<ManagedReference>>,
     ) -> Result<(), RuntimeFailure> {
-        if refined.len() != self.dirty_cards.len()
-            || refined
-                .keys()
-                .any(|owner| !self.dirty_cards.contains(owner))
+        if refined
+            .keys()
+            .any(|owner| !self.dirty_cards.contains(owner))
         {
             return Err(RuntimeFailure::runtime_invariant());
         }
