@@ -17,6 +17,10 @@ enum ReplayMode {
         expected: Vec<SchedulerDecision>,
         cursor: usize,
     },
+    Exploring {
+        selected_prefix: Vec<SchedulerTaskId>,
+        cursor: usize,
+    },
 }
 
 struct DeterministicTask {
@@ -58,6 +62,20 @@ impl DeterministicScheduler {
             configuration,
             ReplayMode::Replaying {
                 expected,
+                cursor: 0,
+            },
+        )
+    }
+
+    #[must_use]
+    pub fn exploring(
+        configuration: SchedulerConfiguration,
+        selected_prefix: Vec<SchedulerTaskId>,
+    ) -> Self {
+        Self::new(
+            configuration,
+            ReplayMode::Exploring {
+                selected_prefix,
                 cursor: 0,
             },
         )
@@ -389,7 +407,45 @@ impl DeterministicScheduler {
         match &self.mode {
             ReplayMode::Recording => true,
             ReplayMode::Replaying { expected, cursor } => *cursor == expected.len(),
+            ReplayMode::Exploring {
+                selected_prefix,
+                cursor,
+            } => *cursor >= selected_prefix.len(),
         }
+    }
+
+    /// Derives bounded alternative selected-task prefixes from the transcript.
+    ///
+    /// Prefixes change one decision after preserving every earlier recorded
+    /// choice. Running an exploration prefix records the deterministic suffix.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero exploration budget.
+    pub fn exploration_prefixes(
+        &self,
+        maximum_prefixes: usize,
+    ) -> Result<Vec<Vec<SchedulerTaskId>>, SchedulerError> {
+        if maximum_prefixes == 0 {
+            return Err(SchedulerError::ExplorationBudget);
+        }
+        let mut prefixes = Vec::new();
+        let mut recorded_prefix = Vec::new();
+        for decision in &self.transcript {
+            for candidate in decision.enabled() {
+                if *candidate == decision.selected() {
+                    continue;
+                }
+                let mut alternative = recorded_prefix.clone();
+                alternative.push(*candidate);
+                prefixes.push(alternative);
+                if prefixes.len() == maximum_prefixes {
+                    return Ok(prefixes);
+                }
+            }
+            recorded_prefix.push(decision.selected());
+        }
+        Ok(prefixes)
     }
 
     /// Returns the exact retained state for one task.
@@ -473,6 +529,24 @@ impl DeterministicScheduler {
                 }
                 Ok((decision.selected(), decision.scheduler()))
             }
+            ReplayMode::Exploring {
+                selected_prefix,
+                cursor,
+            } => {
+                let selected = selected_prefix
+                    .get(*cursor)
+                    .copied()
+                    .unwrap_or_else(|| enabled[0]);
+                if !enabled.contains(&selected) {
+                    return Err(SchedulerError::ReplayEnabledSetMismatch);
+                }
+                let scheduler = self
+                    .tasks
+                    .get(&selected)
+                    .map(|record| record.scheduler)
+                    .ok_or(SchedulerError::UnknownTask(selected))?;
+                Ok((selected, scheduler))
+            }
         }
     }
 
@@ -496,6 +570,8 @@ impl DeterministicScheduler {
             {
                 return Err(SchedulerError::ReplayEnabledSetMismatch);
             }
+            *cursor += 1;
+        } else if let ReplayMode::Exploring { cursor, .. } = &mut self.mode {
             *cursor += 1;
         }
         self.transcript.push(SchedulerDecision::new(

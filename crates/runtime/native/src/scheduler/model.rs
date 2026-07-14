@@ -361,6 +361,7 @@ pub enum SchedulerError {
     ReplayExhausted,
     ReplayEnabledSetMismatch,
     PollBudgetExhausted,
+    ExplorationBudget,
     RuntimeTransition {
         transition: SchedulerRuntimeTransition,
         failure: SchedulerRuntimeTransitionFailure,

@@ -1067,3 +1067,42 @@ fn deterministic_replay_fails_closed_when_the_recorded_task_is_not_ready() {
         Err(SchedulerError::ReplayEnabledSetMismatch)
     );
 }
+
+#[test]
+fn deterministic_exploration_generates_bounded_alternative_choice_prefixes() {
+    let mut recording = DeterministicScheduler::recording(configuration(1, 2));
+    let first = recording
+        .schedule(YieldOnceTask { first: true })
+        .expect("first exploration task");
+    let second = recording
+        .schedule(YieldOnceTask { first: true })
+        .expect("second exploration task");
+    recording
+        .run_until_idle(8)
+        .expect("record exploration baseline");
+
+    let prefixes = recording
+        .exploration_prefixes(2)
+        .expect("derive bounded alternative prefixes");
+    assert_eq!(prefixes.len(), 2);
+    assert_eq!(prefixes[0], vec![second]);
+    assert_eq!(prefixes[1], vec![first, first]);
+
+    let mut explored = DeterministicScheduler::exploring(configuration(1, 2), prefixes[0].clone());
+    let explored_first = explored
+        .schedule(YieldOnceTask { first: true })
+        .expect("first explored task");
+    let explored_second = explored
+        .schedule(YieldOnceTask { first: true })
+        .expect("second explored task");
+    explored
+        .run_until_idle(8)
+        .expect("execute alternative prefix");
+    assert_eq!(explored_first, first);
+    assert_eq!(explored_second, second);
+    assert_eq!(explored.transcript()[0].selected(), second);
+    assert_eq!(
+        recording.exploration_prefixes(0),
+        Err(SchedulerError::ExplorationBudget)
+    );
+}
