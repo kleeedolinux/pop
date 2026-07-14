@@ -169,6 +169,7 @@ struct ExternalEventRegistration {
     task: SchedulerTaskId,
     signalled: bool,
     delivered: bool,
+    readiness_work: Option<u64>,
 }
 
 struct EventDriverState {
@@ -189,8 +190,14 @@ struct EventDriver {
 }
 
 enum HostDelivery {
-    ExternalEvent(SchedulerTaskId),
-    Timer(SchedulerTaskId),
+    ExternalEvent {
+        task: SchedulerTaskId,
+        readiness_work: u64,
+    },
+    Timer {
+        task: SchedulerTaskId,
+        readiness_work: u64,
+    },
 }
 
 pub struct NativeScheduler {
@@ -679,6 +686,7 @@ impl EventDriver {
                 task,
                 signalled: false,
                 delivered: false,
+                readiness_work: None,
             },
         );
         let mut telemetry = lock(&scheduler.telemetry);
@@ -713,11 +721,12 @@ impl EventDriver {
         if state.deliveries.len() >= self.delivery_capacity {
             return Err(SchedulerError::EventDeliveryCapacity);
         }
-        state
+        let registration = state
             .events
             .get_mut(&event)
-            .expect("validated event remains registered")
-            .signalled = true;
+            .expect("validated event remains registered");
+        registration.signalled = true;
+        registration.readiness_work = Some(scheduler.advance_observation_work());
         state.deliveries.push_back(event);
         drop(state);
         self.changed.notify_one();
@@ -834,6 +843,15 @@ impl SharedScheduler {
             })
             .unwrap_or(u64::MAX)
             .saturating_add(1)
+    }
+
+    fn record_event_driver_poll(&self) -> u64 {
+        let work = self.advance_observation_work();
+        let mut telemetry = lock(&self.telemetry);
+        telemetry.telemetry.external_event_polls =
+            telemetry.telemetry.external_event_polls.saturating_add(1);
+        telemetry.telemetry.timer_polls = telemetry.telemetry.timer_polls.saturating_add(1);
+        work
     }
 
     fn task_frame_error(
@@ -2245,19 +2263,29 @@ fn event_driver_loop(driver: &EventDriver, scheduler: &SharedScheduler) {
             if state.shutdown {
                 return;
             }
+            let readiness_work = scheduler.record_event_driver_poll();
             if let Some(event) = state.deliveries.pop_front() {
                 let Some(registration) = state.events.get_mut(&event) else {
                     continue;
                 };
                 registration.delivered = true;
-                break HostDelivery::ExternalEvent(registration.task);
+                let readiness_work = registration
+                    .readiness_work
+                    .expect("queued external event has readiness work");
+                break HostDelivery::ExternalEvent {
+                    task: registration.task,
+                    readiness_work,
+                };
             }
             let now = Instant::now();
             if let Some((&key, &task)) = state.timers.first_key_value()
                 && key.0 <= now
             {
                 state.timers.remove(&key);
-                break HostDelivery::Timer(task);
+                break HostDelivery::Timer {
+                    task,
+                    readiness_work,
+                };
             }
             if let Some((&(deadline, _), _)) = state.timers.first_key_value() {
                 let timeout = deadline.saturating_duration_since(now);
@@ -2276,19 +2304,35 @@ fn event_driver_loop(driver: &EventDriver, scheduler: &SharedScheduler) {
         drop(state);
 
         match delivery {
-            HostDelivery::ExternalEvent(task) => {
+            HostDelivery::ExternalEvent {
+                task,
+                readiness_work,
+            } => {
                 let _ = scheduler.wake(task);
+                let delivery_work = scheduler.advance_observation_work();
                 let mut telemetry = lock(&scheduler.telemetry);
                 telemetry.telemetry.external_events_delivered = telemetry
                     .telemetry
                     .external_events_delivered
                     .saturating_add(1);
+                telemetry
+                    .telemetry
+                    .external_event_delivery_delay
+                    .record(delivery_work.saturating_sub(readiness_work));
             }
-            HostDelivery::Timer(task) => {
+            HostDelivery::Timer {
+                task,
+                readiness_work,
+            } => {
                 let _ = scheduler.wake(task);
+                let delivery_work = scheduler.advance_observation_work();
                 let mut telemetry = lock(&scheduler.telemetry);
                 telemetry.telemetry.timers_delivered =
                     telemetry.telemetry.timers_delivered.saturating_add(1);
+                telemetry
+                    .telemetry
+                    .timer_delivery_delay
+                    .record(delivery_work.saturating_sub(readiness_work));
             }
         }
     }

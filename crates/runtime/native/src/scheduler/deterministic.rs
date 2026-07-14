@@ -303,6 +303,9 @@ impl DeterministicScheduler {
             .virtual_work
             .checked_add(work)
             .ok_or(SchedulerError::IdentityOverflow)?;
+        self.telemetry.timer_polls = self.telemetry.timer_polls.saturating_add(1);
+        self.observation_work = self.observation_work.saturating_add(1);
+        let readiness_work = self.observation_work;
         let due = self
             .timers
             .range(..=(self.virtual_work, SchedulerTimerId::new(u64::MAX)))
@@ -314,6 +317,10 @@ impl DeterministicScheduler {
             if self.wake(task)? {
                 delivered += 1;
                 self.telemetry.timers_delivered = self.telemetry.timers_delivered.saturating_add(1);
+                self.observation_work = self.observation_work.saturating_add(1);
+                self.telemetry
+                    .timer_delivery_delay
+                    .record(self.observation_work.saturating_sub(readiness_work));
             }
         }
         Ok(delivered)
@@ -382,6 +389,9 @@ impl DeterministicScheduler {
             .get(&event)
             .copied()
             .ok_or(SchedulerError::UnknownExternalEvent(event))?;
+        self.telemetry.external_event_polls = self.telemetry.external_event_polls.saturating_add(1);
+        self.observation_work = self.observation_work.saturating_add(1);
+        let readiness_work = self.observation_work;
         if signalled {
             self.telemetry.external_event_signals_coalesced = self
                 .telemetry
@@ -393,6 +403,10 @@ impl DeterministicScheduler {
             self.events.insert(event, (task, true));
             self.telemetry.external_events_delivered =
                 self.telemetry.external_events_delivered.saturating_add(1);
+            self.observation_work = self.observation_work.saturating_add(1);
+            self.telemetry
+                .external_event_delivery_delay
+                .record(self.observation_work.saturating_sub(readiness_work));
             Ok(true)
         } else {
             self.events.insert(event, (task, true));

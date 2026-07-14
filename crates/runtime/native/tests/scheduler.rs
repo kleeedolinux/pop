@@ -1736,6 +1736,17 @@ fn host_timer_and_external_event_wake_only_the_exact_registered_tasks() {
     assert_eq!(telemetry.timers_delivered(), 1);
     assert_eq!(telemetry.external_events_delivered(), 1);
     assert_eq!(telemetry.external_event_signals_coalesced(), 1);
+    assert!(telemetry.timer_polls() >= 1);
+    assert!(telemetry.external_event_polls() >= 1);
+    assert_eq!(telemetry.timer_delivery_delay().samples(), 1);
+    assert_eq!(telemetry.external_event_delivery_delay().samples(), 1);
+    assert!(telemetry.timer_delivery_delay().maximum_work_units() > 0);
+    assert!(
+        telemetry
+            .external_event_delivery_delay()
+            .maximum_work_units()
+            > 0
+    );
 }
 
 #[test]
@@ -1768,6 +1779,10 @@ fn deterministic_virtual_timer_never_consults_wall_clock() {
         Ok(SchedulerTaskState::Completed)
     );
     assert_eq!(scheduler.virtual_work(), 10);
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.timer_polls(), 2);
+    assert_eq!(telemetry.timer_delivery_delay().samples(), 1);
+    assert!(telemetry.timer_delivery_delay().maximum_work_units() > 0);
 }
 
 #[test]
@@ -1803,6 +1818,21 @@ fn deterministic_external_event_is_bounded_and_coalesced() {
     );
     assert_eq!(scheduler.telemetry().external_events_delivered(), 1);
     assert_eq!(scheduler.telemetry().external_event_signals_coalesced(), 1);
+    assert_eq!(scheduler.telemetry().external_event_polls(), 2);
+    assert_eq!(
+        scheduler
+            .telemetry()
+            .external_event_delivery_delay()
+            .samples(),
+        1
+    );
+    assert!(
+        scheduler
+            .telemetry()
+            .external_event_delivery_delay()
+            .maximum_work_units()
+            > 0
+    );
     scheduler
         .release_external_event(event)
         .expect("release deterministic external event");
