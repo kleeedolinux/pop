@@ -243,6 +243,16 @@ mature-heap collection, concurrent marking, or SATB barrier; mature objects are
 retained. It is therefore test infrastructure for relocation correctness, not
 the selectable `ProductionGenerational` runtime profile.
 
+The collector also contains a later non-selectable `GenerationalRuntime`
+conformance composition. It adds page-described TLAB placement, cooperative
+incremental SATB mature tracing/sweeping, protected emergency and evacuation
+reserves, typed non-heap memory accounting, adaptive growth targets, bounded
+allocation assists, deterministic byte-limit OOM, empty-page return, and
+domain/debt telemetry. It still reports the lower relocation contract because
+cooperative work is not concurrent production marking, the native backend does
+not yet provide writable relocating roots, and no profile may infer production
+capability from implementation experiments.
+
 The collector implementation consumes these contracts. It does not redefine
 them, and native exports remain a delegating facade over a concrete collector.
 Crate separation adds no runtime registry, string lookup, or hot-path dynamic

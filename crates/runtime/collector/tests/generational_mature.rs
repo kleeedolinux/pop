@@ -1,4 +1,7 @@
-use pop_runtime_collector::{GenerationalRuntime, MajorCollectorConfig, MajorCyclePhase};
+use pop_runtime_collector::{
+    AllocationInfrastructureConfig, GenerationalMemoryConfig, GenerationalRuntime,
+    MajorCollectorConfig, MajorCyclePhase,
+};
 use pop_runtime_interface::{
     AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
     RootPublication, RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
@@ -256,4 +259,30 @@ fn roots_and_pins_created_during_marking_are_shaded() {
     finish_major(&mut runtime, &mut roots);
     assert!(!runtime.contains(rooted));
     assert!(!runtime.contains(young));
+}
+
+#[test]
+fn pin_admission_does_not_assist_before_registering_a_mature_target() {
+    let mut runtime = GenerationalRuntime::with_memory_config(
+        MajorCollectorConfig::new(1),
+        AllocationInfrastructureConfig::new(64, 256, 32).expect("allocation geometry"),
+        GenerationalMemoryConfig::new(512, 32, 64, 64, 100, 1).expect("memory configuration"),
+    );
+    let mature = runtime.allocate_object(&object(0, &[])).expect("mature");
+    let roots = no_stack_roots(8);
+    runtime
+        .start_major_collection(&roots)
+        .expect("start snapshot without the late pin");
+
+    let pin = runtime
+        .pin(mature)
+        .expect("pin registration precedes any pressure assist");
+    let mut roots = no_stack_roots(9);
+    finish_major(&mut runtime, &mut roots);
+    assert!(runtime.contains(mature));
+
+    runtime.unpin(pin).expect("release pin");
+    runtime.request_major_collection();
+    finish_major(&mut runtime, &mut roots);
+    assert!(!runtime.contains(mature));
 }

@@ -206,6 +206,27 @@ impl RelocationRuntime {
         Ok(reference)
     }
 
+    pub(crate) fn discard_unpublished(
+        &mut self,
+        reference: ManagedReference,
+    ) -> Result<(), RuntimeFailure> {
+        if self.roots.values().any(|target| *target == reference)
+            || self.pins.values().any(|target| *target == reference)
+            || self.objects.values().any(|object| {
+                object.allocation.slots.iter().any(|slot| {
+                    matches!(slot, SlotValue::Reference(Some(target)) if *target == reference)
+                })
+            })
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        self.objects
+            .remove(&reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.metrics.rollback_allocation();
+        Ok(())
+    }
+
     pub(super) fn fresh_reference(&mut self) -> Result<ManagedReference, RuntimeFailure> {
         let reference = ManagedReference::new(self.next_reference);
         self.next_reference = self

@@ -5,9 +5,14 @@ mod allocation;
 mod barrier;
 mod heap;
 mod major;
+mod memory;
 
 pub use allocation::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
     AllocationPlacement, HeapDomain, PageDescriptor, PageId, RegionId,
 };
 pub use heap::{GenerationalRuntime, MajorCollectorConfig, MajorCyclePhase};
+pub use memory::{
+    GenerationalMemoryConfig, GenerationalMemoryConfigError, GenerationalMemoryTelemetry,
+    NonHeapMemoryUsage, NonHeapMemoryUsageError,
+};

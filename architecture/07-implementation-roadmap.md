@@ -128,7 +128,9 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - coroutines/async model;
 - FFI;
 - opt-in retained metadata and generated typed adapters where justified;
-- concurrent mature GC, pacing, latency telemetry, and benchmark gates;
+- production concurrent mature GC and latency/benchmark gates, building on the
+  implemented cooperative SATB mark/sweep, page/TLAB allocation, hard-limit
+  accounting, adaptive pacing, bounded assists, and logical memory telemetry;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.

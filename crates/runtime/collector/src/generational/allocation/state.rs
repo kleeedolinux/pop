@@ -1,6 +1,7 @@
 //! Mutable page inventory, TLAB cursor, and relocation placement updates.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use pop_runtime_interface::{
     AllocationClass, ManagedReference, ObjectMap, ObjectSlot, RuntimeFailure, RuntimeTypeId,
@@ -36,6 +37,12 @@ pub(crate) struct AllocationInfrastructure {
     metrics: AllocationMetrics,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PlacementRequirement {
+    pub(crate) object_bytes: usize,
+    pub(crate) additional_committed_bytes: usize,
+}
+
 impl AllocationInfrastructure {
     pub(crate) fn new(config: AllocationInfrastructureConfig) -> Self {
         Self {
@@ -67,6 +74,28 @@ impl AllocationInfrastructure {
         Ok(())
     }
 
+    pub(crate) fn placement_requirement(
+        &self,
+        type_id: RuntimeTypeId,
+        class: AllocationClass,
+        object_map: &ObjectMap,
+    ) -> Result<PlacementRequirement, RuntimeFailure> {
+        let layout = layout(type_id, object_map);
+        let object_bytes = object_size(object_map.slot_count())?;
+        let additional_committed_bytes = if class == AllocationClass::NurseryEligible
+            && self.tlab.as_ref().is_some_and(|tlab| {
+                tlab.layout == layout && tlab.cursor.saturating_add(object_bytes) <= tlab.limit
+            }) {
+            0
+        } else {
+            self.config.page_bytes.max(object_bytes)
+        };
+        Ok(PlacementRequirement {
+            object_bytes,
+            additional_committed_bytes,
+        })
+    }
+
     fn place_in_tlab(
         &mut self,
         layout: &LayoutKey,
@@ -76,7 +105,11 @@ impl AllocationInfrastructure {
             &tlab.layout != layout || tlab.cursor.saturating_add(size) > tlab.limit
         });
         if refill {
-            let page = self.create_page(layout, HeapDomain::LocalEden, self.config.page_bytes)?;
+            let page = self.create_page(
+                layout,
+                HeapDomain::LocalEden,
+                self.config.page_bytes.max(size),
+            )?;
             self.tlab = Some(Tlab {
                 page,
                 layout: layout.clone(),
@@ -166,6 +199,29 @@ impl AllocationInfrastructure {
 
     pub(crate) fn remove(&mut self, reference: ManagedReference) {
         self.placements.remove(&reference);
+        self.reclaim_empty_pages();
+    }
+
+    pub(crate) fn live_bytes(&self) -> usize {
+        self.placements.values().fold(0, |total, placement| {
+            total.saturating_add(placement.size_bytes)
+        })
+    }
+
+    pub(crate) fn committed_bytes(&self) -> usize {
+        self.pages
+            .values()
+            .fold(0, |total, page| total.saturating_add(page.capacity_bytes))
+    }
+
+    pub(crate) fn bytes_in_domains(&self, domains: &[HeapDomain]) -> usize {
+        self.placements.values().fold(0, |total, placement| {
+            if domains.contains(&placement.domain) {
+                total.saturating_add(placement.size_bytes)
+            } else {
+                total
+            }
+        })
     }
 
     pub(crate) fn move_to_pinned(
@@ -174,13 +230,17 @@ impl AllocationInfrastructure {
         type_id: RuntimeTypeId,
         object_map: &ObjectMap,
     ) -> Result<(), RuntimeFailure> {
-        if !self.placements.contains_key(&reference) {
+        let Some(previous) = self.placements.get(&reference).copied() else {
             return Err(RuntimeFailure::runtime_invariant());
+        };
+        if previous.domain == HeapDomain::Pinned {
+            return Ok(());
         }
         let layout = layout(type_id, object_map);
         let size = object_size(layout.slot_count)?;
         let placement = self.place_on_new_page(&layout, size, HeapDomain::Pinned)?;
         self.placements.insert(reference, placement);
+        self.reclaim_empty_pages();
         Ok(())
     }
 
@@ -227,6 +287,7 @@ impl AllocationInfrastructure {
         }
         self.placements = next;
         self.tlab = None;
+        self.reclaim_empty_pages();
         Ok(())
     }
 
@@ -235,6 +296,28 @@ impl AllocationInfrastructure {
             .metrics
             .allocated_bytes
             .saturating_add(u64::try_from(size).unwrap_or(u64::MAX));
+    }
+
+    fn reclaim_empty_pages(&mut self) {
+        let live_pages: BTreeSet<_> = self
+            .placements
+            .values()
+            .map(|placement| placement.page)
+            .collect();
+        let before = self.pages.len();
+        self.pages.retain(|page, _| live_pages.contains(page));
+        let returned = before.saturating_sub(self.pages.len());
+        self.metrics.pages_returned = self
+            .metrics
+            .pages_returned
+            .saturating_add(u64::try_from(returned).unwrap_or(u64::MAX));
+        if self
+            .tlab
+            .as_ref()
+            .is_some_and(|tlab| !self.pages.contains_key(&tlab.page))
+        {
+            self.tlab = None;
+        }
     }
 }
 
@@ -246,7 +329,7 @@ fn layout(type_id: RuntimeTypeId, object_map: &ObjectMap) -> LayoutKey {
     }
 }
 
-fn object_size(slot_count: u32) -> Result<usize, RuntimeFailure> {
+pub(crate) fn object_size(slot_count: u32) -> Result<usize, RuntimeFailure> {
     usize::try_from(slot_count)
         .map_err(|_| RuntimeFailure::runtime_invariant())?
         .checked_mul(8)

@@ -12,6 +12,9 @@ use super::allocation::{
     AllocationInfrastructure, AllocationInfrastructureConfig, AllocationMetrics,
     AllocationPlacement, PageDescriptor, PageId,
 };
+use super::memory::{
+    GenerationalMemoryConfig, GenerationalMemoryTelemetry, MemoryController, NonHeapMemoryUsage,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MajorCollectorConfig {
@@ -81,6 +84,7 @@ pub struct GenerationalRuntime {
     pub(crate) allocation: AllocationInfrastructure,
     pub(crate) major: MajorCycle,
     pub(crate) config: MajorCollectorConfig,
+    pub(crate) memory: MemoryController,
     pub(crate) minor_requested: bool,
     pub(crate) major_requested: bool,
 }
@@ -101,22 +105,38 @@ impl GenerationalRuntime {
         config: MajorCollectorConfig,
         allocation: AllocationInfrastructureConfig,
     ) -> Self {
+        Self::with_memory_config(config, allocation, GenerationalMemoryConfig::default())
+    }
+
+    #[must_use]
+    pub fn with_memory_config(
+        config: MajorCollectorConfig,
+        allocation: AllocationInfrastructureConfig,
+        memory: GenerationalMemoryConfig,
+    ) -> Self {
         Self {
             nursery: RelocationRuntime::new(),
             allocation: AllocationInfrastructure::new(allocation),
             major: MajorCycle::idle(),
             config,
+            memory: MemoryController::new(memory),
             minor_requested: false,
             major_requested: false,
         }
     }
 
-    pub const fn request_minor_collection(&mut self) {
-        self.minor_requested = true;
+    pub fn request_minor_collection(&mut self) {
+        if !self.minor_requested {
+            self.minor_requested = true;
+            self.memory.record_minor_request();
+        }
     }
 
-    pub const fn request_major_collection(&mut self) {
-        self.major_requested = true;
+    pub fn request_major_collection(&mut self) {
+        if !self.major_requested && !self.major_cycle_active() {
+            self.major_requested = true;
+            self.memory.record_major_request();
+        }
     }
 
     #[must_use]
@@ -154,6 +174,41 @@ impl GenerationalRuntime {
         self.allocation.metrics()
     }
 
+    #[must_use]
+    pub fn memory_telemetry(&self) -> GenerationalMemoryTelemetry {
+        self.memory.telemetry(&self.allocation)
+    }
+
+    /// Replaces the complete stack/code/metadata/native/arena/isolated usage
+    /// snapshot accounted by this collector's hard limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns deterministic out-of-memory without changing the previous
+    /// snapshot when the new total would consume protected reserves.
+    pub fn set_non_heap_memory_usage(
+        &mut self,
+        usage: NonHeapMemoryUsage,
+    ) -> Result<(), RuntimeFailure> {
+        if self.memory.set_non_heap_usage(
+            usage,
+            self.allocation.live_bytes(),
+            self.allocation.committed_bytes(),
+        ) {
+            Ok(())
+        } else {
+            self.memory.record_out_of_memory();
+            Err(crate::heap::BootstrapRuntime::out_of_memory(0, 0))
+        }
+    }
+
+    pub(crate) fn update_memory_target(&mut self) {
+        self.memory.update_target(
+            self.allocation.live_bytes(),
+            self.allocation.committed_bytes(),
+        );
+    }
+
     /// Establishes a precise snapshot and enables the SATB barrier.
     ///
     /// # Errors
@@ -166,7 +221,7 @@ impl GenerationalRuntime {
         self.begin_major(publication)
     }
 
-    pub(crate) fn finish_major(&mut self) -> Result<CollectionStatistics, RuntimeFailure> {
+    pub(crate) fn finish_major(&mut self) -> CollectionStatistics {
         let statistics = CollectionStatistics::new(
             u64::try_from(self.nursery.objects.len()).unwrap_or(u64::MAX),
             self.major.reclaimed,
@@ -176,7 +231,7 @@ impl GenerationalRuntime {
             .metrics
             .record_collection(statistics.reclaimed_objects(), statistics.scanned_objects());
         self.major.reset();
-        Ok(statistics)
+        statistics
     }
 }
 

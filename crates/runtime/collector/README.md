@@ -9,22 +9,27 @@ promotes deterministically, and maintains remembered cards.
 
 `GenerationalRuntime` composes that moving nursery with a modular incremental
 mature-heap conformance slice. Its `generational` modules separate PLRI
-adaptation, SATB/publication barriers, cycle state, and bounded mark/sweep work.
-It preserves snapshot edges, shades roots, pins, and new mature objects, and
-defers nursery relocation while a major snapshot still contains physical
-tokens. The implementation deliberately continues to report
-`RelocationConformance`: mature tracing is cooperative and incremental, not yet
-the background-worker, page/TLAB, paced production collector required before
-`ProductionConcurrentGenerational` may be selected.
+adaptation, SATB/publication barriers, cycle state, bounded mark/sweep work,
+page/TLAB allocation, and memory control. It preserves snapshot edges, shades
+roots, pins, and new mature objects, and defers nursery relocation while a
+major snapshot still contains physical tokens. The implementation deliberately
+continues to report `RelocationConformance`: mature tracing is cooperative and
+incremental rather than worker-concurrent, so
+`ProductionConcurrentGenerational` cannot yet be selected.
 
 The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
 pointer layouts, scheduler-local Eden pointer bumps, separate mature/large/
 pinned domains, survivor-copy placement, deterministic promotion, and immediate
-pinned-space placement. These logical descriptors validate ownership and
-allocation transitions without exposing a raw address through PLRI. Parallel
-per-scheduler TLAB ownership, virtual-memory reservation, size-class reuse, and
-measured production fast paths remain required before the production profile.
+pinned-space placement. A separate memory controller enforces a byte hard limit
+before heap mutation, protects emergency and evacuation reserves, accounts
+typed stack/code/metadata/native/arena/isolated usage, adapts the collection
+target, performs bounded mature-cycle assists, returns empty logical pages, and
+reports domain/debt/pressure/OOM telemetry. These logical descriptors validate
+ownership and allocation transitions without exposing a raw address through
+PLRI. Parallel per-scheduler TLAB ownership, virtual-memory reservation,
+size-class reuse, background workers, and measured production fast paths remain
+required before the production profile.
 
 This crate is reusable by native execution, the MIR interpreter, and a future
 VM. It contains no C exports, native symbol mapping, platform process adapters,
@@ -34,8 +39,9 @@ linker policy, or process-global singleton. See
 The bootstrap implementation is divided into `heap`, `access`, `trace`, and
 `adapter` modules. The `relocation` directory separately groups its heap,
 collection, and adapter ownership; `generational` groups mature-cycle state,
-mark/sweep work, barriers, page/TLAB allocation, and its adapter. The allocation
-submodules separate public typed descriptors from mutable placement state.
+mark/sweep work, barriers, page/TLAB allocation, memory control, and its adapter.
+The allocation and memory submodules each separate public typed descriptors
+from mutable state.
 These are static Rust partitions behind the same PLRI dependency, not runtime
 plugins or dynamic dispatch.
 

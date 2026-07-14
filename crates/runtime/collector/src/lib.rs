@@ -10,8 +10,9 @@ mod trace;
 
 pub use generational::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
-    AllocationPlacement, GenerationalRuntime, HeapDomain, MajorCollectorConfig, MajorCyclePhase,
-    PageDescriptor, PageId, RegionId,
+    AllocationPlacement, GenerationalMemoryConfig, GenerationalMemoryConfigError,
+    GenerationalMemoryTelemetry, GenerationalRuntime, HeapDomain, MajorCollectorConfig,
+    MajorCyclePhase, NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor, PageId, RegionId,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use relocation::{CollectorGeneration, CollectorObjectId, RelocationRuntime};

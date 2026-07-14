@@ -32,23 +32,33 @@ impl GenerationalRuntime {
     }
 
     pub(crate) fn advance_major(&mut self) -> Result<Option<CollectionStatistics>, RuntimeFailure> {
-        let mut remaining = self.config.work_budget();
+        self.advance_major_with_budget(self.config.work_budget())
+            .map(|(statistics, _)| statistics)
+    }
+
+    pub(crate) fn advance_major_with_budget(
+        &mut self,
+        work_budget: usize,
+    ) -> Result<(Option<CollectionStatistics>, usize), RuntimeFailure> {
+        let mut remaining = work_budget;
+        let mut completed_work = 0;
         while remaining > 0 {
             match self.major.phase {
-                MajorCyclePhase::Idle => return Ok(None),
+                MajorCyclePhase::Idle => return Ok((None, completed_work)),
                 MajorCyclePhase::Marking => {
                     if let Some(reference) =
                         self.major.satb.pop().or_else(|| self.major.pending.pop())
                     {
                         self.scan_snapshot_reference(reference)?;
                         remaining -= 1;
+                        completed_work += 1;
                     } else {
                         self.prepare_sweep();
                     }
                 }
                 MajorCyclePhase::Sweeping => {
                     let Some(reference) = self.major.sweep.pop() else {
-                        return self.finish_major().map(Some);
+                        return Ok((Some(self.finish_major()), completed_work));
                     };
                     if self.nursery.objects.remove(&reference).is_some() {
                         self.major.reclaimed = self.major.reclaimed.saturating_add(1);
@@ -56,13 +66,14 @@ impl GenerationalRuntime {
                     self.allocation.remove(reference);
                     self.nursery.dirty_cards.remove(&reference);
                     remaining -= 1;
+                    completed_work += 1;
                 }
             }
         }
         if self.major.phase == MajorCyclePhase::Sweeping && self.major.sweep.is_empty() {
-            return self.finish_major().map(Some);
+            return Ok((Some(self.finish_major()), completed_work));
         }
-        Ok(None)
+        Ok((None, completed_work))
     }
 
     fn scan_snapshot_reference(

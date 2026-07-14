@@ -152,8 +152,21 @@ Package for the first release.
 - [ ] Replace bootstrap-only stable handles with the accepted production
   generational path: a real moving nursery, typed root/edge relocation,
   remembered cards, promotion, and backend capability negotiation.
+  - [x] Implement the single-mutator moving nursery, exact root/edge/handle/pin
+    relocation, remembered cards, deterministic promotion, and page-described
+    allocation conformance path.
+  - [ ] Complete production backend writable-root capability negotiation and
+    parallel scheduler-local allocation/evacuation.
 - [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,
   bounded pause work, deterministic failure behavior, and stress testing.
+  - [x] Implement cooperative incremental SATB marking/sweeping with bounded
+    slices and correct late-root, allocation, and overwritten-edge handling.
+  - [x] Enforce byte admission before mutation, adaptive targets, protected
+    emergency/evacuation reserves, typed non-heap accounting, bounded allocation
+    assists, empty-page return, deterministic OOM, and pressure/debt/domain
+    telemetry.
+  - [ ] Add background workers, epoch handshakes, concurrent card refinement and
+    sweeping, stack watermarks, race/stress proof, and latency measurements.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.

@@ -88,6 +88,10 @@ impl CollectorMetrics {
         self.allocations = self.allocations.saturating_add(1);
     }
 
+    pub(crate) fn rollback_allocation(&mut self) {
+        self.allocations = self.allocations.saturating_sub(1);
+    }
+
     pub(crate) fn record_collection(&mut self, reclaimed: u64, scanned: u64) {
         self.collections = self.collections.saturating_add(1);
         self.reclaimed_objects = self.reclaimed_objects.saturating_add(reclaimed);

@@ -3,6 +3,7 @@
 use pop_runtime_interface::{ObjectSlot, RuntimeTypeId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
 pub struct AllocationInfrastructureConfig {
     pub(super) page_bytes: usize,
     pub(super) region_bytes: usize,
@@ -31,10 +32,13 @@ impl AllocationInfrastructureConfig {
         if page_bytes == 0 || region_bytes == 0 || tlab_bytes == 0 {
             return Err(AllocationInfrastructureError::ZeroSize);
         }
-        if page_bytes % 8 != 0 || region_bytes % 8 != 0 || tlab_bytes % 8 != 0 {
+        if !page_bytes.is_multiple_of(8)
+            || !region_bytes.is_multiple_of(8)
+            || !tlab_bytes.is_multiple_of(8)
+        {
             return Err(AllocationInfrastructureError::UnalignedSize);
         }
-        if region_bytes % page_bytes != 0 {
+        if !region_bytes.is_multiple_of(page_bytes) {
             return Err(AllocationInfrastructureError::RegionPageMismatch);
         }
         if tlab_bytes > page_bytes {
@@ -177,6 +181,7 @@ pub struct AllocationMetrics {
     pub(super) allocated_bytes: u64,
     pub(super) survivor_copies: u64,
     pub(super) promotions: u64,
+    pub(super) pages_returned: u64,
 }
 
 impl AllocationMetrics {
@@ -208,5 +213,10 @@ impl AllocationMetrics {
     #[must_use]
     pub const fn promotions(self) -> u64 {
         self.promotions
+    }
+
+    #[must_use]
+    pub const fn pages_returned(self) -> u64 {
+        self.pages_returned
     }
 }
