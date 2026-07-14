@@ -4550,7 +4550,7 @@ fn recompute_function_effects(
     changed
 }
 
-fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) -> bool {
+pub(crate) fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) -> bool {
     let mut changed = false;
     for function in &mut bubble.functions {
         changed |= insert_function_safe_points(function, arena);

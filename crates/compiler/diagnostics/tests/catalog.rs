@@ -24,10 +24,10 @@ fn catalog_is_sorted_unique_and_partitioned_by_compiler_phase() {
             "POP2006", "POP2007", "POP2008", "POP2009", "POP2010", "POP2011", "POP2012", "POP2013",
             "POP2014", "POP2015", "POP2016", "POP2017", "POP2018", "POP2019", "POP2020", "POP2021",
             "POP2022", "POP2023", "POP2024", "POP2025", "POP2026", "POP2027", "POP2028", "POP2029",
-            "POP4001", "POP4002", "POP4003", "POP4004", "POP4005", "POP4006", "POP4007", "POP6400",
-            "POP6401", "POP6402", "POP6403", "POP6404", "POP6405", "POP6406", "POP6407", "POP6408",
-            "POP7000", "POP7001", "POP7002", "POP7003", "POP7004", "POP7005", "POP7006", "POP7007",
-            "POP7008", "POP7009"
+            "POP2030", "POP2031", "POP4001", "POP4002", "POP4003", "POP4004", "POP4005", "POP4006",
+            "POP4007", "POP6400", "POP6401", "POP6402", "POP6403", "POP6404", "POP6405", "POP6406",
+            "POP6407", "POP6408", "POP7000", "POP7001", "POP7002", "POP7003", "POP7004", "POP7005",
+            "POP7006", "POP7007", "POP7008", "POP7009"
         ]
     );
     assert!(codes.windows(2).all(|pair| pair[0] < pair[1]));
@@ -42,28 +42,28 @@ fn catalog_is_sorted_unique_and_partitioned_by_compiler_phase() {
             .all(|entry| entry.category() == DiagnosticCategory::Resolution)
     );
     assert!(
-        entries[11..40]
+        entries[11..42]
             .iter()
             .all(|entry| entry.category() == DiagnosticCategory::Type)
     );
     assert!(
-        entries[40..47]
+        entries[42..49]
             .iter()
             .all(|entry| entry.category() == DiagnosticCategory::CompileTime)
     );
     assert!(
-        entries[..47]
+        entries[..49]
             .iter()
             .all(|entry| entry.warning_wave().is_none())
     );
-    assert!(entries[..47].iter().all(|entry| !entry.is_suppressible()));
-    assert!(entries[47..56].iter().all(|entry| {
+    assert!(entries[..49].iter().all(|entry| !entry.is_suppressible()));
+    assert!(entries[49..58].iter().all(|entry| {
         entry.category() == DiagnosticCategory::Style
             && entry.severity() == DiagnosticSeverity::Warning
             && entry.warning_wave() == Some(1)
             && entry.is_suppressible()
     }));
-    assert!(entries[56..].iter().all(|entry| {
+    assert!(entries[58..].iter().all(|entry| {
         entry.category() == DiagnosticCategory::Backend
             && entry.severity() == DiagnosticSeverity::Error
             && entry.warning_wave().is_none()

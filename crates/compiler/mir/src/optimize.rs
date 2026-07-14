@@ -33,7 +33,6 @@ pub fn optimize_mir(
         remove_unreachable_blocks(function);
         remove_dead_constants(function);
         refresh_transformed_instruction_effects(function);
-        remove_redundant_gc_safe_points(function);
         recompute_optimized_effects(function);
     }
     for method in &mut bubble.methods {
@@ -42,10 +41,20 @@ pub fn optimize_mir(
         remove_unreachable_blocks(&mut method.function);
         remove_dead_constants(&mut method.function);
         refresh_transformed_instruction_effects(&mut method.function);
-        remove_redundant_gc_safe_points(&mut method.function);
         recompute_optimized_effects(&mut method.function);
     }
     refresh_transitive_call_effects(&mut bubble);
+    while crate::lowering::insert_gc_safe_points(&mut bubble, arena) {
+        refresh_transitive_call_effects(&mut bubble);
+    }
+    for function in &mut bubble.functions {
+        remove_redundant_gc_safe_points(function);
+        recompute_optimized_effects(function);
+    }
+    for method in &mut bubble.methods {
+        remove_redundant_gc_safe_points(&mut method.function);
+        recompute_optimized_effects(&mut method.function);
+    }
     verify_mir_bubble(&bubble, arena)?;
     Ok(bubble)
 }
@@ -139,10 +148,16 @@ fn refresh_transformed_instruction_effects(function: &mut super::MirFunction) {
 }
 
 fn remove_redundant_gc_safe_points(function: &mut super::MirFunction) {
-    let allocates = function.blocks.iter().any(|block| {
+    let requires_operation_safe_point = function.blocks.iter().any(|block| {
         block.instructions.iter().any(|instruction| {
             !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. })
-                && instruction.effects.contains(super::MirEffect::Allocates)
+                && (instruction.effects.contains(super::MirEffect::Allocates)
+                    || matches!(
+                        instruction.kind,
+                        MirInstructionKind::CallDirect { .. }
+                            | MirInstructionKind::CallDirectMethod { .. }
+                            | MirInstructionKind::CallIndirect { .. }
+                    ) && instruction.effects.contains(super::MirEffect::GcSafePoint))
         })
     });
     let has_backedge = function.blocks.iter().any(|block| {
@@ -150,7 +165,17 @@ fn remove_redundant_gc_safe_points(function: &mut super::MirFunction) {
             .into_iter()
             .any(|target| target.raw() <= block.block.raw())
     });
-    if allocates || has_backedge {
+    let requires_periodic_safe_point = function.blocks.iter().any(|block| {
+        block
+            .instructions
+            .iter()
+            .filter(|instruction| {
+                !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. })
+            })
+            .count()
+            >= crate::ir::MAX_STRAIGHT_LINE_WORK_BETWEEN_SAFE_POINTS
+    });
+    if requires_operation_safe_point || has_backedge || requires_periodic_safe_point {
         return;
     }
     for block in &mut function.blocks {

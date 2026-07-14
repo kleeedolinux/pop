@@ -74,8 +74,8 @@ fn check_dumps_deterministic_verified_hir_for_a_pop_module() {
     assert_eq!(first.stderr, second.stderr);
 
     let stdout = output_text(&first.stdout);
-    assert!(stdout.starts_with("hir bubble b0 namespace n0\n"));
-    assert!(stdout.contains("function s0 f0 public m0 b0 add("));
+    assert!(stdout.starts_with("hir bubble b3 namespace n3\n"));
+    assert!(stdout.contains("function s0 f0 public m0 b3 add("));
     assert!(!stdout.contains("mir bubble"));
     assert!(!stdout.to_ascii_lowercase().contains("dynamic"));
     assert!(!stdout.to_ascii_lowercase().contains("llvm"));
@@ -99,7 +99,7 @@ fn check_dumps_deterministic_verified_canonical_mir_for_a_pop_module() {
     assert_eq!(first.stderr, second.stderr);
 
     let stdout = output_text(&first.stdout);
-    assert!(stdout.starts_with("mir bubble b0 namespace n0\n"));
+    assert!(stdout.starts_with("mir bubble b3 namespace n3\n"));
     assert!(stdout.contains("integer.checkedAdd Int64"));
     assert!(!stdout.contains("hir bubble"));
     assert!(!stdout.to_ascii_lowercase().contains("dynamic"));
@@ -126,7 +126,7 @@ fn check_dumps_deterministic_verified_llvm_ir_for_a_pop_module() {
     let stdout = output_text(&first.stdout);
     assert!(stdout.starts_with("; Pop Lang native module\n"));
     assert!(stdout.contains("target triple = \"x86_64-unknown-linux-gnu\""));
-    assert!(stdout.contains("define i64 @pop_b0_s0(i64 %v0, i64 %v1)"));
+    assert!(stdout.contains("define i64 @pop_b3_s0(i64 %v0, i64 %v1)"));
     assert!(stdout.contains("@llvm.sadd.with.overflow.i64"));
     assert!(!stdout.contains("hir bubble"));
     assert!(!stdout.contains("mir bubble"));
@@ -620,18 +620,140 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
     assert_eq!(loaded.package(), "Studio.Data");
     assert_eq!(loaded.version(), "2.1.0");
     assert_eq!(loaded.bubble(), "Studio.Data");
-    assert!(loaded.dependencies().is_empty());
+    let [standard] = loaded.dependencies() else {
+        panic!("dependency artifact records the implicit Standard dependency");
+    };
+    assert_eq!(standard.package(), "Pop.Standard");
+    assert_eq!(standard.bubble(), "Pop.Standard");
     let application_artifact = application.join("target/debug/deps/Studio.Application.poplib");
     let loaded = load_poplib(&application_artifact)
         .expect("root library artifact records its exact dependency");
-    let [dependency] = loaded.dependencies() else {
-        panic!("one exact artifact dependency");
+    let [standard, dependency] = loaded.dependencies() else {
+        panic!("implicit Standard and one exact Package dependency");
     };
+    assert_eq!(standard.package(), "Pop.Standard");
+    assert_eq!(standard.bubble(), "Pop.Standard");
     assert_eq!(dependency.package(), "Studio.Data");
     assert_eq!(dependency.version(), "2.1.0");
     assert_eq!(dependency.bubble(), "Studio.Data");
 
     std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
+    let package =
+        std::env::temp_dir().join(format!("pop-implicit-standard-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create Package");
+    std::fs::write(
+        package.join("bubble.toml"),
+        "[package]\nname = \"Daily.Use\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write manifest");
+    std::fs::write(
+        package.join("src/main.pop"),
+        "namespace Daily.Use\n\
+         function main(): Int\n\
+             local values: {Int} = {1, 2, 3}\n\
+             local reduced = Sequence.reduceOr(values, function(left: Int, right: Int): Int\n\
+                 return left + right\n\
+             end, 0)\n\
+             return Sequence.sum(values) + Sequence.elementAtOr(values, 2, 0) + reduced + Pop.Math.gcd(54, 24)\n\
+         end\n",
+    )
+    .expect("write source");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop build uses implicit Standard");
+    assert!(
+        build.status.success(),
+        "implicit Standard build failed: {}",
+        output_text(&build.stderr)
+    );
+    let executable = package.join("target/debug/Daily.Use");
+    assert_eq!(
+        Command::new(executable)
+            .status()
+            .expect("Standard consumer runs")
+            .code(),
+        Some(20)
+    );
+
+    let artifact = package.join("target/debug/deps/Pop.Standard.poplib");
+    let selected = package.join("target/debug/deps/Pop.Standard.b2.library.o");
+    let loaded = load_poplib(&artifact).expect("verified Standard artifact");
+    let (target, implementation) = loaded
+        .target_implementation()
+        .expect("selected Standard implementation");
+    assert_eq!(target, "x86_64-unknown-linux-gnu");
+    assert_eq!(
+        std::fs::read(selected).expect("artifact-selected linker object"),
+        implementation
+    );
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn single_source_build_executes_with_implicit_standard() {
+    let root = std::env::temp_dir().join(format!("pop-direct-standard-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create direct-source directory");
+    let source = root.join("main.pop");
+    let executable = root.join("main");
+    std::fs::write(
+        &source,
+        "namespace Daily.Source\n\
+         function main(): Int\n\
+             local values: {Int} = {1, 2, 3}\n\
+             return Sequence.sum(values) + Pop.Math.gcd(54, 24)\n\
+         end\n",
+    )
+    .expect("write direct source");
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(&executable)
+        .output()
+        .expect("build direct source with implicit Standard");
+    assert!(build.status.success(), "{}", output_text(&build.stderr));
+    assert_eq!(
+        Command::new(&executable)
+            .status()
+            .expect("run direct source")
+            .code(),
+        Some(12)
+    );
+    std::fs::remove_dir_all(root).expect("remove direct-source directory");
+}
+
+#[test]
+fn package_build_rejects_reserved_standard_identity() {
+    let package =
+        std::env::temp_dir().join(format!("pop-reserved-standard-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create Package");
+    std::fs::write(
+        package.join("bubble.toml"),
+        "[package]\nname = \"Pop.Standard\"\nversion = \"9.9.9\"\nedition = \"2026\"\n",
+    )
+    .expect("write reserved manifest");
+    std::fs::write(
+        package.join("src/lib.pop"),
+        "namespace Pop.Standard\npublic function counterfeit(): Int return 1 end\n",
+    )
+    .expect("write counterfeit source");
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("reject reserved Standard Package");
+    assert!(!build.status.success());
+    assert!(output_text(&build.stderr).contains("reserved foundation identity"));
+    assert!(!package.join("target").exists());
+    std::fs::remove_dir_all(package).expect("remove reserved Package");
 }
 
 #[test]

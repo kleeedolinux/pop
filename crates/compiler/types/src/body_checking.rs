@@ -1218,6 +1218,21 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .extend(resolution.diagnostics().iter().cloned());
             return None;
         }
+        if resolution.symbols().len() > 1 {
+            self.diagnostics
+                .push(resolution_diagnostics::ambiguous_name(
+                    span,
+                    &name,
+                    resolution.symbols().iter().filter_map(|symbol| {
+                        self.resolver
+                            .database()
+                            .index()
+                            .declaration(*symbol)
+                            .map(pop_resolve::Declaration::span)
+                    }),
+                ));
+            return None;
+        }
         let symbol = resolution.symbol()?;
         if let Some(constant) = self.constants.and_then(|constants| constants.get(&symbol)) {
             return self.runtime_constant_expression(constant, span);
