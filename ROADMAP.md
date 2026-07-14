@@ -78,18 +78,45 @@ and does not define the work remaining for `0.1.0`.
 
 ### 2. Finish the standard foundation
 
-- [ ] Freeze the exact `Pop.Standard` prelude, public root inventory, stable
+This blocker closes the exact ADR 0058 bootstrap foundation. It does not promote
+the phase 1+ catalog to implemented status. Async/task execution remains a base-
+language and runtime blocker, while source-free dependency selection and native
+linking remain ordinary-workflow blockers in section 4.
+
+- [x] Freeze the exact `Pop.Standard` prelude, public root inventory, stable
   identities, tier/status metadata, and API baseline.
-- [ ] Make `Option`, `Result`, essential collections, `Iterable<T>`,
-  `Iterator<T>`, `Sequence`, `String`/text, bytes, numeric helpers, and required
-  resource/task primitives usable as native Pop APIs.
-- [ ] Move portable implementations into ordinary `.pop` Modules so adding an
-  algorithm does not require compiler or backend changes.
+  - [x] Accept ADR 0058 and freeze the exact primitive, foundation, protocol,
+    task/cancellation, trusted-attribute, typed-output, and `Sequence` prelude
+    bindings without adding a nominal `Option<T>` beside `T?`.
+  - [x] Add a versioned canonical API baseline with append-only identities,
+    tier/status boundaries, bootstrap cross-checks, and fail-closed loading.
+  - [x] Resolve `Sequence` as the sole trusted low-priority prelude namespace
+    root while preserving nearer declarations and explicit aliases.
+- [x] Make the exact optional `T?`, `Result`, essential collection, iteration,
+  `Sequence`, and `String` foundation executable, and publish the reserved byte,
+  numeric-protocol, resource, and task/cancellation identities without
+  presenting their planned catalog APIs as implemented.
+  - [x] Make optional `T?` values and the reserved `Result<T, TError>` workflow
+    usable without a dynamic carrier or duplicate nominal `Option<T>` wrapper.
+  - [x] Execute fixed arrays, typed tables, growable `List<T>`, integer ranges,
+    nominal iteration, and portable `Sequence` algorithms through the MIR
+    interpreter and LLVM.
+  - [x] Execute immutable UTF-8 `String` literals, concatenation,
+    interpolation, closed primitive formatting, and value equality through the
+    shared runtime contract.
+  - [x] Keep `Bytes`, `Equal`, `Order`, `Hash`, `Close`, `AsyncClose`, `Task`,
+    and `CancelToken` at their exact reserved type/status boundary. Byte/text
+    views, the `Math` API, resource operations, and task execution advance only
+    through their separately accepted language, runtime, and catalog slices.
+- [x] Keep every portable callable in the frozen API baseline in ordinary
+  `.pop` Modules so adding an algorithm does not require compiler or backend
+  changes.
   - [x] Move deterministic `Sequence` adapters into the conventionally
     discovered `Pop.Standard` `sequence.pop` Module.
-- [ ] Emit, verify, load, and link deterministic `.poplib` artifacts containing
-  manifests, public reference metadata, checked documentation, target
-  implementations, hashes, ABI requirements, and exact Bubble dependencies.
+- [x] Emit, verify, and round-trip load deterministic `.poplib` artifacts
+  containing manifests, public reference metadata, checked documentation,
+  target implementations, hashes, ABI requirements, and exact Bubble
+  dependencies.
   - [x] Implement the verified logical public reference-metadata model and
     source-free cross-Bubble consumption path.
   - [x] Accept ADR 0055 for canonical JSON control files, SHA-256 inventories,
@@ -101,11 +128,20 @@ and does not define the work remaining for `0.1.0`.
     reject malformed, missing, extra, traversal, and corrupted content.
   - [x] Emit deterministic schema-versioned `documentation.xml` from checked
     symbol-owned XML fragments.
-- [ ] Complete checked public XML documentation, compiled examples, allocation
-  and cost notes, and interpreter/LLVM differential tests for every stabilized
-  API.
+  - [x] Make `pop build` emit and immediately verify each discovered library
+    Bubble's `.poplib` with exact identity, source/API hashes, dependencies,
+    checked documentation, and the selected native target implementation.
+- [x] Complete checked public XML documentation, compiled examples, allocation
+  and cost notes, and interpreter/LLVM differential tests for every portable
+  callable in the frozen foundation baseline.
   - [x] Preserve checked public documentation by stable `SymbolIdentity` and
     reject duplicate output member IDs deterministically.
+  - [x] Complete checked type-parameter, iteration, allocation, complexity, and
+    dispatch documentation plus compiled examples for the portable `Sequence`
+    baseline.
+  - [x] Keep the native `print` overloads and portable `Sequence` callables
+    labeled `prototype`; no callable advances to `implemented` or `stable`
+    without the complete ADR 0058 evidence gate.
 
 The broad catalog after the standard foundation remains planned work. It is not
 necessary to implement every format, network, media, data, tooling, or AI

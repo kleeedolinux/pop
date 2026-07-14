@@ -178,3 +178,60 @@ fn unknown_names_never_become_dynamic_lookup() {
     assert!(resolution.symbol().is_none());
     assert_eq!(resolution.diagnostic_snapshot(), "POP1002@0..1\n");
 }
+
+#[test]
+fn trusted_prelude_namespace_root_is_a_low_priority_static_alias() {
+    let standard = SourceFile::new(
+        FileId::from_raw(0),
+        "src/sequence.pop",
+        "namespace Pop.Sequence\npublic function fold()\nend\n",
+    )
+    .expect("standard Sequence");
+    let application = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\npublic function run()\nend\n",
+    )
+    .expect("application");
+    let standard_syntax = parse_file(&standard);
+    let application_syntax = parse_file(&application);
+    let indexed = build_declaration_index(&[
+        ModuleInput::new(
+            ModuleId::from_raw(0),
+            BubbleId::from_raw(1),
+            &standard,
+            &standard_syntax,
+        ),
+        ModuleInput::new(
+            ModuleId::from_raw(1),
+            BubbleId::from_raw(2),
+            &application,
+            &application_syntax,
+        ),
+    ]);
+    let resolver = ResolutionDatabase::new(indexed.into_index())
+        .with_prelude_namespace_root("Sequence", "Pop.Sequence")
+        .expect("one valid trusted prelude root");
+
+    let resolution = resolver.resolve(
+        ModuleId::from_raw(1),
+        "Sequence.fold",
+        SymbolSpace::Value,
+        use_span(FileId::from_raw(1)),
+    );
+    assert_eq!(
+        resolution.symbol().expect("prelude-qualified fold").raw(),
+        0
+    );
+    assert!(
+        resolver
+            .resolve(
+                ModuleId::from_raw(1),
+                "Math.minimum",
+                SymbolSpace::Value,
+                use_span(FileId::from_raw(1)),
+            )
+            .symbol()
+            .is_none()
+    );
+}

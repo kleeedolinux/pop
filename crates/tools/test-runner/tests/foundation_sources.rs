@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use pop_documentation::XmlNode;
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, FrontEndResult, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_projects::{BubbleKind, discover_conventional_bubbles, parse_package_manifest};
@@ -13,6 +14,42 @@ const STANDARD_BUBBLE: BubbleId = BubbleId::from_raw(2);
 struct Contribution<'source> {
     path: &'source str,
     source: &'source str,
+}
+
+fn collect_documentation_contracts(
+    nodes: &[XmlNode],
+    names: &mut Vec<String>,
+    examples: &mut Vec<String>,
+) {
+    for node in nodes {
+        let XmlNode::Element {
+            name,
+            attributes,
+            children,
+        } = node
+        else {
+            continue;
+        };
+        names.push(name.clone());
+        if name == "code"
+            && attributes
+                .iter()
+                .any(|attribute| attribute.name() == "language" && attribute.value() == "pop")
+            && attributes
+                .iter()
+                .any(|attribute| attribute.name() == "test" && attribute.value() == "true")
+        {
+            let text = children
+                .iter()
+                .filter_map(|child| match child {
+                    XmlNode::Text(text) => Some(text.as_str()),
+                    XmlNode::Element { .. } => None,
+                })
+                .collect::<String>();
+            examples.push(text);
+        }
+        collect_documentation_contracts(children, names, examples);
+    }
 }
 
 fn repository_root() -> PathBuf {
@@ -199,6 +236,35 @@ fn conventionally_discovered_foundation_contributions_reach_verified_mir() {
     pop_mir::lower_hir_bubble(standard_hir, standard.types())
         .expect("verified Pop.Standard canonical MIR");
 
+    let documentation = standard.checked_documentation();
+    assert_eq!(documentation.len(), 4, "four public Sequence algorithms");
+    let mut examples = Vec::new();
+    for member in documentation {
+        let mut names = Vec::new();
+        collect_documentation_contracts(member.fragment().children(), &mut names, &mut examples);
+        for required in [
+            "summary",
+            "typeparam",
+            "param",
+            "returns",
+            "remarks",
+            "allocation",
+            "complexity",
+            "example",
+            "code",
+        ] {
+            assert!(
+                names.iter().any(|name| name == required),
+                "Sequence documentation lacks <{required}>"
+            );
+        }
+    }
+    assert_eq!(
+        examples.len(),
+        4,
+        "one compiled example per public algorithm"
+    );
+
     let metadata = standard
         .reference_metadata()
         .expect("portable Pop.Standard metadata")
@@ -207,23 +273,22 @@ fn conventionally_discovered_foundation_contributions_reach_verified_mir() {
         FileId::from_raw(0),
         "src/main.pop",
         "namespace Application\n\
-         using Pop.Sequence\n\
          public function run(): Int\n\
              local values: {Int} = {1, 2, 3}\n\
-             local total = fold(values, 0, function(state: Int, value: Int): Int\n\
+             local total = Sequence.fold(values, 0, function(state: Int, value: Int): Int\n\
                  return state + value\n\
              end)\n\
-             local mapped = map(values, function(value: Int): Int\n\
+             local mapped = Sequence.map(values, function(value: Int): Int\n\
                  return value * 2\n\
              end)\n\
-             local filtered = filter(mapped, function(value: Int): Boolean\n\
+             local filtered = Sequence.filter(mapped, function(value: Int): Boolean\n\
                  return value > 2\n\
              end)\n\
-             local collected = collect(filtered)\n\
-             local labels = map(values, function(value: Int): String\n\
+             local collected = Sequence.collect(filtered)\n\
+             local labels = Sequence.map(values, function(value: Int): String\n\
                  return \"item\"\n\
              end)\n\
-             local collectedLabels = collect(labels)\n\
+             local collectedLabels = Sequence.collect(labels)\n\
              return total + List.length(collected) + List.length(collectedLabels)\n\
          end\n",
     )
@@ -248,6 +313,37 @@ fn conventionally_discovered_foundation_contributions_reach_verified_mir() {
     )
     .expect("portable Sequence algorithms specialize into consumer MIR");
     assert!(!mir.dump().contains("callReference b2:"));
+
+    let example_source = SourceFile::new(
+        FileId::from_raw(0),
+        "examples/sequence.pop",
+        format!("namespace StandardExamples\n{}\n", examples.join("\n")),
+    )
+    .expect("compiled documentation example source");
+    let compiled_examples = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(8),
+            NamespaceId::from_raw(8),
+            vec![STANDARD_BUBBLE],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), example_source)],
+        )
+        .with_reference_metadata(vec![
+            standard
+                .reference_metadata()
+                .expect("portable Pop.Standard metadata")
+                .clone(),
+        ]),
+    );
+    assert!(
+        compiled_examples.diagnostics().is_empty(),
+        "{}",
+        compiled_examples.diagnostic_snapshot()
+    );
+    pop_mir::lower_hir_bubble(
+        compiled_examples.hir().expect("documentation example HIR"),
+        compiled_examples.types(),
+    )
+    .expect("documentation examples lower to verified MIR");
 }
 
 #[test]

@@ -95,6 +95,12 @@ not a public Bubble or namespace. Optional official Packages are never pulled in
 by the prelude. A source namespace does not imply a package dependency; package
 metadata records the owning Bubble and tier.
 
+ADR 0058 freezes the initial prelude to its exact primitive/foundation types,
+trusted attributes, typed `print` overloads, and the `Sequence` namespace root.
+Optional values use `T?`, not a second nominal `Option<T>`. Every other catalog
+root requires explicit qualification or `using` and remains unavailable until
+its catalog status and API baseline say otherwise.
+
 ## Complete planned Package families
 
 Package names describe distribution/version boundaries; namespace roots describe

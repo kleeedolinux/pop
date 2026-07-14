@@ -95,8 +95,21 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         .into_index()
         .with_referenced_declarations(referenced_declarations)
         .expect("reference metadata identities are verified before analysis");
-    let database = ResolutionDatabase::new(index);
     let bootstrap = embedded_bootstrap_schema().expect("repository-validated bootstrap schema");
+    let standard_baseline = pop_standard::standard_api_baseline()
+        .expect("repository-validated Pop.Standard API baseline");
+    let database = standard_baseline
+        .entries()
+        .iter()
+        .filter(|entry| entry.prelude() && entry.kind() == pop_standard::ApiKind::Namespace)
+        .fold(ResolutionDatabase::new(index), |database, entry| {
+            database
+                .with_prelude_namespace_root(
+                    entry.name(),
+                    entry.signature().trim_start_matches("namespace "),
+                )
+                .expect("repository-validated prelude namespace root")
+        });
     validate_standard_native_exports(&bootstrap, pop_standard::NATIVE_EXPORTS)
         .expect("repository-validated native Standard adapters");
     let mut resolver = SignatureResolver::new(&database, bootstrap.clone());

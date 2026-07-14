@@ -48,6 +48,7 @@ const MEMBERS: &[&str] = &[
 ];
 
 const PUBLIC_LIBRARY_ROOTS: &[&str] = &[
+    "Actor",
     "Ai",
     "Archive",
     "Atomic",
@@ -56,6 +57,7 @@ const PUBLIC_LIBRARY_ROOTS: &[&str] = &[
     "Bytes",
     "Channel",
     "Cli",
+    "Cluster",
     "Codec",
     "Command",
     "Compress",

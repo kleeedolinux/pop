@@ -9,6 +9,7 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+pop-documentation.workspace = true
 pop-driver.workspace = true
 pop-foundation.workspace = true
 pop-mir.workspace = true

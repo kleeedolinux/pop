@@ -101,13 +101,35 @@ fn strong_handles_and_pins_follow_relocated_targets() {
     let pinned = runtime.allocate_object(&request).expect("pinned object");
     let pin = runtime.pin(pinned).expect("pin");
     force_minor(&mut runtime, &mut no_roots);
-    assert!(!runtime.contains(pinned));
+    assert!(runtime.contains(pinned));
     assert_eq!(runtime.object_count(), 2);
     force_minor(&mut runtime, &mut no_roots);
     assert_eq!(runtime.object_count(), 2);
     runtime.unpin(pin).expect("release updated pin");
     force_minor(&mut runtime, &mut no_roots);
     assert_eq!(runtime.object_count(), 2);
+}
+
+#[test]
+fn pinning_promotes_young_objects_before_the_foreign_boundary() {
+    let mut runtime = RelocationRuntime::new();
+    let young = runtime
+        .allocate_object(&object(AllocationClass::NurseryEligible, 0, &[]))
+        .expect("young object");
+
+    let pin = runtime.pin(young).expect("pin promotes object");
+
+    assert_eq!(
+        runtime.generation(young),
+        Some(CollectorGeneration::Mature),
+        "a pin must expose a stable non-moving token immediately"
+    );
+    let mut publication = roots(20, vec![Some(young)]);
+    force_minor(&mut runtime, &mut publication);
+    assert_eq!(publication.managed_references().next(), Some(young));
+    assert!(runtime.contains(young));
+
+    runtime.unpin(pin).expect("unpin");
 }
 
 #[test]
