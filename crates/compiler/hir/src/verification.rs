@@ -2466,7 +2466,7 @@ impl Verifier<'_> {
                 let Some(task_definition) = pop_types::embedded_bootstrap_schema()
                     .ok()
                     .and_then(|schema| schema.type_by_source_name("Task").copied())
-                    .map(|entry| entry.id())
+                    .map(pop_types::BootstrapTypeEntry::id)
                 else {
                     self.errors.push(HirVerificationError::InvalidType {
                         type_id: task.type_id(),

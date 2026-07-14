@@ -1391,7 +1391,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         if !self
             .resolver
             .database()
-            .resolve(self.module, &name, SymbolSpace::Value, span)
+            .resolve(self.module, name, SymbolSpace::Value, span)
             .symbols()
             .is_empty()
         {

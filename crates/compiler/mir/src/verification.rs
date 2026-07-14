@@ -20,6 +20,8 @@ use crate::lowering::{
 };
 use crate::render::{float_kind_text, integer_kind_text};
 
+type CallableSignature = (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary);
+
 /// Verifies canonical MIR block, value, type, call, and return invariants.
 ///
 /// # Errors
@@ -133,7 +135,7 @@ impl<'mir> MirSchema<'mir> {
     fn collect(
         bubble: &'mir MirBubble,
         arena: &TypeArena,
-        method_signatures: &BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+        method_signatures: &BTreeMap<MethodId, CallableSignature>,
         errors: &mut Vec<MirVerificationError>,
     ) -> Self {
         let mut schema = Self {
@@ -267,7 +269,7 @@ impl<'mir> MirSchema<'mir> {
 
     fn verify_interface_implementations(
         &self,
-        method_signatures: &BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+        method_signatures: &BTreeMap<MethodId, CallableSignature>,
         errors: &mut Vec<MirVerificationError>,
     ) {
         for class in self.classes.values() {
@@ -348,7 +350,7 @@ impl<'mir> MirSchema<'mir> {
 fn verify_builtin_interface_implementations(
     class: &MirClassDeclaration,
     arena: &TypeArena,
-    method_signatures: &BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    method_signatures: &BTreeMap<MethodId, CallableSignature>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     let Some(protocol) = embedded_bootstrap_schema()
@@ -433,12 +435,9 @@ fn verify_function(
     function: &MirFunction,
     arena: &TypeArena,
     schema: &MirSchema<'_>,
-    signatures: &BTreeMap<SymbolId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
-    reference_signatures: &BTreeMap<
-        SymbolIdentity,
-        (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary),
-    >,
-    method_signatures: &BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    signatures: &BTreeMap<SymbolId, CallableSignature>,
+    reference_signatures: &BTreeMap<SymbolIdentity, CallableSignature>,
+    method_signatures: &BTreeMap<MethodId, CallableSignature>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     verify_entry_parameters(function, errors);
@@ -653,12 +652,9 @@ fn verify_entry_parameters(function: &MirFunction, errors: &mut Vec<MirVerificat
 
 fn expected_instruction_effects(
     instruction: &MirInstruction,
-    signatures: &BTreeMap<SymbolId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
-    reference_signatures: &BTreeMap<
-        SymbolIdentity,
-        (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary),
-    >,
-    method_signatures: &BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    signatures: &BTreeMap<SymbolId, CallableSignature>,
+    reference_signatures: &BTreeMap<SymbolIdentity, CallableSignature>,
+    method_signatures: &BTreeMap<MethodId, CallableSignature>,
 ) -> MirEffectSummary {
     match instruction.kind() {
         MirInstructionKind::CallDirect { function, .. } => signatures
@@ -1531,9 +1527,9 @@ pub(crate) fn block_targets(block: &MirBlock) -> Vec<BlockId> {
 
 #[derive(Clone, Copy)]
 struct CallableSignatures<'a> {
-    functions: &'a BTreeMap<SymbolId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
-    references: &'a BTreeMap<SymbolIdentity, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
-    methods: &'a BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    functions: &'a BTreeMap<SymbolId, CallableSignature>,
+    references: &'a BTreeMap<SymbolIdentity, CallableSignature>,
+    methods: &'a BTreeMap<MethodId, CallableSignature>,
 }
 
 fn verify_instruction_types(
@@ -3011,12 +3007,9 @@ fn verify_callable_instruction(
     arena: &TypeArena,
     schema: &MirSchema<'_>,
     values: &BTreeMap<ValueId, TypeId>,
-    signatures: &BTreeMap<SymbolId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
-    reference_signatures: &BTreeMap<
-        SymbolIdentity,
-        (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary),
-    >,
-    method_signatures: &BTreeMap<MethodId, (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    signatures: &BTreeMap<SymbolId, CallableSignature>,
+    reference_signatures: &BTreeMap<SymbolIdentity, CallableSignature>,
+    method_signatures: &BTreeMap<MethodId, CallableSignature>,
     errors: &mut Vec<MirVerificationError>,
 ) -> bool {
     match instruction.kind() {
