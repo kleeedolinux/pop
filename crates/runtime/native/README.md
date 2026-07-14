@@ -42,7 +42,10 @@ serialized native ABI operations, acknowledges active collection epochs at
 managed safe points, and unregisters on shutdown. Every ready or suspended task
 frame owns one collector-visible precise root container. ABI 1 remains the
 stable-token serialized correctness stage; moving native execution still waits
-for the ABI 2 writable-root contract and its backend reload proof.
+for the ABI 2 backend reload proof. The staged
+`pop_rt_gc_safe_point_v2` entry performs failure-atomic writable slot
+installation, but this stable facade deliberately rejects ABI 2 capability
+negotiation.
 
 The checksum-validated synchronized-reference benchmark is available with:
 

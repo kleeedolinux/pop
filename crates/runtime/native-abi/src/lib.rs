@@ -5,6 +5,6 @@ mod version;
 
 pub use symbol::{TABLE_GET_CHECKED_SYMBOL, symbol};
 pub use version::{
-    INVALID_HANDLE, IterationCollectionKind, IterationStatus, NATIVE_ABI_VERSION, NativeAbiVersion,
-    StringFormatTag,
+    ABI_SUPPORT_SYMBOL, GC_SAFE_POINT_V2_SYMBOL, INVALID_HANDLE, IterationCollectionKind,
+    IterationStatus, NATIVE_ABI_1_VERSION, NATIVE_ABI_2_VERSION, NativeAbiVersion, StringFormatTag,
 };

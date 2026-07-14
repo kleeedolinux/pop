@@ -1,12 +1,20 @@
 use std::collections::BTreeSet;
 
 use pop_runtime_interface::RuntimeOperation;
-use pop_runtime_native_abi::{INVALID_HANDLE, NATIVE_ABI_VERSION, symbol};
+use pop_runtime_native_abi::{
+    ABI_SUPPORT_SYMBOL, GC_SAFE_POINT_V2_SYMBOL, INVALID_HANDLE, NATIVE_ABI_1_VERSION,
+    NATIVE_ABI_2_VERSION, symbol,
+};
 
 #[test]
 fn abi_version_and_invalid_handle_are_explicit() {
-    assert_eq!(NATIVE_ABI_VERSION.major(), 1);
-    assert_eq!(NATIVE_ABI_VERSION.minor(), 11);
+    assert_eq!(NATIVE_ABI_1_VERSION.major(), 1);
+    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 11);
+    assert_eq!(NATIVE_ABI_2_VERSION.major(), 2);
+    assert_eq!(NATIVE_ABI_2_VERSION.minor(), 0);
+    assert_ne!(NATIVE_ABI_1_VERSION, NATIVE_ABI_2_VERSION);
+    assert_eq!(ABI_SUPPORT_SYMBOL, "pop_rt_supports_abi");
+    assert_eq!(GC_SAFE_POINT_V2_SYMBOL, "pop_rt_gc_safe_point_v2");
     assert_eq!(INVALID_HANDLE, 0);
 }
 
