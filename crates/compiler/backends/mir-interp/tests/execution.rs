@@ -670,6 +670,34 @@ fn exact_source_overloads_execute_in_the_mir_interpreter() {
 }
 
 #[test]
+fn sequence_index_last_and_reduction_are_generic_and_exact() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            include_str!(
+                "../../../../libraries/standard/tests/programs/sequenceIndexLastReduction.pop"
+            ),
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("main")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified Sequence inspection MIR")
+            .call(function, &[]),
+        Ok(vec![int(0)])
+    );
+}
+
+#[test]
 fn ordinary_pop_sequence_projection_and_composition_are_direct() {
     let (mir, types) = executable_modules(&[
         (

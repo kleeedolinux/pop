@@ -79,3 +79,7 @@ api:34	Api	Pop.Standard	Pop.Sequence	maxByOr	maxByOr<T,TSource:Iterable<T>>(TSou
 api:35	Api	Pop.Standard	Pop.Sequence	append	append<T,TSource:Iterable<T>>(TSource,T)->Iterator<T>	standard	prototype	false	architecture/decisions/0075-sequence-projection-and-composition.md
 api:36	Api	Pop.Standard	Pop.Sequence	prepend	prepend<T,TSource:Iterable<T>>(TSource,T)->Iterator<T>	standard	prototype	false	architecture/decisions/0075-sequence-projection-and-composition.md
 api:37	Api	Pop.Standard	Pop.Sequence	scan	scan<T,TSource:Iterable<T>,TState>(TSource,TState,function(TState,T)->TState)->Iterator<TState>	standard	prototype	false	architecture/decisions/0075-sequence-projection-and-composition.md
+api:38	Api	Pop.Standard	Pop.Sequence	elementAtOr	elementAtOr<T,TSource:Iterable<T>>(TSource,Int,T)->T	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md
+api:39	Api	Pop.Standard	Pop.Sequence	findLastOr	findLastOr<T,TSource:Iterable<T>>(TSource,function(T)->Boolean,T)->T	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md
+api:40	Api	Pop.Standard	Pop.Sequence	indexLastOr	indexLastOr<T,TSource:Iterable<T>>(TSource,function(T)->Boolean,Int)->Int	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md
+api:41	Api	Pop.Standard	Pop.Sequence	reduceOr	reduceOr<T,TSource:Iterable<T>>(TSource,function(T,T)->T,T)->T	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md

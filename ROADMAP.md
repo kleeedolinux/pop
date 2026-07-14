@@ -169,6 +169,8 @@ Post-baseline library work has begun without widening the release foundation:
   metadata, HIR, MIR, the interpreter, and LLVM.
 - [x] Complete ADR 0075 predicate search, projection, and lazy composition
   prototypes with checked documentation and differential coverage.
+- [x] Complete ADR 0076 positional/last-match inspection and first-item
+  reduction prototypes with exact callback and cross-backend coverage.
 - Define view lifetimes before exposing `Bytes` views or `Text.View`.
 - Make reserved `Iteration<T>` exhaustively matchable in ordinary source
   before adding no-fallback sequence inspection.

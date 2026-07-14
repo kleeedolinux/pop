@@ -1242,6 +1242,29 @@ fn emitted_llvm_executes_exact_source_overloads() {
 }
 
 #[test]
+fn emitted_llvm_executes_sequence_index_last_and_reduction() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            include_str!(
+                "../../../../libraries/standard/tests/programs/sequenceIndexLastReduction.pop"
+            ),
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-index-last-reduction");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "native Sequence index/last/reduction contract failed: {}\n{module}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn emitted_llvm_executes_lazy_sequence_bounds_and_composition() {
     let module = native_modules(&[
         (

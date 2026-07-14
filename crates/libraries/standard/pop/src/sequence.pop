@@ -1118,6 +1118,172 @@ public function indexOr<T, TSource: Iterable<T>>(
 end
 
 --- <summary>
+--- Returns the item at a one-based index or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="index">
+--- The one-based position to return.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when the index is nonpositive or out of range.
+--- </param>
+---
+--- <returns>
+--- The item at the requested position, or the fallback.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function elementAtOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    index: Int,
+    fallback: T
+): T
+    if index <= 0 then
+        return fallback
+    end
+    local current = 1
+    for value in source do
+        if current == index then
+            return value
+        end
+        current += 1
+    end
+    return fallback
+end
+
+--- <summary>
+--- Returns the last matching item or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called exactly once for every item.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when no item matches.
+--- </param>
+---
+--- <returns>
+--- The last matching item, or the fallback when none matches.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function findLastOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean,
+    fallback: T
+): T
+    local result = fallback
+    for value in source do
+        if predicate(value) then
+            result = value
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Returns the one-based index of the last matching item or a fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called exactly once for every item.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when no item matches.
+--- </param>
+---
+--- <returns>
+--- The checked one-based index of the last match, or the fallback.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function indexLastOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean,
+    fallback: Int
+): Int
+    local result = fallback
+    local index = 1
+    for value in source do
+        if predicate(value) then
+            result = index
+        end
+        index += 1
+    end
+    return result
+end
+
+--- <summary>
+--- Reduces a sequence from its first item or returns a fallback when empty.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="combine">
+--- The function called left to right for every item after the first.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned only when the source is empty.
+--- </param>
+---
+--- <returns>
+--- The reduced value, or the fallback for an empty source.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function reduceOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    combine: function(left: T, right: T): T,
+    fallback: T
+): T
+    local result = fallback
+    local found = false
+    for value in source do
+        if found then
+            result = combine(result, value)
+        else
+            result = value
+            found = true
+        end
+    end
+    return result
+end
+
+--- <summary>
 --- Adds projected integer values using checked arithmetic.
 --- </summary>
 ---
