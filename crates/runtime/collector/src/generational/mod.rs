@@ -7,6 +7,7 @@ mod coordination;
 mod heap;
 mod major;
 mod memory;
+mod workers;
 
 pub use allocation::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
@@ -21,4 +22,8 @@ pub use heap::{GenerationalRuntime, MajorCollectorConfig, MajorCyclePhase};
 pub use memory::{
     GenerationalMemoryConfig, GenerationalMemoryConfigError, GenerationalMemoryTelemetry,
     NonHeapMemoryUsage, NonHeapMemoryUsageError,
+};
+pub use workers::{
+    BackgroundWorkerConfig, BackgroundWorkerConfigError, BackgroundWorkerStartError,
+    BackgroundWorkerTelemetry,
 };

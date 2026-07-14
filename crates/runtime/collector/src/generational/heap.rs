@@ -15,6 +15,10 @@ use super::allocation::{
 use super::memory::{
     GenerationalMemoryConfig, GenerationalMemoryTelemetry, MemoryController, NonHeapMemoryUsage,
 };
+use super::workers::{
+    BackgroundWorkerConfig, BackgroundWorkerPool, BackgroundWorkerStartError,
+    BackgroundWorkerTelemetry,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MajorCollectorConfig {
@@ -85,6 +89,7 @@ pub struct GenerationalRuntime {
     pub(crate) major: MajorCycle,
     pub(crate) config: MajorCollectorConfig,
     pub(crate) memory: MemoryController,
+    pub(crate) workers: Option<BackgroundWorkerPool>,
     pub(crate) minor_requested: bool,
     pub(crate) major_requested: bool,
 }
@@ -120,9 +125,23 @@ impl GenerationalRuntime {
             major: MajorCycle::idle(),
             config,
             memory: MemoryController::new(memory),
+            workers: None,
             minor_requested: false,
             major_requested: false,
         }
+    }
+
+    /// Creates a collector with persistent bounded host-worker queues.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed startup failure when a host worker cannot be created.
+    pub fn with_background_workers(
+        workers: BackgroundWorkerConfig,
+    ) -> Result<Self, BackgroundWorkerStartError> {
+        let mut runtime = Self::new();
+        runtime.workers = Some(BackgroundWorkerPool::new(workers)?);
+        Ok(runtime)
     }
 
     pub fn request_minor_collection(&mut self) {
@@ -177,6 +196,11 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn memory_telemetry(&self) -> GenerationalMemoryTelemetry {
         self.memory.telemetry(&self.allocation)
+    }
+
+    #[must_use]
+    pub fn background_worker_telemetry(&self) -> Option<BackgroundWorkerTelemetry> {
+        self.workers.as_ref().map(BackgroundWorkerPool::telemetry)
     }
 
     /// Replaces the complete stack/code/metadata/native/arena/isolated usage

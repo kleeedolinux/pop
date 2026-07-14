@@ -7,6 +7,7 @@ use pop_runtime_interface::{
 use crate::{heap::SlotValue, relocation::CollectorGeneration};
 
 use super::heap::{GenerationalRuntime, MajorCyclePhase};
+use super::workers::MarkTask;
 
 impl GenerationalRuntime {
     pub(crate) fn begin_major(
@@ -46,6 +47,16 @@ impl GenerationalRuntime {
             match self.major.phase {
                 MajorCyclePhase::Idle => return Ok((None, completed_work)),
                 MajorCyclePhase::Marking => {
+                    if self.workers.is_some() {
+                        let work = self.advance_background_mark(remaining)?;
+                        if work == 0 {
+                            self.prepare_sweep();
+                        } else {
+                            remaining -= work;
+                            completed_work += work;
+                        }
+                        continue;
+                    }
                     if let Some(reference) =
                         self.major.satb.pop().or_else(|| self.major.pending.pop())
                     {
@@ -57,6 +68,15 @@ impl GenerationalRuntime {
                     }
                 }
                 MajorCyclePhase::Sweeping => {
+                    if self.workers.is_some() {
+                        let work = self.advance_background_sweep(remaining)?;
+                        if work == 0 {
+                            return Ok((Some(self.finish_major()), completed_work));
+                        }
+                        remaining -= work;
+                        completed_work += work;
+                        continue;
+                    }
                     let Some(reference) = self.major.sweep.pop() else {
                         return Ok((Some(self.finish_major()), completed_work));
                     };
@@ -74,6 +94,73 @@ impl GenerationalRuntime {
             return Ok((Some(self.finish_major()), completed_work));
         }
         Ok((None, completed_work))
+    }
+
+    fn advance_background_mark(&mut self, work_budget: usize) -> Result<usize, RuntimeFailure> {
+        let mut tasks = Vec::new();
+        let mut completed_work = 0;
+        while completed_work < work_budget {
+            let Some(reference) = self.major.satb.pop().or_else(|| self.major.pending.pop()) else {
+                break;
+            };
+            completed_work += 1;
+            if !self.major.seen.insert(reference) {
+                continue;
+            }
+            let object = self
+                .nursery
+                .objects
+                .get(&reference)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            tasks.push(MarkTask {
+                reference,
+                generation: object.generation,
+                allocation: object.allocation.clone(),
+            });
+        }
+        if tasks.is_empty() {
+            return Ok(completed_work);
+        }
+        let results = self
+            .workers
+            .as_mut()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?
+            .mark(tasks)?;
+        for result in results {
+            if result.mature {
+                self.major.marked_mature.insert(result.reference);
+            }
+            self.major.pending.extend(result.children);
+            self.major.scanned = self.major.scanned.saturating_add(1);
+        }
+        Ok(completed_work)
+    }
+
+    fn advance_background_sweep(&mut self, work_budget: usize) -> Result<usize, RuntimeFailure> {
+        let mut references = Vec::with_capacity(work_budget.min(self.major.sweep.len()));
+        while references.len() < work_budget {
+            let Some(reference) = self.major.sweep.pop() else {
+                break;
+            };
+            references.push(reference);
+        }
+        if references.is_empty() {
+            return Ok(0);
+        }
+        let swept = self
+            .workers
+            .as_mut()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?
+            .sweep(references)?;
+        let completed_work = swept.len();
+        for reference in swept {
+            if self.nursery.objects.remove(&reference).is_some() {
+                self.major.reclaimed = self.major.reclaimed.saturating_add(1);
+            }
+            self.allocation.remove(reference);
+            self.nursery.dirty_cards.remove(&reference);
+        }
+        Ok(completed_work)
     }
 
     fn scan_snapshot_reference(

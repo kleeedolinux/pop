@@ -10,15 +10,18 @@ promotes deterministically, and maintains remembered cards.
 `GenerationalRuntime` composes that moving nursery with a modular incremental
 mature-heap conformance slice. Its `generational` modules separate PLRI
 adaptation, SATB/publication barriers, cycle state, bounded mark/sweep work,
-page/TLAB allocation, memory control, and typed epoch coordination. The bounded
-coordinator registers managed and foreign execution states, collects exact
-once-only root/TLAB/barrier publications, and completes protocol epochs without
-heap tracing in the handshake. It preserves snapshot edges, shades roots, pins,
-and new mature objects, and defers nursery relocation while a major snapshot
-still contains physical tokens. The implementation deliberately continues to
-report `RelocationConformance`: the coordinator is not yet integrated with
-scheduler/runtime transitions, and mature tracing is cooperative and
-incremental rather than worker-concurrent, so
+page/TLAB allocation, memory control, typed epoch coordination, and opt-in host
+workers. The bounded coordinator registers managed and foreign execution
+states, collects exact once-only root/TLAB/barrier publications, and completes
+protocol epochs without heap tracing in the handshake. Persistent named worker
+threads receive immutable object snapshots through bounded per-worker queues,
+scan exact object maps in parallel, and return sequence-ordered results for
+collector-owned mutation. It preserves snapshot edges, shades roots, pins, and
+new mature objects, and defers nursery relocation while a major snapshot still
+contains physical tokens. The implementation deliberately continues to report
+`RelocationConformance`: epochs/workers are not yet integrated with native
+scheduler transitions, and worker batches currently join each bounded collector
+slice rather than tracing concurrently with mutator execution, so
 `ProductionConcurrentGenerational` cannot yet be selected.
 
 The same conformance runtime now records concrete Stage-2 allocation placement:
@@ -32,8 +35,9 @@ target, performs bounded mature-cycle assists, returns empty logical pages, and
 reports domain/debt/pressure/OOM telemetry. These logical descriptors validate
 ownership and allocation transitions without exposing a raw address through
 PLRI. Parallel per-scheduler TLAB ownership, virtual-memory reservation,
-size-class reuse, background workers, and measured production fast paths remain
-required before the production profile.
+size-class reuse, adaptive work stealing, concurrent card refinement/lazy
+sweeping, and measured production fast paths remain required before the
+production profile.
 
 This crate is reusable by native execution, the MIR interpreter, and a future
 VM. It contains no C exports, native symbol mapping, platform process adapters,
@@ -43,9 +47,9 @@ linker policy, or process-global singleton. See
 The bootstrap implementation is divided into `heap`, `access`, `trace`, and
 `adapter` modules. The `relocation` directory separately groups its heap,
 collection, and adapter ownership; `generational` groups mature-cycle state,
-mark/sweep work, barriers, page/TLAB allocation, memory control, and its adapter.
-The allocation and memory submodules each separate public typed descriptors
-from mutable state.
+mark/sweep work, barriers, page/TLAB allocation, memory control, coordination,
+bounded workers, and its adapter. The allocation, coordination, memory, and
+worker submodules separate public typed descriptors from mutable state.
 These are static Rust partitions behind the same PLRI dependency, not runtime
 plugins or dynamic dispatch.
 
@@ -55,6 +59,12 @@ mutators acknowledge automatically; managed mutators publish precise state;
 bounded foreign transitions remain pending until they enter a safe state. This
 is protocol infrastructure, not a claim that background collection or native
 scheduler handshakes are complete.
+
+The `generational::workers` partition owns persistent host threads, bounded
+per-worker queues, immutable mark snapshots, deterministic result ordering,
+telemetry, and joined shutdown. It performs parallel marking work and sweep
+dispatch only when explicitly configured; it does not claim adaptive sizing,
+work stealing, mutator-concurrent tracing, or concurrent heap mutation.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and

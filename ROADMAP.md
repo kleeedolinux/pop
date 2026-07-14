@@ -168,9 +168,12 @@ Package for the first release.
   - [x] Add typed mutator registration and bounded epoch handshakes with exact
     once-only acknowledgements, published root/TLAB/barrier state, explicit
     foreign-execution states, and deterministic transition telemetry.
-  - [ ] Integrate the epoch coordinator with scheduler/runtime transitions, then
-    add background workers, concurrent card refinement and sweeping, stack
-    watermarks, race/stress proof, and latency measurements.
+  - [x] Add opt-in persistent host workers with bounded per-worker queues,
+    parallel exact object-map scans, deterministic result application, sweep
+    dispatch, worker telemetry, and joined shutdown.
+  - [ ] Integrate epochs and workers with scheduler/runtime transitions, then add
+    adaptive worker sizing/work stealing, concurrent card refinement and lazy
+    sweeping, stack watermarks, race/stress proof, and latency measurements.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.
