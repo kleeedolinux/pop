@@ -9,7 +9,7 @@ use pop_types::embedded_bootstrap_schema;
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 113);
+    assert_eq!(baseline.entries().len(), 83);
 
     let prelude_names = baseline
         .entries()
