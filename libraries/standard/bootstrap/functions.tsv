@@ -2,10 +2,3 @@ schemaVersion	1
 functionId	sourceName	ownerBubble	parameterTypes	resultTypes	effects	prelude
 0	print	Pop.Standard	Int	-	AmbientIo	true
 1	print	Pop.Standard	String	-	AmbientIo	true
-2	Task.CancelSource.cancel	Pop.Standard	UInt64	Boolean	AmbientIo	true
-3	Task.CancelSource.cancellationRequested	Pop.Standard	UInt64	Boolean	AmbientIo	true
-4	Net.Tcp.listenLoopback	Pop.Standard	Int,Int,Boolean	UInt64	AmbientIo	true
-5	Net.Tcp.accept	Pop.Standard	UInt64	UInt64	AmbientIo,Suspends	true
-6	Net.Tcp.receiveRaw	Pop.Standard	UInt64,UInt64,UInt64	UInt64	AmbientIo,Suspends	true
-7	Net.Tcp.sendAllRaw	Pop.Standard	UInt64,UInt64,UInt64	Boolean	AmbientIo,Suspends	true
-8	Net.Tcp.close	Pop.Standard	UInt64	Boolean	AmbientIo	true

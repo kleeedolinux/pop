@@ -1382,11 +1382,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         arguments: &[ExpressionSyntax],
         span: SourceSpan,
     ) -> Option<CheckedCall> {
-        if path.is_empty() {
+        let [name] = path else {
             return None;
-        }
-        let name = path.join(".");
-        if path.len() == 1 && self.binding_by_name(&name).is_some() {
+        };
+        if self.binding_by_name(name).is_some() {
             return None;
         }
         if !self
@@ -1401,7 +1400,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let entries: Vec<_> = self
             .resolver
             .schema()
-            .standard_functions_by_source_name(&name)
+            .standard_functions_by_source_name(name)
             .map(|entry| {
                 (
                     entry.id(),

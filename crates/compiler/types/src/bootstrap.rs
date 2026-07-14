@@ -885,80 +885,26 @@ fn validate_compiler_attributes(
 fn validate_standard_functions(
     entries: &[BootstrapStandardFunctionEntry],
 ) -> Result<(), BootstrapSchemaError> {
-    let expected = [
-        (0, "print", &["Int"][..], &[][..], &["AmbientIo"][..]),
-        (1, "print", &["String"][..], &[][..], &["AmbientIo"][..]),
-        (
-            2,
-            "Task.CancelSource.cancel",
-            &["UInt64"][..],
-            &["Boolean"][..],
-            &["AmbientIo"][..],
-        ),
-        (
-            3,
-            "Task.CancelSource.cancellationRequested",
-            &["UInt64"][..],
-            &["Boolean"][..],
-            &["AmbientIo"][..],
-        ),
-        (
-            4,
-            "Net.Tcp.listenLoopback",
-            &["Int", "Int", "Boolean"][..],
-            &["UInt64"][..],
-            &["AmbientIo"][..],
-        ),
-        (
-            5,
-            "Net.Tcp.accept",
-            &["UInt64"][..],
-            &["UInt64"][..],
-            &["AmbientIo", "Suspends"][..],
-        ),
-        (
-            6,
-            "Net.Tcp.receiveRaw",
-            &["UInt64", "UInt64", "UInt64"][..],
-            &["UInt64"][..],
-            &["AmbientIo", "Suspends"][..],
-        ),
-        (
-            7,
-            "Net.Tcp.sendAllRaw",
-            &["UInt64", "UInt64", "UInt64"][..],
-            &["Boolean"][..],
-            &["AmbientIo", "Suspends"][..],
-        ),
-        (
-            8,
-            "Net.Tcp.close",
-            &["UInt64"][..],
-            &["Boolean"][..],
-            &["AmbientIo"][..],
-        ),
-    ];
-    if entries.len() != expected.len() {
+    if entries.len() != 2 {
         return Err(error(
             "standard function",
             2,
-            "bootstrap standard function inventory changed",
+            "bootstrap requires exactly two standard functions",
         ));
     }
-    for (index, (entry, expected)) in entries.iter().zip(expected).enumerate() {
-        let (id, source_name, parameter_types, result_types, effects) = expected;
-        if entry.id.raw() != id
-            || entry.source_name != source_name
+    for (index, (entry, parameter_type)) in entries.iter().zip(["Int", "String"]).enumerate() {
+        if entry.id.raw() != u32::try_from(index).unwrap_or(u32::MAX)
+            || entry.source_name != "print"
             || entry.owner_bubble != "Pop.Standard"
-            || entry.parameter_types != parameter_types
-            || entry.result_types != result_types
-            || entry.effects != effects
+            || entry.parameter_types != [parameter_type]
+            || !entry.result_types.is_empty()
+            || entry.effects != ["AmbientIo"]
             || !entry.prelude
         {
             return Err(error(
                 "standard function",
                 index + 3,
-                "invalid trusted standard function contract",
+                "invalid trusted print contract",
             ));
         }
     }

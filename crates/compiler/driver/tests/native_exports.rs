@@ -24,16 +24,14 @@ fn mismatched_or_duplicate_adapter_descriptors_fail_closed() {
     assert!(matches!(
         validate_standard_native_exports(&schema, &[wrong]),
         Err(NativeExportValidationError::ExportCount {
-            expected: 9,
+            expected: 2,
             actual: 1
         })
     ));
 
     let first = pop_standard::NATIVE_EXPORTS[0];
-    let mut duplicate = pop_standard::NATIVE_EXPORTS.to_vec();
-    duplicate[1] = first;
     assert!(matches!(
-        validate_standard_native_exports(&schema, &duplicate),
+        validate_standard_native_exports(&schema, &[first, first]),
         Err(NativeExportValidationError::DuplicateBinding { .. })
     ));
 }

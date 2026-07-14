@@ -197,14 +197,6 @@ pub fn lower_mir_to_llvm_ir(
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
-    declarations.push("declare i1 @pop_std_task_cancel_source_cancel(i64)".to_owned());
-    declarations
-        .push("declare i1 @pop_std_task_cancel_source_cancellation_requested(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_listen_loopback(i64, i64, i1)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_accept(i64)".to_owned());
-    declarations.push("declare i64 @pop_std_net_tcp_receive_raw(i64, i64, i64)".to_owned());
-    declarations.push("declare i1 @pop_std_net_tcp_send_all_raw(i64, i64, i64)".to_owned());
-    declarations.push("declare i1 @pop_std_net_tcp_close(i64)".to_owned());
     for reference in bubble.function_references() {
         let result = llvm_results(reference.results(), types)?;
         let parameters = reference

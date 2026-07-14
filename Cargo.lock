@@ -463,7 +463,6 @@ version = "0.1.0"
 dependencies = [
  "pop-internal",
  "pop-library-bridge",
- "pop-runtime-native",
  "pop-types",
 ]
 
