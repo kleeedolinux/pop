@@ -173,11 +173,16 @@ always explicit dependencies/imports.
 
 ### Current implementation status
 
-The bootstrap currently provides only:
+The frozen ADR 0058 bootstrap foundation currently provides:
 
-- stable metadata/protocol identities and primitive/prelude types;
-- `print(Int) -> ()` through a trusted standard-function identity;
-- prototype checked arithmetic, UTF-8 slicing, and sequence helpers.
+- stable metadata/protocol identities and the exact primitive/prelude types;
+- `print(Int) -> ()` and `print(String) -> ()` as typed native prototypes; and
+- `Sequence.map`, `Sequence.filter`, `Sequence.fold`, and `Sequence.collect` as
+  documented portable Pop prototypes with interpreter/LLVM evidence.
+
+Rust-only checked arithmetic and UTF-8 slicing helpers remain implementation
+prototypes. They are not Pop public declarations or API-baseline entries and do
+not make the planned `Math`, `Text`, or `Bytes` catalog families implemented.
 
 During the ADR 0024/0030 standalone native bootstrap, verified bootstrap
 metadata exposes source-level `print(Int) -> ()` and `print(String) -> ()`
@@ -214,9 +219,11 @@ Rust `mod` declaration or compiler registry entry. Repository conformance proves
 complete source discovery, verified HIR/MIR lowering, and logical public
 reference-metadata consumption by a dependent Bubble. `pop build` emits and
 immediately verifies deterministic on-disk `.poplib` artifacts with checked
-documentation and selected native implementations. Resolving dependencies from
-those loaded artifacts and linking their selected implementations remains a
-later loader slice.
+documentation and selected native implementations. The artifact loader
+round-trips those contents without source lookup. Selecting a locked dependency
+artifact as compiler input and linking its verified target implementation
+remain ordinary Package-workflow work rather than part of the frozen standard-
+foundation surface.
 
 Rust-native foundation adapters use the typed `#[poplib(...)]` contract from
 [ADR 0037](./decisions/0037-typed-rust-foundation-adapter-attribute.md). The
