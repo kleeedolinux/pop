@@ -4446,6 +4446,7 @@ fn conservative_indirect_effects() -> MirEffectSummary {
         MirEffect::MayTrap,
         MirEffect::MayUnwind,
         MirEffect::Suspends,
+        MirEffect::Blocks,
         MirEffect::UnsafeMemory,
         MirEffect::ForeignFunction,
         MirEffect::AmbientIo,

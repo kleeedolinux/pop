@@ -1309,6 +1309,7 @@ fn dump_effects(output: &mut String, effects: MirEffectSummary) {
             MirEffect::MayTrap => "MayTrap",
             MirEffect::MayUnwind => "MayUnwind",
             MirEffect::Suspends => "Suspends",
+            MirEffect::Blocks => "Blocks",
             MirEffect::UnsafeMemory => "UnsafeMemory",
             MirEffect::ForeignFunction => "ForeignFunction",
             MirEffect::AmbientIo => "AmbientIo",

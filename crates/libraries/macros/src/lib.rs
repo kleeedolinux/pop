@@ -221,6 +221,7 @@ fn validate_effect(name: &str) -> Result<(), String> {
             | "MayTrap"
             | "MayUnwind"
             | "Suspends"
+            | "Blocks"
             | "UnsafeMemory"
             | "ForeignFunction"
             | "AmbientIo"

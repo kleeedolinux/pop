@@ -109,6 +109,22 @@ fn checked_operations_name_every_portable_trap_kind() {
 }
 
 #[test]
+fn effect_summary_keeps_blocking_distinct_from_suspension_and_io() {
+    let effects = pop_mir::MirEffectSummary::from_effects([
+        MirEffect::Blocks,
+        MirEffect::Suspends,
+        MirEffect::AmbientIo,
+    ]);
+    assert!(effects.contains(MirEffect::Blocks));
+    assert!(effects.contains(MirEffect::Suspends));
+    assert!(effects.contains(MirEffect::AmbientIo));
+    assert_eq!(
+        effects.iter().collect::<Vec<_>>(),
+        vec![MirEffect::Suspends, MirEffect::Blocks, MirEffect::AmbientIo]
+    );
+}
+
+#[test]
 fn standard_string_output_identity_requires_a_string_argument() {
     let (mir, types) = lower(
         "namespace Main\n\

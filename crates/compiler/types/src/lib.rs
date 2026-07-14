@@ -299,6 +299,7 @@ pub enum Effect {
     MayTrap,
     MayUnwind,
     Suspends,
+    Blocks,
     UnsafeMemory,
     ForeignFunction,
     AmbientIo,

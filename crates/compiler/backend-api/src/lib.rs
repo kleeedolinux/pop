@@ -55,6 +55,7 @@ impl RuntimeProfile {
                     RuntimeContract::GarbageCollector,
                     RuntimeContract::ExceptionRuntime,
                     RuntimeContract::CoroutineScheduler,
+                    RuntimeContract::BlockingPool,
                     RuntimeContract::ThreadRuntime,
                     RuntimeContract::DynamicLoader,
                     RuntimeContract::RuntimeReflection,
@@ -121,6 +122,7 @@ pub enum RuntimeContract {
     GarbageCollector,
     ExceptionRuntime,
     CoroutineScheduler,
+    BlockingPool,
     ThreadRuntime,
     DynamicLoader,
     RuntimeReflection,
@@ -246,6 +248,9 @@ impl ProgramRequirements {
             MirEffect::MayUnwind => self.require_runtime(RuntimeContract::ExceptionRuntime, origin),
             MirEffect::Suspends => {
                 self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
+            }
+            MirEffect::Blocks => {
+                self.require_runtime(RuntimeContract::BlockingPool, origin);
             }
             MirEffect::ForeignFunction | MirEffect::AmbientIo => {
                 self.require_runtime(RuntimeContract::StandardLibraryAdapters, origin);

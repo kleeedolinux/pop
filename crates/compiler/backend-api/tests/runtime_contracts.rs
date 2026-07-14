@@ -3,6 +3,7 @@ use pop_backend_api::{
     RuntimeProfileSelectionError, validate_runtime_contracts,
 };
 use pop_foundation::{FunctionId, ValueId};
+use pop_mir::MirEffect;
 use pop_target::{TargetCapability, TargetSpec};
 
 fn bpf_target() -> TargetSpec {
@@ -83,6 +84,38 @@ fn full_runtime_profile_satisfies_allocator_contract_in_unit_resolution() {
         ),
         Ok(())
     );
+}
+
+#[test]
+fn blocking_effect_requires_a_distinct_blocking_pool_contract() {
+    let mut requirements = ProgramRequirements::default();
+    let origin = RequirementOrigin::FunctionEffect {
+        function: FunctionId::from_raw(3),
+        effect: MirEffect::Blocks,
+    };
+    requirements.require_runtime(RuntimeContract::BlockingPool, origin);
+
+    assert_eq!(
+        validate_runtime_contracts(
+            &requirements,
+            RuntimeProfile::BootstrapStableHandles,
+            &native_target(),
+        ),
+        Ok(())
+    );
+
+    let error = validate_runtime_contracts(&requirements, RuntimeProfile::LinuxEbpf, &bpf_target())
+        .expect_err("linux-ebpf has no blocking pool");
+
+    assert!(matches!(
+        error,
+        RuntimeContractError::MissingContract {
+            profile: RuntimeProfile::LinuxEbpf,
+            ref requirement,
+            ..
+        } if requirement.contract() == RuntimeContract::BlockingPool
+            && requirement.origin() == origin
+    ));
 }
 
 #[test]
