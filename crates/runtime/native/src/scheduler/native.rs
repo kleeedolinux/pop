@@ -207,6 +207,7 @@ pub struct NativeScheduler {
     blocking_threads: Vec<JoinHandle<()>>,
     event_driver: Arc<EventDriver>,
     event_driver_thread: Option<JoinHandle<()>>,
+    shutdown_complete: bool,
 }
 
 impl NativeScheduler {
@@ -313,6 +314,7 @@ impl NativeScheduler {
             blocking_threads,
             event_driver,
             event_driver_thread: Some(event_driver_thread),
+            shutdown_complete: false,
         })
     }
 
@@ -529,6 +531,9 @@ impl NativeScheduler {
     }
 
     fn shutdown_threads(&mut self) -> Result<(), SchedulerError> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
         let mut failure = None;
         self.event_driver.shutdown();
         if self
@@ -538,11 +543,25 @@ impl NativeScheduler {
         {
             failure = Some(SchedulerError::ThreadJoin);
         }
+        let blocking_shutdown_work = self.shared.advance_observation_work();
         self.blocking.shutdown();
         for thread in self.blocking_threads.drain(..) {
             if thread.join().is_err() {
                 failure.get_or_insert(SchedulerError::ThreadJoin);
             }
+        }
+        let blocking_shutdown_delay = self
+            .shared
+            .advance_observation_work()
+            .saturating_sub(blocking_shutdown_work);
+        {
+            let mut telemetry = lock(&self.shared.telemetry);
+            telemetry.telemetry.blocking_shutdowns =
+                telemetry.telemetry.blocking_shutdowns.saturating_add(1);
+            telemetry
+                .telemetry
+                .blocking_shutdown_delay
+                .record(blocking_shutdown_delay);
         }
         self.shared.shutdown();
         for thread in self.threads.drain(..) {
@@ -559,6 +578,7 @@ impl NativeScheduler {
         if let Err(error) = self.shared.release_all_task_frames() {
             failure.get_or_insert(error);
         }
+        self.shutdown_complete = true;
         failure.map_or(Ok(()), Err)
     }
 }
@@ -2235,6 +2255,7 @@ fn blocking_worker_loop(pool: &BlockingPool, scheduler: &SharedScheduler) {
 
         let panicked = catch_unwind(AssertUnwindSafe(|| job.operation.run())).is_err();
         let _ = scheduler.wake(job.task);
+        scheduler.advance_observation_work();
         let mut telemetry = lock(&scheduler.telemetry);
         telemetry.telemetry.blocking_completions =
             telemetry.telemetry.blocking_completions.saturating_add(1);

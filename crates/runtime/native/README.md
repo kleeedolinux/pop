@@ -27,7 +27,9 @@ bounded synchronized M:N correctness implementation, deterministic
 per-dispatch work budgets and record/replay, typed collector-transition hooks,
 bounded scheduler-work-unit ready and driver-delivery percentiles, and a
 separate bounded blocking pool plus bounded host/virtual timer and
-external-event delivery specified by the
+external-event delivery. Native shutdown records one bounded blocking-pool
+drain/join delay and remains idempotent under subsequent drop cleanup. These
+contracts are specified by the
 [scheduler runtime design](../../../architecture/23.1-scheduler-runtime-implementation.md).
 This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.

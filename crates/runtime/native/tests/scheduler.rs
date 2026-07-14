@@ -561,6 +561,14 @@ fn native_task_frames_restore_before_poll_and_retain_after_nonterminal_poll() {
     assert_eq!(final_telemetry.frame_root_retentions(), 2);
     assert_eq!(final_telemetry.frame_root_restorations(), 2);
     assert_eq!(final_telemetry.frame_root_failures(), 0);
+    assert_eq!(final_telemetry.blocking_shutdowns(), 1);
+    assert_eq!(final_telemetry.blocking_shutdown_delay().samples(), 1);
+    assert!(
+        final_telemetry
+            .blocking_shutdown_delay()
+            .maximum_work_units()
+            > 0
+    );
 }
 
 #[test]
@@ -1641,10 +1649,14 @@ fn bounded_blocking_pool_runs_off_normal_workers_and_rejects_queue_overflow() {
     scheduler
         .wait_until_idle(Duration::from_secs(5))
         .expect("normal scheduler drains resumed task");
-    let telemetry = scheduler.telemetry();
+    let telemetry = scheduler
+        .shutdown_with_telemetry()
+        .expect("blocking pool shuts down cleanly");
     assert_eq!(telemetry.blocking_submissions(), 2);
     assert_eq!(telemetry.blocking_queue_rejections(), 1);
     assert_eq!(telemetry.blocking_completions(), 2);
+    assert_eq!(telemetry.blocking_shutdowns(), 1);
+    assert_eq!(telemetry.blocking_shutdown_delay().samples(), 1);
 }
 
 #[test]

@@ -291,7 +291,7 @@ Post-baseline library work has begun without widening the release foundation:
       ping-pong latency, continuous I/O fairness, steal-storm and million-frame
       memory evidence, operating-system resource counters, and scheduler/GC
       interaction after the production collector binding exists.
-    - [ ] Add work-budget exhaustion, event/timer poll and delivery-delay,
+    - [x] Add work-budget exhaustion, event/timer poll and delivery-delay,
       blocking shutdown-delay, ready-to-run percentile, and scheduler migration
       telemetry before treating observability as complete.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
