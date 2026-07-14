@@ -269,6 +269,52 @@ impl AllocationInfrastructure {
         Ok(())
     }
 
+    pub(crate) fn move_to_isolated(
+        &mut self,
+        reference: ManagedReference,
+        type_id: RuntimeTypeId,
+        object_map: &ObjectMap,
+    ) -> Result<(), RuntimeFailure> {
+        let Some(previous) = self.placements.get(&reference).copied() else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        if matches!(
+            previous.domain,
+            HeapDomain::Isolated | HeapDomain::LargeObject | HeapDomain::Pinned
+        ) {
+            return Ok(());
+        }
+        let layout = layout(type_id, object_map);
+        let size = object_size(layout.slot_count)?;
+        let placement = self.place_on_new_page(&layout, size, HeapDomain::Isolated)?;
+        self.placements.insert(reference, placement);
+        self.reclaim_empty_pages();
+        Ok(())
+    }
+
+    pub(crate) fn move_to_local_mature(
+        &mut self,
+        reference: ManagedReference,
+        type_id: RuntimeTypeId,
+        object_map: &ObjectMap,
+    ) -> Result<(), RuntimeFailure> {
+        let Some(previous) = self.placements.get(&reference).copied() else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        if matches!(
+            previous.domain,
+            HeapDomain::LocalMature | HeapDomain::LargeObject | HeapDomain::Pinned
+        ) {
+            return Ok(());
+        }
+        let layout = layout(type_id, object_map);
+        let size = object_size(layout.slot_count)?;
+        let placement = self.place_on_new_page(&layout, size, HeapDomain::LocalMature)?;
+        self.placements.insert(reference, placement);
+        self.reclaim_empty_pages();
+        Ok(())
+    }
+
     pub(crate) fn reconcile_after_minor(
         &mut self,
         previous_identities: &BTreeMap<CollectorObjectId, ManagedReference>,
@@ -305,6 +351,7 @@ impl AllocationInfrastructure {
                     self.metrics.promotions = self.metrics.promotions.saturating_add(1);
                 }
                 HeapDomain::LocalEden
+                | HeapDomain::Isolated
                 | HeapDomain::Shared
                 | HeapDomain::LargeObject
                 | HeapDomain::Pinned => {}

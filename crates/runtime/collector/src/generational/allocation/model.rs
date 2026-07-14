@@ -85,6 +85,7 @@ pub enum HeapDomain {
     LocalEden,
     LocalSurvivor,
     LocalMature,
+    Isolated,
     Shared,
     LargeObject,
     Pinned,

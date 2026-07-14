@@ -158,9 +158,11 @@ Package for the first release.
   - [x] Keep ownership separate from placement/generation/pinning, publish
     complete scheduler-local graphs explicitly into shared ownership/pages, and
     reject shared-to-local edges before mutation.
-  - [ ] Add isolated-region construction/transfer, scheduler-indexed local heaps,
-    scoped arenas, shared immutability proofs, and capability-driven barrier
-    elimination.
+  - [x] Add exact-one-owner isolated-region construction, distinct placement and
+    accounting, zero-copy scheduler transfer, protected owner capabilities,
+    external-edge/root/pin rejection, and explicit dissolution.
+  - [ ] Add scheduler-indexed local heaps, scoped arenas, shared immutability
+    proofs, and capability-driven barrier elimination.
   - [ ] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.
 - [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,

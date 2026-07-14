@@ -137,7 +137,10 @@ impl MemoryController {
             metadata_bytes: self.non_heap.metadata_bytes(),
             native_runtime_bytes: self.non_heap.native_runtime_bytes(),
             arena_bytes: self.non_heap.arena_bytes(),
-            isolated_region_bytes: self.non_heap.isolated_region_bytes(),
+            isolated_region_bytes: self
+                .non_heap
+                .isolated_region_bytes()
+                .saturating_add(allocation.bytes_in_domains(&[HeapDomain::Isolated])),
             emergency_reserve_bytes: self.config.emergency_reserve_bytes,
             evacuation_reserve_bytes: self.config.evacuation_reserve_bytes,
             minor_collection_requests: self.minor_collection_requests,

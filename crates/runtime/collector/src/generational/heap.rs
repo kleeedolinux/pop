@@ -15,6 +15,7 @@ use super::allocation::{
 use super::memory::{
     GenerationalMemoryConfig, GenerationalMemoryTelemetry, MemoryController, NonHeapMemoryUsage,
 };
+use super::ownership::IsolationState;
 use super::workers::{
     BackgroundWorkerConfig, BackgroundWorkerPool, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,
@@ -94,6 +95,7 @@ pub struct GenerationalRuntime {
     pub(crate) config: MajorCollectorConfig,
     pub(crate) memory: MemoryController,
     pub(crate) workers: Option<BackgroundWorkerPool>,
+    pub(crate) isolation: IsolationState,
     pub(crate) minor_requested: bool,
     pub(crate) major_requested: bool,
 }
@@ -130,6 +132,7 @@ impl GenerationalRuntime {
             config,
             memory: MemoryController::new(memory),
             workers: None,
+            isolation: IsolationState::new(),
             minor_requested: false,
             major_requested: false,
         }

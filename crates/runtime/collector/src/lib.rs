@@ -20,5 +20,8 @@ pub use generational::{
     NonHeapMemoryUsage, NonHeapMemoryUsageError, PageDescriptor, PageId, RegionId,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
-pub use ownership::{IsolatedRegionId, ObjectOwnership, PublicationStatistics, SchedulerId};
+pub use ownership::{
+    IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
+    PublicationStatistics, SchedulerId,
+};
 pub use relocation::{CollectorGeneration, CollectorObjectId, RelocationRuntime};

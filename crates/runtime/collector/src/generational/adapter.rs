@@ -215,16 +215,31 @@ impl RuntimeAdapter for GenerationalRuntime {
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
+        if matches!(
+            self.ownership(reference),
+            Some(crate::ownership::ObjectOwnership::Isolated(_))
+        ) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         let root = self.nursery.retain_root(reference)?;
         self.shade_new_root(reference);
         Ok(root)
     }
 
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
+        if self.isolation.owns_handle(root) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         self.nursery.release_root(root)
     }
 
     fn pin(&mut self, reference: ManagedReference) -> Result<PinHandle, RuntimeFailure> {
+        if matches!(
+            self.ownership(reference),
+            Some(crate::ownership::ObjectOwnership::Isolated(_))
+        ) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         let (type_id, object_map, already_pinned) = self
             .nursery
             .objects

@@ -76,11 +76,13 @@ refinement, and sweep dispatch only when explicitly configured; it does not
 claim adaptive sizing, work stealing, mutator-concurrent tracing/refinement, or
 concurrent heap mutation.
 
-The ownership foundation currently implements scheduler-local and shared graph
-publication. Isolated-region construction/transfer, scheduler-indexed local
-heaps, scoped arenas, borrowing integration, and compiler-proved barrier
-elimination remain separate required work; they are not simulated through the
-shared publication path.
+The ownership foundation implements scheduler-local/shared publication and
+isolated regions as separate mechanisms. Isolation verifies a unique registered
+owner and rejects other handles, pins, stack roots, or outside incoming edges
+before transactionally assigning a distinct region and placement. Transfer
+changes only the owner scheduler; dissolution returns the graph to local mature
+ownership. Scheduler-indexed local heaps, scoped arenas, borrowing integration,
+and compiler-proved barrier elimination remain separate required work.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and
