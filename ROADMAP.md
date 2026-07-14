@@ -298,6 +298,49 @@ Post-baseline library work has begun without widening the release foundation:
     Direct page-backed access and removal of the process-global common-path
     mutex remain open; repeat both workloads and add production-collector
     throughput/tail-latency gates once selectable.
+
+#### Remaining heap problems
+
+- [ ] **Heap changes can optimize one workload while regressing another.**
+  `allocationChurn` and `objectArray` are not yet one mandatory performance
+  gate. Fix this by rejecting any heap change that regresses either 50-sample
+  median by more than 5%, breaks its checksum, or materially worsens P99 or
+  peak memory.
+- [ ] **Logical pages do not own physical object payloads.** Objects still keep
+  separate host allocations and duplicate object/placement metadata, so page
+  locality does not accelerate ordinary reads, writes, or scanning. Fix this
+  with monomorphic page-backed payloads, page-shared layouts, compact side
+  metadata, and token-derived placement.
+- [ ] **The native common path is globally serialized.** Allocation, array
+  access, field access, and barriers repeatedly lock the process-global runtime
+  and look up opaque tokens. Fix this with scheduler/thread-local active pages,
+  TLAB cursors, barrier buffers, and checked direct access; keep global work on
+  explicit refill, publication, safe-point, and collection slow paths.
+- [ ] **Allocation rebuilds layout information at runtime.** Pointer maps are
+  cloned, sorted, and searched even though the compiler already knows each
+  allocation layout. Fix this with compiler-emitted static layout and
+  allocation-site descriptors shared by allocation, access, barriers, and
+  tracing.
+- [ ] **Reference stores still pay too much barrier machinery.** The runtime
+  reaches generic SATB/generational logic for cases that can be classified
+  cheaply. Fix this with inline conditional barriers, per-mutator buffers,
+  range barriers, unpublished-initialization elision, and adaptive pretenuring
+  for allocation sites with sustained high survival.
+- [ ] **ABI 1 prevents native nursery relocation.** LLVM roots are published
+  but cannot be rewritten and reloaded across every control-flow path, forcing
+  native allocations into stable mature space. Fix this with ABI 2 writable
+  roots, forced-relocation tests, stale-token rejection, and verified reloads
+  for stacks, registers, coroutines, unwind paths, and FFI transitions.
+- [ ] **The production concurrent collector is not selectable.** Native
+  scheduler integration, concurrent mature work, card refinement, lazy sweep,
+  stack watermarks, bounded assists, and race/stress proof remain incomplete.
+  Fix all of them before reporting `ProductionConcurrentGenerational`.
+- [ ] **Retained-object throughput is still far from the target.** The current
+  local result is about 34 ms. Fix the page/access bottlenecks without a churn
+  regression, reach below 25 ms first and below 12 ms next, then compare Pop
+  against other runtimes only when P99, GC CPU, memory, and pause budgets also
+  pass.
+
 - [ ] Prove representative programs behave the same through canonical MIR, the
   MIR interpreter, optimized MIR, and LLVM native execution.
 
