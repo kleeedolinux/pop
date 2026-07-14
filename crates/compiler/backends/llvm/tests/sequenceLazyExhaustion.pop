@@ -1,0 +1,78 @@
+namespace Main
+
+using Pop.Sequence
+
+private class CountingIterator implements Iterator<Int>
+    private current: Int
+    private calls: Int
+
+    public function CountingIterator.new(): CountingIterator
+        return CountingIterator { current = 0, calls = 0 }
+    end
+
+    public function CountingIterator:iterator(): Iterator<Int>
+        return self
+    end
+
+    public function CountingIterator:next(): Iteration<Int>
+        self.calls += 1
+        if self.current >= 1 then
+            return Iteration.End
+        end
+        self.current += 1
+        return Iteration.Item(self.current)
+    end
+
+    public function CountingIterator:callCount(): Int
+        return self.calls
+    end
+end
+
+private function main(): Int
+    local appendCounter = CountingIterator.new()
+    local appendSource: Iterator<Int> = appendCounter
+    local appended = append(appendSource, 9)
+    if appendCounter:callCount() ~= 0 then
+        return 1
+    end
+    if count(take(appended, 1)) ~= 1 then
+        return 2
+    end
+    if count(appended) ~= 1 or appendCounter:callCount() ~= 2 then
+        return 3
+    end
+    if count(appended) ~= 0 or appendCounter:callCount() ~= 2 then
+        return 4
+    end
+
+    local prependCounter = CountingIterator.new()
+    local prependSource: Iterator<Int> = prependCounter
+    local prepended = prepend(prependSource, 9)
+    if count(take(prepended, 1)) ~= 1 or prependCounter:callCount() ~= 0 then
+        return 5
+    end
+    if count(prepended) ~= 1 or prependCounter:callCount() ~= 2 then
+        return 6
+    end
+    if count(prepended) ~= 0 or prependCounter:callCount() ~= 2 then
+        return 7
+    end
+
+    local scanCounter = CountingIterator.new()
+    local scanSource: Iterator<Int> = scanCounter
+    local combineCalls = 0
+    local scanned = scan(scanSource, 0, function(state: Int, value: Int): Int
+        combineCalls += 1
+        return state + value
+    end)
+    if scanCounter:callCount() ~= 0 or combineCalls ~= 0 then
+        return 8
+    end
+    if count(scanned) ~= 1 or scanCounter:callCount() ~= 2 or combineCalls ~= 1 then
+        return 9
+    end
+    if count(scanned) ~= 0 or scanCounter:callCount() ~= 2 or combineCalls ~= 1 then
+        return 10
+    end
+    return 0
+end

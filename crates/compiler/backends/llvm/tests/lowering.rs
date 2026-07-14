@@ -1092,6 +1092,45 @@ fn emitted_llvm_executes_sequence_projection_and_composition() {
 }
 
 #[test]
+fn emitted_llvm_preserves_projection_counts_ties_and_generic_items() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\nusing Pop.Sequence\nprivate record Candidate\n    id: Int\n    key: Int\nend\nprivate function main(): Int\n    local first: Candidate = { id = 1, key = 5 }\n    local second: Candidate = { id = 2, key = 5 }\n    local third: Candidate = { id = 3, key = 7 }\n    local fourth: Candidate = { id = 4, key = 7 }\n    local candidates: {Candidate} = {first, second, third, fourth}\n    local minCalls = 0\n    local least = minByOr(candidates, function(value: Candidate): Int\n        minCalls += 1\n        return value.key\n    end, third)\n    local maxCalls = 0\n    local greatest = maxByOr(candidates, function(value: Candidate): Int\n        maxCalls += 1\n        return value.key\n    end, first)\n    local words: {String} = {\"first\", \"match\", \"last\"}\n    local word = findOr(words, function(value: String): Boolean\n        return value == \"match\"\n    end, \"missing\")\n    if least.id ~= 1 or greatest.id ~= 3 then\n        return 1\n    end\n    if minCalls ~= 4 or maxCalls ~= 4 then\n        return 2\n    end\n    if word ~= \"match\" then\n        return 3\n    end\n    return 0\nend\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-projection-contract");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "native projection contract failed: {}\n{module}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_lazy_adapter_exhaustion() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        ("src/main.pop", include_str!("sequenceLazyExhaustion.pop")),
+    ]);
+    let result = link_with_runtime_and_run(&module, "sequence-lazy-exhaustion");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "native lazy adapter contract failed: {}\n{module}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn emitted_llvm_preserves_integer_sequence_sum_overflow() {
     let module = native_modules(&[
         (
@@ -1136,6 +1175,69 @@ fn emitted_llvm_preserves_integer_sequence_product_overflow() {
     assert!(
         result.status.code().is_none(),
         "Sequence.product must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_projected_sequence_sum_overflow() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\nusing Pop.Sequence\nprivate function main(): Int\n    local values: {Int} = {9223372036854775807, 1}\n    return sumBy(values, function(value: Int): Int\n        return value\n    end)\nend\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "projected-sequence-sum-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Sequence.sumBy must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_projected_sequence_product_overflow() {
+    let module = native_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\nusing Pop.Sequence\nprivate function main(): Int\n    local values: {Int} = {9223372036854775807, 2}\n    return productBy(values, function(value: Int): Int\n        return value\n    end)\nend\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "projected-sequence-product-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Sequence.productBy must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_exact_source_overloads() {
+    let module = native_modules(&[
+        (
+            "src/int.pop",
+            "namespace Main\npublic function choose(value: Int): Int return value + 1 end\n",
+        ),
+        (
+            "src/text.pop",
+            "namespace Main\npublic function choose(value: String): String return value .. \"!\" end\n",
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\nprivate function main(): Int\n    if choose(\"pop\") ~= \"pop!\" then\n        return 1\n    end\n    if choose(41) ~= 42 then\n        return 2\n    end\n    return 0\nend\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "exact-source-overloads");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "native overload execution failed: {}\n{module}",
+        String::from_utf8_lossy(&result.stderr)
     );
 }
 

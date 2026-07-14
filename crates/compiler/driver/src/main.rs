@@ -42,6 +42,8 @@ use pop_types::SemanticType;
 const INTERNAL_BUBBLE: BubbleId = BubbleId::from_raw(1);
 const STANDARD_BUBBLE: BubbleId = BubbleId::from_raw(2);
 const FIRST_PACKAGE_BUBBLE: u32 = 3;
+const INTERNAL_PACKAGE_NAME: &str = "Pop.Internal";
+const STANDARD_PACKAGE_NAME: &str = "Pop.Standard";
 
 const USAGE: &str = "\
 Usage:
@@ -827,6 +829,16 @@ fn lower_package_recursive(
     let manifest = parse_package_manifest(&manifest_text)
         .map_err(|error| eprintln!("pop: {error}"))
         .ok()?;
+    if matches!(
+        manifest.name(),
+        INTERNAL_PACKAGE_NAME | STANDARD_PACKAGE_NAME
+    ) {
+        eprintln!(
+            "pop: Package `{}` attempts to replace a reserved foundation identity",
+            manifest.name()
+        );
+        return None;
+    }
 
     let mut external_libraries = vec![state.standard.clone()];
     for requirement in manifest.dependencies() {
@@ -1729,7 +1741,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
     let manifest = parse_package_manifest(&manifest_text)
         .map_err(|error| eprintln!("pop: invalid reserved Standard manifest: {error}"))
         .ok()?;
-    if manifest.name() != "Pop.Standard" {
+    if manifest.name() != STANDARD_PACKAGE_NAME {
         eprintln!("pop: reserved Standard manifest has the wrong identity");
         return None;
     }
