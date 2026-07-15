@@ -21,6 +21,7 @@
 mod api;
 mod async_lowering;
 mod bpf;
+mod ffi_buffer;
 mod instruction_lowering;
 mod lowering;
 mod module_lowering;

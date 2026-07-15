@@ -4625,6 +4625,8 @@ pub fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeArena>) 
     match arena.get(type_id) {
         Some(SemanticType::Builtin { definition, .. }) => {
             !pop_types::is_ffi_abi_builtin_type(*definition)
+                && *definition != pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID
+                && *definition != pop_types::FFI_ALLOCATION_ERROR_TYPE_ID
         }
         Some(
             SemanticType::Primitive(PrimitiveType::String)

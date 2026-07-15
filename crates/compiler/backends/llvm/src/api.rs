@@ -226,6 +226,10 @@ impl fmt::Display for LlvmModule {
 pub enum LlvmLoweringError {
     MirVerification(Vec<pop_mir::MirVerificationError>),
     RuntimeProfile(RuntimeProfileError),
+    FfiLayoutTargetMismatch {
+        catalog: String,
+        target: String,
+    },
     UnsupportedInstruction {
         function: FunctionId,
         value: ValueId,
@@ -249,6 +253,10 @@ impl fmt::Display for LlvmLoweringError {
                 write!(formatter, "MIR verification failed: {errors:?}")
             }
             Self::RuntimeProfile(error) => write!(formatter, "runtime profile rejected: {error}"),
+            Self::FfiLayoutTargetMismatch { catalog, target } => write!(
+                formatter,
+                "MIR FFI layout target {catalog} does not match LLVM target {target}"
+            ),
             Self::UnsupportedInstruction { function, value } => write!(
                 formatter,
                 "LLVM backend does not support MIR instruction f{} v{}",

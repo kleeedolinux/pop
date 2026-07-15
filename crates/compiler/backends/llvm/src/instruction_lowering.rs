@@ -5,7 +5,7 @@
 //! is a canonical MIR instruction or a source-language semantic rule.
 
 use pop_foundation::{BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
-use pop_mir::{MirInstructionKind, MirTerminator};
+use pop_mir::{MirFfiLayoutCatalog, MirInstructionKind, MirTerminator};
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
@@ -19,6 +19,7 @@ pub(crate) fn lower_instruction(
     instruction: &pop_mir::MirInstruction,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    ffi_layouts: &MirFfiLayoutCatalog,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
@@ -28,6 +29,11 @@ pub(crate) fn lower_instruction(
     direct_scalar_arrays: &DirectScalarArrays,
     options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
+    if let Some(lowered) =
+        crate::ffi_buffer::lower(instruction, value_types, types, ffi_layouts, field_layout)?
+    {
+        return Ok(lowered);
+    }
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
     let line = match instruction.kind() {
@@ -987,12 +993,7 @@ pub(crate) fn lower_instruction(
         | MirInstructionKind::FfiBufferWrite { .. }
         | MirInstructionKind::FfiBufferBorrow { .. }
         | MirInstructionKind::FfiBufferEndBorrow { .. }
-        | MirInstructionKind::FfiBufferClose { .. } => {
-            return Err(LlvmLoweringError::UnsupportedInstruction {
-                function: FunctionId::from_raw(u32::MAX),
-                value: instruction.result(),
-            });
-        }
+        | MirInstructionKind::FfiBufferClose { .. } => unreachable!("lowered above"),
     };
     Ok(line)
 }

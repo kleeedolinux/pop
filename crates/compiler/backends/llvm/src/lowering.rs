@@ -53,6 +53,12 @@ pub fn lower_mir_to_llvm_ir(
     target: &TargetSpec,
     options: LlvmLoweringOptions,
 ) -> Result<LlvmModule, LlvmLoweringError> {
+    if bubble.ffi_layouts().target() != target.triple() {
+        return Err(LlvmLoweringError::FfiLayoutTargetMismatch {
+            catalog: bubble.ffi_layouts().target().to_owned(),
+            target: target.triple().to_owned(),
+        });
+    }
     let native_abi = match options.runtime_profile {
         pop_backend_api::RuntimeProfile::BootstrapStableHandles => {
             pop_runtime_native_abi::NATIVE_ABI_1_VERSION
@@ -85,6 +91,7 @@ pub fn lower_mir_to_llvm_ir(
                 bubble.bubble(),
                 function,
                 types,
+                bubble.ffi_layouts(),
                 options,
                 &field_layout,
                 &record_fields,
@@ -96,6 +103,7 @@ pub fn lower_mir_to_llvm_ir(
                 bubble.bubble(),
                 function,
                 types,
+                bubble.ffi_layouts(),
                 options,
                 memory_none_functions.contains(&function.symbol()),
                 &field_layout,
@@ -110,6 +118,7 @@ pub fn lower_mir_to_llvm_ir(
             bubble.bubble(),
             method.function(),
             types,
+            bubble.ffi_layouts(),
             options,
             false,
             &field_layout,
@@ -130,6 +139,7 @@ pub fn lower_mir_to_llvm_ir(
                 bubble.bubble(),
                 nested,
                 types,
+                bubble.ffi_layouts(),
                 options,
                 &field_layout,
                 &record_fields,
@@ -153,6 +163,7 @@ pub fn lower_mir_to_llvm_ir(
             nested.blocks(),
             Some(("%environment", &self_slots)),
             types,
+            bubble.ffi_layouts(),
             options,
             &field_layout,
             &record_fields,
@@ -953,6 +964,7 @@ pub(crate) fn lower_function(
     bubble: BubbleId,
     function: &pop_mir::MirFunction,
     types: &TypeArena,
+    ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     memory_none: bool,
     field_layout: &BTreeMap<FieldId, u32>,
@@ -970,6 +982,7 @@ pub(crate) fn lower_function(
         function.blocks(),
         None,
         types,
+        ffi_layouts,
         options,
         field_layout,
         record_fields,
@@ -1243,6 +1256,7 @@ pub(crate) fn lower_function_parts(
     function_blocks: &[pop_mir::MirBlock],
     environment: Option<(&str, &BTreeSet<u32>)>,
     types: &TypeArena,
+    ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
@@ -1363,6 +1377,7 @@ pub(crate) fn lower_function_parts(
                 instruction,
                 &value_types,
                 types,
+                ffi_layouts,
                 field_layout,
                 record_fields,
                 record_field_types,

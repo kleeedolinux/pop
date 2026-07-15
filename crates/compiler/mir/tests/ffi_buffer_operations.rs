@@ -1,7 +1,7 @@
 use pop_foundation::{BorrowRegionId, BuiltinTypeId, ResultCaseId, TypeId, ValueId};
 use pop_mir::{
-    MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass, MirInstructionKind, parse_mir_dump,
-    verify_mir_bubble,
+    MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass, MirInstructionKind,
+    is_managed_reference_type_id, parse_mir_dump, verify_mir_bubble,
 };
 use pop_runtime_interface::FfiAbiLayoutId;
 use pop_target::TargetSpec;
@@ -47,6 +47,20 @@ fn buffer_operations_round_trip_with_exact_layout_and_region_text() {
             arguments: Vec::new(),
         })
         .expect("Ffi.AllocationError");
+    let null_pointer_error = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(208),
+            arguments: Vec::new(),
+        })
+        .expect("Ffi.NullPointerError");
+    assert!(!is_managed_reference_type_id(
+        allocation_error,
+        Some(&types)
+    ));
+    assert!(!is_managed_reference_type_id(
+        null_pointer_error,
+        Some(&types)
+    ));
     let open_result = types
         .intern(SemanticType::Builtin {
             definition: BuiltinTypeId::from_raw(100),
