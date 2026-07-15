@@ -43,6 +43,16 @@ pub fn optimize_mir(
         refresh_transformed_instruction_effects(&mut method.function);
         recompute_optimized_effects(&mut method.function);
     }
+    for nested in &mut bubble.nested_functions {
+        let mut function = nested.transformation_adapter();
+        summarize_constant_reduction(&mut function);
+        fold_constants(&mut function);
+        remove_unreachable_blocks(&mut function);
+        remove_dead_constants(&mut function);
+        refresh_transformed_instruction_effects(&mut function);
+        recompute_optimized_effects(&mut function);
+        nested.apply_transformation(function);
+    }
     refresh_transitive_call_effects(&mut bubble);
     while crate::lowering::insert_gc_safe_points(&mut bubble, arena) {
         refresh_transitive_call_effects(&mut bubble);
@@ -54,6 +64,12 @@ pub fn optimize_mir(
     for method in &mut bubble.methods {
         remove_redundant_gc_safe_points(&mut method.function);
         recompute_optimized_effects(&mut method.function);
+    }
+    for nested in &mut bubble.nested_functions {
+        let mut function = nested.transformation_adapter();
+        remove_redundant_gc_safe_points(&mut function);
+        recompute_optimized_effects(&mut function);
+        nested.apply_transformation(function);
     }
     verify_mir_bubble(&bubble, arena)?;
     Ok(bubble)
@@ -87,6 +103,11 @@ fn refresh_transitive_call_effects(bubble: &mut MirBubble) {
                 &previous_methods,
             );
             changed |= method_effects.insert(method.method, effects) != Some(effects);
+        }
+        for nested in &mut bubble.nested_functions {
+            let mut function = nested.transformation_adapter();
+            refresh_function_call_effects(&mut function, &previous_functions, &previous_methods);
+            nested.apply_transformation(function);
         }
         if !changed {
             break;

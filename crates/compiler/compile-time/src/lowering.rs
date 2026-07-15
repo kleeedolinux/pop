@@ -437,7 +437,9 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         TypedStatementKind::ErrorMatch { .. } | TypedStatementKind::ResultMatch { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
-        TypedStatementKind::Defer { .. } => UnsupportedCompileTimeConstruct::TypedFailure,
+        TypedStatementKind::Defer { .. } | TypedStatementKind::AsyncDefer { .. } => {
+            UnsupportedCompileTimeConstruct::TypedFailure
+        }
         TypedStatementKind::OptionalIf { .. } => UnsupportedCompileTimeConstruct::OptionalFlow,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {
@@ -514,7 +516,12 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::ResultPropagate { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
-        TypedExpressionKind::Await { .. } => UnsupportedCompileTimeConstruct::Suspension,
+        TypedExpressionKind::Await { .. }
+        | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::TaskCancelToken { .. }
+        | TypedExpressionKind::TaskCancel { .. }
+        | TypedExpressionKind::TaskGroup { .. }
+        | TypedExpressionKind::TaskStart { .. } => UnsupportedCompileTimeConstruct::Suspension,
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }

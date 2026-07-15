@@ -824,7 +824,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 })
                 .collect::<Option<Vec<_>>>()?;
             let result_types = self.call_result_types(signature.is_async(), result_types)?;
-            let mut typed_arguments = Vec::with_capacity(arguments.len());
+            let mut checked_arguments = Vec::with_capacity(arguments.len());
             for (argument, parameter_type) in arguments.iter().zip(parameter_types) {
                 let typed = self.check_expression_expected(
                     argument,
@@ -836,7 +836,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     typed.span(),
                     argument.span(),
                 );
-                typed_arguments.push(typed);
+                checked_arguments.push(typed);
             }
             let dispatch = self
                 .resolver
@@ -852,7 +852,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     dispatch,
                     is_async: signature.is_async(),
                     type_arguments: resolved_arguments,
-                    arguments: typed_arguments,
+                    arguments: checked_arguments,
                     span,
                 },
                 results: result_types,
@@ -1706,6 +1706,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::NumericFor { .. }
         | TypedStatementKind::GeneralizedFor { .. }
         | TypedStatementKind::Defer { .. }
+        | TypedStatementKind::AsyncDefer { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }

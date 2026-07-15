@@ -40,6 +40,44 @@ fn portable_optimization_folds_constants_and_removes_dead_values_and_blocks() {
 }
 
 #[test]
+fn portable_optimization_covers_nested_async_task_bodies() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nestedAsyncOptimization.pop",
+        "namespace Main\n\
+         public function makeTask(): Task<Int>\n\
+             local operation = async function(): Int\n\
+                 local unusedValue = 99\n\
+                 if true then\n\
+                     return 1 + 2\n\
+                 else\n\
+                     return 5\n\
+                 end\n\
+             end\n\
+             return operation()\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let construction =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let original_blocks = construction.nested_functions()[0].blocks().len();
+    let optimized = optimize_mir(construction, front_end.types()).expect("optimized MIR");
+
+    assert!(verify_mir_bubble(&optimized, front_end.types()).is_ok());
+    assert!(optimized.nested_functions()[0].blocks().len() < original_blocks);
+    let dump = optimized.dump();
+    assert!(dump.contains("const.integer Int64 3"));
+    assert!(!dump.contains("const.integer Int64 99"));
+    assert!(!dump.contains("integer.checkedAdd"));
+}
+
+#[test]
 fn portable_optimization_folds_typed_primitive_equality() {
     let source = SourceFile::new(
         FileId::from_raw(0),

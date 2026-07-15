@@ -304,10 +304,104 @@ pub(crate) fn lower_instruction(
             right.raw()
         ),
         MirInstructionKind::FunctionReference(symbol) => {
-            format!("{result} = add i64 0, {}", direct_function_tag(*symbol))
+            let mut lines = lower_mapped_allocation(&result, 1, &[]);
+            lines.push(format!(
+                "call i8 @{}(i64 {result}, i64 1, i64 {})",
+                native_runtime_symbol(RuntimeOperation::FieldSet),
+                direct_function_tag(*symbol)
+            ));
+            lines.join("\n")
         }
-        MirInstructionKind::TaskCreate { .. } => {
-            return Err(LlvmLoweringError::UnsupportedAsync);
+        MirInstructionKind::TaskCreate {
+            dispatch,
+            arguments,
+            ..
+        } => {
+            let mut call_arguments = Vec::new();
+            let callee = match dispatch {
+                pop_mir::MirTaskDispatch::Direct(function) => {
+                    async_function_create_name(bubble, *function)
+                }
+                pop_mir::MirTaskDispatch::Referenced(function) => {
+                    async_function_create_name(function.bubble(), function.symbol())
+                }
+                pop_mir::MirTaskDispatch::Indirect(callee) => {
+                    let function_type = value_types
+                        .get(callee)
+                        .copied()
+                        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+                    call_arguments.push(format!("i64 %v{}", callee.raw()));
+                    async_indirect_create_name(bubble, function_type)
+                }
+            };
+            call_arguments.extend(
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        llvm_value_type(value_types, *argument, types)
+                            .map(|ty| format!("{ty} %v{}", argument.raw()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            call_arguments.push("i64 0".to_owned());
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_created = call i64 @{callee}({})\n{result}_valid = icmp ne i64 {result}_created, 0\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:\n  {result} = add i64 {result}_created, 0",
+                call_arguments.join(", "),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
+        MirInstructionKind::CancelSourceCreate => format!(
+            "{result} = call i64 @{}()",
+            native_runtime_symbol(RuntimeOperation::CancelSourceCreate)
+        ),
+        MirInstructionKind::CancelSourceToken { source } => format!(
+            "{result} = call i64 @{}(i64 %v{})",
+            native_runtime_symbol(RuntimeOperation::CancelSourceToken),
+            source.raw()
+        ),
+        MirInstructionKind::CancelRequest { source } => format!(
+            "{result}_requested = call i8 @{}(i64 %v{})\n{result} = add i64 0, 0",
+            native_runtime_symbol(RuntimeOperation::TaskCancel),
+            source.raw()
+        ),
+        MirInstructionKind::TaskGroupCreate {
+            cancel,
+            body,
+            completion_type,
+            ..
+        } => {
+            let body_type = value_types
+                .get(body)
+                .copied()
+                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+            let create = async_indirect_create_name(bubble, body_type);
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_group = call i64 @{}(i64 %v{})\n{result}_group_valid = icmp ne i64 {result}_group, 0\nbr i1 {result}_group_valid, label %{label}_group_ready, label %{label}_trap\n{label}_group_ready:\n{result}_group_root = call i64 @{}(i64 {result}_group)\n{result}_group_root_valid = icmp ne i64 {result}_group_root, 0\nbr i1 {result}_group_root_valid, label %{label}_body_create, label %{label}_trap\n{label}_body_create:\n{result}_body = call i64 @{create}(i64 %v{}, i64 {result}_group, i64 %v{})\n{result}_body_valid = icmp ne i64 {result}_body, 0\nbr i1 {result}_body_valid, label %{label}_body_ready, label %{label}_trap\n{label}_body_ready:\n{result}_body_root = call i64 @{}(i64 {result}_body)\n{result}_body_root_valid = icmp ne i64 {result}_body_root, 0\nbr i1 {result}_body_root_valid, label %{label}_wrap, label %{label}_trap\n{label}_wrap:\n{result}_wrapped = call i64 @{}(i64 {result}_group, i64 {result}_body, i8 {})\n{result}_body_root_released = call i8 @{}(i64 {result}_body_root)\n{result}_group_root_released = call i8 @{}(i64 {result}_group_root)\n{result}_wrapped_valid = icmp ne i64 {result}_wrapped, 0\n{result}_body_release_valid = icmp eq i8 {result}_body_root_released, 1\n{result}_group_release_valid = icmp eq i8 {result}_group_root_released, 1\n{result}_release_valid = and i1 {result}_body_release_valid, {result}_group_release_valid\n{result}_all_valid = and i1 {result}_wrapped_valid, {result}_release_valid\nbr i1 {result}_all_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:\n  {result} = add i64 {result}_wrapped, 0",
+                native_runtime_symbol(RuntimeOperation::TaskGroupCreate),
+                cancel.raw(),
+                native_runtime_symbol(RuntimeOperation::RetainRoot),
+                body.raw(),
+                cancel.raw(),
+                native_runtime_symbol(RuntimeOperation::RetainRoot),
+                native_runtime_symbol(RuntimeOperation::TaskGroupWrap),
+                u8::from(is_managed_type(*completion_type, types)),
+                native_runtime_symbol(RuntimeOperation::ReleaseRoot),
+                native_runtime_symbol(RuntimeOperation::ReleaseRoot),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
+        MirInstructionKind::TaskStart { group, task } => {
+            let label = format!("v{}_task_start", instruction.result().raw());
+            format!(
+                "{result}_started = call i8 @{}(i64 %v{}, i64 %v{})\n{result}_valid = icmp eq i8 {result}_started, 1\nbr i1 {result}_valid, label %{label}_valid, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_valid:\n  {result} = add i64 %v{}, 0",
+                native_runtime_symbol(RuntimeOperation::TaskStartGroup),
+                group.raw(),
+                task.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+                task.raw(),
+            )
         }
         MirInstructionKind::CallDirect {
             function: callee,
@@ -425,7 +519,7 @@ pub(crate) fn lower_instruction(
                 direct_scalar_arrays.allocation(instruction.result())
             {
                 debug_assert_eq!(origin, instruction.result());
-                lower_direct_array_create(&result, allocation, value_types, types)?
+                lower_direct_array_create(bubble, &result, allocation, value_types, types)?
             } else {
                 lower_array_create(
                     &result,
@@ -648,7 +742,15 @@ pub(crate) fn lower_instruction(
         }
         MirInstructionKind::ArrayFill { array, value, .. } => {
             if let Some((origin, allocation)) = direct_scalar_arrays.allocation(*array) {
-                lower_direct_array_fill(&result, origin, allocation, *value, value_types, types)?
+                lower_direct_array_fill(
+                    bubble,
+                    &result,
+                    origin,
+                    allocation,
+                    *value,
+                    value_types,
+                    types,
+                )?
             } else {
                 lower_array_fill(&result, *array, *value, value_types, types)?
             }
@@ -1605,6 +1707,7 @@ pub(crate) fn lower_array_create(
 }
 
 pub(crate) fn lower_direct_array_create(
+    bubble: BubbleId,
     result: &str,
     allocation: DirectScalarArray,
     values: &BTreeMap<ValueId, TypeId>,
@@ -1670,7 +1773,8 @@ pub(crate) fn lower_direct_array_create(
         "  unreachable".to_owned(),
         format!("{label}_initialize:"),
         format!(
-            "  call void @pop_llvm_fill_scalar_array(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            "  call void @{}(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            crate::lowering::direct_scalar_array_fill_name(bubble),
             allocation.length.raw()
         ),
         format!("  br label %{label}_create"),
@@ -1857,6 +1961,7 @@ pub(crate) fn lower_direct_array_set(
 }
 
 pub(crate) fn lower_direct_array_fill(
+    bubble: BubbleId,
     result: &str,
     origin: ValueId,
     allocation: DirectScalarArray,
@@ -1876,7 +1981,8 @@ pub(crate) fn lower_direct_array_fill(
     lines.extend([
         format!("{result}_storage = inttoptr i64 %v{} to ptr", origin.raw()),
         format!(
-            "call void @pop_llvm_fill_scalar_array(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            "call void @{}(ptr {result}_storage, i64 %v{}, i64 {stored})",
+            crate::lowering::direct_scalar_array_fill_name(bubble),
             allocation.length.raw()
         ),
         format!("br label %{label}_continue"),
@@ -2480,8 +2586,7 @@ pub(crate) fn lower_gc_safe_point(
             let rejected = format!("{label}_gc_rejected");
             lines.extend([
                 format!(
-                    "{status} = call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
-                    safe_point_symbol
+                    "{status} = call i8 @{safe_point_symbol}(i32 {safe_point}, ptr null, i64 0)"
                 ),
                 format!("{accepted} = icmp eq i8 {status}, 1"),
                 format!("br i1 {accepted}, label %{continuation}, label %{rejected}"),
@@ -2495,10 +2600,7 @@ pub(crate) fn lower_gc_safe_point(
             ]);
         } else {
             lines.extend([
-                format!(
-                    "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
-                    safe_point_symbol
-                ),
+                format!("call i8 @{safe_point_symbol}(i32 {safe_point}, ptr null, i64 0)"),
                 format!("br label %{continuation}"),
                 format!("{continuation}:"),
             ]);
@@ -2554,16 +2656,14 @@ pub(crate) fn lower_gc_safe_point(
 pub(crate) fn is_managed_type(type_id: TypeId, types: &TypeArena) -> bool {
     !matches!(
         types.get(type_id),
-        Some(
-            SemanticType::Primitive(
-                PrimitiveType::Nil
-                    | PrimitiveType::Boolean
-                    | PrimitiveType::Integer(_)
-                    | PrimitiveType::Float32
-                    | PrimitiveType::Float64
-                    | PrimitiveType::Never
-            ) | SemanticType::Function { .. }
-        )
+        Some(SemanticType::Primitive(
+            PrimitiveType::Nil
+                | PrimitiveType::Boolean
+                | PrimitiveType::Integer(_)
+                | PrimitiveType::Float32
+                | PrimitiveType::Float64
+                | PrimitiveType::Never
+        ))
     )
 }
 
@@ -3238,7 +3338,7 @@ pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, Ll
     }
 }
 
-fn optional_inner_type(types: &TypeArena, optional: TypeId) -> Option<TypeId> {
+pub(crate) fn optional_inner_type(types: &TypeArena, optional: TypeId) -> Option<TypeId> {
     let nil = types.source_type("nil")?;
     let SemanticType::Union(members) = types.get(optional)? else {
         return None;

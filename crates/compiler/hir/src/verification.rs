@@ -98,6 +98,9 @@ pub enum HirVerificationError {
         type_id: TypeId,
         span: SourceSpan,
     },
+    InvalidTaskOperation {
+        span: SourceSpan,
+    },
     ExpressionTypeMismatch {
         expected: TypeId,
         found: TypeId,
@@ -1256,6 +1259,7 @@ fn verify_hir_callable_with_schema(
         cell_bindings,
         loop_depth: 0,
         cleanup_depth: 0,
+        async_cleanup_depth: 0,
         is_async: function.is_async,
         errors: Vec::new(),
     };
@@ -1310,11 +1314,27 @@ struct Verifier<'arena> {
     cell_bindings: BTreeSet<BindingId>,
     loop_depth: u32,
     cleanup_depth: u32,
+    async_cleanup_depth: u32,
     is_async: bool,
     errors: Vec<HirVerificationError>,
 }
 
 impl Verifier<'_> {
+    fn is_builtin_type(&self, type_id: TypeId, name: &str, arguments: &[TypeId]) -> bool {
+        embedded_bootstrap_schema()
+            .ok()
+            .and_then(|schema| schema.type_by_source_name(name).copied())
+            .is_some_and(|entry| {
+                matches!(
+                    self.arena.get(type_id),
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments: found,
+                    }) if *definition == entry.id() && found == arguments
+                )
+            })
+    }
+
     #[allow(clippy::too_many_lines)]
     fn verify_statements(&mut self, statements: &[HirStatement], visible: &BTreeSet<LocalId>) {
         let mut visible = visible.clone();
@@ -1838,6 +1858,19 @@ impl Verifier<'_> {
                     }
                     self.cleanup_depth = self.cleanup_depth.saturating_add(1);
                     self.verify_statements(body, &visible);
+                    self.cleanup_depth = self.cleanup_depth.saturating_sub(1);
+                }
+                HirStatementKind::AsyncDefer { body } => {
+                    if self.cleanup_depth != 0 || !self.is_async {
+                        self.errors
+                            .push(HirVerificationError::InvalidCleanupControl {
+                                span: statement.span(),
+                            });
+                    }
+                    self.cleanup_depth = self.cleanup_depth.saturating_add(1);
+                    self.async_cleanup_depth = self.async_cleanup_depth.saturating_add(1);
+                    self.verify_statements(body, &visible);
+                    self.async_cleanup_depth = self.async_cleanup_depth.saturating_sub(1);
                     self.cleanup_depth = self.cleanup_depth.saturating_sub(1);
                 }
                 HirStatementKind::FieldSet { base, field, value } => {
@@ -2501,7 +2534,7 @@ impl Verifier<'_> {
             }
             HirExpressionKind::Await { task } => {
                 self.verify_expression(task, visible);
-                if !self.is_async {
+                if !self.is_async || self.cleanup_depth != self.async_cleanup_depth {
                     self.errors.push(HirVerificationError::AwaitOutsideAsync {
                         span: expression.span(),
                     });
@@ -2509,7 +2542,7 @@ impl Verifier<'_> {
                 let task_definition = embedded_bootstrap_schema()
                     .ok()
                     .and_then(|schema| schema.type_by_source_name("Task").copied())
-                    .map(|entry| entry.id());
+                    .map(pop_types::BootstrapTypeEntry::id);
                 let valid = matches!(
                     (task_definition, self.arena.get(task.type_id())),
                     (
@@ -2526,6 +2559,90 @@ impl Verifier<'_> {
                         type_id: task.type_id(),
                         span: expression.span(),
                     });
+                }
+            }
+            HirExpressionKind::TaskCancellationSource => {
+                if !self.is_builtin_type(expression.type_id(), "Task.CancelSource", &[]) {
+                    self.errors
+                        .push(HirVerificationError::InvalidTaskOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::TaskCancelToken { source } => {
+                self.verify_expression(source, visible);
+                if !self.is_builtin_type(source.type_id(), "Task.CancelSource", &[])
+                    || !self.is_builtin_type(expression.type_id(), "CancelToken", &[])
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidTaskOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::TaskCancel { source } => {
+                self.verify_expression(source, visible);
+                if !self.is_builtin_type(source.type_id(), "Task.CancelSource", &[])
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(pop_types::PrimitiveType::Nil))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidTaskOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::TaskStart { group, task } => {
+                self.verify_expression(group, visible);
+                self.verify_expression(task, visible);
+                let valid_task = embedded_bootstrap_schema()
+                    .ok()
+                    .and_then(|schema| schema.type_by_source_name("Task").copied())
+                    .is_some_and(|entry| {
+                        matches!(
+                            self.arena.get(task.type_id()),
+                            Some(SemanticType::Builtin { definition, arguments })
+                                if *definition == entry.id() && arguments.len() == 1
+                        )
+                    });
+                if !self.is_builtin_type(group.type_id(), "Task.Group", &[])
+                    || !valid_task
+                    || expression.type_id() != task.type_id()
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidTaskOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::TaskGroup { cancel, body } => {
+                self.verify_expression(cancel, visible);
+                self.verify_expression(body, visible);
+                let completion = match self.arena.get(body.type_id()) {
+                    Some(SemanticType::Function {
+                        is_async: true,
+                        parameters,
+                        results,
+                        ..
+                    }) if parameters.len() == 1
+                        && self.is_builtin_type(parameters[0], "Task.Group", &[]) =>
+                    {
+                        match results.as_slice() {
+                            [result] => Some(*result),
+                            _ => self.arena.find(&SemanticType::Tuple(results.clone())),
+                        }
+                    }
+                    _ => None,
+                };
+                if !self.is_builtin_type(cancel.type_id(), "CancelToken", &[])
+                    || !completion.is_some_and(|completion| {
+                        self.is_builtin_type(expression.type_id(), "Task", &[completion])
+                    })
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidTaskOperation {
+                            span: expression.span(),
+                        });
                 }
             }
             HirExpressionKind::Call {
@@ -2828,6 +2945,7 @@ impl Verifier<'_> {
         let saved_cell_bindings = std::mem::replace(&mut self.cell_bindings, nested_cell_bindings);
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let saved_cleanup_depth = std::mem::replace(&mut self.cleanup_depth, 0);
+        let saved_async_cleanup_depth = std::mem::replace(&mut self.async_cleanup_depth, 0);
         let saved_is_async = std::mem::replace(&mut self.is_async, closure.is_async);
         for parameter in &closure.parameters {
             self.verify_type(parameter.type_id, parameter.span);
@@ -2846,6 +2964,7 @@ impl Verifier<'_> {
         self.cell_bindings = saved_cell_bindings;
         self.loop_depth = saved_loop_depth;
         self.cleanup_depth = saved_cleanup_depth;
+        self.async_cleanup_depth = saved_async_cleanup_depth;
         self.is_async = saved_is_async;
     }
 
@@ -3769,7 +3888,7 @@ impl Verifier<'_> {
         let task = embedded_bootstrap_schema()
             .ok()
             .and_then(|schema| schema.type_by_source_name("Task").copied())
-            .map(|entry| entry.id());
+            .map(pop_types::BootstrapTypeEntry::id);
         completion
             .zip(task)
             .and_then(|(completion, definition)| {
@@ -4482,7 +4601,9 @@ fn collect_local_binding_map(
                     collect_local_binding_map(&arm.body, local_bindings);
                 }
             }
-            HirStatementKind::Defer { body } => collect_local_binding_map(body, local_bindings),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                collect_local_binding_map(body, local_bindings);
+            }
             HirStatementKind::LocalSet { .. }
             | HirStatementKind::ParameterSet { .. }
             | HirStatementKind::CaptureSet { .. }
@@ -4689,13 +4810,15 @@ fn collect_written_bindings(
                     );
                 }
             }
-            HirStatementKind::Defer { body } => collect_written_bindings(
-                body,
-                parameter_bindings,
-                capture_bindings,
-                local_bindings,
-                written,
-            ),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                collect_written_bindings(
+                    body,
+                    parameter_bindings,
+                    capture_bindings,
+                    local_bindings,
+                    written,
+                )
+            }
             HirStatementKind::FieldSet { base, value, .. } => {
                 collect_cell_captures(base, written);
                 collect_cell_captures(value, written);
@@ -4862,8 +4985,19 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
                 collect_cell_captures(callee, written);
             }
         }
-        HirExpressionKind::Unary { operand, .. } | HirExpressionKind::Await { task: operand } => {
+        HirExpressionKind::Unary { operand, .. }
+        | HirExpressionKind::Await { task: operand }
+        | HirExpressionKind::TaskCancelToken { source: operand }
+        | HirExpressionKind::TaskCancel { source: operand } => {
             collect_cell_captures(operand, written)
+        }
+        HirExpressionKind::TaskGroup { cancel, body } => {
+            collect_cell_captures(cancel, written);
+            collect_cell_captures(body, written);
+        }
+        HirExpressionKind::TaskStart { group, task } => {
+            collect_cell_captures(group, written);
+            collect_cell_captures(task, written);
         }
         HirExpressionKind::Binary { left, right, .. } => {
             collect_cell_captures(left, written);
@@ -4911,6 +5045,7 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
+        | HirExpressionKind::TaskCancellationSource
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }

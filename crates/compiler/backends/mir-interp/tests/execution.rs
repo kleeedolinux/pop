@@ -208,6 +208,114 @@ fn completed_async_tasks_execute_through_await() {
 }
 
 #[test]
+fn async_cleanup_awaits_before_the_enclosing_task_completes() {
+    let (mir, types, run) = executable_source_function(
+        "namespace Main\n\
+         private async function failDuringClose(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public async function run(): Int\n\
+             async defer\n\
+                 local ignored = await failDuringClose()\n\
+             end\n\
+             return 7\n\
+         end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified async cleanup MIR");
+
+    assert_eq!(
+        interpreter.call(run, &[]),
+        Err(trap(TrapKind::DivisionByZero))
+    );
+}
+
+#[test]
+fn structured_group_transfers_child_ownership_and_returns_the_exact_completion() {
+    let (mir, types, run) = executable_source_function(
+        "namespace Main\n\
+         private async function load(cancel: CancelToken): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child = Task.start(group, load(cancel))\n\
+                 return await child\n\
+             end)\n\
+             return await grouped\n\
+         end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified structured-task MIR");
+
+    assert_eq!(
+        interpreter.call(run, &[]).expect("group completion"),
+        vec![int(42)]
+    );
+}
+
+#[test]
+fn closing_group_joins_an_unawaited_child_and_propagates_its_failure() {
+    let (mir, types, run) = executable_source_function(
+        "namespace Main\n\
+         private async function fail(cancel: CancelToken): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local ignored = Task.start(group, fail(cancel))\n\
+                 return 7\n\
+             end)\n\
+             return await grouped\n\
+         end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified structured-task MIR");
+
+    assert_eq!(
+        interpreter.call(run, &[]),
+        Err(trap(TrapKind::DivisionByZero))
+    );
+}
+
+#[test]
+fn explicit_cancellation_is_observed_but_async_cleanup_await_is_masked() {
+    let (mir, types, run) = executable_source_function(
+        "namespace Main\n\
+         private async function pending(cancel: CancelToken): Int\n\
+             return 8\n\
+         end\n\
+         private async function failDuringCleanup(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 async defer\n\
+                     local ignored = await failDuringCleanup()\n\
+                 end\n\
+                 local child = Task.start(group, pending(cancel))\n\
+                 return await child\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
+         end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified cancellation MIR");
+
+    assert_eq!(
+        interpreter.call(run, &[]),
+        Err(trap(TrapKind::DivisionByZero))
+    );
+}
+
+#[test]
 fn portable_cross_bubble_generic_capsules_execute_private_helpers() {
     let library_bubble = BubbleId::from_raw(2);
     let library_source = SourceFile::new(

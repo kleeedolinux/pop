@@ -324,6 +324,20 @@ fn accepted_adrs_have_unique_numeric_identities() {
     }
 }
 
+#[test]
+fn pull_request_tests_do_not_execute_harness_free_benchmarks() {
+    let workflow = read_required(repository_root().join(".github/workflows/pr-check.yml"));
+
+    assert!(
+        workflow.contains("run: cargo test --workspace --lib --bins --tests --examples"),
+        "PR tests must select test targets without executing harness-free benchmarks"
+    );
+    assert!(
+        !workflow.contains("run: cargo test --workspace --all-targets"),
+        "Cargo's all-targets test mode executes harness-free benchmark binaries"
+    );
+}
+
 fn quoted_values_in_array(manifest: &str, key: &str) -> BTreeSet<String> {
     let key_start = manifest
         .find(key)
@@ -1231,6 +1245,8 @@ fn standard_bootstrap_preserves_the_adr_0058_prelude() {
             "112\tAsyncClose\tPop.Standard\t0\tInterface\ttrue",
             "113\tIteration\tPop.Standard\t1\tNominal\ttrue",
             "114\tCancelToken\tPop.Standard\t0\tNominal\ttrue",
+            "115\tTask.Group\tPop.Standard\t0\tNominal\tfalse",
+            "116\tTask.CancelSource\tPop.Standard\t0\tNominal\tfalse",
         ],
         "ADR 0058 prelude inventory drifted"
     );

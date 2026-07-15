@@ -21,11 +21,37 @@ impl NativeAbiVersion {
     }
 }
 
-pub const NATIVE_ABI_1_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 11);
+pub const NATIVE_ABI_1_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 12);
 pub const NATIVE_ABI_2_VERSION: NativeAbiVersion = NativeAbiVersion::new(2, 0);
 pub const ABI_SUPPORT_SYMBOL: &str = "pop_rt_supports_abi";
 pub const GC_SAFE_POINT_V2_SYMBOL: &str = "pop_rt_gc_safe_point_v2";
 pub const INVALID_HANDLE: u64 = 0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NativeTaskStatus {
+    Failure = 0,
+    Ready = 1,
+    Pending = 2,
+    Completed = 3,
+    Cancelled = 4,
+    Panicked = 5,
+}
+
+impl NativeTaskStatus {
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        Some(match raw {
+            0 => Self::Failure,
+            1 => Self::Ready,
+            2 => Self::Pending,
+            3 => Self::Completed,
+            4 => Self::Cancelled,
+            5 => Self::Panicked,
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

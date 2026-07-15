@@ -34,6 +34,8 @@ type:111	Type	Pop.Standard	Pop	Close	Close	prelude	implemented	true	architecture
 type:112	Type	Pop.Standard	Pop	AsyncClose	AsyncClose	prelude	implemented	true	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md
 type:113	Type	Pop.Standard	Pop	Iteration	Iteration<T>	prelude	implemented	true	architecture/decisions/0053-nominal-iteration-sequences-and-growable-lists.md
 type:114	Type	Pop.Standard	Pop	CancelToken	CancelToken	prelude	implemented	true	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md
+type:115	Type	Pop.Standard	Pop.Task	Group	Task.Group	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
+type:116	Type	Pop.Standard	Pop.Task	CancelSource	Task.CancelSource	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
 attribute:0	Attribute	Pop.Standard	Pop	CompileTime	@CompileTime	prelude	implemented	true	architecture/10-udas-compile-time-and-reflection.md
 attribute:1	Attribute	Pop.Standard	Pop	AttributeUsage	@AttributeUsage	prelude	implemented	true	architecture/10-udas-compile-time-and-reflection.md
 attribute:2	Attribute	Pop.Standard	Pop	AttributeValidator	@AttributeValidator	prelude	implemented	true	architecture/10-udas-compile-time-and-reflection.md
@@ -83,3 +85,8 @@ api:38	Api	Pop.Standard	Pop.Sequence	elementAtOr	elementAtOr<T,TSource:Iterable<
 api:39	Api	Pop.Standard	Pop.Sequence	findLastOr	findLastOr<T,TSource:Iterable<T>>(TSource,function(T)->Boolean,T)->T	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md
 api:40	Api	Pop.Standard	Pop.Sequence	indexLastOr	indexLastOr<T,TSource:Iterable<T>>(TSource,function(T)->Boolean,Int)->Int	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md
 api:41	Api	Pop.Standard	Pop.Sequence	reduceOr	reduceOr<T,TSource:Iterable<T>>(TSource,function(T,T)->T,T)->T	standard	prototype	false	architecture/decisions/0076-sequence-index-last-and-reduction.md
+api:42	Api	Pop.Standard	Pop.Task	cancellationSource	cancellationSource()->Task.CancelSource	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
+api:43	Api	Pop.Standard	Pop.Task	cancelToken	cancelToken(Task.CancelSource)->CancelToken	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
+api:44	Api	Pop.Standard	Pop.Task	cancel	cancel(Task.CancelSource)->()	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
+api:45	Api	Pop.Standard	Pop.Task	group	group<T>(CancelToken,async function(Task.Group):T)->Task<T>	standard	implemented	false	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md
+api:46	Api	Pop.Standard	Pop.Task	start	start<T>(Task.Group,Task<T>)->Task<T>	standard	implemented	false	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md

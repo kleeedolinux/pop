@@ -19,7 +19,11 @@ pub extern "C" fn pop_rt_abi_minor() -> u16 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_supports_abi(major: u16, minor: u16) -> u8 {
-    u8::from(major == NATIVE_ABI_1_VERSION.major() && minor == NATIVE_ABI_1_VERSION.minor())
+    u8::from(
+        major == NATIVE_ABI_1_VERSION.major()
+            && matches!(minor, 11 | 12)
+            && minor <= NATIVE_ABI_1_VERSION.minor(),
+    )
 }
 
 #[allow(unsafe_code)]

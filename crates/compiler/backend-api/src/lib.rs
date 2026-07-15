@@ -252,7 +252,7 @@ impl ProgramRequirements {
                 self.require_runtime(RuntimeContract::GarbageCollector, origin);
             }
             MirEffect::MayUnwind => self.require_runtime(RuntimeContract::ExceptionRuntime, origin),
-            MirEffect::Suspends => {
+            MirEffect::Suspends | MirEffect::Synchronizes => {
                 self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
             }
             MirEffect::Blocks => {
@@ -325,7 +325,12 @@ impl ProgramRequirements {
             | MirInstructionKind::CaptureStore { .. } => {
                 self.require_runtime(RuntimeContract::ClosureEnvironment, origin);
             }
-            MirInstructionKind::TaskCreate { .. } => {
+            MirInstructionKind::TaskCreate { .. }
+            | MirInstructionKind::CancelSourceCreate
+            | MirInstructionKind::CancelSourceToken { .. }
+            | MirInstructionKind::CancelRequest { .. }
+            | MirInstructionKind::TaskGroupCreate { .. }
+            | MirInstructionKind::TaskStart { .. } => {
                 self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
             }
             _ => {}

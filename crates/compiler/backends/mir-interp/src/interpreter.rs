@@ -8,13 +8,16 @@ use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
 use pop_foundation::{NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
 use pop_mir::{
-    MirBubble, MirInstruction, MirInstructionKind, MirSuspendOperation, MirTaskDispatch,
-    MirTerminator, MirUnwindAction, MirVerificationError, verify_mir_bubble,
+    MirBubble, MirCancellationMode, MirInstruction, MirInstructionKind, MirSuspendOperation,
+    MirTaskDispatch, MirTerminator, MirUnwindAction, MirVerificationError, verify_mir_bubble,
 };
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, BarrierKind, ObjectAllocationRequest, ObjectMap,
-    ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
-    RuntimeTypeId, TableAllocationRequest, Trap, TrapKind, WriteBarrier,
+    AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
+    CancellationTokenId, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
+    PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
+    TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle,
+    TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason,
+    WriteBarrier,
 };
 use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
@@ -32,6 +35,8 @@ fn managed_type(arena: &TypeArena, type_id: TypeId) -> bool {
                 | SemanticType::Class { .. }
                 | SemanticType::Interface { .. }
                 | SemanticType::Builtin { .. }
+                | SemanticType::Function { .. }
+                | SemanticType::ErrorUnion { .. }
         )
     )
 }
@@ -163,6 +168,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
             active_captures: None,
+            active_task: None,
         }
         .call(function, &arguments)
         .map(|values| values.into_iter().map(|value| value.visible).collect())
@@ -181,6 +187,7 @@ struct Engine<'mir, 'runtime, R> {
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
     active_captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
+    active_task: Option<TaskId>,
 }
 
 enum PrivateValue {
@@ -197,6 +204,22 @@ enum PrivateValue {
         range_started: bool,
     },
     Task(Rc<RefCell<TaskState>>),
+    CancellationSource(Rc<RefCell<CancellationState>>),
+    CancellationToken(Rc<RefCell<CancellationState>>),
+    TaskGroup(Rc<RefCell<InterpreterTaskGroup>>),
+}
+
+#[derive(Clone)]
+struct CancellationState {
+    token: CancellationTokenId,
+    requested: bool,
+}
+
+struct InterpreterTaskGroup {
+    lifecycle: TaskGroupLifecycle,
+    cancellation: Rc<RefCell<CancellationState>>,
+    children: BTreeMap<TaskId, SymbolId>,
+    reference: ManagedReference,
 }
 
 #[derive(Clone)]
@@ -204,14 +227,21 @@ enum TaskTarget {
     Direct(SymbolId),
     Referenced(SymbolIdentity),
     Indirect(RuntimeValue),
+    Group { body: RuntimeValue, group: SymbolId },
 }
 
 #[derive(Clone)]
-enum TaskState {
+struct TaskState {
+    lifecycle: TaskLifecycle,
+    completion_type: TypeId,
+    execution: TaskExecution,
+}
+
+#[derive(Clone)]
+enum TaskExecution {
     Created {
         target: TaskTarget,
         arguments: Vec<RuntimeValue>,
-        completion_type: TypeId,
         owner: pop_runtime_interface::ManagedReference,
         completion_slot: ObjectSlot,
     },
@@ -441,10 +471,19 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     operation: MirSuspendOperation::Task { task, result_type },
                     resume,
                     cancellation,
+                    cancellation_mode,
                     unwind,
                     live_frame,
                     ..
                 } => {
+                    if *cancellation_mode == MirCancellationMode::Observe
+                        && self.active_cancellation_observation(false)
+                            == CancellationObservation::Requested
+                    {
+                        pending_unwind = None;
+                        block_index = cancellation.raw() as usize;
+                        continue;
+                    }
                     self.publish_suspend_frame(live_frame, &mut values)?;
                     let task = value(&values, *task)?.clone();
                     match self.await_task(&task, *result_type) {
@@ -458,9 +497,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                             values.insert(argument.value(), completion);
                             block_index = resume.raw() as usize;
                         }
-                        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(reason)))
-                            if reason == pop_runtime_interface::UnwindReason::Cancellation =>
-                        {
+                        Err(ExecutionError::Runtime(RuntimeFailure::Unwind(
+                            pop_runtime_interface::UnwindReason::Cancellation,
+                        ))) => {
                             pending_unwind = None;
                             block_index = cancellation.raw() as usize;
                         }
@@ -481,6 +520,21 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 MirTerminator::Missing => return Err(ExecutionError::InvalidControlFlow),
             }
         }
+    }
+
+    fn active_cancellation_observation(&self, masked: bool) -> CancellationObservation {
+        let Some(task) = self.active_task else {
+            return CancellationObservation::Active;
+        };
+        self.private_values
+            .values()
+            .find_map(|value| match value {
+                PrivateValue::Task(state) if state.borrow().lifecycle.id() == task => {
+                    Some(state.borrow().lifecycle.cancellation_observation(masked))
+                }
+                _ => None,
+            })
+            .unwrap_or(CancellationObservation::Active)
     }
 
     fn publish_suspend_frame(
@@ -537,41 +591,60 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         };
         let (target, arguments, completion_type, owner, completion_slot) = {
             let mut state = state.borrow_mut();
-            match &*state {
-                TaskState::Completed(result) => return result.clone(),
-                TaskState::Running => return Err(ExecutionError::InvalidControlFlow),
-                TaskState::Created {
+            let completion_type = state.completion_type;
+            match state.execution.clone() {
+                TaskExecution::Completed(result) => return result,
+                TaskExecution::Running => return Err(ExecutionError::InvalidControlFlow),
+                TaskExecution::Created {
                     target,
                     arguments,
-                    completion_type,
                     owner,
                     completion_slot,
                 } => {
-                    let created = (
-                        target.clone(),
-                        arguments.clone(),
-                        *completion_type,
-                        *owner,
-                        *completion_slot,
-                    );
-                    *state = TaskState::Running;
+                    let created = (target, arguments, completion_type, owner, completion_slot);
+                    if state.lifecycle.state() == RuntimeTaskState::Created {
+                        state
+                            .lifecycle
+                            .start(TaskOwner::DirectAwait {
+                                parent: self.active_task,
+                            })
+                            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                    } else if !matches!(state.lifecycle.owner(), Some(TaskOwner::Group(_))) {
+                        return Err(ExecutionError::InvalidControlFlow);
+                    }
+                    state
+                        .lifecycle
+                        .begin_poll()
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                    state.execution = TaskExecution::Running;
                     created
                 }
             }
         };
         if completion_type != expected_completion_type {
             let result = Err(ExecutionError::TypeMismatch);
-            *state.borrow_mut() = TaskState::Completed(result.clone());
+            let mut state = state.borrow_mut();
+            state
+                .lifecycle
+                .finish_poll(TaskPollCompletion::Panicked)
+                .map_err(|_| ExecutionError::InvalidControlFlow)?;
+            state.execution = TaskExecution::Completed(result.clone());
             return result;
         }
+        let active_task = state.borrow().lifecycle.id();
+        let previous_active_task = self.active_task.replace(active_task);
         let mut result = match target {
             TaskTarget::Direct(function) => self.call(function, &arguments),
             TaskTarget::Referenced(function) => {
                 Err(ExecutionError::UnknownReferencedFunction(function))
             }
             TaskTarget::Indirect(callee) => self.execute_indirect_value(&callee, &arguments),
+            TaskTarget::Group { body, group } => self
+                .execute_task_group(&body, group, completion_type)
+                .map(|completion| vec![completion]),
         }
         .and_then(|returned| self.task_completion(completion_type, returned));
+        self.active_task = previous_active_task;
         if let Ok(completion) = &result
             && let Some(reference) = completion.reference
             && let Err(failure) = self.runtime.write_barrier(WriteBarrier::new(
@@ -584,8 +657,107 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         {
             result = Err(ExecutionError::Runtime(failure));
         }
-        *state.borrow_mut() = TaskState::Completed(result.clone());
+        let completion = match &result {
+            Ok(_) => TaskPollCompletion::Completed,
+            Err(ExecutionError::Runtime(RuntimeFailure::Unwind(
+                pop_runtime_interface::UnwindReason::Cancellation,
+            ))) => TaskPollCompletion::Cancelled,
+            Err(_) => TaskPollCompletion::Panicked,
+        };
+        let mut state = state.borrow_mut();
+        state
+            .lifecycle
+            .finish_poll(completion)
+            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        debug_assert!(matches!(
+            state.lifecycle.state(),
+            RuntimeTaskState::Completed | RuntimeTaskState::Cancelled | RuntimeTaskState::Panicked
+        ));
+        state.execution = TaskExecution::Completed(result.clone());
         result
+    }
+
+    fn execute_task_group(
+        &mut self,
+        body: &RuntimeValue,
+        group_symbol: SymbolId,
+        completion_type: TypeId,
+    ) -> Result<RuntimeValue, ExecutionError> {
+        let group = match self.private_values.get(&group_symbol) {
+            Some(PrivateValue::TaskGroup(group)) => group.clone(),
+            _ => return Err(ExecutionError::InvalidControlFlow),
+        };
+        let group_value = {
+            let group = group.borrow();
+            RuntimeValue::managed(MirValue::TaskGroup(group_symbol), group.reference)
+        };
+        let body_result = self
+            .execute_indirect_value(body, &[group_value])
+            .and_then(|returned| self.task_completion(completion_type, returned));
+        let exit = match &body_result {
+            Ok(_) => TaskGroupExit::BodyCompleted,
+            Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Cancellation))) => {
+                TaskGroupExit::Cancelled
+            }
+            Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(_)))) => {
+                TaskGroupExit::BodyPanicked
+            }
+            Err(_) => TaskGroupExit::BodyFailed,
+        };
+        let children = group
+            .borrow_mut()
+            .lifecycle
+            .begin_close(exit)
+            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        let mut child_failure = None;
+        for child_id in children {
+            let child_symbol = group
+                .borrow()
+                .children
+                .get(&child_id)
+                .copied()
+                .ok_or(ExecutionError::InvalidControlFlow)?;
+            let child_state = match self.private_values.get(&child_symbol) {
+                Some(PrivateValue::Task(child)) => child.clone(),
+                _ => return Err(ExecutionError::InvalidControlFlow),
+            };
+            let (completion_type, child_value) = {
+                let mut child = child_state.borrow_mut();
+                let token = group.borrow().lifecycle.cancellation_token();
+                if !child.lifecycle.state().terminal() {
+                    let _ = child.lifecycle.request_cancellation(token);
+                }
+                let reference = match &child.execution {
+                    TaskExecution::Created { owner, .. } => *owner,
+                    TaskExecution::Running | TaskExecution::Completed(_) => {
+                        group.borrow().reference
+                    }
+                };
+                (
+                    child.completion_type,
+                    RuntimeValue::managed(MirValue::Task(child_symbol), reference),
+                )
+            };
+            let outcome = self.await_task(&child_value, completion_type);
+            if child_failure.is_none() {
+                child_failure = outcome.err();
+            }
+            group
+                .borrow_mut()
+                .lifecycle
+                .join_child(&child_state.borrow().lifecycle)
+                .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        }
+        group
+            .borrow_mut()
+            .lifecycle
+            .complete_close()
+            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        match body_result {
+            Err(error) => Err(error),
+            Ok(_) if child_failure.is_some() => Err(child_failure.expect("checked child failure")),
+            Ok(completion) => Ok(completion),
+        }
     }
 
     fn task_completion(
@@ -702,15 +874,205 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 let task = self.fresh_private_symbol();
                 self.private_values.insert(
                     task,
-                    PrivateValue::Task(Rc::new(RefCell::new(TaskState::Created {
-                        target,
-                        arguments,
+                    PrivateValue::Task(Rc::new(RefCell::new(TaskState {
+                        lifecycle: TaskLifecycle::created(TaskId::new(u64::from(task.raw()))),
                         completion_type: *completion_type,
-                        owner: reference,
-                        completion_slot,
+                        execution: TaskExecution::Created {
+                            target,
+                            arguments,
+                            owner: reference,
+                            completion_slot,
+                        },
                     }))),
                 );
                 return Ok(RuntimeValue::managed(MirValue::Task(task), reference));
+            }
+            MirInstructionKind::CancelSourceCreate => {
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        ObjectMap::new(0, Vec::new())
+                            .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                let source = self.fresh_private_symbol();
+                let cancellation = Rc::new(RefCell::new(CancellationState {
+                    token: CancellationTokenId::new(u64::from(source.raw())),
+                    requested: false,
+                }));
+                self.private_values
+                    .insert(source, PrivateValue::CancellationSource(cancellation));
+                return Ok(RuntimeValue::managed(
+                    MirValue::CancellationSource(source),
+                    reference,
+                ));
+            }
+            MirInstructionKind::CancelSourceToken { source } => {
+                let source = value(values, *source)?.clone();
+                let MirValue::CancellationSource(source_symbol) = source.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let cancellation = match self.private_values.get(&source_symbol) {
+                    Some(PrivateValue::CancellationSource(cancellation)) => cancellation.clone(),
+                    _ => return Err(ExecutionError::InvalidControlFlow),
+                };
+                let token = self.fresh_private_symbol();
+                self.private_values
+                    .insert(token, PrivateValue::CancellationToken(cancellation));
+                return Ok(RuntimeValue {
+                    visible: MirValue::CancellationToken(token),
+                    reference: source.reference,
+                });
+            }
+            MirInstructionKind::CancelRequest { source } => {
+                let MirValue::CancellationSource(source) = value(values, *source)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let cancellation = match self.private_values.get(&source) {
+                    Some(PrivateValue::CancellationSource(cancellation)) => cancellation.clone(),
+                    _ => return Err(ExecutionError::InvalidControlFlow),
+                };
+                let token = {
+                    let mut cancellation = cancellation.borrow_mut();
+                    cancellation.requested = true;
+                    cancellation.token
+                };
+                let tasks = self
+                    .private_values
+                    .values()
+                    .filter_map(|value| match value {
+                        PrivateValue::Task(task) => Some(task.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for task in tasks {
+                    let mut task = task.borrow_mut();
+                    if task.lifecycle.cancellation_token() == Some(token)
+                        && !task.lifecycle.state().terminal()
+                    {
+                        let _ = task.lifecycle.request_cancellation(token);
+                    }
+                }
+                MirValue::Nil
+            }
+            MirInstructionKind::TaskGroupCreate {
+                cancel,
+                body,
+                completion_type,
+                object_map,
+            } => {
+                let cancel = value(values, *cancel)?.clone();
+                let body = value(values, *body)?.clone();
+                let MirValue::CancellationToken(token_symbol) = cancel.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                if !matches!(body.visible, MirValue::Function(_)) {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                let cancellation = match self.private_values.get(&token_symbol) {
+                    Some(PrivateValue::CancellationToken(cancellation)) => cancellation.clone(),
+                    _ => return Err(ExecutionError::InvalidControlFlow),
+                };
+                for (index, stored) in [&cancel, &body].into_iter().enumerate() {
+                    if stored.reference.is_some()
+                        && !object_map.is_reference_slot(ObjectSlot::new(
+                            u32::try_from(index).unwrap_or(u32::MAX),
+                        ))
+                    {
+                        return Err(ExecutionError::InvalidControlFlow);
+                    }
+                }
+                let reference = self
+                    .runtime
+                    .allocate_object(&ObjectAllocationRequest::new(
+                        RuntimeTypeId::new(instruction.result_type().raw()),
+                        AllocationClass::NurseryEligible,
+                        object_map.clone(),
+                    ))
+                    .map_err(ExecutionError::Runtime)?;
+                let group_symbol = self.fresh_private_symbol();
+                let group_id = TaskGroupId::new(u64::from(group_symbol.raw()));
+                let token = cancellation.borrow().token;
+                self.private_values.insert(
+                    group_symbol,
+                    PrivateValue::TaskGroup(Rc::new(RefCell::new(InterpreterTaskGroup {
+                        lifecycle: TaskGroupLifecycle::open(group_id, token),
+                        cancellation: cancellation.clone(),
+                        children: BTreeMap::new(),
+                        reference,
+                    }))),
+                );
+                let task_symbol = self.fresh_private_symbol();
+                let mut lifecycle =
+                    TaskLifecycle::created(TaskId::new(u64::from(task_symbol.raw())));
+                lifecycle
+                    .bind_cancellation_token(token)
+                    .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                if cancellation.borrow().requested {
+                    lifecycle
+                        .request_cancellation(token)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                }
+                let completion_slot = object_map
+                    .slot_count()
+                    .checked_sub(1)
+                    .map(ObjectSlot::new)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.private_values.insert(
+                    task_symbol,
+                    PrivateValue::Task(Rc::new(RefCell::new(TaskState {
+                        lifecycle,
+                        completion_type: *completion_type,
+                        execution: TaskExecution::Created {
+                            target: TaskTarget::Group {
+                                body,
+                                group: group_symbol,
+                            },
+                            arguments: Vec::new(),
+                            owner: reference,
+                            completion_slot,
+                        },
+                    }))),
+                );
+                return Ok(RuntimeValue::managed(
+                    MirValue::Task(task_symbol),
+                    reference,
+                ));
+            }
+            MirInstructionKind::TaskStart { group, task } => {
+                let task_value = value(values, *task)?.clone();
+                let MirValue::TaskGroup(group_symbol) = value(values, *group)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let MirValue::Task(task_symbol) = task_value.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let group = match self.private_values.get(&group_symbol) {
+                    Some(PrivateValue::TaskGroup(group)) => group.clone(),
+                    _ => return Err(ExecutionError::InvalidControlFlow),
+                };
+                let task = match self.private_values.get(&task_symbol) {
+                    Some(PrivateValue::Task(task)) => task.clone(),
+                    _ => return Err(ExecutionError::InvalidControlFlow),
+                };
+                {
+                    let mut group = group.borrow_mut();
+                    let mut task = task.borrow_mut();
+                    group
+                        .lifecycle
+                        .start_child(&mut task.lifecycle)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                    group.children.insert(task.lifecycle.id(), task_symbol);
+                    if group.cancellation.borrow().requested {
+                        let token = group.lifecycle.cancellation_token();
+                        task.lifecycle
+                            .request_cancellation(token)
+                            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+                    }
+                }
+                return Ok(task_value);
             }
             MirInstructionKind::StringConstant(value) => MirValue::String(value.clone()),
             MirInstructionKind::StringConcat { left, right } => {
@@ -1761,7 +2123,12 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     Some(PrivateValue::Closure { .. } | PrivateValue::Iterator { .. }) => {
                         Ok(captured)
                     }
-                    Some(PrivateValue::Task(_)) => Err(ExecutionError::TypeMismatch),
+                    Some(
+                        PrivateValue::Task(_)
+                        | PrivateValue::CancellationSource(_)
+                        | PrivateValue::CancellationToken(_)
+                        | PrivateValue::TaskGroup(_),
+                    ) => Err(ExecutionError::TypeMismatch),
                     None => Err(ExecutionError::TypeMismatch),
                 }
             }

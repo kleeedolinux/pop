@@ -176,7 +176,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.check_match(signature, scrutinee, arms, statement.span())?
             }
             StatementSyntaxKind::Defer { body } => {
-                if let Some((control, control_span)) = illegal_cleanup_control(body) {
+                if let Some((control, control_span)) = illegal_cleanup_control(body, false) {
                     self.diagnostics
                         .push(type_diagnostics::illegal_cleanup_control(
                             control_span,
@@ -185,6 +185,24 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     return None;
                 }
                 TypedStatementKind::Defer {
+                    body: self.check_nested_statements(signature, body),
+                }
+            }
+            StatementSyntaxKind::AsyncDefer { body } => {
+                if !signature.is_async() {
+                    self.diagnostics
+                        .push(type_diagnostics::await_outside_async(statement.span()));
+                    return None;
+                }
+                if let Some((control, control_span)) = illegal_cleanup_control(body, true) {
+                    self.diagnostics
+                        .push(type_diagnostics::illegal_cleanup_control(
+                            control_span,
+                            control,
+                        ));
+                    return None;
+                }
+                TypedStatementKind::AsyncDefer {
                     body: self.check_nested_statements(signature, body),
                 }
             }
@@ -2183,6 +2201,7 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
         | StatementSyntaxKind::NumericFor { .. }
         | StatementSyntaxKind::GeneralizedFor { .. }
         | StatementSyntaxKind::Defer { .. }
+        | StatementSyntaxKind::AsyncDefer { .. }
         | StatementSyntaxKind::Local { .. }
         | StatementSyntaxKind::MultipleLocal { .. }
         | StatementSyntaxKind::LocalFunction { .. }
@@ -2194,24 +2213,29 @@ fn contains_continue_for_current_loop(statements: &[StatementSyntax]) -> bool {
     })
 }
 
-fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static str, SourceSpan)> {
+fn illegal_cleanup_control(
+    statements: &[StatementSyntax],
+    allow_await: bool,
+) -> Option<(&'static str, SourceSpan)> {
     for statement in statements {
         match statement.kind() {
             StatementSyntaxKind::Return { .. } => return Some(("return", statement.span())),
             StatementSyntaxKind::Break => return Some(("break", statement.span())),
             StatementSyntaxKind::Continue => return Some(("continue", statement.span())),
-            StatementSyntaxKind::Defer { .. } => return Some(("defer", statement.span())),
+            StatementSyntaxKind::Defer { .. } | StatementSyntaxKind::AsyncDefer { .. } => {
+                return Some(("defer", statement.span()));
+            }
             StatementSyntaxKind::Local { initializer, .. } => {
-                if expression_contains_result_propagation(initializer) {
-                    return Some(("try", initializer.span()));
+                if let Some(found) = illegal_cleanup_expression(initializer, allow_await) {
+                    return Some(found);
                 }
             }
             StatementSyntaxKind::MultipleLocal { values, .. } => {
-                if let Some(expression) = values
+                if let Some(found) = values
                     .iter()
-                    .find(|value| expression_contains_result_propagation(value))
+                    .find_map(|value| illegal_cleanup_expression(value, allow_await))
                 {
-                    return Some(("try", expression.span()));
+                    return Some(found);
                 }
             }
             StatementSyntaxKind::If {
@@ -2219,13 +2243,13 @@ fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static s
                 then_body,
                 else_body,
             } => {
-                if expression_contains_result_propagation(condition) {
-                    return Some(("try", condition.span()));
-                }
-                if let Some(found) = illegal_cleanup_control(then_body) {
+                if let Some(found) = illegal_cleanup_expression(condition, allow_await) {
                     return Some(found);
                 }
-                if let Some(found) = illegal_cleanup_control(else_body) {
+                if let Some(found) = illegal_cleanup_control(then_body, allow_await) {
+                    return Some(found);
+                }
+                if let Some(found) = illegal_cleanup_control(else_body, allow_await) {
                     return Some(found);
                 }
             }
@@ -2235,32 +2259,32 @@ fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static s
                 else_body,
                 ..
             } => {
-                if expression_contains_result_propagation(initializer) {
-                    return Some(("try", initializer.span()));
-                }
-                if let Some(found) = illegal_cleanup_control(then_body) {
+                if let Some(found) = illegal_cleanup_expression(initializer, allow_await) {
                     return Some(found);
                 }
-                if let Some(found) = illegal_cleanup_control(else_body) {
+                if let Some(found) = illegal_cleanup_control(then_body, allow_await) {
+                    return Some(found);
+                }
+                if let Some(found) = illegal_cleanup_control(else_body, allow_await) {
                     return Some(found);
                 }
             }
             StatementSyntaxKind::While { condition, body }
             | StatementSyntaxKind::RepeatUntil { condition, body } => {
-                if expression_contains_result_propagation(condition) {
-                    return Some(("try", condition.span()));
+                if let Some(found) = illegal_cleanup_expression(condition, allow_await) {
+                    return Some(found);
                 }
-                if let Some(found) = illegal_cleanup_control(body) {
+                if let Some(found) = illegal_cleanup_control(body, allow_await) {
                     return Some(found);
                 }
             }
             StatementSyntaxKind::OptionalWhile {
                 initializer, body, ..
             } => {
-                if expression_contains_result_propagation(initializer) {
-                    return Some(("try", initializer.span()));
+                if let Some(found) = illegal_cleanup_expression(initializer, allow_await) {
+                    return Some(found);
                 }
-                if let Some(found) = illegal_cleanup_control(body) {
+                if let Some(found) = illegal_cleanup_control(body, allow_await) {
                     return Some(found);
                 }
             }
@@ -2271,60 +2295,127 @@ fn illegal_cleanup_control(statements: &[StatementSyntax]) -> Option<(&'static s
                 body,
                 ..
             } => {
-                if [Some(first), Some(last), step.as_ref()]
+                if let Some(found) = [Some(first), Some(last), step.as_ref()]
                     .into_iter()
                     .flatten()
-                    .any(expression_contains_result_propagation)
+                    .find_map(|value| illegal_cleanup_expression(value, allow_await))
                 {
-                    return Some(("try", statement.span()));
+                    return Some(found);
                 }
-                if let Some(found) = illegal_cleanup_control(body) {
+                if let Some(found) = illegal_cleanup_control(body, allow_await) {
                     return Some(found);
                 }
             }
             StatementSyntaxKind::GeneralizedFor { iterable, body, .. } => {
-                if expression_contains_result_propagation(iterable) {
-                    return Some(("try", iterable.span()));
+                if let Some(found) = illegal_cleanup_expression(iterable, allow_await) {
+                    return Some(found);
                 }
-                if let Some(found) = illegal_cleanup_control(body) {
+                if let Some(found) = illegal_cleanup_control(body, allow_await) {
                     return Some(found);
                 }
             }
             StatementSyntaxKind::Match { scrutinee, arms } => {
-                if expression_contains_result_propagation(scrutinee) {
-                    return Some(("try", scrutinee.span()));
+                if let Some(found) = illegal_cleanup_expression(scrutinee, allow_await) {
+                    return Some(found);
                 }
                 for arm in arms {
-                    if let Some(found) = illegal_cleanup_control(arm.body()) {
+                    if let Some(found) = illegal_cleanup_control(arm.body(), allow_await) {
                         return Some(found);
                     }
                 }
             }
             StatementSyntaxKind::Assignment { target, value, .. } => {
-                if expression_contains_result_propagation(target)
-                    || expression_contains_result_propagation(value)
+                if let Some(found) = illegal_cleanup_expression(target, allow_await)
+                    .or_else(|| illegal_cleanup_expression(value, allow_await))
                 {
-                    return Some(("try", statement.span()));
+                    return Some(found);
                 }
             }
             StatementSyntaxKind::MultipleAssignment { targets, values } => {
-                if targets
+                if let Some(found) = targets
                     .iter()
                     .chain(values)
-                    .any(expression_contains_result_propagation)
+                    .find_map(|value| illegal_cleanup_expression(value, allow_await))
                 {
-                    return Some(("try", statement.span()));
+                    return Some(found);
                 }
             }
             StatementSyntaxKind::Expression(expression) => {
-                if expression_contains_result_propagation(expression) {
-                    return Some(("try", expression.span()));
+                if let Some(found) = illegal_cleanup_expression(expression, allow_await) {
+                    return Some(found);
                 }
             }
             StatementSyntaxKind::LocalFunction { .. } => {}
         }
     }
     None
+}
+
+fn illegal_cleanup_expression(
+    expression: &ExpressionSyntax,
+    allow_await: bool,
+) -> Option<(&'static str, SourceSpan)> {
+    if expression_contains_result_propagation(expression) {
+        Some(("try", expression.span()))
+    } else if !allow_await && expression_contains_await(expression) {
+        Some(("await", expression.span()))
+    } else {
+        None
+    }
+}
+
+fn expression_contains_await(expression: &ExpressionSyntax) -> bool {
+    match expression.kind() {
+        ExpressionSyntaxKind::Await { .. } => true,
+        ExpressionSyntaxKind::Call { callee, arguments }
+        | ExpressionSyntaxKind::GenericCall {
+            callee, arguments, ..
+        } => expression_contains_await(callee) || arguments.iter().any(expression_contains_await),
+        ExpressionSyntaxKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => expression_contains_await(receiver) || arguments.iter().any(expression_contains_await),
+        ExpressionSyntaxKind::Index { base, index } => {
+            expression_contains_await(base) || expression_contains_await(index)
+        }
+        ExpressionSyntaxKind::Construct { fields, .. }
+        | ExpressionSyntaxKind::Aggregate { fields } => fields
+            .iter()
+            .any(|field| expression_contains_await(field.value())),
+        ExpressionSyntaxKind::Array(elements) | ExpressionSyntaxKind::Tuple(elements) => {
+            elements.iter().any(expression_contains_await)
+        }
+        ExpressionSyntaxKind::Unary { operand, .. }
+        | ExpressionSyntaxKind::OptionalPropagate { operand }
+        | ExpressionSyntaxKind::ResultPropagate { operand } => expression_contains_await(operand),
+        ExpressionSyntaxKind::Binary { left, right, .. } => {
+            expression_contains_await(left) || expression_contains_await(right)
+        }
+        ExpressionSyntaxKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expression_contains_await(condition)
+                || expression_contains_await(when_true)
+                || expression_contains_await(when_false)
+        }
+        ExpressionSyntaxKind::With { base, fields } => {
+            expression_contains_await(base)
+                || fields
+                    .iter()
+                    .any(|field| expression_contains_await(field.value()))
+        }
+        ExpressionSyntaxKind::Function(_)
+        | ExpressionSyntaxKind::Integer(_)
+        | ExpressionSyntaxKind::Float(_)
+        | ExpressionSyntaxKind::String(_)
+        | ExpressionSyntaxKind::InterpolatedString(_)
+        | ExpressionSyntaxKind::Boolean(_)
+        | ExpressionSyntaxKind::Nil
+        | ExpressionSyntaxKind::Name(_) => false,
+    }
 }
 
 fn expression_contains_result_propagation(expression: &ExpressionSyntax) -> bool {

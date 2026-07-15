@@ -3,11 +3,55 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{
-    MirCleanupExitReason, MirDeclarationKind, MirEffect, MirInstruction, MirInstructionKind,
-    MirSuspendOperation, MirTerminator, MirVerificationError, lower_hir_bubble, parse_mir_dump,
-    verify_mir_bubble,
+    MirCancellationMode, MirCleanupExitReason, MirDeclarationKind, MirEffect, MirInstruction,
+    MirInstructionKind, MirSuspendOperation, MirTerminator, MirVerificationError, lower_hir_bubble,
+    parse_mir_dump, verify_mir_bubble,
 };
 use pop_source::SourceFile;
+
+#[test]
+fn function_values_are_managed_callable_records_at_gc_safe_points() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/functionValues.pop",
+        "namespace Main\n\
+         private function increment(value: Int): Int\n\
+             return value + 1\n\
+         end\n\
+         public function run(): Int\n\
+             local operation = increment\n\
+             return operation(41)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(
+        front_end.hir().expect("function-value HIR"),
+        front_end.types(),
+    )
+    .expect("verified function-value MIR");
+    let reference = mir
+        .functions()
+        .iter()
+        .flat_map(|function| function.blocks())
+        .flat_map(|block| block.instructions())
+        .find(|instruction| matches!(instruction.kind(), MirInstructionKind::FunctionReference(_)))
+        .expect("function reference");
+
+    assert!(reference.effects().contains(MirEffect::Allocates));
+    assert!(reference.effects().contains(MirEffect::MayUnwind));
+    assert!(reference.effects().contains(MirEffect::GcSafePoint));
+}
 
 #[test]
 fn cold_task_frames_carry_static_capture_maps() {
@@ -78,7 +122,7 @@ fn cold_task_frames_carry_static_capture_maps() {
     );
     assert!(maps.iter().any(|map| {
         map.slot_count() == 1
-            && map.reference_slots() == &[pop_runtime_interface::ObjectSlot::new(0)]
+            && map.reference_slots() == [pop_runtime_interface::ObjectSlot::new(0)]
     }));
 
     let dump = mir.dump();
@@ -146,7 +190,7 @@ fn async_await_lowers_to_cold_task_and_verified_suspend_frame() {
             .flat_map(|block| block.instructions())
             .any(|instruction| matches!(instruction.kind(), MirInstructionKind::TaskCreate { .. }))
     );
-    let (resume, cancellation, frame) = consume
+    let (resume, cancellation, cancellation_mode, frame) = consume
         .blocks()
         .iter()
         .find_map(|block| match block.terminator() {
@@ -154,12 +198,14 @@ fn async_await_lowers_to_cold_task_and_verified_suspend_frame() {
                 operation: MirSuspendOperation::Task { .. },
                 resume,
                 cancellation,
+                cancellation_mode,
                 live_frame,
                 ..
-            } => Some((*resume, *cancellation, live_frame)),
+            } => Some((*resume, *cancellation, *cancellation_mode, live_frame)),
             _ => None,
         })
         .expect("task suspend terminator");
+    assert_eq!(cancellation_mode, MirCancellationMode::Observe);
     let integer = front_end.types().source_type("Int").expect("Int");
     let resume_block = &consume.blocks()[resume.raw() as usize];
     assert_eq!(resume_block.arguments().len(), 1);
@@ -233,6 +279,151 @@ fn async_await_lowers_to_cold_task_and_verified_suspend_frame() {
         Err(errors) if errors.iter().any(|error| matches!(
             error,
             MirVerificationError::InvalidSuspendFrame(_)
+        ))
+    ));
+}
+
+#[test]
+fn structured_tasks_lower_to_closed_ownership_and_cancellation_operations() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/structuredTask.pop",
+        "namespace Main\n\
+         private async function load(cancel: CancelToken): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child = Task.start(group, load(cancel))\n\
+                 return await child\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("structured HIR"), front_end.types())
+        .expect("verified structured MIR");
+    let mut instructions = mir
+        .functions()
+        .iter()
+        .flat_map(|function| function.blocks())
+        .flat_map(|block| block.instructions())
+        .collect::<Vec<_>>();
+    instructions.extend(
+        mir.nested_functions()
+            .iter()
+            .flat_map(|function| function.blocks())
+            .flat_map(|block| block.instructions()),
+    );
+
+    for predicate in [
+        |kind: &MirInstructionKind| matches!(kind, MirInstructionKind::CancelSourceCreate),
+        |kind: &MirInstructionKind| matches!(kind, MirInstructionKind::CancelSourceToken { .. }),
+        |kind: &MirInstructionKind| matches!(kind, MirInstructionKind::CancelRequest { .. }),
+        |kind: &MirInstructionKind| matches!(kind, MirInstructionKind::TaskGroupCreate { .. }),
+        |kind: &MirInstructionKind| matches!(kind, MirInstructionKind::TaskStart { .. }),
+    ] {
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| predicate(instruction.kind()))
+        );
+    }
+    assert!(instructions.iter().any(|instruction| {
+        matches!(
+            instruction.kind(),
+            MirInstructionKind::CancelRequest { .. } | MirInstructionKind::TaskStart { .. }
+        ) && instruction.effects().contains(MirEffect::Synchronizes)
+    }));
+    let dump = mir.dump();
+    for operation in [
+        "cancelSourceCreate",
+        "cancelSourceToken",
+        "cancelRequest",
+        "taskGroupCreate",
+        "taskStart",
+    ] {
+        assert!(dump.contains(operation), "missing {operation}: {dump}");
+    }
+    let reparsed = parse_mir_dump(&dump).expect("structured task MIR parses");
+    assert_eq!(reparsed.dump(), dump);
+    assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
+}
+
+#[test]
+fn async_cleanup_await_lowers_inside_the_backend_neutral_cleanup_chain() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncCleanup.pop",
+        "namespace Main\n\
+         private async function close(): Int\n\
+             return 0\n\
+         end\n\
+         public async function run(): Int\n\
+             async defer\n\
+                 local ignored = await close()\n\
+             end\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified async cleanup MIR");
+    let run = mir
+        .functions()
+        .iter()
+        .find(|function| function.symbol().raw() == 1)
+        .expect("run MIR");
+
+    assert!(run.blocks().iter().any(|block| {
+        block.cleanup().is_some()
+            && matches!(
+                block.terminator(),
+                MirTerminator::Suspend {
+                    cancellation_mode: MirCancellationMode::Masked,
+                    ..
+                }
+            )
+    }));
+    let dump = mir.dump();
+    assert!(dump.contains("cleanup"), "{dump}");
+    assert!(dump.contains("suspend.task"), "{dump}");
+    assert!(dump.contains("cancellation-mode:masked"), "{dump}");
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+
+    let unmasked =
+        parse_mir_dump(&dump.replacen("cancellation-mode:masked", "cancellation-mode:observe", 1))
+            .expect("structurally valid unmasked cleanup suspension");
+    assert!(matches!(
+        verify_mir_bubble(&unmasked, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidSuspendCancellationMode(_)
         ))
     ));
 }

@@ -297,6 +297,7 @@ pub struct EffectSummary(u16);
 pub enum Effect {
     Allocates,
     WritesManagedReference,
+    Synchronizes,
     MayTrap,
     MayUnwind,
     Suspends,

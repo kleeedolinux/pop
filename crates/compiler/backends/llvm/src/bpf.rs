@@ -494,6 +494,11 @@ fn validate_instruction(
         | MirInstructionKind::WriteBarrier { .. }
         | MirInstructionKind::CallStandard { .. }
         | MirInstructionKind::TaskCreate { .. }
+        | MirInstructionKind::CancelSourceCreate
+        | MirInstructionKind::CancelSourceToken { .. }
+        | MirInstructionKind::CancelRequest { .. }
+        | MirInstructionKind::TaskGroupCreate { .. }
+        | MirInstructionKind::TaskStart { .. }
         | MirInstructionKind::CallBuiltinInterface { .. } => {
             BpfUnsupportedReason::BackendImplementation
         }

@@ -80,11 +80,15 @@ pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
     let Some(mut publication) = abi_root_publication(safe_point, roots) else {
         return 0;
     };
-    u8::from(service_root_publication(
-        &mut runtime,
-        binding,
-        &mut publication,
-    ))
+    let serviced = service_root_publication(&mut runtime, binding, &mut publication);
+    let releases = if serviced {
+        crate::task::prune_collected_task_state(&mut runtime)
+    } else {
+        Vec::new()
+    };
+    drop(runtime);
+    crate::task::release_pruned_scheduler_tasks(releases);
+    u8::from(serviced)
 }
 
 fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublication> {
@@ -146,7 +150,21 @@ fn abi_safe_point_v2(safe_point: u32, roots: &mut [u64]) -> u8 {
     for ((_, relocated), root) in publication.root_values().zip(roots.iter_mut()) {
         *root = relocated.map_or(0, ManagedReference::raw);
     }
+    let releases = crate::task::prune_collected_task_state(&mut runtime);
+    drop(runtime);
+    crate::task::release_pruned_scheduler_tasks(releases);
     1
+}
+
+/// Publishes exact live roots through the ABI 2 writable-root transition.
+///
+/// This typed Rust entry is used by the native scheduler integration and its
+/// conformance tests. The stable facade may leave tokens unchanged, but it
+/// still validates the managed worker binding, participates in the current
+/// collector epoch, and writes the complete publication back atomically.
+#[must_use]
+pub fn abi_safe_point_writable(safe_point: u32, roots: &mut [u64]) -> u8 {
+    abi_safe_point_v2(safe_point, roots)
 }
 
 #[must_use]

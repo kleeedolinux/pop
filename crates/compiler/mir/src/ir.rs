@@ -30,6 +30,7 @@ pub(crate) const MAX_STRAIGHT_LINE_WORK_BETWEEN_SAFE_POINTS: usize = 256;
 pub enum MirEffect {
     Allocates,
     WritesManagedReference,
+    Synchronizes,
     MayTrap,
     MayUnwind,
     Suspends,
@@ -88,9 +89,10 @@ impl MirEffectSummary {
     }
 
     pub fn iter(self) -> impl Iterator<Item = MirEffect> {
-        const EFFECTS: [MirEffect; 12] = [
+        const EFFECTS: [MirEffect; 13] = [
             MirEffect::Allocates,
             MirEffect::WritesManagedReference,
+            MirEffect::Synchronizes,
             MirEffect::MayTrap,
             MirEffect::MayUnwind,
             MirEffect::Suspends,
@@ -109,12 +111,13 @@ impl MirEffectSummary {
 }
 
 pub(crate) fn lower_effect_summary(summary: pop_types::EffectSummary) -> MirEffectSummary {
-    const EFFECTS: [(pop_types::Effect, MirEffect); 12] = [
+    const EFFECTS: [(pop_types::Effect, MirEffect); 13] = [
         (pop_types::Effect::Allocates, MirEffect::Allocates),
         (
             pop_types::Effect::WritesManagedReference,
             MirEffect::WritesManagedReference,
         ),
+        (pop_types::Effect::Synchronizes, MirEffect::Synchronizes),
         (pop_types::Effect::MayTrap, MirEffect::MayTrap),
         (pop_types::Effect::MayUnwind, MirEffect::MayUnwind),
         (pop_types::Effect::Suspends, MirEffect::Suspends),
@@ -632,6 +635,25 @@ pub struct MirNestedFunction {
 }
 
 impl MirNestedFunction {
+    pub(crate) fn transformation_adapter(&self) -> MirFunction {
+        MirFunction {
+            function: FunctionId::from_raw(self.function.raw()),
+            symbol: self.owner,
+            is_async: self.is_async,
+            parameters: self.parameters.clone(),
+            results: self.results.clone(),
+            effects: self.effects,
+            effects_explicit: self.effects_explicit,
+            blocks: self.blocks.clone(),
+        }
+    }
+
+    pub(crate) fn apply_transformation(&mut self, function: MirFunction) {
+        self.effects = function.effects;
+        self.effects_explicit = function.effects_explicit;
+        self.blocks = function.blocks;
+    }
+
     #[must_use]
     pub const fn owner(&self) -> SymbolId {
         self.owner
@@ -995,6 +1017,23 @@ pub enum MirInstructionKind {
         arguments: Vec<ValueId>,
         completion_type: TypeId,
         object_map: ObjectMap,
+    },
+    CancelSourceCreate,
+    CancelSourceToken {
+        source: ValueId,
+    },
+    CancelRequest {
+        source: ValueId,
+    },
+    TaskGroupCreate {
+        cancel: ValueId,
+        body: ValueId,
+        completion_type: TypeId,
+        object_map: ObjectMap,
+    },
+    TaskStart {
+        group: ValueId,
+        task: ValueId,
     },
     TupleMake(Vec<ValueId>),
     TupleGet {
@@ -1411,6 +1450,12 @@ pub enum MirSuspendOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirCancellationMode {
+    Observe,
+    Masked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MirClosureCapture {
     pub(crate) capture: CaptureId,
     pub(crate) binding: BindingId,
@@ -1505,6 +1550,7 @@ pub enum MirTerminator {
         operation: MirSuspendOperation,
         resume: BlockId,
         cancellation: BlockId,
+        cancellation_mode: MirCancellationMode,
         unwind: MirUnwindAction,
         safe_point: SafePointId,
         live_frame: MirLiveFrame,
@@ -1610,6 +1656,7 @@ pub enum MirVerificationError {
     InvalidSuspendTask(BlockId),
     InvalidSuspendResume(BlockId),
     InvalidSuspendCancellation(BlockId),
+    InvalidSuspendCancellationMode(BlockId),
     InvalidSuspendFrame(BlockId),
     DuplicateSafePoint(SafePointId),
     DuplicateCoroutineState(CoroutineStateId),
@@ -1646,6 +1693,9 @@ pub enum MirVerificationError {
         found_arguments: usize,
         expected_results: usize,
         found_results: usize,
+    },
+    InvalidTaskOperation {
+        instruction: ValueId,
     },
     InvalidComparisonOperands {
         instruction: ValueId,

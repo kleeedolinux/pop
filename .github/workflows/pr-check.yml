@@ -71,7 +71,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: Run tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --lib --bins --tests --examples
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

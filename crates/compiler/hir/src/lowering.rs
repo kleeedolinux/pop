@@ -547,6 +547,12 @@ fn lower_statement(
                 .map(|statement| lower_statement(statement, interface_slots))
                 .collect(),
         },
+        TypedStatementKind::AsyncDefer { body } => HirStatementKind::AsyncDefer {
+            body: body
+                .iter()
+                .map(|statement| lower_statement(statement, interface_slots))
+                .collect(),
+        },
         TypedStatementKind::FieldSet { base, field, value } => HirStatementKind::FieldSet {
             base: lower_expression(base, interface_slots),
             field: *field,
@@ -1020,6 +1026,21 @@ fn lower_expression(
         TypedExpressionKind::Await { task } => HirExpressionKind::Await {
             task: Box::new(lower_expression(task, interface_slots)),
         },
+        TypedExpressionKind::TaskCancellationSource => HirExpressionKind::TaskCancellationSource,
+        TypedExpressionKind::TaskCancelToken { source } => HirExpressionKind::TaskCancelToken {
+            source: Box::new(lower_expression(source, interface_slots)),
+        },
+        TypedExpressionKind::TaskCancel { source } => HirExpressionKind::TaskCancel {
+            source: Box::new(lower_expression(source, interface_slots)),
+        },
+        TypedExpressionKind::TaskGroup { cancel, body } => HirExpressionKind::TaskGroup {
+            cancel: Box::new(lower_expression(cancel, interface_slots)),
+            body: Box::new(lower_expression(body, interface_slots)),
+        },
+        TypedExpressionKind::TaskStart { group, task } => HirExpressionKind::TaskStart {
+            group: Box::new(lower_expression(group, interface_slots)),
+            task: Box::new(lower_expression(task, interface_slots)),
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1358,7 +1379,9 @@ fn first_unknown_interface_call(
                 arms.iter()
                     .find_map(|arm| first_unknown_interface_call(arm.body(), slots))
             }),
-            TypedStatementKind::Defer { body } => first_unknown_interface_call(body, slots),
+            TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
+                first_unknown_interface_call(body, slots)
+            }
             TypedStatementKind::FieldSet { base, value, .. } => {
                 first_unknown_interface_expression(base, slots)
                     .or_else(|| first_unknown_interface_expression(value, slots))
@@ -1563,8 +1586,18 @@ fn first_unknown_interface_expression(
             .iter()
             .find_map(|argument| first_unknown_interface_expression(argument, slots)),
         TypedExpressionKind::Unary { operand, .. }
-        | TypedExpressionKind::Await { task: operand } => {
+        | TypedExpressionKind::Await { task: operand }
+        | TypedExpressionKind::TaskCancelToken { source: operand }
+        | TypedExpressionKind::TaskCancel { source: operand } => {
             first_unknown_interface_expression(operand, slots)
+        }
+        TypedExpressionKind::TaskGroup { cancel, body } => {
+            first_unknown_interface_expression(cancel, slots)
+                .or_else(|| first_unknown_interface_expression(body, slots))
+        }
+        TypedExpressionKind::TaskStart { group, task } => {
+            first_unknown_interface_expression(group, slots)
+                .or_else(|| first_unknown_interface_expression(task, slots))
         }
         TypedExpressionKind::Binary { left, right, .. } => {
             first_unknown_interface_expression(left, slots)
@@ -1631,6 +1664,7 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::TaskCancellationSource
         | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
@@ -1711,7 +1745,9 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 arms.iter()
                     .find_map(|arm| first_compile_time_only_statement(arm.body()))
             }),
-            TypedStatementKind::Defer { body } => first_compile_time_only_statement(body),
+            TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
+                first_compile_time_only_statement(body)
+            }
             TypedStatementKind::FieldSet { base, value, .. } => {
                 first_compile_time_only_expression(base)
                     .or_else(|| first_compile_time_only_expression(value))
@@ -1868,9 +1904,17 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             .iter()
             .find_map(first_compile_time_only_expression),
         TypedExpressionKind::Unary { operand, .. }
-        | TypedExpressionKind::Await { task: operand } => {
+        | TypedExpressionKind::Await { task: operand }
+        | TypedExpressionKind::TaskCancelToken { source: operand }
+        | TypedExpressionKind::TaskCancel { source: operand } => {
             first_compile_time_only_expression(operand)
         }
+        TypedExpressionKind::TaskGroup { cancel, body } => {
+            first_compile_time_only_expression(cancel)
+                .or_else(|| first_compile_time_only_expression(body))
+        }
+        TypedExpressionKind::TaskStart { group, task } => first_compile_time_only_expression(group)
+            .or_else(|| first_compile_time_only_expression(task)),
         TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
             .or_else(|| first_compile_time_only_expression(right)),
         TypedExpressionKind::OptionalDefault { optional, fallback } => {
@@ -1946,6 +1990,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::TaskCancellationSource
         | TypedExpressionKind::EnumCase { .. } => None,
     }
 }

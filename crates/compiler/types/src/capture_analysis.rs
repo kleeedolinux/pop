@@ -125,7 +125,7 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 }
             }
         }
-        TypedStatementKind::Defer { body } => {
+        TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
             for statement in body {
                 finalize_statement_captures(statement, written);
             }
@@ -230,6 +230,7 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::TaskCancellationSource
         | TypedExpressionKind::EnumCase { .. } => {}
         TypedExpressionKind::Closure(closure) => {
             for capture in &mut closure.captures {
@@ -322,8 +323,18 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             }
         }
         TypedExpressionKind::Unary { operand, .. }
-        | TypedExpressionKind::Await { task: operand } => {
+        | TypedExpressionKind::Await { task: operand }
+        | TypedExpressionKind::TaskCancelToken { source: operand }
+        | TypedExpressionKind::TaskCancel { source: operand } => {
             finalize_expression_captures(operand, written);
+        }
+        TypedExpressionKind::TaskGroup { cancel, body } => {
+            finalize_expression_captures(cancel, written);
+            finalize_expression_captures(body, written);
+        }
+        TypedExpressionKind::TaskStart { group, task } => {
+            finalize_expression_captures(group, written);
+            finalize_expression_captures(task, written);
         }
         TypedExpressionKind::Binary { left, right, .. } => {
             finalize_expression_captures(left, written);

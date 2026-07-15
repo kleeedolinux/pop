@@ -19,6 +19,7 @@
 )]
 
 mod api;
+mod async_lowering;
 mod bpf;
 mod instruction_lowering;
 mod lowering;

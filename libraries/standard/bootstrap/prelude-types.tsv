@@ -15,3 +15,5 @@ typeId	sourceName	ownerBubble	arity	role	prelude
 112	AsyncClose	Pop.Standard	0	Interface	true
 113	Iteration	Pop.Standard	1	Nominal	true
 114	CancelToken	Pop.Standard	0	Nominal	true
+115	Task.Group	Pop.Standard	0	Nominal	false
+116	Task.CancelSource	Pop.Standard	0	Nominal	false

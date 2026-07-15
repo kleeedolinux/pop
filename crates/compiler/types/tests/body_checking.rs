@@ -194,6 +194,54 @@ fn async_calls_produce_cold_exact_task_values_and_await_yields_completion() {
 }
 
 #[test]
+fn structured_task_intrinsics_preserve_exact_group_source_token_and_task_types() {
+    let fixture = check_function(
+        "namespace Example\n\
+         private async function load(cancel: CancelToken): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local source: Task.CancelSource = Task.cancellationSource()\n\
+             local cancel: CancelToken = Task.cancelToken(source)\n\
+             local grouped: Task<Int> = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child: Task<Int> = Task.start(group, load(cancel))\n\
+                 return await child\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
+         end\n",
+        "run",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+}
+
+#[test]
+fn structured_task_intrinsics_reject_nominal_authority_and_owner_mismatches() {
+    let fixture = check_function(
+        "namespace Example\n\
+         private async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function invalid(cancel: CancelToken): Int\n\
+             Task.cancel(cancel)\n\
+             local source = Task.cancellationSource()\n\
+             local child = Task.start(source, load())\n\
+             return await child\n\
+         end\n",
+        "invalid",
+    );
+
+    let snapshot = fixture.result.diagnostic_snapshot();
+    assert_eq!(snapshot.matches("POP2003").count(), 2, "{snapshot}");
+    assert!(fixture.result.body().is_none(), "{snapshot}");
+}
+
+#[test]
 fn await_requires_async_context_and_exact_task_operand() {
     let outside = check_function(
         "namespace Example\n\
@@ -217,6 +265,66 @@ fn await_requires_async_context_and_exact_task_operand() {
     );
     assert!(non_task.result.body().is_none());
     assert!(non_task.result.diagnostic_snapshot().starts_with("POP2031"));
+}
+
+#[test]
+fn async_cleanup_is_typed_only_in_async_code_and_ordinary_cleanup_cannot_suspend() {
+    let accepted = check_function(
+        "namespace Example\n\
+         private async function close(): Int\n\
+             return 0\n\
+         end\n\
+         public async function valid(): Int\n\
+             async defer\n\
+                 local ignored = await close()\n\
+             end\n\
+             return 1\n\
+         end\n",
+        "valid",
+    );
+    assert!(
+        accepted.result.diagnostics().is_empty(),
+        "{}",
+        accepted.result.diagnostic_snapshot()
+    );
+    assert!(matches!(
+        accepted.result.body().expect("typed body").statements()[0].kind(),
+        TypedStatementKind::AsyncDefer { .. }
+    ));
+
+    let synchronous = check_function(
+        "namespace Example\n\
+         public function invalid(): Int\n\
+             async defer\n\
+                 local ignored = 0\n\
+             end\n\
+             return 1\n\
+         end\n",
+        "invalid",
+    );
+    assert!(synchronous.result.body().is_none());
+    assert!(
+        synchronous
+            .result
+            .diagnostic_snapshot()
+            .starts_with("POP2030")
+    );
+
+    let ordinary = check_function(
+        "namespace Example\n\
+         private async function close(): Int\n\
+             return 0\n\
+         end\n\
+         public async function invalid(): Int\n\
+             defer\n\
+                 local ignored = await close()\n\
+             end\n\
+             return 1\n\
+         end\n",
+        "invalid",
+    );
+    assert!(ordinary.result.body().is_none());
+    assert!(ordinary.result.diagnostic_snapshot().starts_with("POP2026"));
 }
 
 #[test]

@@ -95,7 +95,7 @@ fn completed_async_tasks_reuse_the_exact_completion_after_optimization() {
     });
     assert!(
         task_map.is_some_and(|map| {
-            map.reference_slots() == &[pop_runtime_interface::ObjectSlot::new(0)]
+            map.reference_slots() == [pop_runtime_interface::ObjectSlot::new(0)]
         }),
         "the retained managed completion must occupy the compiler-proven task slot: {events:?}"
     );

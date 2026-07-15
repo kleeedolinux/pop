@@ -16,9 +16,9 @@ use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
     MirBlock, MirBlockArgument, MirBubble, MirBuiltinInterfaceImplementation,
-    MirBuiltinInterfaceMethodImplementation, MirCapture, MirCaptureMode, MirClassDeclaration,
-    MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration, MirDeclarationKind,
-    MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
+    MirBuiltinInterfaceMethodImplementation, MirCancellationMode, MirCapture, MirCaptureMode,
+    MirClassDeclaration, MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration,
+    MirDeclarationKind, MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
     MirErrorDeclaration, MirErrorSwitchArm, MirField, MirFrameSlot, MirFunction,
     MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
     MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirLiveFrame,
@@ -919,6 +919,40 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             object_map: parse_object_map(object_map, line)?,
         });
     }
+    if text == "cancelSourceCreate" {
+        return Ok(MirInstructionKind::CancelSourceCreate);
+    }
+    if let Some(source) = text.strip_prefix("cancelSourceToken ") {
+        return Ok(MirInstructionKind::CancelSourceToken {
+            source: ValueId::from_raw(parse_prefixed(source, 'v', line)?),
+        });
+    }
+    if let Some(source) = text.strip_prefix("cancelRequest ") {
+        return Ok(MirInstructionKind::CancelRequest {
+            source: ValueId::from_raw(parse_prefixed(source, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("taskGroupCreate completion:t") {
+        let (completion_type, rest) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "task group completion type"))?;
+        let (object_map, operands) = rest
+            .split_once(" cancel:v")
+            .ok_or_else(|| error(line, "task group object map"))?;
+        let (cancel, body) = operands
+            .split_once(" body:v")
+            .ok_or_else(|| error(line, "task group operands"))?;
+        return Ok(MirInstructionKind::TaskGroupCreate {
+            cancel: ValueId::from_raw(parse_u32(cancel, line)?),
+            body: ValueId::from_raw(parse_u32(body, line)?),
+            completion_type: TypeId::from_raw(parse_u32(completion_type, line)?),
+            object_map: parse_object_map(object_map, line)?,
+        });
+    }
+    if let Some(operands) = text.strip_prefix("taskStart ") {
+        let (group, task) = parse_two_values(operands, line)?;
+        return Ok(MirInstructionKind::TaskStart { group, task });
+    }
     if let Some(operands) = text.strip_prefix("string.concat ") {
         let (left, right) = parse_two_values(operands, line)?;
         return Ok(MirInstructionKind::StringConcat { left, right });
@@ -1580,6 +1614,7 @@ fn parse_effects(text: &str, line: usize) -> Result<MirEffectSummary, MirParseEr
         .map(|effect| match effect {
             "Allocates" => Ok(MirEffect::Allocates),
             "WritesManagedReference" => Ok(MirEffect::WritesManagedReference),
+            "Synchronizes" => Ok(MirEffect::Synchronizes),
             "MayTrap" => Ok(MirEffect::MayTrap),
             "MayUnwind" => Ok(MirEffect::MayUnwind),
             "Suspends" => Ok(MirEffect::Suspends),
@@ -1734,14 +1769,22 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
     }
     if let Some(rest) = text.strip_prefix("suspend.task ") {
         let parts: Vec<_> = rest.split_whitespace().collect();
-        if parts.len() != 9 {
+        if parts.len() != 10 {
             return Err(error(line, "malformed task suspension"));
         }
         let task = ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?);
         let result_type = TypeId::from_raw(parse_named_prefix(parts[1], "result:t", line)?);
         let resume = BlockId::from_raw(parse_named_prefix(parts[2], "resume:b", line)?);
         let cancellation = BlockId::from_raw(parse_named_prefix(parts[3], "cancellation:b", line)?);
-        let unwind = parts[4]
+        let cancellation_mode = match parts[4]
+            .strip_prefix("cancellation-mode:")
+            .ok_or_else(|| error(line, "task suspension cancellation mode"))?
+        {
+            "observe" => MirCancellationMode::Observe,
+            "masked" => MirCancellationMode::Masked,
+            _ => return Err(error(line, "task suspension cancellation mode")),
+        };
+        let unwind = parts[5]
             .strip_prefix("unwind:")
             .ok_or_else(|| error(line, "task suspension unwind"))?;
         let unwind = if unwind == "propagate" {
@@ -1751,9 +1794,9 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
         } else {
             return Err(error(line, "task suspension unwind"));
         };
-        let safe_point = SafePointId::new(parse_named_prefix(parts[5], "safePoint:sp", line)?);
-        let state = CoroutineStateId::from_raw(parse_named_prefix(parts[6], "state:cs", line)?);
-        let frame = parts[7]
+        let safe_point = SafePointId::new(parse_named_prefix(parts[6], "safePoint:sp", line)?);
+        let state = CoroutineStateId::from_raw(parse_named_prefix(parts[7], "state:cs", line)?);
+        let frame = parts[8]
             .strip_prefix("frame[")
             .and_then(|frame| frame.strip_suffix(']'))
             .ok_or_else(|| error(line, "task suspension frame"))?;
@@ -1773,7 +1816,7 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
                 })
                 .collect::<Result<Vec<_>, MirParseError>>()?
         };
-        let roots = parts[8]
+        let roots = parts[9]
             .strip_prefix("roots[")
             .and_then(|roots| roots.strip_suffix(']'))
             .ok_or_else(|| error(line, "task suspension roots"))?;
@@ -1789,6 +1832,7 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
             operation: MirSuspendOperation::Task { task, result_type },
             resume,
             cancellation,
+            cancellation_mode,
             unwind,
             safe_point,
             live_frame: MirLiveFrame {
