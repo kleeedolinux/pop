@@ -307,6 +307,10 @@ name = "pop-extension-data"
 version = "0.1.0"
 
 [[package]]
+name = "pop-extension-ffi"
+version = "0.1.0"
+
+[[package]]
 name = "pop-extension-lsp"
 version = "0.1.0"
 dependencies = [

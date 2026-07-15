@@ -22,6 +22,7 @@ members = [
     "crates/extensions/ai",
     "crates/extensions/cli",
     "crates/extensions/data",
+    "crates/extensions/ffi",
     "crates/extensions/lsp",
     "crates/extensions/rpc",
     "crates/extensions/syntax",
@@ -62,6 +63,7 @@ pop-types = { path = "crates/compiler/types" }
 pop-extension-ai = { path = "crates/extensions/ai" }
 pop-extension-cli = { path = "crates/extensions/cli" }
 pop-extension-data = { path = "crates/extensions/data" }
+pop-extension-ffi = { path = "crates/extensions/ffi" }
 pop-extension-lsp = { path = "crates/extensions/lsp" }
 pop-extension-rpc = { path = "crates/extensions/rpc" }
 pop-extension-syntax = { path = "crates/extensions/syntax" }

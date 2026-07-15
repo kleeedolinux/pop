@@ -1,0 +1,4 @@
+[package]
+name = "Pop.Ffi"
+version = "0.1.0"
+edition = "2026"
