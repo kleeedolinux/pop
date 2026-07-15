@@ -297,6 +297,14 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::FfiBufferClose)
         ),
         format!(
+            "declare i64 @{}(i64, ptr, ptr)",
+            native_runtime_symbol(RuntimeOperation::FfiBytesBorrow)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::FfiBytesEndBorrow)
+        ),
+        format!(
             "declare i64 @{}(i64)",
             native_runtime_symbol(RuntimeOperation::Pin)
         ),

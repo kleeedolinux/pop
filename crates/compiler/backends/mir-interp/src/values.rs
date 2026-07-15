@@ -36,6 +36,7 @@ pub enum MirValue {
     TaskGroup(SymbolId),
     FfiHandle(u64),
     FfiBuffer(ManagedReference),
+    Bytes(ManagedReference),
     FfiPointer(ForeignAddress),
     FfiFunction(u64),
     FfiNullPointerError,
@@ -108,7 +109,7 @@ impl RuntimeValue {
     pub(crate) fn visible(visible: MirValue) -> Self {
         let reference = match &visible {
             MirValue::Class(class) => Some(class.reference),
-            MirValue::FfiBuffer(reference) => Some(*reference),
+            MirValue::FfiBuffer(reference) | MirValue::Bytes(reference) => Some(*reference),
             _ => None,
         };
         Self { visible, reference }

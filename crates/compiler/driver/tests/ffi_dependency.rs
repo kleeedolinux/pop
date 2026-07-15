@@ -889,6 +889,155 @@ fn ffi_buffer_with_pointer_allows_exact_foreign_calls_and_balances_unwind() {
 }
 
 #[test]
+fn ffi_with_pin_lowers_one_inline_immutable_bytes_payload_borrow() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/withPin.pop",
+            "namespace Memory\n\
+             public function inspect(bytes: Bytes): Boolean\n\
+                 return Ffi.withPin(bytes, function(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Boolean\n\
+                     return Ffi.OptionalReadOnlyPointer.isPresent(pointer)\n\
+                 end)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("byte pin HIR"), result.types())
+        .expect("byte pin MIR");
+    let dump = mir.dump();
+    for operation in [
+        "ffiBytesBorrow",
+        "ffiBytesBorrowLength",
+        "callScopedBorrow",
+        "ffiBytesEndBorrow",
+    ] {
+        assert!(dump.contains(operation), "missing {operation}\n{dump}");
+    }
+}
+
+#[test]
+fn ffi_with_pin_rejects_non_bytes_non_inline_async_and_escaping_bodies() {
+    let ffi = BubbleId::from_raw(20);
+    for source in [
+        "namespace Memory\n\
+         function inspectBody(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Boolean\n\
+             return Ffi.OptionalReadOnlyPointer.isPresent(pointer)\n\
+         end\n\
+         public function invalid(bytes: Bytes): Boolean\n\
+             return Ffi.withPin(bytes, inspectBody)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(value: String): Boolean\n\
+             return Ffi.withPin(value, function(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Boolean\n\
+                 return Ffi.OptionalReadOnlyPointer.isPresent(pointer)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(bytes: Bytes): Boolean\n\
+             return Ffi.withPin(bytes, async function(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Boolean\n\
+                 return Ffi.OptionalReadOnlyPointer.isPresent(pointer)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(bytes: Bytes): Boolean\n\
+             return Ffi.withPin(bytes, function(pointer: Ffi.OptionalPointer<Byte>, length: Ffi.C.Size): Boolean\n\
+                 return Ffi.OptionalPointer.isPresent(pointer)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(bytes: Bytes): Ffi.OptionalReadOnlyPointer<Byte>\n\
+             return Ffi.withPin(bytes, function(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Ffi.OptionalReadOnlyPointer<Byte>\n\
+                 return pointer\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         function retain(pointer: Ffi.OptionalReadOnlyPointer<Byte>): Boolean\n\
+             return Ffi.OptionalReadOnlyPointer.isPresent(pointer)\n\
+         end\n\
+         public function invalid(bytes: Bytes): Boolean\n\
+             return Ffi.withPin(bytes, function(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Boolean\n\
+                 return retain(pointer)\n\
+             end)\n\
+         end\n",
+    ] {
+        let module = FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(FileId::from_raw(0), "src/invalidPin.pop", source).expect("source"),
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{source}");
+        assert!(!result.diagnostics().is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn ffi_with_pin_allows_an_exact_read_only_foreign_call_and_unwind_cleanup() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/pinnedForeign.pop",
+            "namespace Memory\n\
+             @Ffi.Foreign(\"inspect_bytes\", abi = \"CUnwind\")\n\
+             internal function inspectForeign(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Ffi.C.Int\n\
+             end\n\
+             public function inspect(bytes: Bytes): Ffi.C.Int\n\
+                 return Ffi.withPin(bytes, function(pointer: Ffi.OptionalReadOnlyPointer<Byte>, length: Ffi.C.Size): Ffi.C.Int\n\
+                     return inspectForeign(pointer, length)\n\
+                 end)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("byte pin HIR"), result.types())
+        .expect("byte pin MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callForeign"), "{dump}");
+    assert!(dump.contains("unwind cleanup:b"), "{dump}");
+    assert_eq!(dump.matches("ffiBytesEndBorrow").count(), 2, "{dump}");
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_pointer_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(

@@ -828,6 +828,30 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::FfiBufferClose { buffer } => {
             let _ = write!(output, "ffiBufferClose v{}", buffer.raw());
         }
+        MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+            let _ = write!(
+                output,
+                "ffiBytesBorrow v{} region#{}",
+                bytes.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBytesBorrowLength { bytes, region } => {
+            let _ = write!(
+                output,
+                "ffiBytesBorrowLength v{} region#{}",
+                bytes.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+            let _ = write!(
+                output,
+                "ffiBytesEndBorrow v{} region#{}",
+                bytes.raw(),
+                region.raw()
+            );
+        }
         MirInstructionKind::FfiPointerNone => output.push_str("ffiPointerNone"),
         MirInstructionKind::FfiPointerToOptional { pointer } => {
             let _ = write!(output, "ffiPointerToOptional v{}", pointer.raw());

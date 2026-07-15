@@ -15,11 +15,11 @@ use pop_mir::{
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
     CancellationTokenId, FfiBufferBorrowId, FfiBufferOpenFailure, FfiBufferOpenRequest,
-    ForeignAddress, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle,
-    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
-    TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle,
-    TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason,
-    WriteBarrier,
+    FfiBytesBorrowId, ForeignAddress, ManagedReference, ObjectAllocationRequest, ObjectMap,
+    ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
+    RuntimeTypeId, TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId,
+    TaskLifecycle, TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind,
+    UnwindReason, WriteBarrier,
 };
 use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
@@ -176,6 +176,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             root_handles: BTreeMap::new(),
             ffi_handles: BTreeMap::new(),
             ffi_buffer_borrows: BTreeMap::new(),
+            ffi_bytes_borrows: BTreeMap::new(),
             pin_handles: BTreeMap::new(),
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
@@ -197,11 +198,19 @@ struct Engine<'mir, 'runtime, R> {
     root_handles: BTreeMap<ValueId, RootHandle>,
     ffi_handles: BTreeMap<RootHandle, RuntimeValue>,
     ffi_buffer_borrows: BTreeMap<BorrowRegionId, FfiBufferBorrowId>,
+    ffi_bytes_borrows: BTreeMap<BorrowRegionId, FfiBytesBorrowState>,
     pin_handles: BTreeMap<ValueId, PinHandle>,
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
     active_captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
     active_task: Option<TaskId>,
+}
+
+#[derive(Clone, Copy)]
+struct FfiBytesBorrowState {
+    owner: ManagedReference,
+    borrow: FfiBytesBorrowId,
+    length: u64,
 }
 
 enum PrivateValue {
@@ -1894,6 +1903,41 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 }
                 borrow.address().map_or(MirValue::Nil, MirValue::FfiPointer)
             }
+            MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+                if self.ffi_bytes_borrows.contains_key(region) {
+                    return Err(self.runtime_invariant());
+                }
+                let owner = value(values, *bytes)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let borrow = self
+                    .runtime
+                    .ffi_bytes_borrow(owner)
+                    .map_err(|_| self.runtime_invariant())?;
+                let state = FfiBytesBorrowState {
+                    owner,
+                    borrow: borrow.id(),
+                    length: borrow.length(),
+                };
+                self.ffi_bytes_borrows.insert(*region, state);
+                borrow.address().map_or(MirValue::Nil, MirValue::FfiPointer)
+            }
+            MirInstructionKind::FfiBytesBorrowLength { bytes, region } => {
+                let owner = value(values, *bytes)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let state = self
+                    .ffi_bytes_borrows
+                    .get(region)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if state.owner != owner {
+                    return Err(self.runtime_invariant());
+                }
+                MirValue::Integer(
+                    IntegerValue::parse_decimal(&state.length.to_string(), IntegerKind::UInt64)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                )
+            }
             MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
                 let address = ffi_pointer(&value(values, *pointer)?.visible)?;
                 let entry = self
@@ -2008,6 +2052,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::FfiHandleClose { .. }
             | MirInstructionKind::FfiBufferWrite { .. }
             | MirInstructionKind::FfiBufferEndBorrow { .. }
+            | MirInstructionKind::FfiBytesEndBorrow { .. }
             | MirInstructionKind::FfiBufferClose { .. }
             | MirInstructionKind::FfiUnsafeStore { .. }
             | MirInstructionKind::FfiUnsafeCopy { .. }
@@ -2248,6 +2293,24 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .ffi_buffer_end_borrow(reference, borrow)
                     .map_err(|_| self.runtime_invariant())?;
                 self.ffi_buffer_borrows.remove(region);
+                return Ok(());
+            }
+            MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+                let owner = value(values, *bytes)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let state = self
+                    .ffi_bytes_borrows
+                    .get(region)
+                    .copied()
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if state.owner != owner {
+                    return Err(self.runtime_invariant());
+                }
+                self.runtime
+                    .ffi_bytes_end_borrow(owner, state.borrow)
+                    .map_err(|_| self.runtime_invariant())?;
+                self.ffi_bytes_borrows.remove(region);
                 return Ok(());
             }
             MirInstructionKind::FfiBufferClose { buffer } => {

@@ -9,7 +9,9 @@ use pop_mir::{
 use pop_runtime_interface::FfiAbiLayoutId;
 use pop_source::SourceFile;
 use pop_target::TargetSpec;
-use pop_types::{FFI_BUFFER_TYPE_ID, SemanticType, TypeArena};
+use pop_types::{
+    FFI_BUFFER_TYPE_ID, FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID, SemanticType, TypeArena,
+};
 
 fn layout(raw: u64) -> FfiAbiLayoutId {
     FfiAbiLayoutId::new(raw).expect("nonzero layout")
@@ -17,6 +19,79 @@ fn layout(raw: u64) -> FfiAbiLayoutId {
 
 fn target() -> TargetSpec {
     TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target")
+}
+
+#[test]
+fn immutable_bytes_borrows_use_private_abi_state_without_object_offsets() {
+    let mut types = TypeArena::new();
+    let bytes = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(0),
+            arguments: Vec::new(),
+        })
+        .expect("Bytes");
+    let byte = types.source_type("Byte").expect("Byte");
+    let boolean = types.source_type("Boolean").expect("Boolean");
+    let size = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(221),
+            arguments: Vec::new(),
+        })
+        .expect("FFI size");
+    let optional_pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+            arguments: vec![byte],
+        })
+        .expect("optional read-only pointer");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{bytes}) -> (t{boolean}) effects[MayTrap,Roots]\n  b0(v0:t{bytes}):\n    v1:t{optional_pointer} = ffiBytesBorrow v0 region#0\n    v2:t{size} = ffiBytesBorrowLength v0 region#0\n    v3:t{boolean} = callScopedBorrow s0 nf0 region#0 captures[] (v1, v2) effects[] unwind propagate\n    do v4 ffiBytesEndBorrow v0 region#0\n    return (v3)\nnested s0 nf0 captures - params(t{optional_pointer};t{size}) results(t{boolean}) effects[]\n  b0(v0:t{optional_pointer}, v1:t{size}):\n    v2:t{boolean} = const.boolean true\n    return (v2)\n",
+        bytes = bytes.raw(),
+        boolean = boolean.raw(),
+        optional_pointer = optional_pointer.raw(),
+        size = size.raw(),
+    ))
+    .expect("immutable Bytes MIR");
+    let llvm = lower_mir_to_llvm_ir(&mir, &types, &target(), LlvmLoweringOptions::default())
+        .expect("immutable Bytes LLVM");
+    let text = llvm.to_string();
+    assert!(
+        text.contains("declare i64 @pop_rt_ffi_bytes_borrow(i64, ptr, ptr)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("declare i8 @pop_rt_ffi_bytes_end_borrow(i64, i64)"),
+        "{text}"
+    );
+    assert!(text.contains("call i64 @pop_rt_ffi_bytes_borrow"), "{text}");
+    assert!(text.contains("ffi_bytes_region_0_token"), "{text}");
+    assert!(text.contains("ffi_bytes_region_0_length"), "{text}");
+    assert!(
+        text.contains("store i64 %v1_token_value, ptr %ffi_bytes_region_0_token"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%v1 = load i64, ptr %ffi_bytes_region_0_address"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%v2 = load i64, ptr %ffi_bytes_region_0_length"),
+        "{text}"
+    );
+    assert!(
+        text.contains("icmp ne i64") && text.contains("token_value"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i8 @pop_rt_ffi_bytes_end_borrow"),
+        "{text}"
+    );
+    assert!(
+        text.contains("store i64 0, ptr %ffi_bytes_region_0_token"),
+        "{text}"
+    );
+    assert!(!text.contains("getelementptr i8, ptr %v0"), "{text}");
+    llvm.verify().expect("valid immutable Bytes LLVM");
 }
 
 #[test]

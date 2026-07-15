@@ -86,7 +86,7 @@ fn buffer_operations_round_trip_with_exact_layout_and_region_text() {
     .expect("catalog");
     let layout_id = catalog.entries()[0].id().raw();
     let text = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{buffer}, t{integer}) -> () effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{buffer}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots (v1)\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{size} = ffiBufferLength v1 layout#{layout_id}\n    v6:t{integer} = ffiBufferRead v1 v0 layout#{layout_id}\n    do v7 ffiBufferWrite v1 v0 v2 layout#{layout_id}\n    v8:t{optional_pointer} = ffiBufferBorrow v1 v5 layout#{layout_id} region#9\n    do v9 ffiBufferEndBorrow v1 region#9\n    do v10 ffiBufferClose v1\n    return ()\n",
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{buffer}, t{integer}) -> () effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{buffer}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots (v1)\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{size} = ffiBufferLength v1 layout#{layout_id}\n    v6:t{integer} = ffiBufferRead v1 v0 layout#{layout_id}\n    do v7 ffiBufferWrite v1 v0 v2 layout#{layout_id}\n    v8:t{optional_pointer} = ffiBufferBorrow v1 v5 layout#{layout_id} region#9\n    do v9 callScopedBorrow s0 nf0 region#9 captures[] (v8,v5) effects[] unwind propagate\n    do v10 ffiBufferEndBorrow v1 region#9\n    do v11 ffiBufferClose v1\n    return ()\nnested s0 nf0 captures - params(t{optional_pointer};t{size}) results() effects[]\n  b0(v0:t{optional_pointer}, v1:t{size}):\n    return ()\n",
         size = size.raw(),
         buffer = buffer.raw(),
         integer = integer.raw(),
@@ -144,16 +144,16 @@ fn assert_invalid_buffer_variants(
             &format!("v7:t{} = ffiBufferWrite", integer.raw()),
         ),
         text.replace("ffiBufferBorrow v1 v5", "ffiBufferBorrow v1 v0"),
-        text.replace("    do v9 ffiBufferEndBorrow v1 region#9\n", ""),
+        text.replace("    do v10 ffiBufferEndBorrow v1 region#9\n", ""),
         text.replace("ffiBufferEndBorrow v1 region#9", "ffiBufferEndBorrow v1 region#10"),
         text.replace(
-            "    do v9 ffiBufferEndBorrow",
-            "    do v11 ffiBufferClose v1\n    do v9 ffiBufferEndBorrow",
+            "    do v10 ffiBufferEndBorrow",
+            "    do v12 ffiBufferClose v1\n    do v10 ffiBufferEndBorrow",
         ),
         text.replace(
-            "    do v9 ffiBufferEndBorrow",
+            "    do v10 ffiBufferEndBorrow",
             &format!(
-                "    v11:t{} = ffiBufferBorrow v1 v5 layout#{layout_id} region#10\n    do v9 ffiBufferEndBorrow",
+                "    v12:t{} = ffiBufferBorrow v1 v5 layout#{layout_id} region#10\n    do v10 ffiBufferEndBorrow",
                 optional_pointer.raw()
             ),
         ),

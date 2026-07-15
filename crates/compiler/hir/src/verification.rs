@@ -201,6 +201,9 @@ pub enum HirVerificationError {
     InvalidFfiBufferOperation {
         span: SourceSpan,
     },
+    InvalidFfiBytesBorrow {
+        span: SourceSpan,
+    },
     InvalidFfiPointerOperation {
         span: SourceSpan,
     },
@@ -2940,6 +2943,38 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiBytesWithPin {
+                bytes,
+                body,
+                body_type,
+                region: _,
+            } => {
+                self.verify_expression(bytes, visible);
+                let closure_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *body_type,
+                    span: body.span,
+                };
+                self.verify_closure(body, &closure_expression, visible);
+                let byte = self.arena.source_type("Byte");
+                let valid_parameters = matches!((byte, body.parameters.as_slice()), (Some(byte), [pointer, length])
+                    if ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id,
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(byte)
+                    && self.is_builtin_type(length.type_id, "Ffi.C.Size", &[]));
+                if !self.is_builtin_type(bytes.type_id(), "Bytes", &[])
+                    || body.is_async
+                    || !valid_parameters
+                    || body.results.as_slice() != [expression.type_id()]
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBytesBorrow {
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::FfiPointerNone {
                 element,
                 layout_record,
@@ -5547,6 +5582,14 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         }
         HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
             collect_cell_captures(buffer, written);
+            for capture in &body.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
+        HirExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            collect_cell_captures(bytes, written);
             for capture in &body.captures {
                 if capture.mode == HirCaptureMode::Cell {
                     written.insert(capture.binding);

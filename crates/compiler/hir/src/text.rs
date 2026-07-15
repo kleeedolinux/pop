@@ -1178,6 +1178,11 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, buffer, arena);
             let _ = write!(output, ", scoped nested#{})", body.function.raw());
         }
+        HirExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            output.push_str("ffi.withPin(");
+            dump_expression(output, bytes, arena);
+            let _ = write!(output, ", scoped nested#{})", body.function.raw());
+        }
         HirExpressionKind::FfiPointerNone {
             element,
             layout_record,

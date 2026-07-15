@@ -1512,6 +1512,18 @@ pub enum MirInstructionKind {
     FfiBufferClose {
         buffer: ValueId,
     },
+    FfiBytesBorrow {
+        bytes: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiBytesBorrowLength {
+        bytes: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiBytesEndBorrow {
+        bytes: ValueId,
+        region: BorrowRegionId,
+    },
     FfiPointerNone,
     FfiPointerToOptional {
         pointer: ValueId,
@@ -1892,6 +1904,9 @@ pub enum MirVerificationError {
         instruction: ValueId,
     },
     InvalidFfiBufferOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiBytesOperation {
         instruction: ValueId,
     },
     InvalidFfiPointerOperation {

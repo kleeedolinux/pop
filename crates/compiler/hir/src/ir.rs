@@ -2378,6 +2378,25 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             }
             remap_aggregate_statements(&mut body.body, instances);
         }
+        HirExpressionKind::FfiBytesWithPin {
+            bytes,
+            body,
+            body_type,
+            ..
+        } => {
+            remap_aggregate_expression(bytes, instances);
+            *body_type = instances.type_id(*body_type);
+            for parameter in &mut body.parameters {
+                parameter.type_id = instances.type_id(parameter.type_id);
+            }
+            for result in &mut body.results {
+                *result = instances.type_id(*result);
+            }
+            for capture in &mut body.captures {
+                capture.type_id = instances.type_id(capture.type_id);
+            }
+            remap_aggregate_statements(&mut body.body, instances);
+        }
         HirExpressionKind::Field { base, field } => {
             remap_aggregate_expression(base, instances);
             *field = instances.field(base.type_id(), *field);
@@ -2942,6 +2961,10 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         HirExpressionKind::Closure(closure) => collect_statement_calls(closure.body(), calls),
         HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
             collect_expression_calls(buffer, calls);
+            collect_statement_calls(body.body(), calls);
+        }
+        HirExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            collect_expression_calls(bytes, calls);
             collect_statement_calls(body.body(), calls);
         }
         HirExpressionKind::Field { base, .. }
@@ -3515,6 +3538,25 @@ fn specialize_expression(
         } => {
             specialize_expression(buffer, substitutions, instances, arena)?;
             specialize_type(element, substitutions, arena)?;
+            specialize_type(body_type, substitutions, arena)?;
+            for parameter in &mut body.parameters {
+                specialize_type(&mut parameter.type_id, substitutions, arena)?;
+            }
+            for result in &mut body.results {
+                specialize_type(result, substitutions, arena)?;
+            }
+            for capture in &mut body.captures {
+                specialize_type(&mut capture.type_id, substitutions, arena)?;
+            }
+            specialize_statements(&mut body.body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiBytesWithPin {
+            bytes,
+            body,
+            body_type,
+            ..
+        } => {
+            specialize_expression(bytes, substitutions, instances, arena)?;
             specialize_type(body_type, substitutions, arena)?;
             for parameter in &mut body.parameters {
                 specialize_type(&mut parameter.type_id, substitutions, arena)?;
@@ -4566,6 +4608,12 @@ pub enum HirExpressionKind {
         body_type: TypeId,
         element: TypeId,
         layout_record: Option<SymbolId>,
+        region: BorrowRegionId,
+    },
+    FfiBytesWithPin {
+        bytes: Box<HirExpression>,
+        body: HirClosure,
+        body_type: TypeId,
         region: BorrowRegionId,
     },
     FfiPointerNone {

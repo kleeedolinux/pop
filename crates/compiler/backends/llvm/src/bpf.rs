@@ -499,6 +499,9 @@ fn validate_instruction(
         | MirInstructionKind::FfiBufferBorrow { .. }
         | MirInstructionKind::FfiBufferEndBorrow { .. }
         | MirInstructionKind::FfiBufferClose { .. }
+        | MirInstructionKind::FfiBytesBorrow { .. }
+        | MirInstructionKind::FfiBytesBorrowLength { .. }
+        | MirInstructionKind::FfiBytesEndBorrow { .. }
         | MirInstructionKind::FfiPointerNone
         | MirInstructionKind::FfiPointerToOptional { .. }
         | MirInstructionKind::FfiPointerReadOnly { .. }

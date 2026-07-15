@@ -352,8 +352,15 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         } => {
             finalize_expression_captures(operand, written);
         }
-        TypedExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
-            finalize_expression_captures(buffer, written);
+        TypedExpressionKind::FfiBufferWithPointer {
+            buffer: owner,
+            body,
+            ..
+        }
+        | TypedExpressionKind::FfiBytesWithPin {
+            bytes: owner, body, ..
+        } => {
+            finalize_expression_captures(owner, written);
             for capture in &mut body.captures {
                 if written.contains(&capture.binding) {
                     capture.mode = CaptureMode::Cell;

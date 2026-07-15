@@ -136,6 +136,25 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .check_ffi_handle_invocation(path, arguments, None, span)
                     .map(CheckedInvocation::Value);
             }
+            if matches!(path.as_slice(), [ffi, operation]
+                if ffi == "Ffi" && operation == "withPin")
+                && self.resolver.has_ffi_dependency()
+                && self
+                    .resolver
+                    .database()
+                    .resolve(
+                        self.module,
+                        &path.join("."),
+                        SymbolSpace::Value,
+                        callee.span(),
+                    )
+                    .symbol()
+                    .is_none()
+            {
+                return self
+                    .check_ffi_with_pin_invocation(arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if matches!(path.as_slice(), [ffi, buffer, operation]
                 if ffi == "Ffi" && buffer == "Buffer"
                     && matches!(operation.as_str(), "length" | "read" | "write" | "close" | "withPointer"))
@@ -648,6 +667,67 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(TypedExpression {
             kind,
             type_id,
+            span,
+        })
+    }
+
+    fn check_ffi_with_pin_invocation(
+        &mut self,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if arguments.len() != 2 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "Ffi.withPin",
+                2,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let bytes_type = self.ffi_builtin_type("Bytes", Vec::new())?;
+        let byte = self.resolver.arena().source_type("Byte")?;
+        let size = self.ffi_builtin_type("Ffi.C.Size", Vec::new())?;
+        let bytes = self.check_expression_expected(
+            &arguments[0],
+            Some(ExpectedExpressionType::plain(bytes_type)),
+        )?;
+        self.require_same_type(bytes_type, bytes.type_id(), bytes.span(), span);
+        let body_expression = self.check_expression(&arguments[1])?;
+        let body_type = body_expression.type_id();
+        let TypedExpressionKind::Closure(body) = body_expression.kind else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                arguments[1].span(),
+                "immediate non-async inline closure",
+                self.type_name(body_expression.type_id()),
+                span,
+            ));
+            return None;
+        };
+        let optional_pointer = self.ffi_builtin_type("Ffi.OptionalReadOnlyPointer", vec![byte])?;
+        let valid_shape = !body.is_async()
+            && matches!(body.parameters(), [pointer, length]
+                if pointer.type_id() == optional_pointer && length.type_id() == size)
+            && body.results().len() == 1;
+        if !valid_shape || !scoped_borrow_body_is_valid(&body, self.signatures) {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                arguments[1].span(),
+                "non-escaping scoped FFI byte borrow body",
+                "incompatible closure",
+                span,
+            ));
+            return None;
+        }
+        let region = pop_foundation::BorrowRegionId::from_raw(self.next_borrow_region);
+        self.next_borrow_region = self.next_borrow_region.saturating_add(1);
+        Some(TypedExpression {
+            type_id: body.results()[0],
+            kind: TypedExpressionKind::FfiBytesWithPin {
+                bytes: Box::new(bytes),
+                body,
+                body_type,
+                region,
+            },
             span,
         })
     }
@@ -2854,7 +2934,11 @@ fn scoped_borrow_expression_is_valid(
             arguments,
             ..
         } => {
-            if *is_async {
+            if *is_async
+                || signatures
+                    .get(function)
+                    .is_some_and(|signature| signature.effects().contains(crate::Effect::Suspends))
+            {
                 return false;
             }
             let foreign = signatures.get(function).is_some_and(|signature| {
@@ -2870,7 +2954,11 @@ fn scoped_borrow_expression_is_valid(
             arguments,
             ..
         } => {
-            if *is_async {
+            if *is_async
+                || signatures.get(&function.symbol()).is_some_and(|signature| {
+                    signature.effects().contains(crate::Effect::Suspends)
+                })
+            {
                 return false;
             }
             let foreign = signatures.get(&function.symbol()).is_some_and(|signature| {
@@ -2883,8 +2971,13 @@ fn scoped_borrow_expression_is_valid(
         TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .all(|argument| scoped_borrow_expression_is_valid(argument, pointer, false, signatures)),
-        TypedExpressionKind::IndirectCall { callee, arguments, .. } => {
-            scoped_borrow_expression_is_valid(callee, pointer, false, signatures)
+        TypedExpressionKind::IndirectCall {
+            callee,
+            is_async,
+            arguments,
+        } => {
+            !is_async
+                && scoped_borrow_expression_is_valid(callee, pointer, false, signatures)
                 && arguments
                     .iter()
                     .all(|argument| scoped_borrow_expression_is_valid(argument, pointer, false, signatures))
@@ -2916,6 +3009,7 @@ fn scoped_borrow_expression_is_valid(
             scoped_borrow_expression_is_valid(argument, pointer, false, signatures)
         }),
         TypedExpressionKind::FfiBufferWithPointer { .. }
+        | TypedExpressionKind::FfiBytesWithPin { .. }
         | TypedExpressionKind::FfiUnsafeLoad { .. }
         | TypedExpressionKind::FfiUnsafeStore { .. }
         | TypedExpressionKind::FfiUnsafeAdvance { .. }

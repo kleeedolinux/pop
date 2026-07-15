@@ -29,6 +29,9 @@ pub(crate) fn lower_instruction(
     direct_scalar_arrays: &DirectScalarArrays,
     options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
+    if let Some(lowered) = crate::ffi_bytes::lower(instruction) {
+        return Ok(lowered);
+    }
     if let Some(lowered) =
         crate::ffi_buffer::lower(instruction, value_types, types, ffi_layouts, field_layout)?
     {
@@ -1079,6 +1082,9 @@ pub(crate) fn lower_instruction(
         | MirInstructionKind::FfiBufferBorrow { .. }
         | MirInstructionKind::FfiBufferEndBorrow { .. }
         | MirInstructionKind::FfiBufferClose { .. } => unreachable!("lowered above"),
+        MirInstructionKind::FfiBytesBorrow { .. }
+        | MirInstructionKind::FfiBytesBorrowLength { .. }
+        | MirInstructionKind::FfiBytesEndBorrow { .. } => unreachable!("lowered above"),
         MirInstructionKind::FfiUnsafeLoad { .. }
         | MirInstructionKind::FfiUnsafeStore { .. }
         | MirInstructionKind::FfiUnsafeAdvance { .. }

@@ -1151,6 +1151,11 @@ enum CleanupAction<'hir> {
         region: BorrowRegionId,
         span: SourceSpan,
     },
+    FfiBytesBorrow {
+        bytes: ValueId,
+        region: BorrowRegionId,
+        span: SourceSpan,
+    },
 }
 
 #[derive(Clone)]
@@ -1510,8 +1515,15 @@ fn visit_expression_closures(
                 }
             }
         }
-        HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
-            visit_expression_closures(buffer, parameters, locals);
+        HirExpressionKind::FfiBufferWithPointer {
+            buffer: owner,
+            body,
+            ..
+        }
+        | HirExpressionKind::FfiBytesWithPin {
+            bytes: owner, body, ..
+        } => {
+            visit_expression_closures(owner, parameters, locals);
             for capture in body.captures() {
                 if capture.mode() != HirCaptureMode::Cell {
                     continue;
@@ -3772,6 +3784,65 @@ impl<'hir> FunctionBuilder<'hir> {
                 );
                 return result;
             }
+            HirExpressionKind::FfiBytesWithPin {
+                bytes,
+                body,
+                region,
+                ..
+            } => {
+                let bytes = self.lower_expression(bytes);
+                let pointer = self.emit(
+                    MirInstructionKind::FfiBytesBorrow {
+                        bytes,
+                        region: *region,
+                    },
+                    body.parameters()[0].type_id(),
+                    expression.span(),
+                );
+                let cleanup_scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                self.active_cleanups.push(ActiveCleanup {
+                    scope: cleanup_scope,
+                    action: CleanupAction::FfiBytesBorrow {
+                        bytes,
+                        region: *region,
+                        span: expression.span(),
+                    },
+                });
+                let length = self.emit(
+                    MirInstructionKind::FfiBytesBorrowLength {
+                        bytes,
+                        region: *region,
+                    },
+                    body.parameters()[1].type_id(),
+                    expression.span(),
+                );
+                let (captures, declared_effects) = self.lower_scoped_closure(body);
+                let result = self.emit(
+                    MirInstructionKind::CallScopedBorrow {
+                        owner: self.owner,
+                        function: body.function(),
+                        captures,
+                        arguments: vec![pointer, length],
+                        region: *region,
+                        declared_effects,
+                        unwind: MirUnwindAction::Propagate,
+                    },
+                    expression.type_id(),
+                    expression.span(),
+                );
+                self.active_cleanups
+                    .pop()
+                    .expect("scoped FFI byte cleanup was registered");
+                self.emit_effect(
+                    MirInstructionKind::FfiBytesEndBorrow {
+                        bytes,
+                        region: *region,
+                    },
+                    expression.span(),
+                );
+                return result;
+            }
             HirExpressionKind::FfiPointerNone { .. } => MirInstructionKind::FfiPointerNone,
             HirExpressionKind::FfiPointerToOptional { pointer } => {
                 MirInstructionKind::FfiPointerToOptional {
@@ -4853,6 +4924,14 @@ impl<'hir> FunctionBuilder<'hir> {
                 MirInstructionKind::FfiBufferEndBorrow { buffer, region },
                 span,
             ),
+            CleanupAction::FfiBytesBorrow {
+                bytes,
+                region,
+                span,
+            } => self.emit_effect(
+                MirInstructionKind::FfiBytesEndBorrow { bytes, region },
+                span,
+            ),
         }
     }
 
@@ -5498,6 +5577,13 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::FfiBufferWrite { .. }
         | MirInstructionKind::FfiBufferBorrow { .. }
         | MirInstructionKind::FfiBufferEndBorrow { .. } => {
+            MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::FfiBytesBorrow { .. }
+        | MirInstructionKind::FfiBytesEndBorrow { .. } => {
+            MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
+        }
+        MirInstructionKind::FfiBytesBorrowLength { .. } => {
             MirEffectSummary::empty().with(MirEffect::MayTrap)
         }
         MirInstructionKind::FfiUnsafeLoad { .. }

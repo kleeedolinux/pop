@@ -588,6 +588,12 @@ pub enum TypedExpressionKind {
         layout_record: Option<SymbolId>,
         region: BorrowRegionId,
     },
+    FfiBytesWithPin {
+        bytes: Box<TypedExpression>,
+        body: TypedClosure,
+        body_type: TypeId,
+        region: BorrowRegionId,
+    },
     FfiPointerNone {
         element: TypeId,
         layout_record: Option<SymbolId>,

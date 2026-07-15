@@ -593,7 +593,7 @@ fn verify_function(
         dominators: &dominators,
         blocks: &blocks,
     };
-    verify_ffi_buffer_borrows(function, &blocks, errors);
+    verify_ffi_borrows(function, &blocks, errors);
     let expected_suspend_frames = expected_suspend_frame_slots(function);
     let mut safe_points = BTreeSet::new();
     let mut coroutine_states = BTreeSet::new();
@@ -1803,28 +1803,63 @@ pub(crate) fn block_targets(block: &MirBlock) -> Vec<BlockId> {
     targets
 }
 
-#[derive(Clone, Copy)]
-struct FfiBufferBorrowDefinition {
-    buffer: ValueId,
-    expected_length: ValueId,
-    layout: FfiAbiLayoutId,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FfiBorrowKind {
+    Buffer,
+    Bytes,
 }
 
-fn verify_ffi_buffer_borrows(
+#[derive(Clone, Copy)]
+enum FfiBorrowDefinition {
+    Buffer {
+        owner: ValueId,
+        pointer: ValueId,
+        length: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    Bytes {
+        owner: ValueId,
+        pointer: ValueId,
+    },
+}
+
+impl FfiBorrowDefinition {
+    const fn owner(self) -> ValueId {
+        match self {
+            Self::Buffer { owner, .. } | Self::Bytes { owner, .. } => owner,
+        }
+    }
+
+    const fn pointer(self) -> ValueId {
+        match self {
+            Self::Buffer { pointer, .. } | Self::Bytes { pointer, .. } => pointer,
+        }
+    }
+
+    const fn kind(self) -> FfiBorrowKind {
+        match self {
+            Self::Buffer { .. } => FfiBorrowKind::Buffer,
+            Self::Bytes { .. } => FfiBorrowKind::Bytes,
+        }
+    }
+}
+
+fn verify_ffi_borrows(
     function: &MirFunction,
     blocks: &BTreeMap<BlockId, &MirBlock>,
     errors: &mut Vec<MirVerificationError>,
 ) {
-    let mut lengths = BTreeMap::new();
+    let mut buffer_lengths = BTreeMap::new();
+    let mut bytes_lengths = BTreeMap::<BorrowRegionId, Vec<(ValueId, ValueId)>>::new();
     let mut borrows = BTreeMap::new();
-    let mut ends = BTreeMap::<BorrowRegionId, Vec<ValueId>>::new();
+    let mut ends = BTreeMap::<BorrowRegionId, Vec<(ValueId, FfiBorrowKind)>>::new();
     let mut borrowed_optionals = BTreeMap::new();
     let mut scoped_calls = BTreeMap::<BorrowRegionId, Vec<(ValueId, Vec<ValueId>)>>::new();
     for block in function.blocks() {
         for instruction in block.instructions() {
             match instruction.kind() {
                 MirInstructionKind::FfiBufferLength { buffer, layout } => {
-                    lengths.insert(instruction.result(), (*buffer, *layout));
+                    buffer_lengths.insert(instruction.result(), (*buffer, *layout));
                 }
                 MirInstructionKind::FfiBufferBorrow {
                     buffer,
@@ -1832,9 +1867,10 @@ fn verify_ffi_buffer_borrows(
                     layout,
                     region,
                 } => {
-                    let definition = FfiBufferBorrowDefinition {
-                        buffer: *buffer,
-                        expected_length: *expected_length,
+                    let definition = FfiBorrowDefinition::Buffer {
+                        owner: *buffer,
+                        pointer: instruction.result(),
+                        length: *expected_length,
                         layout: *layout,
                     };
                     if borrows.insert(*region, definition).is_some() {
@@ -1842,8 +1878,31 @@ fn verify_ffi_buffer_borrows(
                     }
                     borrowed_optionals.insert(instruction.result(), *region);
                 }
-                MirInstructionKind::FfiBufferEndBorrow { region, .. } => {
-                    ends.entry(*region).or_default().push(instruction.result());
+                MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+                    let definition = FfiBorrowDefinition::Bytes {
+                        owner: *bytes,
+                        pointer: instruction.result(),
+                    };
+                    if borrows.insert(*region, definition).is_some() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    borrowed_optionals.insert(instruction.result(), *region);
+                }
+                MirInstructionKind::FfiBytesBorrowLength { bytes, region } => {
+                    bytes_lengths
+                        .entry(*region)
+                        .or_default()
+                        .push((*bytes, instruction.result()));
+                }
+                MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+                    ends.entry(*region)
+                        .or_default()
+                        .push((*buffer, FfiBorrowKind::Buffer));
+                }
+                MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+                    ends.entry(*region)
+                        .or_default()
+                        .push((*bytes, FfiBorrowKind::Bytes));
                 }
                 MirInstructionKind::CallScopedBorrow {
                     region, arguments, ..
@@ -1856,37 +1915,44 @@ fn verify_ffi_buffer_borrows(
         }
     }
     for (region, definition) in &borrows {
-        if lengths.get(&definition.expected_length) != Some(&(definition.buffer, definition.layout))
-            || ends.get(region).is_none_or(Vec::is_empty)
-        {
+        let length = match definition {
+            FfiBorrowDefinition::Buffer {
+                owner,
+                length,
+                layout,
+                ..
+            } if buffer_lengths.get(length) == Some(&(*owner, *layout)) => Some(*length),
+            FfiBorrowDefinition::Bytes { owner, .. } => {
+                bytes_lengths
+                    .get(region)
+                    .and_then(|lengths| match lengths.as_slice() {
+                        [(bytes, length)] if bytes == owner => Some(*length),
+                        _ => None,
+                    })
+            }
+            FfiBorrowDefinition::Buffer { .. } => None,
+        };
+        let valid_ends = ends.get(region).is_some_and(|ends| {
+            !ends.is_empty()
+                && ends
+                    .iter()
+                    .all(|(owner, kind)| *owner == definition.owner() && *kind == definition.kind())
+        });
+        let valid_call = length.is_some_and(|length| {
+            matches!(scoped_calls.get(region).map(Vec::as_slice), Some([(_, arguments)])
+                if arguments.as_slice() == [definition.pointer(), length])
+        });
+        if !valid_ends || !valid_call {
             push_borrow_region_error(*region, errors);
         }
     }
-    for region in ends.keys() {
+    for region in ends
+        .keys()
+        .chain(bytes_lengths.keys())
+        .chain(scoped_calls.keys())
+    {
         if !borrows.contains_key(region) {
             push_borrow_region_error(*region, errors);
-        }
-    }
-    for (region, calls) in &scoped_calls {
-        let valid = borrows.get(region).is_some_and(|borrow| {
-            matches!(calls.as_slice(), [(_, arguments)]
-                if matches!(arguments.as_slice(), [pointer, length]
-                    if borrowed_optionals.get(pointer) == Some(region)
-                        && *length == borrow.expected_length))
-        });
-        if !valid {
-            push_borrow_region_error(*region, errors);
-        }
-    }
-
-    let mut borrowed_pointers = BTreeMap::new();
-    for block in function.blocks() {
-        for instruction in block.instructions() {
-            if let MirInstructionKind::OptionalGet { optional } = instruction.kind()
-                && let Some(region) = borrowed_optionals.get(optional)
-            {
-                borrowed_pointers.insert(instruction.result(), *region);
-            }
         }
     }
     for block in function.blocks() {
@@ -1895,27 +1961,15 @@ fn verify_ffi_buffer_borrows(
                 if let Some(region) = borrowed_optionals.get(&operand)
                     && !matches!(
                         instruction.kind(),
-                        MirInstructionKind::OptionalIsPresent { .. }
-                            | MirInstructionKind::OptionalGet { .. }
-                            | MirInstructionKind::FfiPointerIsPresent { .. }
-                            | MirInstructionKind::FfiPointerRequire { .. }
-                            | MirInstructionKind::CallScopedBorrow { .. }
+                        MirInstructionKind::CallScopedBorrow { .. }
                     )
-                {
-                    push_borrow_region_error(*region, errors);
-                }
-                if let Some(region) = borrowed_pointers.get(&operand)
-                    && !matches!(instruction.kind(), MirInstructionKind::CallForeign { .. })
                 {
                     push_borrow_region_error(*region, errors);
                 }
             }
         }
         for operand in terminator_operands(block.terminator()) {
-            if let Some(region) = borrowed_optionals
-                .get(&operand)
-                .or_else(|| borrowed_pointers.get(&operand))
-            {
+            if let Some(region) = borrowed_optionals.get(&operand) {
                 push_borrow_region_error(*region, errors);
             }
         }
@@ -1931,21 +1985,38 @@ fn verify_ffi_buffer_borrows(
         for instruction in block.instructions() {
             match instruction.kind() {
                 MirInstructionKind::FfiBufferBorrow { buffer, region, .. } => {
-                    if active.contains_key(region)
-                        || active.values().any(|active_buffer| active_buffer == buffer)
-                    {
+                    if !active.is_empty() {
                         push_borrow_region_error(*region, errors);
                     }
-                    active.insert(*region, *buffer);
+                    active.insert(*region, (*buffer, FfiBorrowKind::Buffer));
+                }
+                MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+                    if !active.is_empty() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    active.insert(*region, (*bytes, FfiBorrowKind::Bytes));
+                }
+                MirInstructionKind::FfiBytesBorrowLength { bytes, region }
+                    if !matches!(
+                        active.get(region),
+                        Some((owner, FfiBorrowKind::Bytes)) if owner == bytes
+                    ) =>
+                {
+                    push_borrow_region_error(*region, errors);
                 }
                 MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
-                    if active.remove(region) != Some(*buffer) {
+                    if active.remove(region) != Some((*buffer, FfiBorrowKind::Buffer)) {
+                        push_borrow_region_error(*region, errors);
+                    }
+                }
+                MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+                    if active.remove(region) != Some((*bytes, FfiBorrowKind::Bytes)) {
                         push_borrow_region_error(*region, errors);
                     }
                 }
                 MirInstructionKind::FfiBufferClose { buffer } => {
-                    for region in active.iter().filter_map(|(region, active_buffer)| {
-                        (active_buffer == buffer).then_some(*region)
+                    for region in active.iter().filter_map(|(region, (owner, kind))| {
+                        (*owner == *buffer && *kind == FfiBorrowKind::Buffer).then_some(*region)
                     }) {
                         push_borrow_region_error(region, errors);
                     }
@@ -1986,8 +2057,8 @@ fn verify_ffi_buffer_borrows(
 
 fn merge_borrow_state(
     target: BlockId,
-    state: &BTreeMap<BorrowRegionId, ValueId>,
-    incoming: &mut BTreeMap<BlockId, BTreeMap<BorrowRegionId, ValueId>>,
+    state: &BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>,
+    incoming: &mut BTreeMap<BlockId, BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>>,
     pending: &mut Vec<BlockId>,
     errors: &mut Vec<MirVerificationError>,
 ) {
@@ -2004,7 +2075,7 @@ fn merge_borrow_state(
 }
 
 fn push_active_borrow_errors(
-    active: &BTreeMap<BorrowRegionId, ValueId>,
+    active: &BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     for region in active.keys() {
@@ -2044,6 +2115,7 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiBufferWrite { .. }
             | MirInstructionKind::FfiBufferEndBorrow { .. }
             | MirInstructionKind::FfiBufferClose { .. }
+            | MirInstructionKind::FfiBytesEndBorrow { .. }
             | MirInstructionKind::FfiUnsafeStore { .. }
             | MirInstructionKind::FfiUnsafeCopy { .. }
             | MirInstructionKind::Pin { .. }
@@ -2063,11 +2135,24 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiBufferLength { .. }
             | MirInstructionKind::FfiBufferRead { .. }
             | MirInstructionKind::FfiBufferBorrow { .. }
+            | MirInstructionKind::FfiBytesBorrow { .. }
+            | MirInstructionKind::FfiBytesBorrowLength { .. }
     );
     if requires_value_form && !instruction.has_result() {
-        errors.push(MirVerificationError::InvalidFfiBufferOperation {
-            instruction: instruction.result(),
-        });
+        let error = if matches!(
+            instruction.kind(),
+            MirInstructionKind::FfiBytesBorrow { .. }
+                | MirInstructionKind::FfiBytesBorrowLength { .. }
+        ) {
+            MirVerificationError::InvalidFfiBytesOperation {
+                instruction: instruction.result(),
+            }
+        } else {
+            MirVerificationError::InvalidFfiBufferOperation {
+                instruction: instruction.result(),
+            }
+        };
+        errors.push(error);
         return;
     }
     let requires_pointer_value = matches!(
@@ -2243,6 +2328,38 @@ fn verify_instruction_types(
             verify_ffi_buffer_operation(
                 instruction,
                 ffi_buffer_operand_element(arena, values, *buffer).is_some(),
+                errors,
+            );
+        }
+        MirInstructionKind::FfiBytesBorrow { bytes, .. } => {
+            let valid = values
+                .get(bytes)
+                .is_some_and(|type_id| is_exact_bootstrap_type(arena, *type_id, "Bytes", &[]))
+                && arena.source_type("Byte").is_some_and(|byte| {
+                    ffi_pointer_payload(
+                        arena,
+                        instruction.result_type(),
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(byte)
+                });
+            verify_ffi_bytes_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBytesBorrowLength { bytes, .. } => {
+            verify_ffi_bytes_operation(
+                instruction,
+                values
+                    .get(bytes)
+                    .is_some_and(|type_id| is_exact_bootstrap_type(arena, *type_id, "Bytes", &[]))
+                    && Some(instruction.result_type()) == ffi_size_type(arena),
+                errors,
+            );
+        }
+        MirInstructionKind::FfiBytesEndBorrow { bytes, .. } => {
+            verify_ffi_bytes_operation(
+                instruction,
+                values
+                    .get(bytes)
+                    .is_some_and(|type_id| is_exact_bootstrap_type(arena, *type_id, "Bytes", &[])),
                 errors,
             );
         }
@@ -3046,6 +3163,18 @@ fn verify_ffi_pointer_operation(
 ) {
     if !valid {
         errors.push(MirVerificationError::InvalidFfiPointerOperation {
+            instruction: instruction.result(),
+        });
+    }
+}
+
+fn verify_ffi_bytes_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiBytesOperation {
             instruction: instruction.result(),
         });
     }
@@ -5185,6 +5314,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             expected_length,
             ..
         } => vec![*buffer, *expected_length],
+        MirInstructionKind::FfiBytesBorrow { bytes, .. }
+        | MirInstructionKind::FfiBytesEndBorrow { bytes, .. } => vec![*bytes],
+        MirInstructionKind::FfiBytesBorrowLength { bytes, .. } => vec![*bytes],
         MirInstructionKind::Pin { value } => vec![*value],
         MirInstructionKind::Unpin { handle } => vec![*handle],
         MirInstructionKind::WriteBarrier {

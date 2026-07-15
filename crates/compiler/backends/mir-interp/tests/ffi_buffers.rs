@@ -184,7 +184,7 @@ fn reference_unsafe_memory_requires_active_borrow_and_preserves_overlap() {
 }
 
 #[test]
-fn interpreter_executes_typed_buffer_storage_and_lexical_borrow_operations() {
+fn interpreter_executes_typed_buffer_storage_operations() {
     let mut types = TypeArena::new();
     let integer = types.source_type("Int").expect("Int");
     let boolean = types.source_type("Boolean").expect("Boolean");
@@ -200,12 +200,6 @@ fn interpreter_executes_typed_buffer_storage_and_lexical_borrow_operations() {
             arguments: vec![integer],
         })
         .expect("buffer");
-    let optional_pointer = types
-        .intern(SemanticType::Builtin {
-            definition: BuiltinTypeId::from_raw(201),
-            arguments: vec![integer],
-        })
-        .expect("optional pointer");
     let allocation_error = types
         .intern(SemanticType::Builtin {
             definition: BuiltinTypeId::from_raw(209),
@@ -234,13 +228,12 @@ fn interpreter_executes_typed_buffer_storage_and_lexical_borrow_operations() {
     .expect("catalog");
     let layout_id = catalog.entries()[0].id().raw();
     let text = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{size}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    v7:t{size} = ffiBufferLength v6 layout#{layout_id}\n    do v8 ffiBufferWrite v6 v1 v2 layout#{layout_id}\n    v9:t{integer} = ffiBufferRead v6 v1 layout#{layout_id}\n    v10:t{optional_pointer} = ffiBufferBorrow v6 v7 layout#{layout_id} region#1\n    do v11 ffiBufferEndBorrow v6 region#1\n    do v12 ffiBufferClose v6\n    return (v9)\n  b2():\n    v13:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\n",
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{size}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    v7:t{size} = ffiBufferLength v6 layout#{layout_id}\n    do v8 ffiBufferWrite v6 v1 v2 layout#{layout_id}\n    v9:t{integer} = ffiBufferRead v6 v1 layout#{layout_id}\n    do v10 ffiBufferClose v6\n    return (v9)\n  b2():\n    v11:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\n",
         size = size.raw(),
         integer = integer.raw(),
         open_result = open_result.raw(),
         boolean = boolean.raw(),
         buffer = buffer.raw(),
-        optional_pointer = optional_pointer.raw(),
         allocation_error = allocation_error.raw(),
     );
     let mir = parse_mir_dump(&text)

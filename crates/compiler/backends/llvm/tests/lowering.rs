@@ -1678,6 +1678,8 @@ fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
     assert!(text.contains("declare i8 @pop_rt_ffi_buffer_borrow(i64, i64, ptr, ptr, ptr)"));
     assert!(text.contains("declare i8 @pop_rt_ffi_buffer_end_borrow(i64, i64)"));
     assert!(text.contains("declare i8 @pop_rt_ffi_buffer_close(i64)"));
+    assert!(text.contains("declare i64 @pop_rt_ffi_bytes_borrow(i64, ptr, ptr)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_bytes_end_borrow(i64, i64)"));
     assert!(text.contains("%v2 = call i64 @pop_rt_retain_root(i64 %v1)"));
     assert!(text.contains("call i8 @pop_rt_release_root(i64 %v2)"));
 

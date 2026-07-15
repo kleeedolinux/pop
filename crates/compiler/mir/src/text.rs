@@ -902,6 +902,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::FfiBufferWrite { .. }
                 | MirInstructionKind::FfiBufferEndBorrow { .. }
                 | MirInstructionKind::FfiBufferClose { .. }
+                | MirInstructionKind::FfiBytesEndBorrow { .. }
                 | MirInstructionKind::FfiUnsafeStore { .. }
                 | MirInstructionKind::FfiUnsafeCopy { .. }
                 | MirInstructionKind::Pin { .. }
@@ -1490,6 +1491,36 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     if let Some(buffer) = text.strip_prefix("ffiBufferClose ") {
         return Ok(MirInstructionKind::FfiBufferClose {
             buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBytesBorrow ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [bytes, region] = parts.as_slice() else {
+            return Err(error(line, "FFI Bytes borrow"));
+        };
+        return Ok(MirInstructionKind::FfiBytesBorrow {
+            bytes: ValueId::from_raw(parse_prefixed(bytes, 'v', line)?),
+            region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBytesBorrowLength ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [bytes, region] = parts.as_slice() else {
+            return Err(error(line, "FFI Bytes borrow length"));
+        };
+        return Ok(MirInstructionKind::FfiBytesBorrowLength {
+            bytes: ValueId::from_raw(parse_prefixed(bytes, 'v', line)?),
+            region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBytesEndBorrow ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [bytes, region] = parts.as_slice() else {
+            return Err(error(line, "FFI Bytes end borrow"));
+        };
+        return Ok(MirInstructionKind::FfiBytesEndBorrow {
+            bytes: ValueId::from_raw(parse_prefixed(bytes, 'v', line)?),
+            region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
         });
     }
     if text == "ffiPointerNone" {

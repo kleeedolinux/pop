@@ -531,6 +531,7 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::FfiBufferWrite { .. }
         | TypedExpressionKind::FfiBufferClose { .. }
         | TypedExpressionKind::FfiBufferWithPointer { .. }
+        | TypedExpressionKind::FfiBytesWithPin { .. }
         | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::FfiPointerToOptional { .. }
         | TypedExpressionKind::FfiPointerReadOnly { .. }
