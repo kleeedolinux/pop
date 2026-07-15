@@ -341,6 +341,8 @@ pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
 
 /// Stable bootstrap identity of the exact `Ffi.Handle<T>` type constructor.
 pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
+/// Stable bootstrap identity of the exact `Ffi.Buffer<T>` type constructor.
+pub const FFI_BUFFER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(207);
 /// Stable bootstrap identity of `Ffi.NullPointerError`.
 pub const FFI_NULL_POINTER_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(208);
 /// Stable bootstrap identity of `Ffi.AllocationError`.

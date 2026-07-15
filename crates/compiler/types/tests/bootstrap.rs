@@ -191,6 +191,7 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(205)));
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(206)));
     assert!(!is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(207)));
+    assert_eq!(pop_types::FFI_BUFFER_TYPE_ID, BuiltinTypeId::from_raw(207));
     assert!(!is_ffi_abi_builtin_type(
         pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID
     ));
