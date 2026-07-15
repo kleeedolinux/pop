@@ -1108,6 +1108,31 @@ fn lower_expression(
         TypedExpressionKind::FfiHandleClose { handle } => HirExpressionKind::FfiHandleClose {
             handle: Box::new(lower_expression(handle, interface_slots)),
         },
+        TypedExpressionKind::FfiBufferOpen { length, element } => {
+            HirExpressionKind::FfiBufferOpen {
+                length: Box::new(lower_expression(length, interface_slots)),
+                element: *element,
+            }
+        }
+        TypedExpressionKind::FfiBufferLength { buffer } => HirExpressionKind::FfiBufferLength {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferRead { buffer, index } => HirExpressionKind::FfiBufferRead {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => HirExpressionKind::FfiBufferWrite {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferClose { buffer } => HirExpressionKind::FfiBufferClose {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1660,9 +1685,25 @@ fn first_unknown_interface_expression(
         }
         TypedExpressionKind::FfiHandleOpen { value: operand }
         | TypedExpressionKind::FfiHandleGet { handle: operand }
-        | TypedExpressionKind::FfiHandleClose { handle: operand } => {
+        | TypedExpressionKind::FfiHandleClose { handle: operand }
+        | TypedExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | TypedExpressionKind::FfiBufferLength { buffer: operand }
+        | TypedExpressionKind::FfiBufferClose { buffer: operand } => {
             first_unknown_interface_expression(operand, slots)
         }
+        TypedExpressionKind::FfiBufferRead { buffer, index } => {
+            first_unknown_interface_expression(buffer, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => first_unknown_interface_expression(buffer, slots)
+            .or_else(|| first_unknown_interface_expression(index, slots))
+            .or_else(|| first_unknown_interface_expression(value, slots)),
         TypedExpressionKind::TaskGroup { cancel, body } => {
             first_unknown_interface_expression(cancel, slots)
                 .or_else(|| first_unknown_interface_expression(body, slots))
@@ -1983,9 +2024,25 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         }
         TypedExpressionKind::FfiHandleOpen { value: operand }
         | TypedExpressionKind::FfiHandleGet { handle: operand }
-        | TypedExpressionKind::FfiHandleClose { handle: operand } => {
+        | TypedExpressionKind::FfiHandleClose { handle: operand }
+        | TypedExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | TypedExpressionKind::FfiBufferLength { buffer: operand }
+        | TypedExpressionKind::FfiBufferClose { buffer: operand } => {
             first_compile_time_only_expression(operand)
         }
+        TypedExpressionKind::FfiBufferRead { buffer, index } => {
+            first_compile_time_only_expression(buffer)
+                .or_else(|| first_compile_time_only_expression(index))
+        }
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => first_compile_time_only_expression(buffer)
+            .or_else(|| first_compile_time_only_expression(index))
+            .or_else(|| first_compile_time_only_expression(value)),
         TypedExpressionKind::TaskGroup { cancel, body } => {
             first_compile_time_only_expression(cancel)
                 .or_else(|| first_compile_time_only_expression(body))

@@ -114,6 +114,26 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .check_ffi_handle_invocation(path, arguments, None, span)
                     .map(CheckedInvocation::Value);
             }
+            if matches!(path.as_slice(), [ffi, buffer, operation]
+                if ffi == "Ffi" && buffer == "Buffer"
+                    && matches!(operation.as_str(), "length" | "read" | "write" | "close"))
+                && self.resolver.has_ffi_dependency()
+                && self
+                    .resolver
+                    .database()
+                    .resolve(
+                        self.module,
+                        &path.join("."),
+                        SymbolSpace::Value,
+                        callee.span(),
+                    )
+                    .symbol()
+                    .is_none()
+            {
+                return self
+                    .check_ffi_buffer_invocation(path, arguments, None, span)
+                    .map(CheckedInvocation::Value);
+            }
             if path.as_slice() == ["String"] {
                 return self
                     .check_string_conversion(arguments, span)
@@ -392,6 +412,164 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id,
             span,
         })
+    }
+
+    pub(crate) fn check_ffi_buffer_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        explicit_element: Option<TypeId>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let operation = path.get(2)?.as_str();
+        let expected_arity = match operation {
+            "open" | "length" | "close" => 1,
+            "read" => 2,
+            "write" => 3,
+            _ => return None,
+        };
+        if arguments.len() != expected_arity {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                format!("Ffi.Buffer.{operation}"),
+                expected_arity,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let size = self.ffi_builtin_type("Ffi.C.Size", Vec::new())?;
+        if operation == "open" {
+            let element = explicit_element?;
+            if !self.ffi_buffer_element(element) {
+                self.diagnostics.push(type_diagnostics::type_mismatch(
+                    span,
+                    "FFI ABI storage type",
+                    self.type_name(element),
+                    span,
+                ));
+                return None;
+            }
+            let length = self.check_expression_expected(
+                &arguments[0],
+                Some(ExpectedExpressionType::plain(size)),
+            )?;
+            self.require_same_type(size, length.type_id(), length.span(), span);
+            let buffer = self.ffi_builtin_type("Ffi.Buffer", vec![element])?;
+            let allocation_error = self.ffi_builtin_type("Ffi.AllocationError", Vec::new())?;
+            let type_id = self.resolver.result_type(buffer, allocation_error)?;
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::FfiBufferOpen {
+                    length: Box::new(length),
+                    element,
+                },
+                type_id,
+                span,
+            });
+        }
+
+        let buffer = self.check_expression(&arguments[0])?;
+        let element = self.ffi_buffer_payload(buffer.type_id()).or_else(|| {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                buffer.span(),
+                "Ffi.Buffer<T>",
+                self.type_name(buffer.type_id()),
+                span,
+            ));
+            None
+        })?;
+        if explicit_element.is_some_and(|expected| expected != element) {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                buffer.span(),
+                self.type_name(explicit_element?),
+                self.type_name(element),
+                span,
+            ));
+            return None;
+        }
+        let buffer = Box::new(buffer);
+        let nil = self.resolver.arena().source_type("nil")?;
+        let (kind, type_id) = match operation {
+            "length" => (TypedExpressionKind::FfiBufferLength { buffer }, size),
+            "read" => {
+                let index = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(size)),
+                )?;
+                self.require_same_type(size, index.type_id(), index.span(), span);
+                (
+                    TypedExpressionKind::FfiBufferRead {
+                        buffer,
+                        index: Box::new(index),
+                    },
+                    element,
+                )
+            }
+            "write" => {
+                let index = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(size)),
+                )?;
+                let value = self.check_expression_expected(
+                    &arguments[2],
+                    Some(ExpectedExpressionType::plain(element)),
+                )?;
+                self.require_same_type(size, index.type_id(), index.span(), span);
+                self.require_same_type(element, value.type_id(), value.span(), span);
+                (
+                    TypedExpressionKind::FfiBufferWrite {
+                        buffer,
+                        index: Box::new(index),
+                        value: Box::new(value),
+                    },
+                    nil,
+                )
+            }
+            "close" => (TypedExpressionKind::FfiBufferClose { buffer }, nil),
+            _ => return None,
+        };
+        Some(TypedExpression {
+            kind,
+            type_id,
+            span,
+        })
+    }
+
+    fn ffi_builtin_type(&mut self, name: &str, arguments: Vec<TypeId>) -> Option<TypeId> {
+        let definition = self.resolver.schema().type_by_source_name(name)?.id();
+        self.resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition,
+                arguments,
+            })
+            .ok()
+    }
+
+    fn ffi_buffer_payload(&self, type_id: TypeId) -> Option<TypeId> {
+        match self.resolver.arena().get(type_id) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == crate::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+                Some(arguments[0])
+            }
+            _ => None,
+        }
+    }
+
+    fn ffi_buffer_element(&self, type_id: TypeId) -> bool {
+        match self.resolver.arena().get(type_id) {
+            Some(SemanticType::Primitive(
+                PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+            )) => true,
+            Some(SemanticType::Builtin { definition, .. }) => {
+                crate::is_ffi_integer_abi_builtin_type(*definition)
+                    || crate::is_ffi_pointer_type_constructor(*definition)
+                    || crate::is_ffi_function_type_constructor(*definition)
+                    || *definition == crate::FFI_HANDLE_TYPE_ID
+            }
+            _ => false,
+        }
     }
 
     fn check_exact_source_overload(

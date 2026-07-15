@@ -1126,6 +1126,43 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, handle, arena);
             output.push(')');
         }
+        HirExpressionKind::FfiBufferOpen { length, element } => {
+            output.push_str("ffi.buffer.open<<");
+            output.push_str(&type_text(*element, arena));
+            output.push_str(">>(");
+            dump_expression(output, length, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferLength { buffer } => {
+            output.push_str("ffi.buffer.length(");
+            dump_expression(output, buffer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            output.push_str("ffi.buffer.read(");
+            dump_expression(output, buffer, arena);
+            output.push_str(", ");
+            dump_expression(output, index, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            output.push_str("ffi.buffer.write(");
+            dump_expression(output, buffer, arena);
+            output.push_str(", ");
+            dump_expression(output, index, arena);
+            output.push_str(", ");
+            dump_expression(output, value, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferClose { buffer } => {
+            output.push_str("ffi.buffer.close(");
+            dump_expression(output, buffer, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
             type_arguments,

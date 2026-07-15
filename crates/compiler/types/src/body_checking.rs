@@ -641,6 +641,42 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 span,
             );
         }
+        if matches!(path.as_slice(), [ffi, buffer, operation]
+            if ffi == "Ffi" && buffer == "Buffer" && operation == "open")
+            && self.resolver.has_ffi_dependency()
+            && self
+                .resolver
+                .database()
+                .resolve(
+                    self.module,
+                    &path.join("."),
+                    SymbolSpace::Value,
+                    callee.span(),
+                )
+                .symbol()
+                .is_none()
+        {
+            if type_arguments.len() != 1 {
+                self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                    span,
+                    "Ffi.Buffer.open",
+                    1,
+                    type_arguments.len(),
+                ));
+                return None;
+            }
+            let enclosing = self.signature_stack.last().cloned()?;
+            let (resolved, diagnostics) =
+                self.resolver
+                    .resolve_annotation(self.module, &type_arguments[0], &enclosing);
+            self.diagnostics.extend(diagnostics);
+            return self.check_ffi_buffer_invocation(
+                path,
+                arguments,
+                Some(resolved?.type_id()?),
+                span,
+            );
+        }
         if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
             return self.check_array_create(type_arguments, arguments, span);
         }

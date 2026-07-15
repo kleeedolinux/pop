@@ -2365,9 +2365,28 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::FfiHandleOpen { value: base }
         | HirExpressionKind::FfiHandleGet { handle: base }
         | HirExpressionKind::FfiHandleClose { handle: base }
+        | HirExpressionKind::FfiBufferLength { buffer: base }
+        | HirExpressionKind::FfiBufferClose { buffer: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
+        }
+        HirExpressionKind::FfiBufferOpen { length, element } => {
+            remap_aggregate_expression(length, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            remap_aggregate_expression(buffer, instances);
+            remap_aggregate_expression(index, instances);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            remap_aggregate_expression(buffer, instances);
+            remap_aggregate_expression(index, instances);
+            remap_aggregate_expression(value, instances);
         }
         HirExpressionKind::TaskGroup { cancel, body } => {
             remap_aggregate_expression(cancel, instances);
@@ -2854,6 +2873,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::FfiHandleOpen { value: base }
         | HirExpressionKind::FfiHandleGet { handle: base }
         | HirExpressionKind::FfiHandleClose { handle: base }
+        | HirExpressionKind::FfiBufferOpen { length: base, .. }
+        | HirExpressionKind::FfiBufferLength { buffer: base }
+        | HirExpressionKind::FfiBufferClose { buffer: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -2867,6 +2889,19 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         HirExpressionKind::TableGet { table, key } => {
             collect_expression_calls(table, calls);
             collect_expression_calls(key, calls);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            collect_expression_calls(buffer, calls);
+            collect_expression_calls(index, calls);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            collect_expression_calls(buffer, calls);
+            collect_expression_calls(index, calls);
+            collect_expression_calls(value, calls);
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
@@ -3373,9 +3408,28 @@ fn specialize_expression(
         | HirExpressionKind::FfiHandleOpen { value: base }
         | HirExpressionKind::FfiHandleGet { handle: base }
         | HirExpressionKind::FfiHandleClose { handle: base }
+        | HirExpressionKind::FfiBufferLength { buffer: base }
+        | HirExpressionKind::FfiBufferClose { buffer: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiBufferOpen { length, element } => {
+            specialize_expression(length, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            specialize_expression(buffer, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            specialize_expression(buffer, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
         }
         HirExpressionKind::TaskGroup { cancel, body } => {
             specialize_expression(cancel, substitutions, instances, arena)?;
@@ -4303,6 +4357,25 @@ pub enum HirExpressionKind {
     },
     FfiHandleClose {
         handle: Box<HirExpression>,
+    },
+    FfiBufferOpen {
+        length: Box<HirExpression>,
+        element: TypeId,
+    },
+    FfiBufferLength {
+        buffer: Box<HirExpression>,
+    },
+    FfiBufferRead {
+        buffer: Box<HirExpression>,
+        index: Box<HirExpression>,
+    },
+    FfiBufferWrite {
+        buffer: Box<HirExpression>,
+        index: Box<HirExpression>,
+        value: Box<HirExpression>,
+    },
+    FfiBufferClose {
+        buffer: Box<HirExpression>,
     },
     Call {
         dispatch: HirCallDispatch,

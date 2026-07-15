@@ -19,20 +19,25 @@ use pop_hir::{
     hir_generic_call_instances, remap_hir_function_dispatches, specialize_hir_function,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
+    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap,
+    TrapKind,
 };
-use pop_target::TargetSpec;
+use pop_target::{CAbiScalarKind, TargetSpec};
 use pop_types::{
-    FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType, SemanticType,
-    TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
+    FfiCIntegerKind, FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType,
+    SemanticType, TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
+    ffi_c_integer_kind, is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
+    is_ffi_pointer_type_constructor,
 };
 
-use crate::MirFfiLayoutCatalog;
 use crate::ir::*;
 use crate::verification::{
     instruction_operands, instruction_unwind_target, terminator_operands, terminator_targets,
     verify_mir_bubble,
 };
+use crate::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass};
+
+type OptionalFfiLayoutFingerprint<'a> = Option<&'a dyn Fn(&[u8]) -> String>;
 
 /// Lowers a verified HIR Bubble to canonical MIR and verifies the result.
 ///
@@ -50,7 +55,28 @@ pub fn lower_hir_bubble(
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu")
         .expect("the accepted native target is part of the target inventory");
-    lower_hir_bubble_for_target(hir, arena, &target)
+    lower_hir_bubble_for_target_internal(hir, arena, &target, None)
+}
+
+/// Lowers HIR with artifact-owned SHA-256 identities for source-selected FFI
+/// layouts.
+///
+/// # Errors
+///
+/// Returns deterministic MIR or FFI layout invariant violations.
+///
+/// # Panics
+///
+/// Panics only if the toolchain's required native target is removed from the
+/// accepted target inventory.
+pub fn lower_hir_bubble_with_fingerprint(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    fingerprint: impl Fn(&[u8]) -> String,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu")
+        .expect("the accepted native target is part of the target inventory");
+    lower_hir_bubble_for_target_internal(hir, arena, &target, Some(&fingerprint))
 }
 
 /// Lowers a verified HIR Bubble to canonical MIR for one exact target and
@@ -63,6 +89,30 @@ pub fn lower_hir_bubble_for_target(
     hir: &HirBubble,
     arena: &TypeArena,
     target: &TargetSpec,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    lower_hir_bubble_for_target_internal(hir, arena, target, None)
+}
+
+/// Lowers HIR for one exact target with artifact-owned SHA-256 identities for
+/// source-selected FFI layouts.
+///
+/// # Errors
+///
+/// Returns deterministic MIR or FFI layout invariant violations.
+pub fn lower_hir_bubble_for_target_with_fingerprint(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
+    fingerprint: impl Fn(&[u8]) -> String,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    lower_hir_bubble_for_target_internal(hir, arena, target, Some(&fingerprint))
+}
+
+fn lower_hir_bubble_for_target_internal(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
+    fingerprint: OptionalFfiLayoutFingerprint<'_>,
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     let all_declarations = specialization_declarations(hir);
     let all_methods = specialization_methods(hir);
@@ -112,6 +162,7 @@ pub fn lower_hir_bubble_for_target(
         })
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
+    let ffi_layouts = source_ffi_layout_catalog(arena, target, fingerprint)?;
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let empty_function_effects = BTreeMap::new();
     let empty_method_effects = BTreeMap::new();
@@ -125,6 +176,7 @@ pub fn lower_hir_bubble_for_target(
                 &reference_effects,
                 &empty_function_effects,
                 &empty_method_effects,
+                &ffi_layouts,
             )
             .0
         })
@@ -143,6 +195,7 @@ pub fn lower_hir_bubble_for_target(
                 &reference_effects,
                 &empty_function_effects,
                 &empty_method_effects,
+                &ffi_layouts,
             )
             .0,
         })
@@ -176,6 +229,7 @@ pub fn lower_hir_bubble_for_target(
                 &reference_effects,
                 &function_effects,
                 &method_effects,
+                &ffi_layouts,
             );
             nested_functions.append(&mut nested);
             function
@@ -194,6 +248,7 @@ pub fn lower_hir_bubble_for_target(
                 &reference_effects,
                 &function_effects,
                 &method_effects,
+                &ffi_layouts,
             );
             nested_functions.append(&mut nested);
             MirMethod {
@@ -214,7 +269,7 @@ pub fn lower_hir_bubble_for_target(
         methods,
         nested_functions,
         function_references,
-        ffi_layouts: MirFfiLayoutCatalog::empty(target),
+        ffi_layouts,
     };
     rewrite_foreign_calls(&mut mir);
     recompute_effects(&mut mir);
@@ -228,6 +283,106 @@ pub fn lower_hir_bubble_for_target(
     seal_effects(&mut mir);
     verify_mir_bubble(&mir, arena)?;
     Ok(mir)
+}
+
+fn source_ffi_layout_catalog(
+    arena: &TypeArena,
+    target: &TargetSpec,
+    fingerprint: OptionalFfiLayoutFingerprint<'_>,
+) -> Result<MirFfiLayoutCatalog, Vec<MirVerificationError>> {
+    let elements = (0..arena.len())
+        .filter_map(|raw| arena.get(TypeId::from_raw(u32::try_from(raw).ok()?)))
+        .filter_map(|semantic| match semantic {
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+                Some(arguments[0])
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if elements.is_empty() {
+        return Ok(MirFfiLayoutCatalog::empty(target));
+    }
+    let Some(fingerprint) = fingerprint else {
+        return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
+    };
+    let entries = elements
+        .into_iter()
+        .enumerate()
+        .map(|(index, element)| source_ffi_layout(element, index, arena, target))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+    MirFfiLayoutCatalog::new(target, entries, arena, fingerprint)
+        .map_err(|_| vec![MirVerificationError::InvalidFfiLayoutCatalog])
+}
+
+fn source_ffi_layout(
+    element: TypeId,
+    index: usize,
+    arena: &TypeArena,
+    target: &TargetSpec,
+) -> Option<MirFfiLayout> {
+    let (size, alignment, value_class) = match arena.get(element)? {
+        SemanticType::Primitive(PrimitiveType::Integer(kind)) => {
+            let size = u64::from(kind.bit_width()) / 8;
+            (size, size, MirFfiValueClass::Integer)
+        }
+        SemanticType::Primitive(PrimitiveType::Float32) => (4, 4, MirFfiValueClass::Float),
+        SemanticType::Primitive(PrimitiveType::Float64) => (8, 8, MirFfiValueClass::Float),
+        SemanticType::Builtin { definition, .. }
+            if is_ffi_integer_abi_builtin_type(*definition) =>
+        {
+            let layout = target
+                .c_abi_scalar_layout(target_ffi_integer_kind(ffi_c_integer_kind(*definition)?))?;
+            (layout.size(), layout.alignment(), MirFfiValueClass::Integer)
+        }
+        SemanticType::Builtin { definition, .. }
+            if is_ffi_pointer_type_constructor(*definition) =>
+        {
+            let (size, alignment) = target.ffi_pointer_layout()?;
+            (size, alignment, MirFfiValueClass::Pointer)
+        }
+        SemanticType::Builtin { definition, .. }
+            if is_ffi_function_type_constructor(*definition) =>
+        {
+            let (size, alignment) = target.ffi_pointer_layout()?;
+            (size, alignment, MirFfiValueClass::FunctionPointer)
+        }
+        SemanticType::Builtin { definition, .. }
+            if *definition == pop_types::FFI_HANDLE_TYPE_ID =>
+        {
+            (8, 8, MirFfiValueClass::Handle)
+        }
+        _ => return None,
+    };
+    let provisional = u64::try_from(index).ok()?.checked_add(1)?;
+    Some(MirFfiLayout::new(
+        FfiAbiLayoutId::new(provisional)?,
+        element,
+        size,
+        alignment,
+        value_class,
+    ))
+}
+
+const fn target_ffi_integer_kind(kind: FfiCIntegerKind) -> CAbiScalarKind {
+    match kind {
+        FfiCIntegerKind::Char => CAbiScalarKind::Char,
+        FfiCIntegerKind::SignedChar => CAbiScalarKind::SignedChar,
+        FfiCIntegerKind::UnsignedChar => CAbiScalarKind::UnsignedChar,
+        FfiCIntegerKind::Short => CAbiScalarKind::Short,
+        FfiCIntegerKind::UnsignedShort => CAbiScalarKind::UnsignedShort,
+        FfiCIntegerKind::Int => CAbiScalarKind::Int,
+        FfiCIntegerKind::UnsignedInt => CAbiScalarKind::UnsignedInt,
+        FfiCIntegerKind::Long => CAbiScalarKind::Long,
+        FfiCIntegerKind::UnsignedLong => CAbiScalarKind::UnsignedLong,
+        FfiCIntegerKind::LongLong => CAbiScalarKind::LongLong,
+        FfiCIntegerKind::UnsignedLongLong => CAbiScalarKind::UnsignedLongLong,
+        FfiCIntegerKind::Size => CAbiScalarKind::Size,
+        FfiCIntegerKind::PointerDifference => CAbiScalarKind::PointerDifference,
+    }
 }
 
 fn rewrite_foreign_calls(bubble: &mut MirBubble) {
@@ -801,6 +956,7 @@ fn lower_function(
     reference_effects: &BTreeMap<SymbolIdentity, MirEffectSummary>,
     function_effects: &BTreeMap<SymbolId, MirEffectSummary>,
     method_effects: &BTreeMap<MethodId, MirEffectSummary>,
+    ffi_layouts: &MirFfiLayoutCatalog,
 ) -> (MirFunction, Vec<MirNestedFunction>) {
     let (mut lowered, nested) = FunctionBuilder::new(
         function,
@@ -809,6 +965,7 @@ fn lower_function(
         reference_effects,
         function_effects,
         method_effects,
+        ffi_layouts,
     )
     .lower();
     lowered.function = function.function();
@@ -920,6 +1077,7 @@ struct FunctionBuilder<'hir> {
     reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
     function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
     method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+    ffi_layouts: &'hir MirFfiLayoutCatalog,
     blocks: Vec<BuildingBlock>,
     current: BlockId,
     next_value: u32,
@@ -1332,7 +1490,23 @@ fn visit_expression_closures(
         }
         HirExpressionKind::FfiHandleOpen { value }
         | HirExpressionKind::FfiHandleGet { handle: value }
-        | HirExpressionKind::FfiHandleClose { handle: value } => {
+        | HirExpressionKind::FfiHandleClose { handle: value }
+        | HirExpressionKind::FfiBufferOpen { length: value, .. }
+        | HirExpressionKind::FfiBufferLength { buffer: value }
+        | HirExpressionKind::FfiBufferClose { buffer: value } => {
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            visit_expression_closures(buffer, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            visit_expression_closures(buffer, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
             visit_expression_closures(value, parameters, locals);
         }
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -1382,6 +1556,7 @@ impl<'hir> FunctionBuilder<'hir> {
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
         function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
         method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+        ffi_layouts: &'hir MirFfiLayoutCatalog,
     ) -> Self {
         let parameter_specs: Vec<_> = hir
             .parameters()
@@ -1400,6 +1575,7 @@ impl<'hir> FunctionBuilder<'hir> {
             reference_effects,
             function_effects,
             method_effects,
+            ffi_layouts,
         )
     }
 
@@ -1411,6 +1587,7 @@ impl<'hir> FunctionBuilder<'hir> {
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
         function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
         method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+        ffi_layouts: &'hir MirFfiLayoutCatalog,
     ) -> Self {
         let parameter_specs = closure
             .parameters()
@@ -1449,6 +1626,7 @@ impl<'hir> FunctionBuilder<'hir> {
             reference_effects,
             function_effects,
             method_effects,
+            ffi_layouts,
         )
     }
 
@@ -1465,6 +1643,7 @@ impl<'hir> FunctionBuilder<'hir> {
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
         function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
         method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+        ffi_layouts: &'hir MirFfiLayoutCatalog,
     ) -> Self {
         let mut arguments = Vec::new();
         let mut parameters = BTreeMap::new();
@@ -1493,6 +1672,7 @@ impl<'hir> FunctionBuilder<'hir> {
             reference_effects,
             function_effects,
             method_effects,
+            ffi_layouts,
             blocks: vec![BuildingBlock {
                 cleanup: None,
                 arguments,
@@ -3278,6 +3458,68 @@ impl<'hir> FunctionBuilder<'hir> {
                 );
                 MirInstructionKind::NilConstant
             }
+            HirExpressionKind::FfiBufferOpen { length, element } => {
+                let (layout, element_size, alignment) = self.ffi_layout(*element);
+                let result = match self.arena.get(expression.type_id()) {
+                    Some(SemanticType::Builtin { definition, .. }) => *definition,
+                    _ => unreachable!("verified FFI buffer allocation has an exact Result type"),
+                };
+                MirInstructionKind::FfiBufferOpen {
+                    length: self.lower_expression(length),
+                    element: *element,
+                    layout,
+                    element_size,
+                    alignment,
+                    result,
+                    success: ResultCaseId::from_raw(0),
+                    failure: ResultCaseId::from_raw(1),
+                }
+            }
+            HirExpressionKind::FfiBufferLength { buffer } => {
+                let element = ffi_buffer_type_element(self.arena, buffer.type_id())
+                    .expect("verified FFI buffer operand has one element type");
+                let (layout, _, _) = self.ffi_layout(element);
+                MirInstructionKind::FfiBufferLength {
+                    buffer: self.lower_expression(buffer),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiBufferRead { buffer, index } => {
+                let (layout, _, _) = self.ffi_layout(expression.type_id());
+                MirInstructionKind::FfiBufferRead {
+                    buffer: self.lower_expression(buffer),
+                    index: self.lower_expression(index),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiBufferWrite {
+                buffer,
+                index,
+                value,
+            } => {
+                let (layout, _, _) = self.ffi_layout(value.type_id());
+                let buffer = self.lower_expression(buffer);
+                let index = self.lower_expression(index);
+                let value = self.lower_expression(value);
+                self.emit_effect(
+                    MirInstructionKind::FfiBufferWrite {
+                        buffer,
+                        index,
+                        value,
+                        layout,
+                    },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiBufferClose { buffer } => {
+                let buffer = self.lower_expression(buffer);
+                self.emit_effect(
+                    MirInstructionKind::FfiBufferClose { buffer },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
@@ -3465,6 +3707,7 @@ impl<'hir> FunctionBuilder<'hir> {
             self.reference_effects,
             self.function_effects,
             self.method_effects,
+            self.ffi_layouts,
         )
         .lower();
         let captures: Vec<_> = closure
@@ -3538,6 +3781,16 @@ impl<'hir> FunctionBuilder<'hir> {
             closure_type,
             closure.span(),
         )
+    }
+
+    fn ffi_layout(&self, element: TypeId) -> (FfiAbiLayoutId, u64, u64) {
+        let layout = self
+            .ffi_layouts
+            .entries()
+            .iter()
+            .find(|layout| layout.element() == element)
+            .expect("verified source FFI buffer type has one target layout");
+        (layout.id(), layout.size(), layout.alignment())
     }
 
     fn lower_capture_source(
@@ -4570,6 +4823,18 @@ pub(crate) fn list_element_map(arena: &TypeArena, type_id: TypeId) -> ArrayEleme
             arguments,
         }) if Some(*definition) == list && arguments.len() == 1 => element_map(arena, arguments[0]),
         _ => ArrayElementMap::Scalar,
+    }
+}
+
+fn ffi_buffer_type_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
     }
 }
 

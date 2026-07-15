@@ -524,7 +524,12 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::TaskStart { .. } => UnsupportedCompileTimeConstruct::Suspension,
         TypedExpressionKind::FfiHandleOpen { .. }
         | TypedExpressionKind::FfiHandleGet { .. }
-        | TypedExpressionKind::FfiHandleClose { .. } => {
+        | TypedExpressionKind::FfiHandleClose { .. }
+        | TypedExpressionKind::FfiBufferOpen { .. }
+        | TypedExpressionKind::FfiBufferLength { .. }
+        | TypedExpressionKind::FfiBufferRead { .. }
+        | TypedExpressionKind::FfiBufferWrite { .. }
+        | TypedExpressionKind::FfiBufferClose { .. } => {
             UnsupportedCompileTimeConstruct::ResultlessCall
         }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,

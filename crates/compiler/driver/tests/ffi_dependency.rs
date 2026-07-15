@@ -164,6 +164,165 @@ fn ffi_handle_calls_require_the_dependency_and_managed_payloads() {
 }
 
 #[test]
+fn ffi_buffer_calls_lower_from_typed_source_with_one_target_layout_catalog() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/buffers.pop",
+            "namespace Buffers\n\
+             public function allocate(length: Ffi.C.Size): Result<Ffi.Buffer<Int>, Ffi.AllocationError>\n\
+                 return Ffi.Buffer.open<<Int>>(length)\n\
+             end\n\
+             public function length(buffer: Ffi.Buffer<Int>): Ffi.C.Size\n\
+                 return Ffi.Buffer.length(buffer)\n\
+             end\n\
+             public function read(buffer: Ffi.Buffer<Int>, index: Ffi.C.Size): Int\n\
+                 return Ffi.Buffer.read(buffer, index)\n\
+             end\n\
+             public function write(buffer: Ffi.Buffer<Int>, index: Ffi.C.Size, value: Int)\n\
+                 Ffi.Buffer.write(buffer, index, value)\n\
+             end\n\
+             public function close(buffer: Ffi.Buffer<Int>)\n\
+                 Ffi.Buffer.close(buffer)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+
+    assert_eq!(
+        pop_mir::lower_hir_bubble(result.hir().expect("buffer HIR"), result.types())
+            .expect_err("source FFI layouts require artifact-owned fingerprints"),
+        vec![pop_mir::MirVerificationError::MissingFfiLayoutFingerprint]
+    );
+
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("buffer HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("buffer MIR");
+    let [layout] = mir.ffi_layouts().entries() else {
+        panic!("one canonical Int buffer layout");
+    };
+    assert_eq!(
+        layout.element(),
+        result.types().source_type("Int").expect("Int")
+    );
+    assert_eq!(layout.size(), 8);
+    assert_eq!(layout.alignment(), 8);
+    assert_eq!(layout.fingerprint().len(), 64);
+    let dump = mir.dump();
+    assert!(dump.contains("ffiBufferOpen"), "{dump}");
+    assert!(dump.contains("ffiBufferLength"), "{dump}");
+    assert!(dump.contains("ffiBufferRead"), "{dump}");
+    assert!(dump.contains("ffiBufferWrite"), "{dump}");
+    assert!(dump.contains("ffiBufferClose"), "{dump}");
+    assert!(dump.contains(&format!("layout#{}", layout.id().raw())));
+}
+
+#[test]
+fn ffi_buffer_calls_require_the_dependency_abi_storage_and_exact_operands() {
+    let module = |body: &str| {
+        FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(
+                FileId::from_raw(0),
+                "src/invalidBuffer.pop",
+                format!("namespace Buffers\n{body}"),
+            )
+            .expect("source"),
+        )
+    };
+    let without_dependency = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(10),
+        NamespaceId::from_raw(10),
+        Vec::new(),
+        vec![module(
+            "public function invalid(length: Int)\n    Ffi.Buffer.open<<Int>>(length)\nend\n",
+        )],
+    ));
+    assert!(without_dependency.hir().is_none());
+
+    let ffi = BubbleId::from_raw(20);
+    for body in [
+        "public function invalid(length: Ffi.C.Size)\n    Ffi.Buffer.open<<Array<Int>>>(length)\nend\n",
+        "public function invalid(buffer: Ffi.Buffer<Int>)\n    Ffi.Buffer.read(buffer, true)\nend\n",
+        "public function invalid(buffer: Ffi.Buffer<Int>, index: Ffi.C.Size)\n    Ffi.Buffer.write(buffer, index, true)\nend\n",
+        "public function invalid(buffer: Ffi.Buffer<Int>)\n    Ffi.Buffer.close(buffer, buffer)\nend\n",
+    ] {
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module(body)],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{body}");
+        assert!(!result.diagnostics().is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn resolved_user_calls_are_not_hijacked_by_ffi_buffer_spelling() {
+    let ffi = BubbleId::from_raw(20);
+    let declaration = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/userBuffer.pop",
+            "namespace Ffi.Buffer\npublic function length(value: Int): Int\n    return value\nend\n",
+        )
+        .expect("source"),
+    );
+    let caller = FrontEndModule::new(
+        ModuleId::from_raw(1),
+        SourceFile::new(
+            FileId::from_raw(1),
+            "src/caller.pop",
+            "namespace Caller\npublic function run(): Int\n    return Ffi.Buffer.length(7)\nend\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![declaration, caller],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("user call HIR"), result.types())
+        .expect("user call MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callDirect"), "{dump}");
+    assert!(!dump.contains("ffiBufferLength"), "{dump}");
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_handle_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(

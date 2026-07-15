@@ -1736,6 +1736,8 @@ pub enum MirVerificationError {
     },
     UnknownGenericTemplate(SymbolId),
     InvalidGenericSpecialization(SymbolId),
+    MissingFfiLayoutFingerprint,
+    InvalidFfiLayoutCatalog,
     InvalidType(TypeId),
     DuplicateValue(ValueId),
     UnknownValue(ValueId),

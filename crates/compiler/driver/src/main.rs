@@ -24,11 +24,11 @@ use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, NativeLinkInput,
     NativeLinkPlanSource, PoplibDependency, PoplibEmission, ReferenceFunction, ReferenceMetadata,
-    ReferenceType, analyze_bubble, emit_poplib, encode_reference_metadata, load_poplib,
-    resolve_native_link_inputs, validate_foreign_link_aliases,
+    ReferenceType, analyze_bubble, artifact_sha256_hex, emit_poplib, encode_reference_metadata,
+    load_poplib, resolve_native_link_inputs, validate_foreign_link_aliases,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
-use pop_mir::{lower_hir_bubble, optimize_mir};
+use pop_mir::{lower_hir_bubble_with_fingerprint, optimize_mir};
 use pop_projects::{
     BubbleKind, BubbleLock, DependencySource, LockMode, LockedBubble, LockedBubbleIdentity,
     LockedPackage, LockedSource, WorkspaceManifest, apply_lock_policy,
@@ -540,7 +540,7 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
         eprintln!("pop: internal compiler error: successful analysis did not publish HIR");
         return ExitCode::from(101);
     };
-    let mir = match lower_hir_bubble(hir, result.types()) {
+    let mir = match lower_hir_bubble_with_fingerprint(hir, result.types(), artifact_sha256_hex) {
         Ok(mir) => mir,
         Err(errors) => {
             eprintln!("pop: internal compiler error: canonical MIR verification failed");
@@ -1923,7 +1923,7 @@ fn lower_native_bubble(
     } else {
         None
     };
-    let mir = lower_hir_bubble(hir, result.types())
+    let mir = lower_hir_bubble_with_fingerprint(hir, result.types(), artifact_sha256_hex)
         .map_err(|errors| {
             eprintln!(
                 "pop: internal compiler error: canonical MIR verification failed: {errors:?}"

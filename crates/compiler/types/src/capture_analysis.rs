@@ -328,7 +328,12 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::TaskCancel { source: operand }
         | TypedExpressionKind::FfiHandleOpen { value: operand }
         | TypedExpressionKind::FfiHandleGet { handle: operand }
-        | TypedExpressionKind::FfiHandleClose { handle: operand } => {
+        | TypedExpressionKind::FfiHandleClose { handle: operand }
+        | TypedExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | TypedExpressionKind::FfiBufferLength { buffer: operand }
+        | TypedExpressionKind::FfiBufferClose { buffer: operand } => {
             finalize_expression_captures(operand, written);
         }
         TypedExpressionKind::TaskGroup { cancel, body } => {
@@ -359,6 +364,19 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::StringConcat { left, right } => {
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
+        }
+        TypedExpressionKind::FfiBufferRead { buffer, index } => {
+            finalize_expression_captures(buffer, written);
+            finalize_expression_captures(index, written);
+        }
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            finalize_expression_captures(buffer, written);
+            finalize_expression_captures(index, written);
+            finalize_expression_captures(value, written);
         }
         TypedExpressionKind::Conditional {
             condition,

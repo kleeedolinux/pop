@@ -559,6 +559,25 @@ pub enum TypedExpressionKind {
     FfiHandleClose {
         handle: Box<TypedExpression>,
     },
+    FfiBufferOpen {
+        length: Box<TypedExpression>,
+        element: TypeId,
+    },
+    FfiBufferLength {
+        buffer: Box<TypedExpression>,
+    },
+    FfiBufferRead {
+        buffer: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+    },
+    FfiBufferWrite {
+        buffer: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+        value: Box<TypedExpression>,
+    },
+    FfiBufferClose {
+        buffer: Box<TypedExpression>,
+    },
     OptionalNarrow {
         optional: Box<TypedExpression>,
     },
