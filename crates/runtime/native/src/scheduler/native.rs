@@ -14,9 +14,9 @@ use super::{
     DetachedSchedulerRuntimeTransitions, SchedulerBlockingOperationId,
     SchedulerCollectorBindingFailure, SchedulerConfiguration, SchedulerError,
     SchedulerExternalEventId, SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
-    SchedulerRuntimeTransitions, SchedulerTask, SchedulerTaskContext, SchedulerTaskFrameFailure,
-    SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
-    SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
+    SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
+    SchedulerTaskContext, SchedulerTaskFrameFailure, SchedulerTaskId, SchedulerTaskMobility,
+    SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry, SchedulerTimerId, SchedulerWorkerId,
 };
 
 enum InternalTaskState {
@@ -1483,14 +1483,14 @@ impl SharedScheduler {
             if self.shutdown.load(Ordering::Acquire) {
                 return Ok(None);
             }
-            if let Some(task) = self.try_take(index, local_polls) {
+            if let Some(task) = self.try_take(index, local_polls)? {
                 return Ok(Some(task));
             }
             let idle = lock(&self.queues.idle_gate);
             if self.shutdown.load(Ordering::Acquire) {
                 return Ok(None);
             }
-            if let Some(task) = self.try_take(index, local_polls) {
+            if let Some(task) = self.try_take(index, local_polls)? {
                 return Ok(Some(task));
             }
             self.record_worker_used(worker);
@@ -1513,32 +1513,36 @@ impl SharedScheduler {
         }
     }
 
-    fn try_take(&self, index: usize, local_polls: usize) -> Option<QueuedTask> {
+    fn try_take(
+        &self,
+        index: usize,
+        local_polls: usize,
+    ) -> Result<Option<QueuedTask>, SchedulerError> {
         let check_injection =
             local_polls.is_multiple_of(self.configuration.injection_poll_interval);
-        if check_injection && let Some(id) = self.take_injection(index) {
-            return Some(QueuedTask {
+        if check_injection && let Some(id) = self.take_injection(index)? {
+            return Ok(Some(QueuedTask {
                 id,
                 source: WorkSource::Injection,
-            });
+            }));
         }
         if let Some(id) = lock(&self.queues.local[index]).pop_front() {
             self.record_local_dequeued(1);
-            return Some(QueuedTask {
+            return Ok(Some(QueuedTask {
                 id,
                 source: WorkSource::Local,
-            });
+            }));
         }
-        if !check_injection && let Some(id) = self.take_injection(index) {
-            return Some(QueuedTask {
+        if !check_injection && let Some(id) = self.take_injection(index)? {
+            return Ok(Some(QueuedTask {
                 id,
                 source: WorkSource::Injection,
-            });
+            }));
         }
         self.try_steal(index)
     }
 
-    fn take_injection(&self, index: usize) -> Option<SchedulerTaskId> {
+    fn take_injection(&self, index: usize) -> Result<Option<SchedulerTaskId>, SchedulerError> {
         let destination = scheduler_id(index);
         let mut injection = lock(&self.queues.injection);
         let owner_position = {
@@ -1555,33 +1559,36 @@ impl SharedScheduler {
             if id.is_some() {
                 self.record_injection_dequeued();
             }
-            return id;
+            return Ok(id);
         }
         if !self.migration_enabled {
-            return None;
+            return Ok(None);
         }
-        let id = injection.pop_front()?;
+        let Some(id) = injection.pop_front() else {
+            return Ok(None);
+        };
         drop(injection);
-        if self.assign_scheduler(id, index) {
+        if self.assign_scheduler(id, index)? {
             self.record_injection_dequeued();
-            Some(id)
+            Ok(Some(id))
         } else {
             lock(&self.queues.injection).push_back(id);
-            None
+            Ok(None)
         }
     }
 
-    fn try_steal(&self, thief: usize) -> Option<QueuedTask> {
+    fn try_steal(&self, thief: usize) -> Result<Option<QueuedTask>, SchedulerError> {
         if !self.migration_enabled {
-            return None;
+            return Ok(None);
         }
         if !self.enter_steal_search() {
-            return None;
+            return Ok(None);
         }
         let mut result = None;
+        let mut failure = None;
         let mut victims_examined = 0;
         let round = self.steal_rounds[thief].fetch_add(1, Ordering::Relaxed);
-        for victim in steal_victims(thief, self.configuration.scheduler_count, round) {
+        'search: for victim in steal_victims(thief, self.configuration.scheduler_count, round) {
             victims_examined += 1;
             let Some(mut victim_queue) = try_lock(&self.queues.local[victim]) else {
                 continue;
@@ -1621,8 +1628,13 @@ impl SharedScheduler {
                 else {
                     continue;
                 };
-                if !self.migrate_task_record(id, &mut record, scheduler_id(thief)) {
-                    continue;
+                match self.migrate_task_record(id, &mut record, scheduler_id(thief)) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        failure = Some(error);
+                        break 'search;
+                    }
                 }
                 victim_queue.remove(position);
                 stolen.push(id);
@@ -1662,7 +1674,7 @@ impl SharedScheduler {
                 WorkSource::Local | WorkSource::Injection => 0,
             }),
         );
-        result
+        failure.map_or(Ok(result), Err)
     }
 
     fn enter_steal_search(&self) -> bool {
@@ -1688,14 +1700,14 @@ impl SharedScheduler {
         }
     }
 
-    fn assign_scheduler(&self, id: SchedulerTaskId, index: usize) -> bool {
-        if let Ok(cell) = self.task(id) {
-            let mut record = lock(&cell.record);
-            if record.mobility == SchedulerTaskMobility::Movable {
-                return self.migrate_task_record(id, &mut record, scheduler_id(index));
-            }
+    fn assign_scheduler(&self, id: SchedulerTaskId, index: usize) -> Result<bool, SchedulerError> {
+        let cell = self.task(id)?;
+        let mut record = lock(&cell.record);
+        if record.mobility == SchedulerTaskMobility::Movable {
+            self.migrate_task_record(id, &mut record, scheduler_id(index))
+        } else {
+            Ok(true)
         }
-        true
     }
 
     fn migrate_task_record(
@@ -1703,18 +1715,18 @@ impl SharedScheduler {
         id: SchedulerTaskId,
         record: &mut TaskRecord,
         destination: SchedulerId,
-    ) -> bool {
+    ) -> Result<bool, SchedulerError> {
         if record.scheduler == destination {
-            return true;
+            return Ok(true);
         }
         if !record.ready_migration.available() {
-            return false;
+            return Ok(false);
         }
-        if !self.migration_allowed(id, record.scheduler, destination) {
-            return false;
+        if !self.migration_allowed(id, record.scheduler, destination)? {
+            return Ok(false);
         }
         let Some(frame_roots) = record.frame_roots else {
-            return false;
+            return Ok(false);
         };
         if crate::state::transfer_scheduler_task_roots(frame_roots, record.scheduler, destination)
             .is_err()
@@ -1722,7 +1734,7 @@ impl SharedScheduler {
             let mut telemetry = lock(&self.telemetry);
             telemetry.telemetry.gc_delayed_migrations =
                 telemetry.telemetry.gc_delayed_migrations.saturating_add(1);
-            return false;
+            return Ok(false);
         }
         let accepted = record.ready_migration.accept();
         debug_assert!(accepted);
@@ -1730,7 +1742,7 @@ impl SharedScheduler {
         let mut telemetry = lock(&self.telemetry);
         telemetry.telemetry.scheduler_migrations =
             telemetry.telemetry.scheduler_migrations.saturating_add(1);
-        true
+        Ok(true)
     }
 
     fn begin_poll(
@@ -2166,12 +2178,14 @@ impl SharedScheduler {
         &self,
         transition: SchedulerRuntimeTransition,
     ) -> Result<SchedulerRuntimeTransitionControl, SchedulerError> {
-        self.runtime_transitions
-            .apply(transition)
-            .map_err(|failure| SchedulerError::RuntimeTransition {
-                transition,
-                failure,
-            })
+        catch_unwind(AssertUnwindSafe(|| {
+            self.runtime_transitions.apply(transition)
+        }))
+        .unwrap_or(Err(SchedulerRuntimeTransitionFailure::CollectorState))
+        .map_err(|failure| SchedulerError::RuntimeTransition {
+            transition,
+            failure,
+        })
     }
 
     fn require_runtime_transition(
@@ -2189,21 +2203,25 @@ impl SharedScheduler {
         }
     }
 
-    fn migration_allowed(&self, task: SchedulerTaskId, from: SchedulerId, to: SchedulerId) -> bool {
+    fn migration_allowed(
+        &self,
+        task: SchedulerTaskId,
+        from: SchedulerId,
+        to: SchedulerId,
+    ) -> Result<bool, SchedulerError> {
         if from == to {
-            return true;
+            return Ok(true);
         }
         let transition = SchedulerRuntimeTransition::TaskMigration { task, from, to };
-        let allowed = matches!(
-            self.apply_runtime_transition(transition),
-            Ok(SchedulerRuntimeTransitionControl::Continue)
-        );
-        if !allowed {
-            let mut telemetry = lock(&self.telemetry);
-            telemetry.telemetry.gc_delayed_migrations =
-                telemetry.telemetry.gc_delayed_migrations.saturating_add(1);
+        match self.apply_runtime_transition(transition)? {
+            SchedulerRuntimeTransitionControl::Continue => Ok(true),
+            SchedulerRuntimeTransitionControl::RefuseMigration => {
+                let mut telemetry = lock(&self.telemetry);
+                telemetry.telemetry.gc_delayed_migrations =
+                    telemetry.telemetry.gc_delayed_migrations.saturating_add(1);
+                Ok(false)
+            }
         }
-        allowed
     }
 
     fn shutdown(&self) {
@@ -2215,6 +2233,18 @@ impl SharedScheduler {
 }
 
 fn worker_loop(
+    shared: &SharedScheduler,
+    worker: SchedulerWorkerId,
+    scheduler: SchedulerId,
+) -> Result<(), SchedulerError> {
+    let result = run_worker_loop(shared, worker, scheduler);
+    if result.is_err() {
+        shared.shutdown();
+    }
+    result
+}
+
+fn run_worker_loop(
     shared: &SharedScheduler,
     worker: SchedulerWorkerId,
     scheduler: SchedulerId,
@@ -2256,9 +2286,6 @@ fn worker_loop(
         }
         Ok(())
     })();
-    if work_result.is_err() {
-        shared.shutdown();
-    }
     let stop_result = shared
         .require_runtime_transition(SchedulerRuntimeTransition::WorkerStopped { worker, scheduler })
         .map(|()| shared.record_worker_stopped());

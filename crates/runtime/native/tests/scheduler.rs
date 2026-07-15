@@ -77,6 +77,86 @@ impl SchedulerRuntimeTransitions for RejectDispatchRuntimeTransitions {
     }
 }
 
+struct RejectWorkerStartRuntimeTransitions {
+    attempted: Mutex<Option<mpsc::Sender<SchedulerRuntimeTransition>>>,
+}
+
+struct PanicWorkerStartRuntimeTransitions {
+    attempted: Mutex<Option<mpsc::Sender<SchedulerRuntimeTransition>>>,
+}
+
+struct RejectMigrationRuntimeTransitions {
+    attempted: Mutex<Option<mpsc::Sender<SchedulerRuntimeTransition>>>,
+}
+
+impl SchedulerRuntimeTransitions for RejectMigrationRuntimeTransitions {
+    fn apply(
+        &self,
+        transition: SchedulerRuntimeTransition,
+    ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
+        if matches!(transition, SchedulerRuntimeTransition::TaskMigration { .. }) {
+            if let Some(attempted) = self
+                .attempted
+                .lock()
+                .expect("migration rejection sender")
+                .take()
+            {
+                attempted
+                    .send(transition)
+                    .expect("report migration rejection");
+            }
+            Err(SchedulerRuntimeTransitionFailure::CollectorState)
+        } else {
+            Ok(SchedulerRuntimeTransitionControl::Continue)
+        }
+    }
+}
+
+impl SchedulerRuntimeTransitions for PanicWorkerStartRuntimeTransitions {
+    fn apply(
+        &self,
+        transition: SchedulerRuntimeTransition,
+    ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
+        if matches!(transition, SchedulerRuntimeTransition::WorkerStarted { .. }) {
+            if let Some(attempted) = self
+                .attempted
+                .lock()
+                .expect("worker-start panic sender")
+                .take()
+            {
+                attempted
+                    .send(transition)
+                    .expect("report worker-start panic");
+            }
+            panic!("trusted runtime transition panic");
+        }
+        Ok(SchedulerRuntimeTransitionControl::Continue)
+    }
+}
+
+impl SchedulerRuntimeTransitions for RejectWorkerStartRuntimeTransitions {
+    fn apply(
+        &self,
+        transition: SchedulerRuntimeTransition,
+    ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
+        if matches!(transition, SchedulerRuntimeTransition::WorkerStarted { .. }) {
+            if let Some(attempted) = self
+                .attempted
+                .lock()
+                .expect("worker-start rejection sender")
+                .take()
+            {
+                attempted
+                    .send(transition)
+                    .expect("report worker-start rejection");
+            }
+            Err(SchedulerRuntimeTransitionFailure::CollectorState)
+        } else {
+            Ok(SchedulerRuntimeTransitionControl::Continue)
+        }
+    }
+}
+
 fn explicit_empty_frame(id: u32) -> StackMap {
     StackMap::new(SafePointId::new(id), Vec::new()).expect("empty task frame map")
 }
@@ -517,6 +597,23 @@ fn configuration(scheduler_count: usize, task_capacity: usize) -> SchedulerConfi
     .expect("scheduler configuration")
 }
 
+fn wait_until_scheduler_closed(scheduler: &NativeScheduler, failure: &str) {
+    let closure_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match scheduler.wake(SchedulerTaskId::new(u64::MAX)) {
+            Err(SchedulerError::Closed) => break,
+            Err(SchedulerError::UnknownTask(_)) => {
+                assert!(
+                    std::time::Instant::now() < closure_deadline,
+                    "{failure} did not close the scheduler"
+                );
+                std::thread::yield_now();
+            }
+            result => panic!("unexpected scheduler closure probe: {result:?}"),
+        }
+    }
+}
+
 #[test]
 fn native_task_frames_restore_before_poll_and_retain_after_nonterminal_poll() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -597,6 +694,69 @@ fn native_workers_register_manage_detach_and_unregister_exact_mutators() {
     assert_eq!(telemetry.managed_mutator_transitions(), 2);
     assert_eq!(telemetry.detached_mutator_transitions(), 2);
     assert_eq!(telemetry.mutator_unregistrations(), 2);
+}
+
+#[test]
+fn rejected_worker_start_closes_scheduler_before_further_admission() {
+    let (attempted, observed) = mpsc::channel();
+    let transitions = Arc::new(RejectWorkerStartRuntimeTransitions {
+        attempted: Mutex::new(Some(attempted)),
+    });
+    let scheduler = NativeScheduler::new_with_runtime_transitions(configuration(1, 1), transitions)
+        .expect("native scheduler starts host worker");
+    let transition = observed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker-start rejection observed");
+    wait_until_scheduler_closed(&scheduler, "worker-start rejection");
+
+    assert_eq!(
+        scheduler.schedule(CompleteTask {
+            completions: Arc::new(Mutex::new(0)),
+        }),
+        Err(SchedulerError::Closed)
+    );
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.retained_tasks(), 0);
+    assert_eq!(telemetry.mutator_registrations(), 1);
+    assert_eq!(telemetry.mutator_unregistrations(), 1);
+    assert_eq!(
+        scheduler.shutdown(),
+        Err(SchedulerError::RuntimeTransition {
+            transition,
+            failure: SchedulerRuntimeTransitionFailure::CollectorState,
+        })
+    );
+}
+
+#[test]
+fn panicked_worker_runtime_transition_closes_scheduler_globally() {
+    let (attempted, observed) = mpsc::channel();
+    let transitions = Arc::new(PanicWorkerStartRuntimeTransitions {
+        attempted: Mutex::new(Some(attempted)),
+    });
+    let scheduler = NativeScheduler::new_with_runtime_transitions(configuration(1, 1), transitions)
+        .expect("native scheduler starts host worker");
+    let transition = observed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker-start panic observed");
+    wait_until_scheduler_closed(&scheduler, "worker runtime panic");
+
+    assert_eq!(
+        scheduler.schedule(CompleteTask {
+            completions: Arc::new(Mutex::new(0)),
+        }),
+        Err(SchedulerError::Closed)
+    );
+    let telemetry = scheduler.telemetry();
+    assert_eq!(telemetry.mutator_registrations(), 1);
+    assert_eq!(telemetry.mutator_unregistrations(), 1);
+    assert_eq!(
+        scheduler.shutdown(),
+        Err(SchedulerError::RuntimeTransition {
+            transition,
+            failure: SchedulerRuntimeTransitionFailure::CollectorState,
+        })
+    );
 }
 
 #[test]
@@ -1577,6 +1737,75 @@ fn gc_transition_hook_can_delay_migration_without_losing_ready_work() {
             .expect("runtime transition log")
             .iter()
             .any(|event| matches!(event, SchedulerRuntimeTransition::TaskMigration { .. }))
+    );
+}
+
+#[test]
+fn failed_migration_transition_closes_scheduler_instead_of_becoming_refusal() {
+    let (attempted, observed) = mpsc::channel();
+    let transitions = Arc::new(RejectMigrationRuntimeTransitions {
+        attempted: Mutex::new(Some(attempted)),
+    });
+    let scheduler = NativeScheduler::new_with_runtime_transitions(configuration(2, 4), transitions)
+        .expect("native scheduler with migration failure");
+    let (started_sender, started_receiver) = mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            BlockingProbeTask {
+                started: started_sender,
+                gate: Arc::clone(&gate),
+            },
+        )
+        .expect("occupy owning worker");
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("owning worker is occupied");
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Movable,
+            CompleteTask {
+                completions: Arc::new(Mutex::new(0)),
+            },
+        )
+        .expect("queue migration-failing task");
+    let transition = observed
+        .recv_timeout(Duration::from_secs(1))
+        .expect("migration failure observed");
+
+    let closure_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let closed = loop {
+        match scheduler.wake(SchedulerTaskId::new(u64::MAX)) {
+            Err(SchedulerError::Closed) => break true,
+            Err(SchedulerError::UnknownTask(_)) if std::time::Instant::now() < closure_deadline => {
+                std::thread::yield_now();
+            }
+            Err(SchedulerError::UnknownTask(_)) => break false,
+            result => panic!("unexpected scheduler closure probe: {result:?}"),
+        }
+    };
+    let (open, changed) = &*gate;
+    *open.lock().expect("probe gate") = true;
+    changed.notify_one();
+    assert!(
+        closed,
+        "migration transition failure did not close scheduler"
+    );
+    assert_eq!(
+        scheduler.schedule(CompleteTask {
+            completions: Arc::new(Mutex::new(0)),
+        }),
+        Err(SchedulerError::Closed)
+    );
+    assert_eq!(
+        scheduler.shutdown(),
+        Err(SchedulerError::RuntimeTransition {
+            transition,
+            failure: SchedulerRuntimeTransitionFailure::CollectorState,
+        })
     );
 }
 

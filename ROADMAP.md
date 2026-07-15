@@ -307,6 +307,11 @@ Post-baseline library work has begun without widening the release foundation:
     - [x] Prevent repeated migration of one task within the same ready
       publication, and make the optimized steal-storm benchmark reject
       migration amplification, duplicate/lost work, or repeated peer scans.
+    - [x] Close the complete scheduler after worker startup or runtime-
+      transition failure, convert a panicked trusted transition into the same
+      typed collector-state incident, propagate migration errors instead of
+      treating them as ordinary migration refusal, and reject later task
+      admission while preserving ordinary task-panic isolation.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.
