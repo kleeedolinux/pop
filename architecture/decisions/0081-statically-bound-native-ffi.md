@@ -174,6 +174,36 @@ effect summary always contains `ForeignFunction`, `UnsafeMemory`, and
 `Ffi.Nonblocking` attribute is present. `Ffi.Nonblocking` is a reviewed promise;
 the compiler cannot infer it from a native symbol name.
 
+`enterForeign` receives one mutable precise `RootPublication` plus the closed
+call mode `Blocking` or `BoundedNonblocking`. It services the safe point before
+native code runs and returns an opaque nonzero `ForeignTransitionId`. The
+transition retains the complete logical publication until `leaveForeign`; a
+moving runtime writes every relocated root back before either transition
+returns. A blocking call converts the publication to runtime-owned strong
+handles and places its mutator in `HandlesOnly`, so collection never waits for
+the native call. A bounded nonblocking call keeps the publication attached to
+the mutator in `BoundedForeign`; it must return within the target's reviewed
+bounded-transition contract.
+
+Transition identities are thread-bound, LIFO-nested, and single-use.
+`leaveForeign` requires the original identity and exact root-slot shape,
+restores `Managed` state before managed code resumes, installs every current
+root value, and consumes the identity. A missing managed-thread binding,
+wrong-thread identity, mismatched publication, out-of-order leave, duplicate
+leave, or transition failure is a runtime invariant panic. Cleanup paths,
+including the explicit `CUnwind` boundary, must execute the matching leave
+exactly once; an optimizer cannot separate, duplicate, or remove the pair.
+
+Native ABI 1.13 adds distinct `pop_rt_enter_foreign` and
+`pop_rt_leave_foreign` entries. The enter entry receives a safe-point identity,
+a writable exact root array/count, and the closed `u8` mode (`0` blocking,
+`1` bounded nonblocking), and returns a nonzero transition token or zero on
+failure. Leave receives that token and the same writable root array/count and
+returns a status byte. These new entries do not reinterpret an older ABI 1
+safe-point symbol. Native ABI 2 uses the same logical transition with relocating
+root writeback; a backend may advertise relocating FFI only after forced-
+relocation tests cover both successful return and unwind cleanup.
+
 Native unwind is forbidden by default. `abi = "CUnwind"` selects the C ABI with
 an explicit unwind boundary and adds `MayUnwind`; an incompatible target
 rejects it. No native exception or panic crosses into Pop as an untyped payload. A

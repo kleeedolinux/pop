@@ -88,7 +88,12 @@ cross-compilation, cache behavior, and the future VM deterministic and aligned.
 
 For ADR 0081 calls, LLVM declares one external symbol from the resolved foreign
 identity, applies the selected target C/system calling convention and verified
-ABI layouts, and surrounds the call with the canonical foreign/root transition.
+ABI layouts, spills the exact live managed roots, and surrounds the call with
+one canonical `EnterForeign`/`LeaveForeign` pair. The returned transition
+identity and root-slot shape remain coupled across every normal and unwind edge;
+LLVM reloads every writable root slot after leave before later managed use.
+`Ffi.Nonblocking` selects only the closed bounded mode and never removes the
+transition. Missing target unwind support rejects `CUnwind` before emission.
 The driver—not LLVM semantic lowering—consumes the typed `NativeLinkPlan` to
 link system/framework/object/archive/shared/import-library inputs. LLVM never
 parses raw linker flags or reconstructs ownership, callback, or movement facts.

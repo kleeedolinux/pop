@@ -160,6 +160,18 @@ the unpolled ownership state atomically. Structured groups retain every owned
 child until join, while unreachable cold/terminal side records are weakly
 pruned after collection without adding source-visible finalization.
 
+ADR 0081 advances native ABI 1 to version 1.13 with balanced foreign-call
+transitions. `EnterForeign` services one mutable precise root publication and
+returns a thread-bound, LIFO, single-use `ForeignTransitionId`; `LeaveForeign`
+restores managed state, writes current roots into the identical publication,
+and consumes that identity. Potentially blocking calls retain their roots in
+runtime-owned strong handles and transition to `HandlesOnly`; exact reviewed
+nonblocking calls use `BoundedForeign`. The native entries are
+`pop_rt_enter_foreign` and `pop_rt_leave_foreign`; their writable arrays are
+new ABI 1.13 arguments and do not alter the immutable ABI 1 safe-point entry.
+ABI 2 preserves the same PLRI operation while additionally proving relocating
+writeback on return and unwind.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry
