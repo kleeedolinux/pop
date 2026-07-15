@@ -80,6 +80,7 @@ impl TargetSpec {
                 .operating_system(OperatingSystem::Linux)
                 .capability(TargetCapability::Threads)
                 .capability(TargetCapability::PreciseStackMaps)
+                .capability(TargetCapability::RelocatingNursery)
                 .build(),
             "bpfel-unknown-none" => Self::builder(triple)
                 .pointer_width(PointerWidth::Bits64)

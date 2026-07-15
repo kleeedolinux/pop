@@ -6,7 +6,7 @@ use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind, UnwindReason};
 use pop_source::SourceFile;
-use pop_target::{Endianness, PointerWidth, TargetSpec};
+use pop_target::{Endianness, PointerWidth, TargetCapability, TargetSpec};
 use pop_types::{IntegerKind, IntegerValue};
 use std::fmt::Write as _;
 use std::fs;
@@ -17,6 +17,8 @@ fn target() -> TargetSpec {
     TargetSpec::builder("x86_64-unknown-linux-gnu")
         .pointer_width(PointerWidth::Bits64)
         .endianness(Endianness::Little)
+        .capability(TargetCapability::PreciseStackMaps)
+        .capability(TargetCapability::RelocatingNursery)
         .build()
         .expect("complete target")
 }

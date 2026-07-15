@@ -21,6 +21,14 @@ fn target_spec_exposes_backend_neutral_facts() {
 }
 
 #[test]
+fn native_target_declares_relocating_nursery_feasibility() {
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target");
+
+    assert!(target.supports(TargetCapability::PreciseStackMaps));
+    assert!(target.supports(TargetCapability::RelocatingNursery));
+}
+
+#[test]
 fn bpf_target_specs_are_elf_llvm_bpf_targets() {
     let little = TargetSpec::for_triple("bpfel-unknown-none").expect("bpfel target");
     assert_eq!(little.pointer_width(), PointerWidth::Bits64);

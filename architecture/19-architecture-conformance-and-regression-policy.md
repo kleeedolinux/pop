@@ -244,7 +244,7 @@ Minimum traceability matrix:
 | Concise APIs and explicit costs | public libraries, docs, analyzers, benchmarks | call-site, allocation/copy/dispatch, effect, and measured-budget tests |
 | Independent official extensions | package resolver, extension builds, tooling | manifest/version/dependency/namespace/standard-exclusion tests |
 | Compact prelude | resolver, `Pop.Standard` | exact prelude snapshot/collision tests |
-| Pop GC | compiler/runtime/backends | root/barrier/stress/latency correctness tests |
+| Pop GC | compiler/runtime/backends | mutable-root relocation, immutable-shared proof, verified barrier-elision, scheduler-local parallel allocation/evacuation, capability/profile rejection, stress, and latency tests |
 | Diagnostic fixes | compiler/tooling | applicability, atomicity, postcondition tests |
 | XML documentation | parser, resolver, docs, libraries | tag/signature/cref/artifact tests |
 | No Lua regression | all semantic layers | permanent forbidden-feature regression suite |
@@ -281,6 +281,9 @@ Architecture CI should eventually verify:
 - mutable typed root relocation, runtime-profile/backend capability rejection,
   honest relocation-conformance stage labeling, and no bootstrap-handle
   substitution for the moving nursery;
+- atomic immutable-shared graph proofs, verified backend-neutral barrier
+  elision, explicit scheduler allocator identities, disjoint local token
+  namespaces, and independently runnable local evacuation;
 - typed public-function reference metadata and Bubble-scoped symbol identities;
 - naming/PascalCase/no-lower-snake rules;
 - default-internal visibility, private binary-entry shorthand, and absence of

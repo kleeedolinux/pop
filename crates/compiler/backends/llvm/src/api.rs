@@ -17,14 +17,40 @@ use inkwell::targets::{
 
 use inkwell::targets::TargetTriple;
 
-use pop_backend_api::RuntimeProfile;
+use pop_backend_api::{
+    BackendCapabilities, BackendGcCapability, RuntimeProfile, RuntimeProfileError,
+};
 use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_runtime_native_abi::NativeAbiVersion;
+use pop_target::TargetSpec;
 
 use crate::lowering::PrivateModule;
 
 const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
 const DEFAULT_GC_POLL_INTERVAL: NonZeroU32 =
     NonZeroU32::new(16_384).expect("the default GC poll interval is nonzero");
+
+/// Returns the closed GC capability inventory proved by LLVM conformance.
+#[must_use]
+pub fn llvm_backend_capabilities() -> BackendCapabilities {
+    BackendCapabilities::new([
+        BackendGcCapability::PreciseRoots,
+        BackendGcCapability::RelocatingManagedReferences,
+    ])
+}
+
+/// Validates an LLVM runtime profile against target and exact native ABI facts.
+///
+/// # Errors
+///
+/// Returns the first closed backend, target, or ABI incompatibility.
+pub fn validate_llvm_runtime_profile(
+    profile: RuntimeProfile,
+    target: &TargetSpec,
+    native_abi: NativeAbiVersion,
+) -> Result<(), RuntimeProfileError> {
+    llvm_backend_capabilities().validate_runtime_profile(profile, target, native_abi.major())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LlvmLoweringOptions {
@@ -199,6 +225,7 @@ impl fmt::Display for LlvmModule {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LlvmLoweringError {
     MirVerification(Vec<pop_mir::MirVerificationError>),
+    RuntimeProfile(RuntimeProfileError),
     UnsupportedInstruction {
         function: FunctionId,
         value: ValueId,
@@ -220,6 +247,7 @@ impl fmt::Display for LlvmLoweringError {
             Self::MirVerification(errors) => {
                 write!(formatter, "MIR verification failed: {errors:?}")
             }
+            Self::RuntimeProfile(error) => write!(formatter, "runtime profile rejected: {error}"),
             Self::UnsupportedInstruction { function, value } => write!(
                 formatter,
                 "LLVM backend does not support MIR instruction f{} v{}",

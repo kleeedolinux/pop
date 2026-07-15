@@ -84,11 +84,14 @@ and is not read by semantic compiler stages.
 Compile-time execution never runs through LLVM. This keeps editor analysis,
 cross-compilation, cache behavior, and the future VM deterministic and aligned.
 
-The current LLVM bootstrap spills stable handles before safe-point calls but
-does not reload relocated values, so it cannot advertise production relocation.
-Production support begins only after statepoint/relocate or equivalent writable-
-root lowering updates every live value across control-flow merges and passes
-emitted-metadata plus forced-relocation execution tests.
+LLVM keeps ABI 1 stable-handle lowering and separately advertises
+`RelocatingManagedReferences` for ABI 2. Its writable-root lowering spills exact
+live roots, checks the closed safe-point result, reloads new SSA aliases, and
+rewrites later instructions, branch arguments, merges, and loop backedges.
+Concrete backend capabilities, target capabilities, and the exact native ABI
+descriptor are validated together before artifact emission. Emitted-IR
+verification and forced-relocation execution tests gate this capability; an ABI
+2 call alone is not sufficient.
 
 ADR 0078 selects the first equivalent lowering: ABI 2 spills opaque managed
 tokens to the exact writable array, calls `pop_rt_gc_safe_point_v2`, reloads new
