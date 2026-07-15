@@ -432,10 +432,4 @@ Pop Lang is released under the [MIT License](LICENSE).
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=poplanguage%2Fpop&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=poplanguage/pop&type=date&theme=dark&legend=top-left&sealed_token=i90L7NkXuFhZHebubJxSDwRWP04Q98hsGU1h3znAp1NwRi5jOT9UlCpw5ShClSfIQiFYNp1-L2R7a2zpv88K_gFwnCzoN7fJVKdbNULO__WlxxfFHg13vwzOt4uMDasUyn9QXj5QaeE9UEQtiLk69HNoBCuV7W42qXH15H0MR3XhLfCGlRjQtK1wE6pm" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=poplanguage/pop&type=date&legend=top-left&sealed_token=i90L7NkXuFhZHebubJxSDwRWP04Q98hsGU1h3znAp1NwRi5jOT9UlCpw5ShClSfIQiFYNp1-L2R7a2zpv88K_gFwnCzoN7fJVKdbNULO__WlxxfFHg13vwzOt4uMDasUyn9QXj5QaeE9UEQtiLk69HNoBCuV7W42qXH15H0MR3XhLfCGlRjQtK1wE6pm" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=poplanguage/pop&type=date&legend=top-left&sealed_token=i90L7NkXuFhZHebubJxSDwRWP04Q98hsGU1h3znAp1NwRi5jOT9UlCpw5ShClSfIQiFYNp1-L2R7a2zpv88K_gFwnCzoN7fJVKdbNULO__WlxxfFHg13vwzOt4uMDasUyn9QXj5QaeE9UEQtiLk69HNoBCuV7W42qXH15H0MR3XhLfCGlRjQtK1wE6pm" />
- </picture>
-</a>
+[![Star History Chart](https://api.star-history.com/chart?repos=poplanguage/pop&type=date&legend=top-left&sealed_token=i90L7NkXuFhZHebubJxSDwRWP04Q98hsGU1h3znAp1NwRi5jOT9UlCpw5ShClSfIQiFYNp1-L2R7a2zpv88K_gFwnCzoN7fJVKdbNULO__WlxxfFHg13vwzOt4uMDasUyn9QXj5QaeE9UEQtiLk69HNoBCuV7W42qXH15H0MR3XhLfCGlRjQtK1wE6pm)](https://www.star-history.com/?repos=poplanguage%2Fpop&type=date&legend=top-left)
