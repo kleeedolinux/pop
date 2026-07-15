@@ -876,6 +876,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
             kind,
             MirInstructionKind::CallStandard { .. }
                 | MirInstructionKind::CallDirect { .. }
+                | MirInstructionKind::CallForeign { .. }
                 | MirInstructionKind::CallReferenced { .. }
                 | MirInstructionKind::CallDirectMethod { .. }
                 | MirInstructionKind::CallInterface { .. }
@@ -929,6 +930,7 @@ fn parse_instruction_unwind(
 ) -> Result<(&str, MirUnwindAction), MirParseError> {
     let has_embedded_unwind = [
         "callDirect ",
+        "callForeign ",
         "callReference ",
         "callMethod ",
         "callInterface ",
@@ -1286,6 +1288,7 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     }
     if text.starts_with("callStandard")
         || text.starts_with("callDirect")
+        || text.starts_with("callForeign")
         || text.starts_with("callReference")
         || text.starts_with("callIndirect")
         || text.starts_with("call.interface")
@@ -1597,6 +1600,25 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
         return Ok(MirInstructionKind::CallDirect {
             function: SymbolId::from_raw(parse_u32(function, line)?),
             arguments: parse_values(values, line)?,
+            declared_effects,
+            unwind,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("callForeign s") {
+        let (function, values) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "malformed foreign call"))?;
+        let (arguments, transition) = values
+            .split_once(" safePoint sp")
+            .ok_or_else(|| error(line, "foreign call roots"))?;
+        let (safe_point, roots) = transition
+            .split_once(" roots ")
+            .ok_or_else(|| error(line, "foreign call safe point"))?;
+        return Ok(MirInstructionKind::CallForeign {
+            function: SymbolId::from_raw(parse_u32(function, line)?),
+            arguments: parse_values(arguments, line)?,
+            safe_point: SafePointId::new(parse_u32(safe_point, line)?),
+            roots: parse_values(roots, line)?,
             declared_effects,
             unwind,
         });

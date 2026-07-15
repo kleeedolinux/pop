@@ -1166,6 +1166,34 @@ fn cleanup_resume_preserves_the_original_unwind_reason() {
 }
 
 #[test]
+fn interpreter_rejects_foreign_calls_without_an_exact_typed_adapter() {
+    let types = pop_types::TypeArena::new();
+    let int32 = types.source_type("Int32").expect("Int32");
+    let mir = parse_mir_dump(&format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "foreign s0 f0 params() results(t{int32}) symbol(native_poll) abi(C) links(-) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "function s1 f1() -> (t{int32}) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "  b0():\n",
+            "    do v0 gcSafePoint sp0 roots ()\n",
+            "    v1:t{int32} = callForeign s0 () safePoint sp0 roots () effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks] unwind propagate\n",
+            "    return (v1)\n",
+        ),
+        int32 = int32.raw(),
+    ))
+    .expect("foreign MIR");
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified foreign MIR");
+
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::UnsupportedForeignFunction(
+            SymbolId::from_raw(0)
+        ))
+    );
+}
+
+#[test]
 fn panic_during_panic_cleanup_becomes_the_terminal_double_panic_kind() {
     let mir = parse_mir_dump(concat!(
         "mir bubble b0 namespace n0\n",

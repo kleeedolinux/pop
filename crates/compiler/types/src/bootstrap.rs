@@ -331,6 +331,14 @@ impl BootstrapTypeEntry {
     }
 }
 
+/// Returns whether an exact bootstrap identity belongs to the closed Pop.Ffi
+/// ABI vocabulary. These values have scalar native representations and are
+/// never managed-reference tokens.
+#[must_use]
+pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 200..=204 | 210..=222)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTypeRole {
     Array,

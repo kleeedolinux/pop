@@ -192,6 +192,7 @@ pub fn lower_hir_bubble(
         nested_functions,
         function_references,
     };
+    rewrite_foreign_calls(&mut mir);
     recompute_effects(&mut mir);
     while insert_gc_safe_points(&mut mir, arena) {
         // Backedge safe points make their containing function a GC safe point.
@@ -199,9 +200,94 @@ pub fn lower_hir_bubble(
         // also require a safe point immediately before the call.
         recompute_effects(&mut mir);
     }
+    populate_foreign_call_roots(&mut mir);
     seal_effects(&mut mir);
     verify_mir_bubble(&mir, arena)?;
     Ok(mir)
+}
+
+fn rewrite_foreign_calls(bubble: &mut MirBubble) {
+    let foreign = bubble
+        .foreign_functions
+        .iter()
+        .map(MirForeignFunction::symbol)
+        .collect::<BTreeSet<_>>();
+    for instruction in bubble
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.blocks)
+        .chain(
+            bubble
+                .methods
+                .iter_mut()
+                .flat_map(|method| &mut method.function.blocks),
+        )
+        .chain(
+            bubble
+                .nested_functions
+                .iter_mut()
+                .flat_map(|nested| &mut nested.blocks),
+        )
+        .flat_map(|block| &mut block.instructions)
+    {
+        let MirInstructionKind::CallDirect {
+            function,
+            arguments,
+            declared_effects,
+            unwind,
+        } = instruction.kind.clone()
+        else {
+            continue;
+        };
+        if foreign.contains(&function) {
+            instruction.kind = MirInstructionKind::CallForeign {
+                function,
+                arguments,
+                safe_point: SafePointId::new(0),
+                roots: Vec::new(),
+                declared_effects,
+                unwind,
+            };
+        }
+    }
+}
+
+fn populate_foreign_call_roots(bubble: &mut MirBubble) {
+    for block in bubble
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.blocks)
+        .chain(
+            bubble
+                .methods
+                .iter_mut()
+                .flat_map(|method| &mut method.function.blocks),
+        )
+        .chain(
+            bubble
+                .nested_functions
+                .iter_mut()
+                .flat_map(|nested| &mut nested.blocks),
+        )
+    {
+        let mut previous_safe_point = None;
+        for instruction in &mut block.instructions {
+            match &mut instruction.kind {
+                MirInstructionKind::GcSafePoint {
+                    safe_point, roots, ..
+                } => previous_safe_point = Some((*safe_point, roots.clone())),
+                MirInstructionKind::CallForeign {
+                    safe_point, roots, ..
+                } => {
+                    if let Some((previous, previous_roots)) = previous_safe_point.take() {
+                        *safe_point = previous;
+                        *roots = previous_roots;
+                    }
+                }
+                _ => previous_safe_point = None,
+            }
+        }
+    }
 }
 
 fn specialization_declarations(hir: &HirBubble) -> Vec<&pop_hir::HirDeclaration> {
@@ -4049,6 +4135,7 @@ impl<'hir> FunctionBuilder<'hir> {
         let cleanup = cleanup_entry.expect("active cleanup set is nonempty");
         let unwind = match &mut instruction {
             MirInstructionKind::CallDirect { unwind, .. }
+            | MirInstructionKind::CallForeign { unwind, .. }
             | MirInstructionKind::CallReferenced { unwind, .. }
             | MirInstructionKind::CallDirectMethod { unwind, .. }
             | MirInstructionKind::CallInterface { unwind, .. }
@@ -4479,24 +4566,27 @@ fn closure_environment_object_map(arena: &TypeArena, captures: &[MirClosureCaptu
     .expect("closure captures form a valid logical object map")
 }
 
-pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeArena>) -> bool {
+#[must_use]
+pub fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeArena>) -> bool {
     let Some(arena) = arena else {
         return false;
     };
-    matches!(
-        arena.get(type_id),
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin { definition, .. }) => {
+            !pop_types::is_ffi_abi_builtin_type(*definition)
+        }
         Some(
             SemanticType::Primitive(PrimitiveType::String)
-                | SemanticType::Tuple(_)
-                | SemanticType::Array(_)
-                | SemanticType::Table { .. }
-                | SemanticType::Class { .. }
-                | SemanticType::Interface { .. }
-                | SemanticType::Builtin { .. }
-                | SemanticType::Function { .. }
-                | SemanticType::ErrorUnion { .. }
-        )
-    )
+            | SemanticType::Tuple(_)
+            | SemanticType::Array(_)
+            | SemanticType::Table { .. }
+            | SemanticType::Class { .. }
+            | SemanticType::Interface { .. }
+            | SemanticType::Function { .. }
+            | SemanticType::ErrorUnion { .. },
+        ) => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn task_group_object_map(
@@ -4689,6 +4779,9 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         MirInstructionKind::CallDirect {
             declared_effects, ..
         }
+        | MirInstructionKind::CallForeign {
+            declared_effects, ..
+        }
         | MirInstructionKind::CallReferenced {
             declared_effects, ..
         }
@@ -4857,6 +4950,9 @@ fn recompute_function_effects(
                 MirInstructionKind::CallDirect { function, .. } => {
                     function_effects.get(function).copied().unwrap_or_default()
                 }
+                MirInstructionKind::CallForeign { function, .. } => {
+                    function_effects.get(function).copied().unwrap_or_default()
+                }
                 MirInstructionKind::CallDirectMethod { method, .. } => {
                     method_effects.get(method).copied().unwrap_or_default()
                 }
@@ -4872,6 +4968,9 @@ fn recompute_function_effects(
             if !instruction.effects_explicit {
                 match &mut instruction.kind {
                     MirInstructionKind::CallDirect {
+                        declared_effects, ..
+                    }
+                    | MirInstructionKind::CallForeign {
                         declared_effects, ..
                     }
                     | MirInstructionKind::CallDirectMethod {
@@ -4951,6 +5050,7 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) ->
                 || matches!(
                     instruction.kind,
                     MirInstructionKind::CallDirect { .. }
+                        | MirInstructionKind::CallForeign { .. }
                         | MirInstructionKind::CallDirectMethod { .. }
                         | MirInstructionKind::CallInterface { .. }
                         | MirInstructionKind::CallIndirect { .. }

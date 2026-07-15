@@ -174,6 +174,15 @@ fn refresh_function_call_effects(
                     *declared_effects = effects;
                     effects
                 }
+                MirInstructionKind::CallForeign {
+                    function,
+                    declared_effects,
+                    ..
+                } => {
+                    let effects = function_effects.get(function).copied().unwrap_or_default();
+                    *declared_effects = effects;
+                    effects
+                }
                 MirInstructionKind::CallDirectMethod {
                     method,
                     declared_effects,
@@ -200,6 +209,7 @@ fn refresh_transformed_instruction_effects(function: &mut super::MirFunction) {
             if !matches!(
                 instruction.kind,
                 MirInstructionKind::CallDirect { .. }
+                    | MirInstructionKind::CallForeign { .. }
                     | MirInstructionKind::CallReferenced { .. }
                     | MirInstructionKind::CallDirectMethod { .. }
             ) {
@@ -217,6 +227,7 @@ fn remove_redundant_gc_safe_points(function: &mut super::MirFunction) {
                     || matches!(
                         instruction.kind,
                         MirInstructionKind::CallDirect { .. }
+                            | MirInstructionKind::CallForeign { .. }
                             | MirInstructionKind::CallDirectMethod { .. }
                             | MirInstructionKind::CallIndirect { .. }
                     ) && instruction.effects.contains(super::MirEffect::GcSafePoint))
@@ -776,6 +787,10 @@ fn remove_unreachable_blocks(function: &mut super::MirFunction) {
         for instruction in &mut block.instructions {
             match &mut instruction.kind {
                 MirInstructionKind::CallDirect {
+                    unwind: super::MirUnwindAction::Cleanup(target),
+                    ..
+                }
+                | MirInstructionKind::CallForeign {
                     unwind: super::MirUnwindAction::Cleanup(target),
                     ..
                 }

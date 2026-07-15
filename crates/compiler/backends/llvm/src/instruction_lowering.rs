@@ -415,6 +415,28 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::CallForeign {
+            function: callee,
+            arguments,
+            safe_point,
+            roots,
+            ..
+        } => lower_foreign_call(
+            bubble,
+            instruction.result(),
+            result_type,
+            *callee,
+            arguments,
+            safe_point.raw(),
+            roots,
+            instruction.effects(),
+            value_types,
+            types,
+            matches!(
+                options.runtime_profile,
+                pop_backend_api::RuntimeProfile::ProductionGenerational
+            ),
+        )?,
         MirInstructionKind::CallReferenced {
             function: callee,
             arguments,
@@ -1669,6 +1691,101 @@ pub(crate) fn call_line(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_foreign_call(
+    bubble: BubbleId,
+    result_id: ValueId,
+    result_type: Option<TypeId>,
+    callee: SymbolId,
+    arguments: &[ValueId],
+    safe_point: u32,
+    roots: &[ValueId],
+    effects: pop_mir::MirEffectSummary,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    writable_roots: bool,
+) -> Result<String, LlvmLoweringError> {
+    let result = format!("%v{}", result_id.raw());
+    let label = format!("v{}_foreign", result_id.raw());
+    let root_array = format!("{result}_foreign_roots");
+    let root_pointer = if roots.is_empty() {
+        "null".to_owned()
+    } else {
+        format!("{root_array}_pointer")
+    };
+    let mut lines = Vec::new();
+    if !roots.is_empty() {
+        lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
+        for (index, root) in roots.iter().enumerate() {
+            let slot = format!("{root_array}_{index}");
+            lines.extend([
+                format!(
+                    "{slot} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                    roots.len()
+                ),
+                format!("store i64 %v{}, ptr {slot}", root.raw()),
+            ]);
+        }
+        lines.push(format!(
+            "{root_pointer} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 0",
+            roots.len()
+        ));
+    }
+    let mode = u8::from(!effects.contains(pop_mir::MirEffect::Blocks));
+    lines.extend([
+        format!(
+            "{result}_foreign_transition = call i64 @{}(i32 {safe_point}, ptr {root_pointer}, i64 {}, i8 {mode})",
+            native_runtime_symbol(RuntimeOperation::EnterForeign),
+            roots.len()
+        ),
+        format!(
+            "{result}_foreign_entered = icmp ne i64 {result}_foreign_transition, 0"
+        ),
+        format!(
+            "br i1 {result}_foreign_entered, label %{label}_call, label %{label}_trap"
+        ),
+        format!("{label}_call:"),
+        call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(bubble, callee)),
+            arguments,
+            values,
+            types,
+        )?,
+        format!(
+            "{result}_foreign_left = call i8 @{}(i64 {result}_foreign_transition, ptr {root_pointer}, i64 {})",
+            native_runtime_symbol(RuntimeOperation::LeaveForeign),
+            roots.len()
+        ),
+        format!("{result}_foreign_leave_valid = icmp eq i8 {result}_foreign_left, 1"),
+        format!(
+            "br i1 {result}_foreign_leave_valid, label %{label}_ready, label %{label}_trap"
+        ),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
+        "  unreachable".to_owned(),
+        format!("{label}_ready:"),
+    ]);
+    if writable_roots {
+        for (index, root) in roots.iter().enumerate() {
+            let slot = format!("{root_array}_{index}_reload");
+            lines.extend([
+                format!(
+                    "{slot} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                    roots.len()
+                ),
+                format!(
+                    "%v{}_after_foreign_v{} = load i64, ptr {slot}",
+                    root.raw(),
+                    result_id.raw()
+                ),
+            ]);
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 pub(crate) fn lower_array_create(
     result: &str,
     length: ValueId,
@@ -2659,17 +2776,7 @@ pub(crate) fn lower_gc_safe_point(
 }
 
 pub(crate) fn is_managed_type(type_id: TypeId, types: &TypeArena) -> bool {
-    !matches!(
-        types.get(type_id),
-        Some(SemanticType::Primitive(
-            PrimitiveType::Nil
-                | PrimitiveType::Boolean
-                | PrimitiveType::Integer(_)
-                | PrimitiveType::Float32
-                | PrimitiveType::Float64
-                | PrimitiveType::Never
-        ))
-    )
+    pop_mir::is_managed_reference_type_id(type_id, Some(types))
 }
 
 pub(crate) fn lower_tuple_make(

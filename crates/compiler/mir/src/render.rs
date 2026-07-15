@@ -971,6 +971,20 @@ fn dump_callable_or_schema_instruction(
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }
+        MirInstructionKind::CallForeign {
+            function,
+            arguments,
+            safe_point,
+            roots,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(output, "callForeign s{} ", function.raw());
+            dump_value_list(output, arguments);
+            let _ = write!(output, " safePoint sp{} roots ", safe_point.raw());
+            dump_value_list(output, roots);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
         MirInstructionKind::CallReferenced {
             function,
             arguments,

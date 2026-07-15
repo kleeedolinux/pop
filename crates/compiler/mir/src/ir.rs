@@ -978,9 +978,9 @@ impl MirInstruction {
 
     /// Returns the ordinary SSA operands read by this instruction.
     ///
-    /// Precise GC roots are stack-map metadata and are intentionally not
-    /// ordinary operands; consumers that transform roots must inspect the
-    /// `GcSafePoint` instruction directly.
+    /// `GcSafePoint` roots are stack-map metadata and are intentionally not
+    /// ordinary operands. `CallForeign` transition roots are semantic uses
+    /// held across native execution and therefore are ordinary operands.
     #[must_use]
     pub fn operands(&self) -> Vec<ValueId> {
         instruction_operands(&self.kind)
@@ -995,6 +995,7 @@ impl MirInstruction {
     pub const fn unwind_action(&self) -> MirUnwindAction {
         match &self.kind {
             MirInstructionKind::CallDirect { unwind, .. }
+            | MirInstructionKind::CallForeign { unwind, .. }
             | MirInstructionKind::CallReferenced { unwind, .. }
             | MirInstructionKind::CallDirectMethod { unwind, .. }
             | MirInstructionKind::CallInterface { unwind, .. }
@@ -1304,6 +1305,14 @@ pub enum MirInstructionKind {
     CallDirect {
         function: SymbolId,
         arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
+    CallForeign {
+        function: SymbolId,
+        arguments: Vec<ValueId>,
+        safe_point: SafePointId,
+        roots: Vec<ValueId>,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
@@ -1753,6 +1762,13 @@ pub enum MirVerificationError {
         found_arguments: usize,
         expected_results: usize,
         found_results: usize,
+    },
+    InvalidForeignCall {
+        instruction: ValueId,
+        function: SymbolId,
+    },
+    InvalidForeignRoots {
+        instruction: ValueId,
     },
     InvalidTaskOperation {
         instruction: ValueId,

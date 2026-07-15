@@ -61,6 +61,7 @@ pub use bootstrap::{
     BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
     BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
     CompilerAttributeRole, CompilerAttributeTarget, embedded_bootstrap_schema,
+    is_ffi_abi_builtin_type,
 };
 pub use classes::{
     ClassDefinition, ClassDefinitionResult, ClassFieldDefinition, ClassMethodDefinition,

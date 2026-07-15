@@ -94,6 +94,11 @@ pub fn verify_mir_bubble(
         .filter(|function| function.is_async())
         .map(MirFunction::symbol)
         .collect();
+    let foreign_functions: BTreeSet<_> = bubble
+        .foreign_functions
+        .iter()
+        .map(MirForeignFunction::symbol)
+        .collect();
     let mut reference_signatures = BTreeMap::new();
     for reference in &bubble.function_references {
         let signature = (
@@ -132,6 +137,7 @@ pub fn verify_mir_bubble(
             &method_signatures,
             &async_functions,
             &async_references,
+            &foreign_functions,
             &mut errors,
         );
     }
@@ -145,6 +151,7 @@ pub fn verify_mir_bubble(
             &method_signatures,
             &async_functions,
             &async_references,
+            &foreign_functions,
             &mut errors,
         );
     }
@@ -481,6 +488,7 @@ fn verify_function(
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     async_functions: &BTreeSet<SymbolId>,
     async_references: &BTreeSet<SymbolIdentity>,
+    foreign_functions: &BTreeSet<SymbolId>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     verify_entry_parameters(function, errors);
@@ -642,6 +650,7 @@ fn verify_function(
             }
             let referenced_function = match instruction.kind() {
                 MirInstructionKind::CallDirect { function, .. }
+                | MirInstructionKind::CallForeign { function, .. }
                 | MirInstructionKind::FunctionReference(function) => Some(*function),
                 _ => None,
             };
@@ -649,6 +658,25 @@ fn verify_function(
                 && !signatures.contains_key(&function)
             {
                 errors.push(MirVerificationError::UnknownFunction(function));
+            }
+            match instruction.kind() {
+                MirInstructionKind::CallDirect { function, .. }
+                    if foreign_functions.contains(function) =>
+                {
+                    errors.push(MirVerificationError::InvalidForeignCall {
+                        instruction: instruction.result(),
+                        function: *function,
+                    });
+                }
+                MirInstructionKind::CallForeign { function, .. }
+                    if !foreign_functions.contains(function) =>
+                {
+                    errors.push(MirVerificationError::InvalidForeignCall {
+                        instruction: instruction.result(),
+                        function: *function,
+                    });
+                }
+                _ => {}
             }
             if let MirInstructionKind::CallReferenced { function, .. } = instruction.kind()
                 && !reference_signatures.contains_key(function)
@@ -756,6 +784,10 @@ fn expected_instruction_effects(
             .get(function)
             .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
+        MirInstructionKind::CallForeign { function, .. } => signatures
+            .get(function)
+            .map(|(_, _, effects)| *effects)
+            .unwrap_or_default(),
         MirInstructionKind::CallReferenced { function, .. } => reference_signatures
             .get(function)
             .map(|(_, _, effects)| *effects)
@@ -828,6 +860,7 @@ fn verify_gc_contracts(
                 || matches!(
                     instruction.kind(),
                     MirInstructionKind::CallDirect { .. }
+                        | MirInstructionKind::CallForeign { .. }
                         | MirInstructionKind::CallDirectMethod { .. }
                         | MirInstructionKind::CallIndirect { .. }
                 ) && instruction.effects().contains(MirEffect::GcSafePoint);
@@ -842,6 +875,24 @@ fn verify_gc_contracts(
                 errors.push(MirVerificationError::MissingGcSafePoint {
                     instruction: instruction.result(),
                 });
+            }
+            if let MirInstructionKind::CallForeign {
+                safe_point, roots, ..
+            } = instruction.kind()
+            {
+                let exact_transition = index.checked_sub(1).and_then(|previous| {
+                    match block.instructions()[previous].kind() {
+                        MirInstructionKind::GcSafePoint {
+                            safe_point, roots, ..
+                        } => Some((safe_point, roots)),
+                        _ => None,
+                    }
+                });
+                if exact_transition != Some((safe_point, roots)) {
+                    errors.push(MirVerificationError::InvalidForeignRoots {
+                        instruction: instruction.result(),
+                    });
+                }
             }
             match instruction.kind() {
                 MirInstructionKind::ArrayMake { element_map, .. } => {
@@ -1111,6 +1162,7 @@ fn unpublished_owner_operation(instruction: &MirInstruction, owner: ValueId) -> 
         | MirInstructionKind::CaptureCellStore { value, .. }
         | MirInstructionKind::CaptureStore { value, .. } => *value != owner,
         MirInstructionKind::CallDirect { .. }
+        | MirInstructionKind::CallForeign { .. }
         | MirInstructionKind::CallReferenced { .. }
         | MirInstructionKind::CallStandard { .. }
         | MirInstructionKind::CallDirectMethod { .. }
@@ -3364,6 +3416,15 @@ fn verify_callable_instruction(
                 verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
+        MirInstructionKind::CallForeign {
+            function,
+            arguments,
+            ..
+        } => {
+            if let Some((parameters, results, _)) = signatures.functions.get(function) {
+                verify_call_signature(instruction, arguments, parameters, results, values, errors);
+            }
+        }
         MirInstructionKind::CallReferenced {
             function,
             arguments,
@@ -4067,6 +4128,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::ErrorMake {
             arguments: values, ..
         } => values.clone(),
+        MirInstructionKind::CallForeign {
+            arguments, roots, ..
+        } => arguments.iter().chain(roots).copied().collect(),
         MirInstructionKind::TaskCreate {
             dispatch,
             arguments,

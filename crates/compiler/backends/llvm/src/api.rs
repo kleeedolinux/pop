@@ -238,6 +238,7 @@ pub enum LlvmLoweringError {
     InvalidFieldLayout(FieldId),
     InvalidEntryPoint(SymbolId),
     UnsupportedEntryPointSignature(SymbolId),
+    UnsupportedForeignFunction(SymbolId),
     UnsupportedAsync,
 }
 
@@ -273,6 +274,11 @@ impl fmt::Display for LlvmLoweringError {
             Self::UnsupportedEntryPointSignature(symbol) => write!(
                 formatter,
                 "entry point s{} must accept () or (Array<String>) and return () or Int",
+                symbol.raw()
+            ),
+            Self::UnsupportedForeignFunction(symbol) => write!(
+                formatter,
+                "LLVM backend does not support foreign function s{} on this target",
                 symbol.raw()
             ),
             Self::UnsupportedAsync => write!(

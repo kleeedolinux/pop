@@ -1,5 +1,5 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
-use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
+use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_source::SourceFile;
 use pop_types::{Effect, ForeignAbi};
 
@@ -15,6 +15,41 @@ fn ffi_module() -> FrontEndModule {
         )
         .expect("source"),
     )
+}
+
+fn assert_balanced_foreign_root_contract(mir: &pop_mir::MirBubble, wrapper_symbol: SymbolId) {
+    let wrapper = mir
+        .functions()
+        .iter()
+        .find(|function| function.symbol() == wrapper_symbol)
+        .expect("foreign wrapper MIR");
+    let instructions = wrapper.blocks()[0].instructions();
+    let call_index = instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                instruction.kind(),
+                pop_mir::MirInstructionKind::CallForeign { .. }
+            )
+        })
+        .expect("canonical foreign call");
+    let pop_mir::MirInstructionKind::GcSafePoint {
+        safe_point: published_safe_point,
+        roots: published_roots,
+        ..
+    } = instructions[call_index - 1].kind()
+    else {
+        panic!("foreign call must immediately follow its safe point");
+    };
+    let pop_mir::MirInstructionKind::CallForeign {
+        safe_point, roots, ..
+    } = instructions[call_index].kind()
+    else {
+        unreachable!();
+    };
+    assert_eq!(safe_point, published_safe_point);
+    assert_eq!(roots, published_roots);
+    assert_eq!(roots.len(), 1, "only the live String is a managed root");
 }
 
 #[test]
@@ -76,10 +111,12 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
              end\n\
              @Ffi.Foreign(\"native_poll\")\n\
              @Ffi.Nonblocking\n\
-             internal function poll(): Ffi.C.Int\n\
+             internal function poll(value: Ffi.C.Int): Ffi.C.Int\n\
              end\n\
-             internal function pollWrapper(): Ffi.C.Int\n\
-                 return poll()\n\
+             internal function pollWrapper(value: Ffi.C.Int, retained: String): Ffi.C.Int\n\
+                 local result = poll(value)\n\
+                 print(retained)\n\
+                 return result\n\
              end\n",
         )
         .expect("source"),
@@ -123,6 +160,12 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
             .iter()
             .any(|function| function.name() == "pollWrapper")
     );
+    let wrapper_symbol = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "pollWrapper")
+        .expect("foreign wrapper")
+        .symbol();
     assert!(hir.verify(result.types()).is_ok());
     let dump = hir.dump(result.types());
     assert!(dump.contains("foreign s0"));
@@ -149,9 +192,16 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
     assert!(mir_close.effects().contains(pop_mir::MirEffect::Blocks));
     let mir_dump = mir.dump();
     assert!(mir_dump.contains("foreign s0"));
-    let reparsed = pop_mir::parse_mir_dump(&mir_dump).expect("foreign MIR text round trip");
+    assert!(mir_dump.contains("callForeign s1"));
+    assert!(!mir_dump.contains("callDirect s1"));
+    assert_balanced_foreign_root_contract(&mir, wrapper_symbol);
+    let reparsed = pop_mir::parse_mir_dump(&mir_dump)
+        .unwrap_or_else(|error| panic!("foreign MIR text round trip: {error:?}\n{mir_dump}"));
     assert_eq!(reparsed.dump(), mir_dump);
     pop_mir::verify_mir_bubble(&reparsed, result.types()).expect("reparsed foreign MIR verifies");
+    let optimized = pop_mir::optimize_mir(reparsed, result.types()).expect("optimized foreign MIR");
+    assert!(optimized.dump().contains("callForeign s1"));
+    assert!(!optimized.dump().contains("callDirect s1"));
 }
 
 #[test]

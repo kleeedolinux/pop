@@ -66,6 +66,7 @@ impl Default for ExecutionLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     UnknownFunction(SymbolId),
+    UnsupportedForeignFunction(SymbolId),
     UnknownReferencedFunction(SymbolIdentity),
     WrongArity,
     TypeMismatch,
@@ -1742,6 +1743,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::CallStandard { .. }
             | MirInstructionKind::CallDirect { .. }
+            | MirInstructionKind::CallForeign { .. }
             | MirInstructionKind::CallReferenced { .. }
             | MirInstructionKind::CallDirectMethod { .. }
             | MirInstructionKind::CallInterface { .. }
@@ -1806,6 +1808,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => self.execute_direct_call(*function, arguments, values)?,
+            MirInstructionKind::CallForeign { function, .. } => {
+                return Err(ExecutionError::UnsupportedForeignFunction(*function));
+            }
             MirInstructionKind::CallReferenced { function, .. } => {
                 return Err(ExecutionError::UnknownReferencedFunction(*function));
             }
@@ -1994,6 +1999,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => single_result(self.execute_direct_call(*function, arguments, values)?),
+            MirInstructionKind::CallForeign { function, .. } => {
+                return Err(ExecutionError::UnsupportedForeignFunction(*function));
+            }
             MirInstructionKind::CallReferenced { function, .. } => {
                 return Err(ExecutionError::UnknownReferencedFunction(*function));
             }
