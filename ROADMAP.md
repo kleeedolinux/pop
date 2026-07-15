@@ -188,7 +188,7 @@ Post-baseline library work has begun without widening the release foundation:
 
 ### 3. Make the runtime release-ready
 
-- [ ] Replace bootstrap-only stable handles with the accepted production
+- [x] Replace bootstrap-only stable handles with the accepted production
   generational path: a real moving nursery, typed root/edge relocation,
   remembered cards, promotion, and backend capability negotiation.
   - [x] Implement the single-mutator moving nursery, exact root/edge/handle/pin
@@ -210,8 +210,8 @@ Post-baseline library work has begun without widening the release foundation:
     completed lifetime in deterministic safe-point units, report long-lived
     pins once, and keep first/additional pin transitions independent of heap
     size.
-  - [ ] Add shared immutability proofs and capability-driven barrier elimination.
-  - [ ] Complete production backend writable-root capability negotiation and
+  - [x] Add shared immutability proofs and capability-driven barrier elimination.
+  - [x] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.
 - [x] Complete concurrent mature marking, SATB barriers, sweeping, pacing,
   bounded pause work, deterministic failure behavior, and stress testing.
