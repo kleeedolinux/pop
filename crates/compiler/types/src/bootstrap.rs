@@ -341,6 +341,10 @@ pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
 
 /// Stable bootstrap identity of the exact `Ffi.Handle<T>` type constructor.
 pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
+/// Stable bootstrap identity of `Ffi.NullPointerError`.
+pub const FFI_NULL_POINTER_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(208);
+/// Stable bootstrap identity of `Ffi.AllocationError`.
+pub const FFI_ALLOCATION_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(209);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTypeRole {
@@ -862,6 +866,8 @@ fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaE
         (205, "Ffi.ReadOnlyPointer", 1),
         (206, "Ffi.OptionalReadOnlyPointer", 1),
         (207, "Ffi.Buffer", 1),
+        (208, "Ffi.NullPointerError", 0),
+        (209, "Ffi.AllocationError", 0),
         (210, "Ffi.C.Char", 0),
         (211, "Ffi.C.SignedChar", 0),
         (212, "Ffi.C.UnsignedChar", 0),

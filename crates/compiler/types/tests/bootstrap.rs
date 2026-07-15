@@ -144,6 +144,8 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
         (205, "Ffi.ReadOnlyPointer", 1),
         (206, "Ffi.OptionalReadOnlyPointer", 1),
         (207, "Ffi.Buffer", 1),
+        (208, "Ffi.NullPointerError", 0),
+        (209, "Ffi.AllocationError", 0),
         (210, "Ffi.C.Char", 0),
         (211, "Ffi.C.SignedChar", 0),
         (212, "Ffi.C.UnsignedChar", 0),
@@ -179,6 +181,8 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
         "ReadOnlyPointer",
         "OptionalReadOnlyPointer",
         "Buffer",
+        "NullPointerError",
+        "AllocationError",
         "Char",
         "Size",
     ] {
@@ -187,6 +191,12 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(205)));
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(206)));
     assert!(!is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(207)));
+    assert!(!is_ffi_abi_builtin_type(
+        pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID
+    ));
+    assert!(!is_ffi_abi_builtin_type(
+        pop_types::FFI_ALLOCATION_ERROR_TYPE_ID
+    ));
 }
 
 #[test]

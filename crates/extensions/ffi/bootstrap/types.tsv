@@ -8,6 +8,8 @@ typeId	sourceName	ownerBubble	arity	role	prelude
 205	Ffi.ReadOnlyPointer	Pop.Ffi	1	Nominal	false
 206	Ffi.OptionalReadOnlyPointer	Pop.Ffi	1	Nominal	false
 207	Ffi.Buffer	Pop.Ffi	1	Nominal	false
+208	Ffi.NullPointerError	Pop.Ffi	0	Nominal	false
+209	Ffi.AllocationError	Pop.Ffi	0	Nominal	false
 210	Ffi.C.Char	Pop.Ffi	0	Nominal	false
 211	Ffi.C.SignedChar	Pop.Ffi	0	Nominal	false
 212	Ffi.C.UnsignedChar	Pop.Ffi	0	Nominal	false
