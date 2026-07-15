@@ -339,8 +339,30 @@ pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
     matches!(id.raw(), 200..=206 | 210..=222)
 }
 
+/// Returns whether an identity is one of the closed C integer ABI scalars.
+#[must_use]
+pub const fn is_ffi_integer_abi_builtin_type(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 210..=222)
+}
+
+/// Returns whether an identity is a mutable or read-only FFI pointer
+/// constructor, including its optional form.
+#[must_use]
+pub const fn is_ffi_pointer_type_constructor(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 200 | 201 | 205 | 206)
+}
+
+/// Returns whether an identity is an FFI function-pointer constructor,
+/// including its optional form.
+#[must_use]
+pub const fn is_ffi_function_type_constructor(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 202 | 203)
+}
+
 /// Stable bootstrap identity of the exact `Ffi.Handle<T>` type constructor.
 pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
+/// Stable bootstrap identity of the exact `Ffi.Pointer<T>` type constructor.
+pub const FFI_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(200);
 /// Stable bootstrap identity of the exact `Ffi.Buffer<T>` type constructor.
 pub const FFI_BUFFER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(207);
 /// Stable bootstrap identity of `Ffi.NullPointerError`.

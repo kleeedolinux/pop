@@ -191,7 +191,23 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(205)));
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(206)));
     assert!(!is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(207)));
+    assert_eq!(pop_types::FFI_POINTER_TYPE_ID, BuiltinTypeId::from_raw(200));
     assert_eq!(pop_types::FFI_BUFFER_TYPE_ID, BuiltinTypeId::from_raw(207));
+    assert!(pop_types::is_ffi_pointer_type_constructor(
+        BuiltinTypeId::from_raw(206)
+    ));
+    assert!(!pop_types::is_ffi_pointer_type_constructor(
+        pop_types::FFI_HANDLE_TYPE_ID
+    ));
+    assert!(pop_types::is_ffi_function_type_constructor(
+        BuiltinTypeId::from_raw(203)
+    ));
+    assert!(pop_types::is_ffi_integer_abi_builtin_type(
+        BuiltinTypeId::from_raw(221)
+    ));
+    assert!(!pop_types::is_ffi_integer_abi_builtin_type(
+        pop_types::FFI_POINTER_TYPE_ID
+    ));
     assert!(!is_ffi_abi_builtin_type(
         pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID
     ));

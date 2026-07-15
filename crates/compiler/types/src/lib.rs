@@ -61,8 +61,9 @@ pub use bootstrap::{
     BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
     BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
     CompilerAttributeRole, CompilerAttributeTarget, FFI_ALLOCATION_ERROR_TYPE_ID,
-    FFI_BUFFER_TYPE_ID, FFI_HANDLE_TYPE_ID, FFI_NULL_POINTER_ERROR_TYPE_ID,
-    embedded_bootstrap_schema, is_ffi_abi_builtin_type,
+    FFI_BUFFER_TYPE_ID, FFI_HANDLE_TYPE_ID, FFI_NULL_POINTER_ERROR_TYPE_ID, FFI_POINTER_TYPE_ID,
+    embedded_bootstrap_schema, is_ffi_abi_builtin_type, is_ffi_function_type_constructor,
+    is_ffi_integer_abi_builtin_type, is_ffi_pointer_type_constructor,
 };
 pub use classes::{
     ClassDefinition, ClassDefinitionResult, ClassFieldDefinition, ClassMethodDefinition,

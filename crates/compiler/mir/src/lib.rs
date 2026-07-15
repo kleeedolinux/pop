@@ -23,6 +23,7 @@
     clippy::wildcard_imports
 )]
 
+mod ffi_layout;
 mod ir;
 mod lowering;
 mod optimize;
@@ -30,6 +31,7 @@ mod render;
 mod text;
 mod verification;
 
+pub use ffi_layout::*;
 pub use ir::*;
 pub(crate) use lowering::local_instruction_effects;
 pub use lowering::{is_managed_reference_type_id, lower_hir_bubble};
