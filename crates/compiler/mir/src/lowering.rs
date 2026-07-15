@@ -8,9 +8,9 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, BlockId, CaptureId, ClassId, CleanupScopeId, CoroutineStateId, FieldId, FileId,
-    FunctionId, LocalId, MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange,
-    TextSize, TypeId, ValueId, ValueParameterId,
+    BindingId, BlockId, BorrowRegionId, CaptureId, ClassId, CleanupScopeId, CoroutineStateId,
+    FieldId, FileId, FunctionId, LocalId, MethodId, ResultCaseId, SourceSpan, SymbolId,
+    SymbolIdentity, TextRange, TextSize, TypeId, ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
@@ -1140,7 +1140,17 @@ struct BuildingBlock {
 #[derive(Clone, Copy)]
 struct ActiveCleanup<'hir> {
     scope: CleanupScopeId,
-    body: &'hir [HirStatement],
+    action: CleanupAction<'hir>,
+}
+
+#[derive(Clone, Copy)]
+enum CleanupAction<'hir> {
+    Statements(&'hir [HirStatement]),
+    FfiBufferBorrow {
+        buffer: ValueId,
+        region: BorrowRegionId,
+        span: SourceSpan,
+    },
 }
 
 #[derive(Clone)]
@@ -1486,6 +1496,23 @@ fn visit_expression_closures(
     match expression.kind() {
         HirExpressionKind::Closure(closure) => {
             for capture in closure.captures() {
+                if capture.mode() != HirCaptureMode::Cell {
+                    continue;
+                }
+                match capture.source() {
+                    HirCaptureSource::Local(local) => {
+                        locals.insert(local);
+                    }
+                    HirCaptureSource::Parameter(parameter) => {
+                        parameters.insert(parameter);
+                    }
+                    HirCaptureSource::Capture(_) => {}
+                }
+            }
+        }
+        HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            visit_expression_closures(buffer, parameters, locals);
+            for capture in body.captures() {
                 if capture.mode() != HirCaptureMode::Cell {
                     continue;
                 }
@@ -2121,12 +2148,18 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::Defer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
-                    self.active_cleanups.push(ActiveCleanup { scope, body });
+                    self.active_cleanups.push(ActiveCleanup {
+                        scope,
+                        action: CleanupAction::Statements(body),
+                    });
                 }
                 HirStatementKind::AsyncDefer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
-                    self.active_cleanups.push(ActiveCleanup { scope, body });
+                    self.active_cleanups.push(ActiveCleanup {
+                        scope,
+                        action: CleanupAction::Statements(body),
+                    });
                 }
                 HirStatementKind::FieldSet { base, field, value } => {
                     let base = self.lower_expression(base);
@@ -2395,7 +2428,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 scope: cleanup.scope,
                 reason,
             });
-            self.lower_statements(cleanup.body);
+            self.lower_cleanup_action(cleanup.action);
             self.current_cleanup = previous_cleanup;
         }
         self.active_cleanups = registered;
@@ -3679,6 +3712,66 @@ impl<'hir> FunctionBuilder<'hir> {
                 );
                 MirInstructionKind::NilConstant
             }
+            HirExpressionKind::FfiBufferWithPointer {
+                buffer,
+                body,
+                element,
+                region,
+                ..
+            } => {
+                let buffer = self.lower_expression(buffer);
+                let (layout, _, _) = self.ffi_layout(*element);
+                let length = self.emit(
+                    MirInstructionKind::FfiBufferLength { buffer, layout },
+                    body.parameters()[1].type_id(),
+                    expression.span(),
+                );
+                let pointer = self.emit(
+                    MirInstructionKind::FfiBufferBorrow {
+                        buffer,
+                        expected_length: length,
+                        layout,
+                        region: *region,
+                    },
+                    body.parameters()[0].type_id(),
+                    expression.span(),
+                );
+                let cleanup_scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                self.active_cleanups.push(ActiveCleanup {
+                    scope: cleanup_scope,
+                    action: CleanupAction::FfiBufferBorrow {
+                        buffer,
+                        region: *region,
+                        span: expression.span(),
+                    },
+                });
+                let (captures, declared_effects) = self.lower_scoped_closure(body);
+                let result = self.emit(
+                    MirInstructionKind::CallScopedBorrow {
+                        owner: self.owner,
+                        function: body.function(),
+                        captures,
+                        arguments: vec![pointer, length],
+                        region: *region,
+                        declared_effects,
+                        unwind: MirUnwindAction::Propagate,
+                    },
+                    expression.type_id(),
+                    expression.span(),
+                );
+                self.active_cleanups
+                    .pop()
+                    .expect("scoped FFI borrow cleanup was registered");
+                self.emit_effect(
+                    MirInstructionKind::FfiBufferEndBorrow {
+                        buffer,
+                        region: *region,
+                    },
+                    expression.span(),
+                );
+                return result;
+            }
             HirExpressionKind::FfiPointerNone { .. } => MirInstructionKind::FfiPointerNone,
             HirExpressionKind::FfiPointerToOptional { pointer } => {
                 MirInstructionKind::FfiPointerToOptional {
@@ -3967,7 +4060,10 @@ impl<'hir> FunctionBuilder<'hir> {
         self.emit(kind, expression.type_id(), expression.span())
     }
 
-    fn lower_closure(&mut self, closure: &HirClosure, closure_type: TypeId) -> ValueId {
+    fn lower_scoped_closure(
+        &mut self,
+        closure: &HirClosure,
+    ) -> (Vec<MirClosureCapture>, MirEffectSummary) {
         let (lowered, mut nested) = FunctionBuilder::new_closure(
             self.owner,
             closure,
@@ -4013,8 +4109,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 }
             })
             .collect();
-        let object_map = closure_environment_object_map(self.arena, &captures);
-        self.nested_functions.push(MirNestedFunction {
+        let mut nested_function = MirNestedFunction {
             owner: self.owner,
             function: closure.function(),
             is_async: closure.is_async(),
@@ -4038,8 +4133,20 @@ impl<'hir> FunctionBuilder<'hir> {
             effects: lowered.effects,
             effects_explicit: lowered.effects_explicit,
             blocks: lowered.blocks,
-        });
+        };
+        let mut adapter = nested_function.transformation_adapter();
+        while recompute_function_effects(&mut adapter, self.function_effects, self.method_effects) {
+        }
+        nested_function.apply_transformation(adapter);
+        let declared_effects = nested_function.effects();
+        self.nested_functions.push(nested_function);
         self.nested_functions.append(&mut nested);
+        (captures, declared_effects)
+    }
+
+    fn lower_closure(&mut self, closure: &HirClosure, closure_type: TypeId) -> ValueId {
+        let (captures, _) = self.lower_scoped_closure(closure);
+        let object_map = closure_environment_object_map(self.arena, &captures);
         self.emit(
             MirInstructionKind::ClosureEnvironmentAllocate {
                 owner: self.owner,
@@ -4699,7 +4806,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 scope: cleanup.scope,
                 reason: MirCleanupExitReason::Unwind,
             });
-            self.lower_statements(cleanup.body);
+            self.lower_cleanup_action(cleanup.action);
             self.current_cleanup = previous_cleanup;
         }
         self.terminate(MirTerminator::ResumeUnwind);
@@ -4714,6 +4821,7 @@ impl<'hir> FunctionBuilder<'hir> {
             | MirInstructionKind::CallInterface { unwind, .. }
             | MirInstructionKind::CallBuiltinInterface { unwind, .. }
             | MirInstructionKind::CallIndirect { unwind, .. } => Some(unwind),
+            MirInstructionKind::CallScopedBorrow { unwind, .. } => Some(unwind),
             _ => None,
         };
         if let Some(unwind) = unwind {
@@ -4732,6 +4840,20 @@ impl<'hir> FunctionBuilder<'hir> {
             lowered.push((key, value));
         }
         lowered
+    }
+
+    fn lower_cleanup_action(&mut self, action: CleanupAction<'hir>) {
+        match action {
+            CleanupAction::Statements(statements) => self.lower_statements(statements),
+            CleanupAction::FfiBufferBorrow {
+                buffer,
+                region,
+                span,
+            } => self.emit_effect(
+                MirInstructionKind::FfiBufferEndBorrow { buffer, region },
+                span,
+            ),
+        }
     }
 
     fn emit(&mut self, kind: MirInstructionKind, type_id: TypeId, span: SourceSpan) -> ValueId {
@@ -5417,6 +5539,9 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         }
         | MirInstructionKind::CallIndirect {
             declared_effects, ..
+        }
+        | MirInstructionKind::CallScopedBorrow {
+            declared_effects, ..
         } => *declared_effects,
         MirInstructionKind::IntegerConstant(_)
         | MirInstructionKind::FloatConstant(_)
@@ -5677,6 +5802,7 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) ->
                         | MirInstructionKind::CallDirectMethod { .. }
                         | MirInstructionKind::CallInterface { .. }
                         | MirInstructionKind::CallIndirect { .. }
+                        | MirInstructionKind::CallScopedBorrow { .. }
                 ) && instruction.effects.contains(MirEffect::GcSafePoint);
             let already_at_safe_point = instructions.last().is_some_and(|previous| {
                 matches!(previous.kind, MirInstructionKind::GcSafePoint { .. })

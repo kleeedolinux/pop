@@ -5,10 +5,11 @@
 //! modules so downstream phases can depend on a stable typed contract.
 
 use pop_foundation::{
-    AttributeId, BindingId, BuiltinTypeId, CaptureId, ClassId, Diagnostic, EnumCaseId, ErrorCaseId,
-    ErrorId, FieldId, InterfaceId, InterfaceMethodId, IterationProtocolMethodId, LocalId, MethodId,
-    ModuleId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId,
-    SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, BorrowRegionId, BuiltinTypeId, CaptureId, ClassId, Diagnostic,
+    EnumCaseId, ErrorCaseId, ErrorId, FieldId, InterfaceId, InterfaceMethodId,
+    IterationProtocolMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, NominalInterfaceId,
+    ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -578,6 +579,14 @@ pub enum TypedExpressionKind {
     },
     FfiBufferClose {
         buffer: Box<TypedExpression>,
+    },
+    FfiBufferWithPointer {
+        buffer: Box<TypedExpression>,
+        body: TypedClosure,
+        body_type: TypeId,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        region: BorrowRegionId,
     },
     FfiPointerNone {
         element: TypeId,

@@ -1136,6 +1136,21 @@ fn lower_expression(
         TypedExpressionKind::FfiBufferClose { buffer } => HirExpressionKind::FfiBufferClose {
             buffer: Box::new(lower_expression(buffer, interface_slots)),
         },
+        TypedExpressionKind::FfiBufferWithPointer {
+            buffer,
+            body,
+            body_type,
+            element,
+            layout_record,
+            region,
+        } => HirExpressionKind::FfiBufferWithPointer {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+            body: lower_closure(body, interface_slots),
+            body_type: *body_type,
+            element: *element,
+            layout_record: *layout_record,
+            region: *region,
+        },
         TypedExpressionKind::FfiPointerNone {
             element,
             layout_record,
@@ -1709,6 +1724,10 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::Closure(closure) => {
             first_unknown_interface_call(closure.body().statements(), slots)
         }
+        TypedExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            first_unknown_interface_expression(buffer, slots)
+                .or_else(|| first_unknown_interface_call(body.body().statements(), slots))
+        }
         TypedExpressionKind::Field { base, .. } => first_unknown_interface_expression(base, slots),
         TypedExpressionKind::ClassConstruct { fields, .. }
         | TypedExpressionKind::Record { fields, .. } => fields
@@ -2084,6 +2103,10 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::HasAttributeQuery { .. } => Some(expression.span()),
         TypedExpressionKind::Closure(closure) => {
             first_compile_time_only_statement(closure.body().statements())
+        }
+        TypedExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            first_compile_time_only_expression(buffer)
+                .or_else(|| first_compile_time_only_statement(body.body().statements()))
         }
         TypedExpressionKind::Field { base, .. } => first_compile_time_only_expression(base),
         TypedExpressionKind::ClassConstruct { fields, .. }

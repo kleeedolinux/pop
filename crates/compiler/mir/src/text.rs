@@ -894,6 +894,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::CallInterface { .. }
                 | MirInstructionKind::CallBuiltinInterface { .. }
                 | MirInstructionKind::CallIndirect { .. }
+                | MirInstructionKind::CallScopedBorrow { .. }
                 | MirInstructionKind::GcSafePoint { .. }
                 | MirInstructionKind::RetainRoot { .. }
                 | MirInstructionKind::ReleaseRoot { .. }
@@ -953,6 +954,7 @@ fn parse_instruction_unwind(
         "callMethod ",
         "callInterface ",
         "callIndirect ",
+        "callScopedBorrow ",
     ]
     .iter()
     .any(|prefix| operation.starts_with(prefix));
@@ -1309,6 +1311,7 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         || text.starts_with("callForeign")
         || text.starts_with("callReference")
         || text.starts_with("callIndirect")
+        || text.starts_with("callScopedBorrow")
         || text.starts_with("call.interface")
         || text.starts_with("call.builtinInterface")
     {
@@ -1877,6 +1880,27 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
             .ok_or_else(|| error(line, "malformed indirect call"))?;
         return Ok(MirInstructionKind::CallIndirect {
             callee: ValueId::from_raw(parse_u32(callee, line)?),
+            arguments: parse_values(values, line)?,
+            declared_effects,
+            unwind,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("callScopedBorrow s") {
+        let (header, values) = rest
+            .split_once("] ")
+            .ok_or_else(|| error(line, "malformed scoped borrow call"))?;
+        let (head, captures) = header
+            .split_once(" captures[")
+            .ok_or_else(|| error(line, "scoped borrow captures"))?;
+        let parts: Vec<_> = head.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(error(line, "scoped borrow call header"));
+        }
+        return Ok(MirInstructionKind::CallScopedBorrow {
+            owner: SymbolId::from_raw(parse_u32(parts[0], line)?),
+            function: NestedFunctionId::from_raw(parse_named_prefix(parts[1], "nf", line)?),
+            region: BorrowRegionId::from_raw(parse_hash(parts[2], "region#", line)?),
+            captures: parse_closure_captures(captures, line)?,
             arguments: parse_values(values, line)?,
             declared_effects,
             unwind,

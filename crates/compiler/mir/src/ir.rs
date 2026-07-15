@@ -1014,6 +1014,7 @@ impl MirInstruction {
             | MirInstructionKind::CallDirectMethod { unwind, .. }
             | MirInstructionKind::CallInterface { unwind, .. }
             | MirInstructionKind::CallIndirect { unwind, .. } => *unwind,
+            MirInstructionKind::CallScopedBorrow { unwind, .. } => *unwind,
             _ => self.unwind,
         }
     }
@@ -1365,6 +1366,15 @@ pub enum MirInstructionKind {
     CallIndirect {
         callee: ValueId,
         arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
+    CallScopedBorrow {
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: Vec<MirClosureCapture>,
+        arguments: Vec<ValueId>,
+        region: BorrowRegionId,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },

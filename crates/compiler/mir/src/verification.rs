@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
     BlockId, BorrowRegionId, BuiltinTypeId, ClassId, ErrorId, FieldId, InterfaceId, MethodId,
-    NominalInterfaceId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    NestedFunctionId, NominalInterfaceId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot};
 use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena, embedded_bootstrap_schema};
@@ -89,6 +89,11 @@ pub fn verify_mir_bubble(
             )
         })
         .collect();
+    let nested_signatures: BTreeMap<_, _> = bubble
+        .nested_functions
+        .iter()
+        .map(|function| ((function.owner(), function.function()), function))
+        .collect();
     let async_functions: BTreeSet<_> = bubble
         .functions
         .iter()
@@ -136,6 +141,7 @@ pub fn verify_mir_bubble(
             &signatures,
             &reference_signatures,
             &method_signatures,
+            &nested_signatures,
             &async_functions,
             &async_references,
             &foreign_functions,
@@ -151,6 +157,7 @@ pub fn verify_mir_bubble(
             &signatures,
             &reference_signatures,
             &method_signatures,
+            &nested_signatures,
             &async_functions,
             &async_references,
             &foreign_functions,
@@ -489,6 +496,7 @@ fn verify_function(
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    nested_signatures: &BTreeMap<(SymbolId, NestedFunctionId), &MirNestedFunction>,
     async_functions: &BTreeSet<SymbolId>,
     async_references: &BTreeSet<SymbolIdentity>,
     foreign_functions: &BTreeSet<SymbolId>,
@@ -702,6 +710,7 @@ fn verify_function(
                     functions: signatures,
                     references: reference_signatures,
                     methods: method_signatures,
+                    nested: nested_signatures,
                     async_functions,
                     async_references,
                 },
@@ -804,6 +813,9 @@ fn expected_instruction_effects(
             .unwrap_or_default(),
         MirInstructionKind::CallIndirect {
             declared_effects, ..
+        }
+        | MirInstructionKind::CallScopedBorrow {
+            declared_effects, ..
         } => *declared_effects,
         kind => local_instruction_effects(kind),
     }
@@ -869,6 +881,7 @@ fn verify_gc_contracts(
                         | MirInstructionKind::CallForeign { .. }
                         | MirInstructionKind::CallDirectMethod { .. }
                         | MirInstructionKind::CallIndirect { .. }
+                        | MirInstructionKind::CallScopedBorrow { .. }
                 ) && instruction.effects().contains(MirEffect::GcSafePoint);
             if requires_safe_point
                 && !index.checked_sub(1).is_some_and(|previous| {
@@ -1176,6 +1189,7 @@ fn unpublished_owner_operation(instruction: &MirInstruction, owner: ValueId) -> 
         | MirInstructionKind::CallInterface { .. }
         | MirInstructionKind::CallBuiltinInterface { .. }
         | MirInstructionKind::CallIndirect { .. } => false,
+        MirInstructionKind::CallScopedBorrow { .. } => false,
         kind => !instruction_operands(kind).contains(&owner),
     }
 }
@@ -1805,6 +1819,7 @@ fn verify_ffi_buffer_borrows(
     let mut borrows = BTreeMap::new();
     let mut ends = BTreeMap::<BorrowRegionId, Vec<ValueId>>::new();
     let mut borrowed_optionals = BTreeMap::new();
+    let mut scoped_calls = BTreeMap::<BorrowRegionId, Vec<(ValueId, Vec<ValueId>)>>::new();
     for block in function.blocks() {
         for instruction in block.instructions() {
             match instruction.kind() {
@@ -1830,19 +1845,36 @@ fn verify_ffi_buffer_borrows(
                 MirInstructionKind::FfiBufferEndBorrow { region, .. } => {
                     ends.entry(*region).or_default().push(instruction.result());
                 }
+                MirInstructionKind::CallScopedBorrow {
+                    region, arguments, ..
+                } => scoped_calls
+                    .entry(*region)
+                    .or_default()
+                    .push((instruction.result(), arguments.clone())),
                 _ => {}
             }
         }
     }
     for (region, definition) in &borrows {
         if lengths.get(&definition.expected_length) != Some(&(definition.buffer, definition.layout))
-            || ends.get(region).map(Vec::len) != Some(1)
+            || ends.get(region).is_none_or(Vec::is_empty)
         {
             push_borrow_region_error(*region, errors);
         }
     }
     for region in ends.keys() {
         if !borrows.contains_key(region) {
+            push_borrow_region_error(*region, errors);
+        }
+    }
+    for (region, calls) in &scoped_calls {
+        let valid = borrows.get(region).is_some_and(|borrow| {
+            matches!(calls.as_slice(), [(_, arguments)]
+                if matches!(arguments.as_slice(), [pointer, length]
+                    if borrowed_optionals.get(pointer) == Some(region)
+                        && *length == borrow.expected_length))
+        });
+        if !valid {
             push_borrow_region_error(*region, errors);
         }
     }
@@ -1865,6 +1897,9 @@ fn verify_ffi_buffer_borrows(
                         instruction.kind(),
                         MirInstructionKind::OptionalIsPresent { .. }
                             | MirInstructionKind::OptionalGet { .. }
+                            | MirInstructionKind::FfiPointerIsPresent { .. }
+                            | MirInstructionKind::FfiPointerRequire { .. }
+                            | MirInstructionKind::CallScopedBorrow { .. }
                     )
                 {
                     push_borrow_region_error(*region, errors);
@@ -1914,6 +1949,11 @@ fn verify_ffi_buffer_borrows(
                     }) {
                         push_borrow_region_error(region, errors);
                     }
+                }
+                MirInstructionKind::CallScopedBorrow { region, .. }
+                    if !active.contains_key(region) =>
+                {
+                    push_borrow_region_error(*region, errors);
                 }
                 _ => {}
             }
@@ -1981,6 +2021,7 @@ struct CallableSignatures<'a> {
     functions: &'a BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     references: &'a BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     methods: &'a BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    nested: &'a BTreeMap<(SymbolId, NestedFunctionId), &'a MirNestedFunction>,
     async_functions: &'a BTreeSet<SymbolId>,
     async_references: &'a BTreeSet<SymbolIdentity>,
 }
@@ -4231,7 +4272,143 @@ fn verify_callable_instruction(
         } => {
             verify_indirect_call(instruction, *callee, arguments, arena, values, errors);
         }
+        MirInstructionKind::CallScopedBorrow {
+            owner,
+            function,
+            captures,
+            arguments,
+            declared_effects,
+            ..
+        } => {
+            let Some(nested) = signatures.nested.get(&(*owner, *function)) else {
+                errors.push(MirVerificationError::InvalidCallSignature {
+                    instruction: instruction.result(),
+                    expected_arguments: 0,
+                    found_arguments: arguments.len(),
+                    expected_results: 0,
+                    found_results: usize::from(instruction.has_result()),
+                });
+                return true;
+            };
+            verify_call_signature(
+                instruction,
+                arguments,
+                nested.parameters(),
+                nested.results(),
+                values,
+                errors,
+            );
+            let captures_valid = !nested.is_async()
+                && *declared_effects == nested.effects()
+                && !declared_effects.contains(MirEffect::Suspends)
+                && scoped_borrow_nested_body_is_valid(nested)
+                && captures.len() == nested.captures().len()
+                && captures
+                    .iter()
+                    .zip(nested.captures())
+                    .all(|(found, expected)| {
+                        !found.self_reference()
+                            && found.capture() == expected.capture()
+                            && found.binding() == expected.binding()
+                            && found.slot() == expected.slot()
+                            && found.type_id() == expected.type_id()
+                            && found.mode() == expected.mode()
+                            && values.get(&found.value()) == Some(&found.type_id())
+                    });
+            if !captures_valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         _ => return false,
+    }
+    true
+}
+
+fn scoped_borrow_nested_body_is_valid(nested: &MirNestedFunction) -> bool {
+    let Some(pointer) = nested
+        .blocks()
+        .first()
+        .and_then(|block| block.arguments().first())
+        .map(|argument| argument.value())
+    else {
+        return false;
+    };
+    let blocks: BTreeMap<_, _> = nested
+        .blocks()
+        .iter()
+        .map(|block| (block.block(), block))
+        .collect();
+    let mut tainted = BTreeSet::from([pointer]);
+    loop {
+        let before = tainted.len();
+        for block in nested.blocks() {
+            for instruction in block.instructions() {
+                if instruction
+                    .operands()
+                    .iter()
+                    .any(|operand| tainted.contains(operand))
+                    && matches!(
+                        instruction.kind(),
+                        MirInstructionKind::FfiPointerRequire { .. }
+                            | MirInstructionKind::OptionalGet { .. }
+                            | MirInstructionKind::ResultGetOk { .. }
+                    )
+                {
+                    tainted.insert(instruction.result());
+                }
+            }
+            if let MirTerminator::Branch { target, arguments } = block.terminator()
+                && let Some(target) = blocks.get(target)
+            {
+                for (argument, parameter) in arguments.iter().zip(target.arguments()) {
+                    if tainted.contains(argument) {
+                        tainted.insert(parameter.value());
+                    }
+                }
+            }
+        }
+        if tainted.len() == before {
+            break;
+        }
+    }
+    for block in nested.blocks() {
+        for instruction in block.instructions() {
+            let reads_borrow = instruction
+                .operands()
+                .iter()
+                .any(|operand| tainted.contains(operand));
+            if !reads_borrow {
+                if matches!(
+                    instruction.kind(),
+                    MirInstructionKind::CallScopedBorrow { .. }
+                ) {
+                    return false;
+                }
+                continue;
+            }
+            match instruction.kind() {
+                MirInstructionKind::FfiPointerIsPresent { .. }
+                | MirInstructionKind::CallForeign { .. } => {}
+                MirInstructionKind::FfiPointerRequire { .. }
+                | MirInstructionKind::OptionalGet { .. }
+                | MirInstructionKind::ResultGetOk { .. } => {}
+                _ => return false,
+            }
+        }
+        match block.terminator() {
+            MirTerminator::Branch { .. } => {}
+            terminator => {
+                if terminator_operands(terminator)
+                    .iter()
+                    .any(|operand| tainted.contains(operand))
+                {
+                    return false;
+                }
+            }
+        }
     }
     true
 }
@@ -4861,6 +5038,16 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         MirInstructionKind::CallIndirect {
             callee, arguments, ..
         } => std::iter::once(*callee)
+            .chain(arguments.iter().copied())
+            .collect(),
+        MirInstructionKind::CallScopedBorrow {
+            captures,
+            arguments,
+            ..
+        } => captures
+            .iter()
+            .filter(|capture| !capture.self_reference())
+            .map(|capture| capture.value())
             .chain(arguments.iter().copied())
             .collect(),
         MirInstructionKind::CheckedIntegerAdd { left, right, .. }

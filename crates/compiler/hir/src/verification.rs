@@ -2906,6 +2906,40 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiBufferWithPointer {
+                buffer,
+                body,
+                body_type,
+                element,
+                layout_record,
+                region: _,
+            } => {
+                self.verify_expression(buffer, visible);
+                let closure_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *body_type,
+                    span: body.span,
+                };
+                self.verify_closure(body, &closure_expression, visible);
+                let valid_parameters = matches!(body.parameters.as_slice(), [pointer, length]
+                    if ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id,
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ) == Some(*element)
+                    && self.is_builtin_type(length.type_id, "Ffi.C.Size", &[]));
+                if ffi_buffer_payload(self.arena, buffer.type_id()) != Some(*element)
+                    || body.is_async
+                    || !valid_parameters
+                    || body.results.as_slice() != [expression.type_id()]
+                    || !is_ffi_buffer_element(self.arena, *element, layout_record.is_some())
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::FfiPointerNone {
                 element,
                 layout_record,
@@ -5506,6 +5540,14 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
     match expression.kind() {
         HirExpressionKind::Closure(closure) => {
             for capture in &closure.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
+        HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            collect_cell_captures(buffer, written);
+            for capture in &body.captures {
                 if capture.mode == HirCaptureMode::Cell {
                     written.insert(capture.binding);
                 }

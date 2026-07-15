@@ -1,10 +1,12 @@
 use pop_backend_mir_interp::{MirInterpreter, MirValue, ReferenceRuntimeAdapter};
 use pop_driver::artifact_sha256_hex;
-use pop_foundation::{BuiltinTypeId, SymbolId};
+use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
+use pop_foundation::{BubbleId, BuiltinTypeId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass, parse_mir_dump};
 use pop_runtime_interface::{
     FfiAbiLayoutId, FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, RuntimeAdapter,
 };
+use pop_source::SourceFile;
 use pop_target::TargetSpec;
 use pop_types::{
     FFI_BUFFER_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID,
@@ -13,6 +15,60 @@ use pop_types::{
 
 fn layout(raw: u64) -> FfiAbiLayoutId {
     FfiAbiLayoutId::new(raw).expect("nonzero layout")
+}
+
+#[test]
+fn interpreter_executes_zero_and_nonzero_scoped_buffer_bodies() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/scopedBuffer.pop",
+            "namespace Memory\n\
+             public function present(buffer: Ffi.Buffer<Int>): Boolean\n\
+                 return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+                     return Ffi.OptionalPointer.isPresent(pointer)\n\
+                 end)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("scoped buffer HIR"),
+        result.types(),
+        artifact_sha256_hex,
+    )
+    .expect("scoped buffer MIR");
+    let layout_id = mir.ffi_layouts().entries()[0].id();
+    for (length, expected) in [(0, false), (2, true)] {
+        let mut runtime = ReferenceRuntimeAdapter::default();
+        let buffer = runtime
+            .ffi_buffer_open(&FfiBufferOpenRequest::new(length, 8, 8, layout_id).unwrap())
+            .expect("buffer");
+        let interpreter = MirInterpreter::with_runtime(&mir, result.types(), runtime)
+            .expect("verified scoped buffer MIR");
+        assert_eq!(
+            interpreter
+                .call(SymbolId::from_raw(0), &[MirValue::FfiBuffer(buffer)])
+                .expect("scoped buffer execution"),
+            vec![MirValue::Boolean(expected)]
+        );
+    }
 }
 
 #[test]

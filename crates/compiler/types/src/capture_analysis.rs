@@ -352,6 +352,17 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         } => {
             finalize_expression_captures(operand, written);
         }
+        TypedExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            finalize_expression_captures(buffer, written);
+            for capture in &mut body.captures {
+                if written.contains(&capture.binding) {
+                    capture.mode = CaptureMode::Cell;
+                }
+            }
+            for statement in &mut body.body.statements {
+                finalize_statement_captures(statement, written);
+            }
+        }
         TypedExpressionKind::FfiUnsafeStore { pointer, value, .. }
         | TypedExpressionKind::FfiUnsafeAdvance {
             pointer,

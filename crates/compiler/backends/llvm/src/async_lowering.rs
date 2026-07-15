@@ -16,9 +16,10 @@ use crate::instruction_lowering::{
     optional_inner_type,
 };
 use crate::lowering::{
-    DirectScalarArrays, PrivateBlock, PrivateFunction, async_function_create_name,
-    async_function_poll_name, async_nested_create_name, async_nested_poll_name,
-    initialize_array_outputs, native_runtime_symbol, replace_llvm_value_token,
+    CaptureEnvironment, DirectScalarArrays, PrivateBlock, PrivateFunction,
+    async_function_create_name, async_function_poll_name, async_nested_create_name,
+    async_nested_poll_name, initialize_array_outputs, native_runtime_symbol,
+    replace_llvm_value_token,
 };
 
 #[derive(Clone, Copy)]
@@ -267,7 +268,9 @@ fn lower_async_parts(
                 record_fields,
                 record_field_types,
                 string_literals,
-                environment,
+                environment.map_or(CaptureEnvironment::None, |(name, slots)| {
+                    CaptureEnvironment::Managed(name, slots)
+                }),
                 &BTreeSet::new(),
                 &direct_scalar_arrays,
                 options,

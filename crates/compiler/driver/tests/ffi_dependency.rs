@@ -699,6 +699,196 @@ fn ffi_unsafe_memory_calls_reject_safe_namespace_and_type_drift() {
 }
 
 #[test]
+fn ffi_buffer_with_pointer_requires_one_non_escaping_inline_body() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/withPointer.pop",
+            "namespace Memory\n\
+             public function inspect(buffer: Ffi.Buffer<Int>): Boolean\n\
+                 return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+                     return Ffi.OptionalPointer.isPresent(pointer)\n\
+                 end)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("scoped buffer HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("scoped buffer MIR");
+    let dump = mir.dump();
+    for operation in [
+        "ffiBufferLength",
+        "ffiBufferBorrow",
+        "callScopedBorrow",
+        "ffiBufferEndBorrow",
+    ] {
+        assert!(dump.contains(operation), "missing {operation}\n{dump}");
+    }
+    let reparsed = pop_mir::parse_mir_dump(&dump)
+        .unwrap_or_else(|error| panic!("scoped FFI MIR text round trip: {error:?}\n{dump}"))
+        .with_ffi_layouts(mir.ffi_layouts().clone());
+    assert_eq!(reparsed.dump(), dump);
+    pop_mir::verify_mir_bubble(&reparsed, result.types())
+        .expect("reparsed scoped FFI MIR verifies");
+    let corrupted_dump = dump.replacen("region#0 captures[", "region#1 captures[", 1);
+    assert_ne!(corrupted_dump, dump, "scoped call region must be present");
+    let corrupted = pop_mir::parse_mir_dump(&corrupted_dump)
+        .expect("corrupt scoped FFI MIR remains syntactically valid")
+        .with_ffi_layouts(mir.ffi_layouts().clone());
+    assert!(
+        pop_mir::verify_mir_bubble(&corrupted, result.types()).is_err(),
+        "corrupt scoped call region must fail independent MIR verification"
+    );
+    let optimized =
+        pop_mir::optimize_mir(reparsed, result.types()).expect("optimized scoped FFI MIR");
+    assert!(optimized.dump().contains("callScopedBorrow"));
+}
+
+#[test]
+fn ffi_buffer_with_pointer_rejects_function_values_async_and_escape() {
+    let ffi = BubbleId::from_raw(20);
+    for source in [
+        "namespace Memory\n\
+         function inspectBody(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+             return Ffi.OptionalPointer.isPresent(pointer)\n\
+         end\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Boolean\n\
+             return Ffi.Buffer.withPointer(buffer, inspectBody)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Boolean\n\
+             return Ffi.Buffer.withPointer(buffer, async function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+                 return Ffi.OptionalPointer.isPresent(pointer)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Ffi.OptionalPointer<Int>\n\
+             return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Ffi.OptionalPointer<Int>\n\
+                 return pointer\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         function retain(pointer: Ffi.OptionalPointer<Int>): Boolean\n\
+             return Ffi.OptionalPointer.isPresent(pointer)\n\
+         end\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Boolean\n\
+             return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+                 return retain(pointer)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Ffi.C.Size\n\
+             return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Ffi.C.Size\n\
+                 return Ffi.Unsafe.address(Ffi.OptionalPointer.require(pointer)?)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Boolean\n\
+             return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+                 return Ffi.Buffer.withPointer(buffer, function(nestedPointer: Ffi.OptionalPointer<Int>, nestedLength: Ffi.C.Size): Boolean\n\
+                     return Ffi.OptionalPointer.isPresent(nestedPointer)\n\
+                 end)\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Array<Ffi.OptionalPointer<Int>>\n\
+             return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Array<Ffi.OptionalPointer<Int>>\n\
+                 return { pointer }\n\
+             end)\n\
+         end\n",
+        "namespace Memory\n\
+         public function invalid(buffer: Ffi.Buffer<Int>): Result<Ffi.Pointer<Int>, Ffi.NullPointerError>\n\
+             return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Result<Ffi.Pointer<Int>, Ffi.NullPointerError>\n\
+                 return Ffi.OptionalPointer.require(pointer)\n\
+             end)\n\
+         end\n",
+    ] {
+        let module = FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(FileId::from_raw(0), "src/invalidBorrow.pop", source).expect("source"),
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{source}");
+        assert!(!result.diagnostics().is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn ffi_buffer_with_pointer_allows_exact_foreign_calls_and_balances_unwind() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/scopedForeign.pop",
+            "namespace Memory\n\
+             @Ffi.Foreign(\"inspect_pointer\", abi = \"CUnwind\")\n\
+             internal function inspectForeign(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Ffi.C.Int\n\
+             end\n\
+             public function inspect(buffer: Ffi.Buffer<Int>): Ffi.C.Int\n\
+                 return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Ffi.C.Int\n\
+                     return inspectForeign(pointer, length)\n\
+                 end)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("scoped foreign HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("scoped foreign MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callForeign"), "{dump}");
+    assert!(dump.contains("callScopedBorrow"), "{dump}");
+    assert!(dump.contains("unwind cleanup:b"), "{dump}");
+    assert_eq!(dump.matches("ffiBufferEndBorrow").count(), 2, "{dump}");
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_pointer_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(

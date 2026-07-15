@@ -1,10 +1,13 @@
 use pop_backend_llvm::{LlvmLoweringError, LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_driver::artifact_sha256_hex;
+use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
+use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_foundation::{BuiltinTypeId, FieldId};
 use pop_mir::{
     MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutField, MirFfiValueClass, parse_mir_dump,
 };
 use pop_runtime_interface::FfiAbiLayoutId;
+use pop_source::SourceFile;
 use pop_target::TargetSpec;
 use pop_types::{FFI_BUFFER_TYPE_ID, SemanticType, TypeArena};
 
@@ -14,6 +17,57 @@ fn layout(raw: u64) -> FfiAbiLayoutId {
 
 fn target() -> TargetSpec {
     TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target")
+}
+
+#[test]
+fn scoped_buffer_bodies_pass_captures_directly_without_a_closure_environment() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/scopedCapture.pop",
+            "namespace Memory\n\
+             public function enough(buffer: Ffi.Buffer<Int>, allowed: Boolean): Boolean\n\
+                 return Ffi.Buffer.withPointer(buffer, function(pointer: Ffi.OptionalPointer<Int>, length: Ffi.C.Size): Boolean\n\
+                     return allowed\n\
+                 end)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("scoped capture HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("scoped capture MIR");
+    assert!(!mir.dump().contains("closureEnvironment.allocate"));
+    let llvm = lower_mir_to_llvm_ir(
+        &mir,
+        result.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("scoped capture LLVM");
+    let text = llvm.to_string();
+    assert!(text.contains("@pop_b10_nested_0_0"), "{text}");
+    assert!(text.contains("%capture0"), "{text}");
+    llvm.verify().expect("valid scoped capture LLVM");
 }
 
 fn scalar_buffer_mir() -> (pop_mir::MirBubble, TypeArena) {
@@ -65,7 +119,7 @@ fn scalar_buffer_mir() -> (pop_mir::MirBubble, TypeArena) {
     .expect("catalog");
     let layout_id = catalog.entries()[0].id().raw();
     let text = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{size}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    v7:t{size} = ffiBufferLength v6 layout#{layout_id}\n    do v8 ffiBufferWrite v6 v1 v2 layout#{layout_id}\n    v9:t{integer} = ffiBufferRead v6 v1 layout#{layout_id}\n    v10:t{optional_pointer} = ffiBufferBorrow v6 v7 layout#{layout_id} region#1\n    do v11 ffiBufferEndBorrow v6 region#1\n    do v12 ffiBufferClose v6\n    return (v9)\n  b2():\n    v13:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\n",
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{size}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    v7:t{size} = ffiBufferLength v6 layout#{layout_id}\n    do v8 ffiBufferWrite v6 v1 v2 layout#{layout_id}\n    v9:t{integer} = ffiBufferRead v6 v1 layout#{layout_id}\n    v10:t{optional_pointer} = ffiBufferBorrow v6 v7 layout#{layout_id} region#1\n    v11:t{integer} = callScopedBorrow s0 nf0 region#1 captures[] (v10, v7) effects[] unwind propagate\n    do v12 ffiBufferEndBorrow v6 region#1\n    do v13 ffiBufferClose v6\n    return (v9)\n  b2():\n    v14:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\nnested s0 nf0 captures - params(t{optional_pointer};t{size}) results(t{integer}) effects[]\n  b0(v0:t{optional_pointer}, v1:t{size}):\n    v2:t{integer} = const.integer Int64 0\n    return (v2)\n",
         size = size.raw(),
         integer = integer.raw(),
         result = result.raw(),

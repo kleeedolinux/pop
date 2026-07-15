@@ -138,7 +138,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
             if matches!(path.as_slice(), [ffi, buffer, operation]
                 if ffi == "Ffi" && buffer == "Buffer"
-                    && matches!(operation.as_str(), "length" | "read" | "write" | "close"))
+                    && matches!(operation.as_str(), "length" | "read" | "write" | "close" | "withPointer"))
                 && self.resolver.has_ffi_dependency()
                 && self
                     .resolver
@@ -482,6 +482,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let operation = path.get(2)?.as_str();
         let expected_arity = match operation {
             "open" | "length" | "close" => 1,
+            "withPointer" => 2,
             "read" => 2,
             "write" => 3,
             _ => return None,
@@ -548,6 +549,60 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 span,
             ));
             return None;
+        }
+        let element_kind = self.ffi_buffer_element(element, None).or_else(|| {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                span,
+                "FFI ABI storage type",
+                self.type_name(element),
+                span,
+            ));
+            None
+        })?;
+        let layout_record = element_kind.layout_record();
+        if operation == "withPointer" {
+            let body_expression = self.check_expression(&arguments[1])?;
+            let body_type = body_expression.type_id();
+            let TypedExpressionKind::Closure(body) = body_expression.kind else {
+                self.diagnostics.push(type_diagnostics::type_mismatch(
+                    arguments[1].span(),
+                    "immediate non-async inline closure",
+                    self.type_name(body_expression.type_id()),
+                    span,
+                ));
+                return None;
+            };
+            let optional_pointer = self.ffi_builtin_type("Ffi.OptionalPointer", vec![element])?;
+            let valid_shape = !body.is_async()
+                && matches!(body.parameters(), [pointer, length]
+                    if pointer.type_id() == optional_pointer && length.type_id() == size)
+                && body.results().len() == 1;
+            if !valid_shape || !scoped_borrow_body_is_valid(&body, self.signatures) {
+                self.diagnostics.push(type_diagnostics::type_mismatch(
+                    arguments[1].span(),
+                    "non-escaping scoped FFI borrow body",
+                    "incompatible closure",
+                    span,
+                ));
+                return None;
+            }
+            return Some(TypedExpression {
+                type_id: body.results()[0],
+                kind: TypedExpressionKind::FfiBufferWithPointer {
+                    buffer: Box::new(buffer),
+                    body,
+                    body_type,
+                    element,
+                    layout_record,
+                    region: {
+                        let region =
+                            pop_foundation::BorrowRegionId::from_raw(self.next_borrow_region);
+                        self.next_borrow_region = self.next_borrow_region.saturating_add(1);
+                        region
+                    },
+                },
+                span,
+            });
         }
         let buffer = Box::new(buffer);
         let nil = self.resolver.arena().source_type("nil")?;
@@ -2738,6 +2793,142 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id: result_type,
             span,
         })
+    }
+}
+
+fn scoped_borrow_body_is_valid(
+    body: &TypedClosure,
+    signatures: &BTreeMap<pop_foundation::SymbolId, crate::ResolvedFunctionSignature>,
+) -> bool {
+    let Some(pointer) = body
+        .parameters()
+        .first()
+        .map(TypedClosureParameter::parameter)
+    else {
+        return false;
+    };
+    body.body()
+        .statements()
+        .iter()
+        .all(|statement| match statement.kind() {
+            TypedStatementKind::Return { values } => values
+                .iter()
+                .all(|value| scoped_borrow_expression_is_valid(value, pointer, false, signatures)),
+            TypedStatementKind::Expression(expression) => {
+                scoped_borrow_expression_is_valid(expression, pointer, false, signatures)
+            }
+            _ => false,
+        })
+}
+
+fn scoped_borrow_expression_is_valid(
+    expression: &TypedExpression,
+    pointer: pop_foundation::ValueParameterId,
+    pointer_allowed: bool,
+    signatures: &BTreeMap<pop_foundation::SymbolId, crate::ResolvedFunctionSignature>,
+) -> bool {
+    match expression.kind() {
+        TypedExpressionKind::Parameter(parameter) if *parameter == pointer => pointer_allowed,
+        TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
+            scoped_borrow_expression_is_valid(operand, pointer, true, signatures)
+        }
+        TypedExpressionKind::FfiPointerRequire { pointer: operand, .. } => {
+            pointer_allowed
+                && scoped_borrow_expression_is_valid(operand, pointer, true, signatures)
+        }
+        TypedExpressionKind::ResultPropagate { result, .. } => {
+            scoped_borrow_expression_is_valid(
+                result,
+                pointer,
+                pointer_allowed,
+                signatures,
+            )
+        }
+        TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand } => {
+            scoped_borrow_expression_is_valid(operand, pointer, false, signatures)
+        }
+        TypedExpressionKind::DirectCall {
+            function,
+            is_async,
+            arguments,
+            ..
+        } => {
+            if *is_async {
+                return false;
+            }
+            let foreign = signatures.get(function).is_some_and(|signature| {
+                signature.effects().contains(crate::Effect::ForeignFunction)
+            });
+            arguments.iter().all(|argument| {
+                scoped_borrow_expression_is_valid(argument, pointer, foreign, signatures)
+            })
+        }
+        TypedExpressionKind::ReferencedCall {
+            function,
+            is_async,
+            arguments,
+            ..
+        } => {
+            if *is_async {
+                return false;
+            }
+            let foreign = signatures.get(&function.symbol()).is_some_and(|signature| {
+                signature.effects().contains(crate::Effect::ForeignFunction)
+            });
+            arguments.iter().all(|argument| {
+                scoped_borrow_expression_is_valid(argument, pointer, foreign, signatures)
+            })
+        }
+        TypedExpressionKind::StandardCall { arguments, .. } => arguments
+            .iter()
+            .all(|argument| scoped_borrow_expression_is_valid(argument, pointer, false, signatures)),
+        TypedExpressionKind::IndirectCall { callee, arguments, .. } => {
+            scoped_borrow_expression_is_valid(callee, pointer, false, signatures)
+                && arguments
+                    .iter()
+                    .all(|argument| scoped_borrow_expression_is_valid(argument, pointer, false, signatures))
+        }
+        TypedExpressionKind::Closure(closure) => !closure.captures().iter().any(|capture| {
+            matches!(capture.source(), CaptureSource::Parameter(parameter) if parameter == pointer)
+        }),
+        TypedExpressionKind::Array(elements) | TypedExpressionKind::Tuple(elements) => elements
+            .iter()
+            .all(|element| scoped_borrow_expression_is_valid(element, pointer, false, signatures)),
+        TypedExpressionKind::Table(entries) => entries.iter().all(|entry| {
+            scoped_borrow_expression_is_valid(entry.key(), pointer, false, signatures)
+                && scoped_borrow_expression_is_valid(entry.value(), pointer, false, signatures)
+        }),
+        TypedExpressionKind::Record { fields, .. }
+        | TypedExpressionKind::ClassConstruct { fields, .. } => fields.iter().all(|field| {
+            scoped_borrow_expression_is_valid(field.value(), pointer, false, signatures)
+        }),
+        TypedExpressionKind::RecordUpdate { base, fields, .. } => {
+            scoped_borrow_expression_is_valid(base, pointer, false, signatures)
+                && fields.iter().all(|field| {
+                    scoped_borrow_expression_is_valid(field.value(), pointer, false, signatures)
+                })
+        }
+        TypedExpressionKind::UnionCase { arguments, .. }
+        | TypedExpressionKind::ResultCase { arguments, .. }
+        | TypedExpressionKind::IterationCase { arguments, .. }
+        | TypedExpressionKind::ErrorCase { arguments, .. } => arguments.iter().all(|argument| {
+            scoped_borrow_expression_is_valid(argument, pointer, false, signatures)
+        }),
+        TypedExpressionKind::FfiBufferWithPointer { .. }
+        | TypedExpressionKind::FfiUnsafeLoad { .. }
+        | TypedExpressionKind::FfiUnsafeStore { .. }
+        | TypedExpressionKind::FfiUnsafeAdvance { .. }
+        | TypedExpressionKind::FfiUnsafeCopy { .. }
+        | TypedExpressionKind::FfiUnsafeAddress { .. }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress { .. }
+        | TypedExpressionKind::TaskGroup { .. }
+        | TypedExpressionKind::TaskStart { .. }
+        | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::TaskCancelToken { .. }
+        | TypedExpressionKind::TaskCancel { .. }
+        | TypedExpressionKind::Await { .. } => false,
+        _ => true,
     }
 }
 

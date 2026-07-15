@@ -524,6 +524,7 @@ fn validate_instruction(
             BpfUnsupportedReason::BackendImplementation
         }
         MirInstructionKind::CallIndirect { .. }
+        | MirInstructionKind::CallScopedBorrow { .. }
         | MirInstructionKind::CallInterface { .. }
         | MirInstructionKind::CallReferenced { .. }
         | MirInstructionKind::CallDirectMethod { .. } => BpfUnsupportedReason::Call,

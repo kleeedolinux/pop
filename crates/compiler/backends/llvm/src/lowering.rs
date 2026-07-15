@@ -24,6 +24,13 @@ use crate::async_lowering::{lower_async_function, lower_async_nested};
 use crate::instruction_lowering::{
     llvm_results, llvm_type, lower_instruction, lower_runtime_slot_load, lower_terminator,
 };
+
+#[derive(Clone, Copy)]
+pub(crate) enum CaptureEnvironment<'a> {
+    None,
+    Managed(&'a str, &'a BTreeSet<u32>),
+    Scoped(&'a [pop_mir::MirCapture]),
+}
 use crate::module_lowering::{
     analyze_memory_none_functions, checked_integer_declarations, collect_field_layout,
     collect_record_field_types, collect_record_fields, collect_self_capture_slots,
@@ -129,6 +136,30 @@ pub fn lower_mir_to_llvm_ir(
         lowered.name = method_name(bubble.bubble(), method.method());
         functions.push(lowered);
     }
+    let scoped_nested = bubble
+        .functions()
+        .iter()
+        .flat_map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .flat_map(|method| method.function().blocks()),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .flat_map(pop_mir::MirNestedFunction::blocks),
+        )
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::CallScopedBorrow {
+                owner, function, ..
+            } => Some((*owner, *function)),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     for nested in bubble.nested_functions() {
         if nested.is_async() {
             let self_slots = self_capture_slots
@@ -153,6 +184,11 @@ pub fn lower_mir_to_llvm_ir(
             .get(&(nested.owner(), nested.function()))
             .cloned()
             .unwrap_or_default();
+        let environment = if scoped_nested.contains(&(nested.owner(), nested.function())) {
+            CaptureEnvironment::Scoped(nested.captures())
+        } else {
+            CaptureEnvironment::Managed("%environment", &self_slots)
+        };
         functions.push(lower_function_parts(
             bubble.bubble(),
             nested_name(bubble.bubble(), nested.owner(), nested.function()),
@@ -161,7 +197,7 @@ pub fn lower_mir_to_llvm_ir(
             nested.effects(),
             false,
             nested.blocks(),
-            Some(("%environment", &self_slots)),
+            environment,
             types,
             bubble.ffi_layouts(),
             options,
@@ -981,7 +1017,7 @@ pub(crate) fn lower_function(
         function.effects(),
         memory_none,
         function.blocks(),
-        None,
+        CaptureEnvironment::None,
         types,
         ffi_layouts,
         options,
@@ -1255,7 +1291,7 @@ pub(crate) fn lower_function_parts(
     effects: MirEffectSummary,
     memory_none: bool,
     function_blocks: &[pop_mir::MirBlock],
-    environment: Option<(&str, &BTreeSet<u32>)>,
+    environment: CaptureEnvironment<'_>,
     types: &TypeArena,
     ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
@@ -1465,9 +1501,17 @@ pub(crate) fn lower_function_parts(
             ),
         });
     }
-    let mut parameters = environment
-        .map(|(name, _)| vec![format!("i64 {name}")])
-        .unwrap_or_default();
+    let mut parameters = match environment {
+        CaptureEnvironment::None => Vec::new(),
+        CaptureEnvironment::Managed(name, _) => vec![format!("i64 {name}")],
+        CaptureEnvironment::Scoped(captures) => captures
+            .iter()
+            .map(|capture| {
+                llvm_type(capture.type_id(), types)
+                    .map(|ty| format!("{ty} %capture{}", capture.slot()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     parameters.extend(
         parameter_types
             .iter()

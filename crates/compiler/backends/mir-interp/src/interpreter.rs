@@ -1984,6 +1984,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CallInterface { .. }
             | MirInstructionKind::CallBuiltinInterface { .. }
             | MirInstructionKind::CallIndirect { .. }
+            | MirInstructionKind::CallScopedBorrow { .. }
             | MirInstructionKind::RecordMake { .. }
             | MirInstructionKind::ClassMake { .. }
             | MirInstructionKind::RecordUpdate { .. }
@@ -2389,6 +2390,15 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             MirInstructionKind::CallIndirect {
                 callee, arguments, ..
             } => single_result(self.execute_indirect_call(*callee, arguments, values)?),
+            MirInstructionKind::CallScopedBorrow {
+                owner,
+                function,
+                captures,
+                arguments,
+                ..
+            } => single_result(
+                self.execute_scoped_borrow_call(*owner, *function, captures, arguments, values)?,
+            ),
             MirInstructionKind::CallInterface {
                 method, arguments, ..
             } => {
@@ -2889,6 +2899,46 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         let callee = value(values, callee)?.clone();
         let arguments = evaluated_arguments(arguments, values)?;
         self.execute_indirect_value(&callee, &arguments)
+    }
+
+    fn execute_scoped_borrow_call(
+        &mut self,
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: &[pop_mir::MirClosureCapture],
+        arguments: &[ValueId],
+        values: &BTreeMap<ValueId, RuntimeValue>,
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        if captures.iter().any(|capture| capture.self_reference()) {
+            return Err(ExecutionError::InvalidControlFlow);
+        }
+        let nested = self
+            .mir
+            .nested_functions()
+            .iter()
+            .find(|candidate| candidate.owner() == owner && candidate.function() == function)
+            .ok_or(ExecutionError::InvalidControlFlow)?;
+        let capture_values = captures
+            .iter()
+            .map(|capture| value(values, capture.value()).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let arguments = evaluated_arguments(arguments, values)?;
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(ExecutionError::CallDepthLimit)?;
+        if self.depth > self.limits.maximum_call_depth {
+            return Err(ExecutionError::CallDepthLimit);
+        }
+        let result = self.execute(
+            nested.parameters(),
+            nested.results(),
+            nested.blocks(),
+            &arguments,
+            Some(Rc::new(RefCell::new(capture_values))),
+        );
+        self.depth -= 1;
+        result
     }
 
     fn execute_indirect_value(

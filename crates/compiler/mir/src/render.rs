@@ -1240,6 +1240,55 @@ fn dump_callable_or_schema_instruction(
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }
+        MirInstructionKind::CallScopedBorrow {
+            owner,
+            function,
+            captures,
+            arguments,
+            region,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(
+                output,
+                "callScopedBorrow s{} nf{} region#{} captures[",
+                owner.raw(),
+                function.raw(),
+                region.raw()
+            );
+            for (index, capture) in captures.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                let mode = match capture.mode() {
+                    MirCaptureMode::Value => "value",
+                    MirCaptureMode::Cell => "cell",
+                };
+                if capture.self_reference() {
+                    let _ = write!(
+                        output,
+                        "cap{}:bind{}@{}=self:t{}:{mode}",
+                        capture.capture().raw(),
+                        capture.binding().raw(),
+                        capture.slot(),
+                        capture.type_id().raw()
+                    );
+                } else {
+                    let _ = write!(
+                        output,
+                        "cap{}:bind{}@{}=v{}:t{}:{mode}",
+                        capture.capture().raw(),
+                        capture.binding().raw(),
+                        capture.slot(),
+                        capture.value().raw(),
+                        capture.type_id().raw()
+                    );
+                }
+            }
+            output.push_str("] ");
+            dump_value_list(output, arguments);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
         MirInstructionKind::RecordMake { record, fields } => {
             dump_fields(output, "recordMake", *record, None, fields);
         }

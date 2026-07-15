@@ -24,7 +24,7 @@ pub(crate) fn lower_instruction(
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
-    environment: Option<(&str, &BTreeSet<u32>)>,
+    environment: CaptureEnvironment<'_>,
     proven_non_overflow_adds: &BTreeSet<ValueId>,
     direct_scalar_arrays: &DirectScalarArrays,
     options: LlvmLoweringOptions,
@@ -755,6 +755,38 @@ pub(crate) fn lower_instruction(
                 types,
             )?
         }
+        MirInstructionKind::CallScopedBorrow {
+            owner,
+            function,
+            captures,
+            arguments,
+            ..
+        } => {
+            let mut args = captures
+                .iter()
+                .map(|capture| {
+                    llvm_value_type(value_types, capture.value(), types)
+                        .map(|ty| format!("{ty} %v{}", capture.value().raw()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            args.extend(
+                arguments
+                    .iter()
+                    .map(|value| {
+                        llvm_value_type(value_types, *value, types)
+                            .map(|ty| format!("{ty} %v{}", value.raw()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
+            let return_type =
+                result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
+            format!(
+                "{assignment}call {return_type} @{}({})",
+                nested_name(bubble, *owner, *function),
+                args.join(", ")
+            )
+        }
         MirInstructionKind::TupleMake(elements) => {
             lower_tuple_make(&result, elements, value_types, types)?
         }
@@ -977,45 +1009,69 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::CaptureCellStore { cell, value } => {
             lower_capture_store(&format!("%v{}", cell.raw()), *value, value_types, types)?
         }
-        MirInstructionKind::CaptureLoad { slot, mode, .. } => lower_capture_load(
-            instruction.result(),
-            instruction.result_type(),
-            environment
-                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+        MirInstructionKind::CaptureLoad { slot, mode, .. } => match environment {
+            CaptureEnvironment::Managed(name, self_slots) => lower_capture_load(
+                instruction.result(),
+                instruction.result_type(),
+                name,
+                *slot,
+                *mode,
+                self_slots.contains(slot),
+                types,
+            )?,
+            CaptureEnvironment::Scoped(_) if *mode == pop_mir::MirCaptureMode::Value => {
+                let ty = llvm_type(instruction.result_type(), types)?;
+                format!("{result} = select i1 true, {ty} %capture{slot}, {ty} zeroinitializer")
+            }
+            CaptureEnvironment::Scoped(_) => lower_runtime_slot_load_from(
+                instruction.result(),
+                instruction.result_type(),
+                &format!("%capture{slot}"),
+                1,
+                types,
+            )?
+            .join("\n"),
+            CaptureEnvironment::None => {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
-                })?
-                .0,
-            *slot,
-            *mode,
-            environment.is_some_and(|(_, self_slots)| self_slots.contains(slot)),
-            types,
-        )?,
-        MirInstructionKind::CaptureCellReference { slot, .. } => lower_runtime_slot_load_from(
-            instruction.result(),
-            instruction.result_type(),
-            environment
-                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                });
+            }
+        },
+        MirInstructionKind::CaptureCellReference { slot, .. } => match environment {
+            CaptureEnvironment::Managed(name, _) => lower_runtime_slot_load_from(
+                instruction.result(),
+                instruction.result_type(),
+                name,
+                *slot as usize + 2,
+                types,
+            )?
+            .join("\n"),
+            CaptureEnvironment::Scoped(_) => {
+                let ty = llvm_type(instruction.result_type(), types)?;
+                format!("{result} = select i1 true, {ty} %capture{slot}, {ty} zeroinitializer")
+            }
+            CaptureEnvironment::None => {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
-                })?
-                .0,
-            *slot as usize + 2,
-            types,
-        )?
-        .join("\n"),
-        MirInstructionKind::CaptureStore { slot, value, .. } => lower_nested_capture_store(
-            environment
-                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                });
+            }
+        },
+        MirInstructionKind::CaptureStore { slot, value, .. } => match environment {
+            CaptureEnvironment::Managed(name, _) => {
+                lower_nested_capture_store(name, *slot, *value, value_types, types)?
+            }
+            CaptureEnvironment::Scoped(_) => {
+                lower_capture_store(&format!("%capture{slot}"), *value, value_types, types)?
+            }
+            CaptureEnvironment::None => {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
-                })?
-                .0,
-            *slot,
-            *value,
-            value_types,
-            types,
-        )?,
+                });
+            }
+        },
         MirInstructionKind::FfiBufferOpen { .. }
         | MirInstructionKind::FfiBufferLength { .. }
         | MirInstructionKind::FfiBufferRead { .. }
