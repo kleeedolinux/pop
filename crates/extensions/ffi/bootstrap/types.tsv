@@ -1,0 +1,20 @@
+schemaVersion	1
+typeId	sourceName	ownerBubble	arity	role	prelude
+200	Ffi.Pointer	Pop.Ffi	1	Nominal	false
+201	Ffi.OptionalPointer	Pop.Ffi	1	Nominal	false
+202	Ffi.Function	Pop.Ffi	1	Nominal	false
+203	Ffi.OptionalFunction	Pop.Ffi	1	Nominal	false
+204	Ffi.Handle	Pop.Ffi	1	Nominal	false
+210	Ffi.C.Char	Pop.Ffi	0	Nominal	false
+211	Ffi.C.SignedChar	Pop.Ffi	0	Nominal	false
+212	Ffi.C.UnsignedChar	Pop.Ffi	0	Nominal	false
+213	Ffi.C.Short	Pop.Ffi	0	Nominal	false
+214	Ffi.C.UnsignedShort	Pop.Ffi	0	Nominal	false
+215	Ffi.C.Int	Pop.Ffi	0	Nominal	false
+216	Ffi.C.UnsignedInt	Pop.Ffi	0	Nominal	false
+217	Ffi.C.Long	Pop.Ffi	0	Nominal	false
+218	Ffi.C.UnsignedLong	Pop.Ffi	0	Nominal	false
+219	Ffi.C.LongLong	Pop.Ffi	0	Nominal	false
+220	Ffi.C.UnsignedLongLong	Pop.Ffi	0	Nominal	false
+221	Ffi.C.Size	Pop.Ffi	0	Nominal	false
+222	Ffi.C.PointerDifference	Pop.Ffi	0	Nominal	false

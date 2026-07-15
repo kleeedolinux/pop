@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use pop_foundation::AttributeId;
 use pop_types::{
-    AttributeIdentity, CompilerAttributeRole, CompilerAttributeTarget, PrimitiveType,
-    embedded_bootstrap_schema,
+    AttributeIdentity, BootstrapTypeRole, CompilerAttributeRole, CompilerAttributeTarget,
+    PrimitiveType, embedded_bootstrap_schema,
 };
 
 #[test]
@@ -92,7 +92,7 @@ fn compile_time_attribute_has_a_stable_trusted_prelude_contract() {
     let schema = embedded_bootstrap_schema().expect("valid embedded bootstrap schema");
     let attributes = schema.compiler_attributes();
 
-    assert_eq!(attributes.len(), 3);
+    assert_eq!(attributes.len(), 7);
     let compile_time = schema
         .compiler_attribute_by_role(CompilerAttributeRole::CompileTime)
         .expect("trusted CompileTime attribute");
@@ -130,6 +130,123 @@ fn compile_time_attribute_has_a_stable_trusted_prelude_contract() {
     assert_eq!(validator.argument_count(), 1);
     assert_eq!(validator.target(), CompilerAttributeTarget::Attribute);
     assert!(validator.is_in_prelude());
+}
+
+#[test]
+fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
+    let schema = embedded_bootstrap_schema().expect("valid embedded bootstrap schema");
+    let expected = [
+        (200, "Ffi.Pointer", 1),
+        (201, "Ffi.OptionalPointer", 1),
+        (202, "Ffi.Function", 1),
+        (203, "Ffi.OptionalFunction", 1),
+        (204, "Ffi.Handle", 1),
+        (210, "Ffi.C.Char", 0),
+        (211, "Ffi.C.SignedChar", 0),
+        (212, "Ffi.C.UnsignedChar", 0),
+        (213, "Ffi.C.Short", 0),
+        (214, "Ffi.C.UnsignedShort", 0),
+        (215, "Ffi.C.Int", 0),
+        (216, "Ffi.C.UnsignedInt", 0),
+        (217, "Ffi.C.Long", 0),
+        (218, "Ffi.C.UnsignedLong", 0),
+        (219, "Ffi.C.LongLong", 0),
+        (220, "Ffi.C.UnsignedLongLong", 0),
+        (221, "Ffi.C.Size", 0),
+        (222, "Ffi.C.PointerDifference", 0),
+    ];
+
+    for (id, source_name, arity) in expected {
+        let entry = schema
+            .type_by_source_name(source_name)
+            .unwrap_or_else(|| panic!("missing trusted {source_name} type"));
+        assert_eq!(entry.id().raw(), id);
+        assert_eq!(entry.owner_bubble(), "Pop.Ffi");
+        assert_eq!(entry.arity(), arity);
+        assert_eq!(entry.role(), BootstrapTypeRole::Nominal);
+        assert!(!entry.is_in_prelude());
+    }
+
+    for unqualified in [
+        "Pointer",
+        "OptionalPointer",
+        "Function",
+        "OptionalFunction",
+        "Handle",
+        "Char",
+        "Size",
+    ] {
+        assert!(schema.type_by_source_name(unqualified).is_none());
+    }
+}
+
+#[test]
+fn ffi_attributes_have_stable_trusted_non_prelude_contracts() {
+    let schema = embedded_bootstrap_schema().expect("valid embedded bootstrap schema");
+    let expected = [
+        (
+            CompilerAttributeRole::FfiLink,
+            100,
+            "Ffi.Link",
+            1,
+            CompilerAttributeTarget::Namespace,
+        ),
+        (
+            CompilerAttributeRole::FfiForeign,
+            101,
+            "Ffi.Foreign",
+            2,
+            CompilerAttributeTarget::Function,
+        ),
+        (
+            CompilerAttributeRole::FfiNonblocking,
+            102,
+            "Ffi.Nonblocking",
+            0,
+            CompilerAttributeTarget::Function,
+        ),
+        (
+            CompilerAttributeRole::FfiCLayout,
+            103,
+            "Ffi.C.Layout",
+            0,
+            CompilerAttributeTarget::Record,
+        ),
+    ];
+
+    for (role, id, source_name, argument_count, target) in expected {
+        let entry = schema
+            .compiler_attribute_by_role(role)
+            .unwrap_or_else(|| panic!("missing trusted {source_name} attribute"));
+        assert_eq!(entry.id().raw(), id);
+        assert_eq!(entry.source_name(), source_name);
+        assert_eq!(entry.owner_bubble(), "Pop.Ffi");
+        assert_eq!(entry.argument_count(), argument_count);
+        assert_eq!(entry.target(), target);
+        assert!(!entry.is_in_prelude());
+        assert_eq!(
+            schema.compiler_attribute_by_source_name(source_name),
+            Some(entry)
+        );
+        assert_eq!(schema.compiler_attribute_role(entry.identity()), Some(role));
+    }
+
+    assert!(schema.compiler_attribute_by_source_name("Link").is_none());
+    assert!(
+        schema
+            .compiler_attribute_by_source_name("Foreign")
+            .is_none()
+    );
+    assert!(
+        schema
+            .compiler_attribute_by_source_name("Nonblocking")
+            .is_none()
+    );
+    assert!(
+        schema
+            .compiler_attribute_by_source_name("Ffi.C.layout")
+            .is_none()
+    );
 }
 
 #[test]
