@@ -2,6 +2,7 @@
 
 mod allocation;
 mod failure;
+mod foreign;
 mod identity;
 mod iteration;
 mod list;
@@ -15,6 +16,7 @@ mod text;
 
 pub use allocation::*;
 pub use failure::*;
+pub use foreign::*;
 pub use identity::*;
 pub use iteration::*;
 pub use list::*;

@@ -91,7 +91,7 @@ pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
     u8::from(serviced)
 }
 
-fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublication> {
+pub(crate) fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublication> {
     let root_slots = (0..roots.len())
         .filter_map(|index| u32::try_from(index).ok())
         .map(pop_runtime_interface::RootSlot::new)
@@ -110,7 +110,7 @@ fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublicatio
     RootPublication::new(stack_map, roots).ok()
 }
 
-fn service_root_publication(
+pub(crate) fn service_root_publication(
     runtime: &mut StableGenerationalRuntime,
     binding: Option<NativeExecutionBinding>,
     publication: &mut RootPublication,

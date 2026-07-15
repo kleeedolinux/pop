@@ -35,6 +35,8 @@ pub enum RuntimeOperation {
     ReleaseRoot,
     Pin,
     Unpin,
+    EnterForeign,
+    LeaveForeign,
     PublishRoots,
     GcSafePoint,
     SatbWriteBarrier,

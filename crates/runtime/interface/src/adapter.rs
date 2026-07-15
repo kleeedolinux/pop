@@ -1,7 +1,7 @@
 use crate::{
-    ArrayAllocationRequest, GarbageCollectorContract, ManagedReference, ObjectAllocationRequest,
-    PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure, TableAllocationRequest,
-    Trap, WriteBarrier,
+    ArrayAllocationRequest, ForeignCallMode, ForeignTransitionId, GarbageCollectorContract,
+    ManagedReference, ObjectAllocationRequest, PanicPayload, PinHandle, RootHandle,
+    RootPublication, RuntimeFailure, TableAllocationRequest, Trap, WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,6 +134,40 @@ pub trait RuntimeAdapter {
     /// unavailable.
     fn unpin(&mut self, pin: PinHandle) -> Result<(), RuntimeFailure> {
         let _ = pin;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Enters a balanced foreign-call transition after servicing the exact
+    /// mutable root publication.
+    ///
+    /// Adapters without a foreign execution boundary reject this operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic when the transition is unavailable or root
+    /// publication cannot complete.
+    fn enter_foreign(
+        &mut self,
+        roots: &mut RootPublication,
+        mode: ForeignCallMode,
+    ) -> Result<ForeignTransitionId, RuntimeFailure> {
+        let _ = (roots, mode);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Leaves and consumes one balanced foreign-call transition, installing
+    /// current managed references into the identical publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic for an unavailable, stale, mismatched, or
+    /// out-of-order transition.
+    fn leave_foreign(
+        &mut self,
+        transition: ForeignTransitionId,
+        roots: &mut RootPublication,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (transition, roots);
         Err(RuntimeFailure::runtime_invariant())
     }
 

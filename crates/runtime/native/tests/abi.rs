@@ -29,10 +29,11 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn native_runtime_exports_the_stable_generational_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 12);
+    assert_eq!(pop_rt_abi_minor(), 13);
     assert_eq!(pop_rt_gc_stage(), 2);
     assert_eq!(pop_rt_supports_abi(1, 11), 1);
     assert_eq!(pop_rt_supports_abi(1, 12), 1);
+    assert_eq!(pop_rt_supports_abi(1, 13), 1);
     assert_eq!(pop_rt_supports_abi(2, 0), 0);
 }
 
