@@ -52,6 +52,13 @@ renumbers by discovery order. Artifact metadata always carries and compares the
 full fingerprint, descriptor facts, and compact identity, so the compact value
 is an execution key rather than the sole integrity proof.
 
+Consistent with ADR 0055, the reviewed SHA-256 implementation remains inside
+project/artifact/compiler-driver ownership. Portable MIR constructs the exact
+canonical descriptor and validates the supplied lowercase fingerprint shape,
+compact prefix, nonzero identity, and collision rules, but does not gain a
+third-party hashing dependency or select a physical artifact encoding. The
+artifact owner computes the digest before finalizing the catalog.
+
 ### Trusted source-to-catalog bridge
 
 The trusted `Ffi.C.Layout` compiler attribute is resolved on records before HIR

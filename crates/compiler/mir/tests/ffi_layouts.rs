@@ -1,3 +1,4 @@
+use pop_driver::artifact_sha256_hex;
 use pop_foundation::{BuiltinTypeId, FieldId, TypeId};
 use pop_mir::{
     MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutError, MirFfiLayoutField, MirFfiValueClass,
@@ -5,7 +6,7 @@ use pop_mir::{
 };
 use pop_runtime_interface::FfiAbiLayoutId;
 use pop_target::TargetSpec;
-use pop_types::{FFI_POINTER_TYPE_ID, SemanticType, TypeArena};
+use pop_types::{FFI_POINTER_TYPE_ID, ForeignAbi, SemanticType, TypeArena};
 
 fn layout(raw: u64) -> FfiAbiLayoutId {
     FfiAbiLayoutId::new(raw).expect("nonzero layout")
@@ -13,6 +14,14 @@ fn layout(raw: u64) -> FfiAbiLayoutId {
 
 fn target() -> TargetSpec {
     TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target")
+}
+
+fn build_catalog(
+    target: &TargetSpec,
+    entries: Vec<MirFfiLayout>,
+    types: &TypeArena,
+) -> Result<MirFfiLayoutCatalog, MirFfiLayoutError> {
+    MirFfiLayoutCatalog::new(target, entries, types, artifact_sha256_hex)
 }
 
 fn field(raw: u32, source_index: u32, layout_id: u64, offset: u64) -> MirFfiLayoutField {
@@ -35,6 +44,51 @@ fn entry(
 }
 
 #[test]
+fn catalog_derives_scalar_identity_from_canonical_descriptor_bytes() {
+    let types = TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let catalog = build_catalog(
+        &target(),
+        vec![entry(99, integer, 8, 8, MirFfiValueClass::Integer)],
+        &types,
+    )
+    .expect("canonical scalar catalog");
+    let [scalar] = catalog.entries() else {
+        panic!("one scalar layout");
+    };
+
+    assert_eq!(
+        scalar.descriptor(),
+        "{\"schemaVersion\":1,\"target\":\"x86_64-unknown-linux-gnu\",\"abi\":\"C\",\"abiType\":\"Int64\",\"size\":8,\"alignment\":8}"
+    );
+    assert_eq!(
+        scalar.fingerprint(),
+        "ebec5c4b572171b0c9b360015cf117534aeaaafc40687f55d7c1de482bbcd04f"
+    );
+    assert_eq!(scalar.id().raw(), 17_000_064_172_070_891_952);
+
+    let system = build_catalog(
+        &target(),
+        vec![MirFfiLayout::new_for_abi(
+            layout(99),
+            integer,
+            8,
+            8,
+            MirFfiValueClass::Integer,
+            ForeignAbi::System,
+        )],
+        &types,
+    )
+    .expect("system ABI catalog");
+    assert!(
+        system.entries()[0]
+            .descriptor()
+            .contains("\"abi\":\"System\"")
+    );
+    assert_ne!(system.entries()[0].id(), scalar.id());
+}
+
+#[test]
 fn catalog_validates_and_orders_nested_target_layouts() {
     let mut types = TypeArena::new();
     let integer = types.source_type("Int").expect("Int");
@@ -51,7 +105,7 @@ fn catalog_validates_and_orders_nested_target_layouts() {
         ]))
         .expect("record");
 
-    let catalog = MirFfiLayoutCatalog::new(
+    let catalog = build_catalog(
         &target(),
         vec![
             entry(
@@ -69,18 +123,105 @@ fn catalog_validates_and_orders_nested_target_layouts() {
     .expect("valid catalog");
 
     assert_eq!(catalog.target(), "x86_64-unknown-linux-gnu");
+    assert!(catalog.entries().is_sorted_by_key(MirFfiLayout::id));
     assert_eq!(
         catalog
             .entries()
             .iter()
-            .map(|entry| entry.id().raw())
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
-    assert_eq!(
-        catalog.get(layout(3)).map(MirFfiLayout::element),
+            .find(|entry| entry.element() == record)
+            .map(MirFfiLayout::element),
         Some(record)
     );
+    let record_layout = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.element() == record)
+        .expect("record layout");
+    assert_eq!(
+        record_layout.descriptor(),
+        "{\"schemaVersion\":1,\"target\":\"x86_64-unknown-linux-gnu\",\"abi\":\"C\",\"size\":16,\"alignment\":8,\"fields\":[{\"name\":\"count\",\"abiType\":\"Int64\",\"offset\":0,\"size\":8,\"alignment\":8},{\"name\":\"data\",\"abiType\":\"Ffi.Pointer<Int64>\",\"offset\":8,\"size\":8,\"alignment\":8}]}"
+    );
+    assert_eq!(
+        record_layout.fingerprint(),
+        "65f6d02fbbd2412dd70ca436e7aabf8cf9e034af13a1db9415e2867f95c2f98c"
+    );
+    assert_eq!(record_layout.id().raw(), 7_347_288_745_534_701_869);
+}
+
+#[test]
+fn catalog_identity_ignores_provisional_keys_and_local_type_allocation_order() {
+    let build = |with_noise: bool, keys: [u64; 3]| {
+        let mut types = TypeArena::new();
+        let integer = types.source_type("Int").expect("Int");
+        if with_noise {
+            types
+                .intern(SemanticType::Array(integer))
+                .expect("unrelated type");
+        }
+        let pointer = types
+            .intern(SemanticType::Builtin {
+                definition: FFI_POINTER_TYPE_ID,
+                arguments: vec![integer],
+            })
+            .expect("pointer");
+        let record = types
+            .intern(SemanticType::Record(vec![
+                ("count".to_owned(), integer),
+                ("data".to_owned(), pointer),
+            ]))
+            .expect("record");
+        build_catalog(
+            &target(),
+            vec![
+                entry(keys[0], integer, 8, 8, MirFfiValueClass::Integer),
+                entry(keys[1], pointer, 8, 8, MirFfiValueClass::Pointer),
+                entry(
+                    keys[2],
+                    record,
+                    16,
+                    8,
+                    MirFfiValueClass::Record(vec![
+                        field(1, 0, keys[0], 0),
+                        field(2, 1, keys[1], 8),
+                    ]),
+                ),
+            ],
+            &types,
+        )
+        .expect("stable catalog")
+        .entries()
+        .iter()
+        .map(|entry| (entry.id(), entry.fingerprint().to_owned()))
+        .collect::<Vec<_>>()
+    };
+
+    assert_eq!(build(false, [1, 2, 3]), build(true, [91, 37, 82]));
+}
+
+#[test]
+fn catalog_rejects_invalid_zero_and_colliding_artifact_fingerprints() {
+    let types = TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let float = types.source_type("Float64").expect("Float64");
+    let entries = || {
+        vec![
+            entry(1, integer, 8, 8, MirFfiValueClass::Integer),
+            entry(2, float, 8, 8, MirFfiValueClass::Float),
+        ]
+    };
+
+    assert!(matches!(
+        MirFfiLayoutCatalog::new(&target(), entries(), &types, |_| "A".repeat(64)),
+        Err(MirFfiLayoutError::InvalidFingerprint(_))
+    ));
+    assert!(matches!(
+        MirFfiLayoutCatalog::new(&target(), entries(), &types, |_| "0".repeat(64)),
+        Err(MirFfiLayoutError::ZeroCompactIdentity(_))
+    ));
+    assert!(matches!(
+        MirFfiLayoutCatalog::new(&target(), entries(), &types, |_| "1".repeat(64)),
+        Err(MirFfiLayoutError::CompactIdentityCollision(_))
+    ));
 }
 
 #[test]
@@ -104,7 +245,7 @@ fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
         .expect("managed array");
 
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &target(),
             vec![
                 entry(1, integer, 8, 8, MirFfiValueClass::Integer),
@@ -115,7 +256,7 @@ fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
         Err(MirFfiLayoutError::DuplicateLayout(layout(1)))
     );
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &target(),
             vec![entry(1, integer, 8, 3, MirFfiValueClass::Integer)],
             &types,
@@ -123,7 +264,7 @@ fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
         Err(MirFfiLayoutError::InvalidGeometry(layout(1)))
     );
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &target(),
             vec![entry(1, array, 8, 8, MirFfiValueClass::Pointer)],
             &types,
@@ -149,7 +290,7 @@ fn catalog_rejects_unsupported_targets_and_false_target_geometry() {
         "bpfel-unknown-none"
     );
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &unsupported,
             vec![entry(1, c_int, 4, 4, MirFfiValueClass::Integer)],
             &types,
@@ -157,7 +298,7 @@ fn catalog_rejects_unsupported_targets_and_false_target_geometry() {
         Err(MirFfiLayoutError::UnsupportedTarget)
     );
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &target(),
             vec![entry(1, c_int, 8, 8, MirFfiValueClass::Integer)],
             &types,
@@ -192,7 +333,7 @@ fn catalog_rejects_overlapping_and_recursive_record_plans() {
         .expect("triple pair");
 
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &target(),
             vec![
                 entry(1, integer32, 4, 4, MirFfiValueClass::Integer),
@@ -227,7 +368,7 @@ fn catalog_rejects_overlapping_and_recursive_record_plans() {
         .intern(SemanticType::Record(vec![("next".to_owned(), first)]))
         .expect("second");
     assert_eq!(
-        MirFfiLayoutCatalog::new(
+        build_catalog(
             &target(),
             vec![
                 entry(

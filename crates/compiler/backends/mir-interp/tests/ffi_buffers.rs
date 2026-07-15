@@ -1,4 +1,5 @@
 use pop_backend_mir_interp::{MirInterpreter, MirValue, ReferenceRuntimeAdapter};
+use pop_driver::artifact_sha256_hex;
 use pop_foundation::{BuiltinTypeId, SymbolId};
 use pop_mir::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass, parse_mir_dump};
 use pop_runtime_interface::{
@@ -131,10 +132,12 @@ fn interpreter_executes_typed_buffer_storage_and_lexical_borrow_operations() {
             MirFfiValueClass::Integer,
         )],
         &types,
+        artifact_sha256_hex,
     )
     .expect("catalog");
+    let layout_id = catalog.entries()[0].id().raw();
     let text = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{size}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#7 size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    v7:t{size} = ffiBufferLength v6 layout#7\n    do v8 ffiBufferWrite v6 v1 v2 layout#7\n    v9:t{integer} = ffiBufferRead v6 v1 layout#7\n    v10:t{optional_pointer} = ffiBufferBorrow v6 v7 layout#7 region#1\n    do v11 ffiBufferEndBorrow v6 region#1\n    do v12 ffiBufferClose v6\n    return (v9)\n  b2():\n    v13:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\n",
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{size}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    v7:t{size} = ffiBufferLength v6 layout#{layout_id}\n    do v8 ffiBufferWrite v6 v1 v2 layout#{layout_id}\n    v9:t{integer} = ffiBufferRead v6 v1 layout#{layout_id}\n    v10:t{optional_pointer} = ffiBufferBorrow v6 v7 layout#{layout_id} region#1\n    do v11 ffiBufferEndBorrow v6 region#1\n    do v12 ffiBufferClose v6\n    return (v9)\n  b2():\n    v13:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\n",
         size = size.raw(),
         integer = integer.raw(),
         open_result = open_result.raw(),

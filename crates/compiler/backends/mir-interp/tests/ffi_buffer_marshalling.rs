@@ -1,4 +1,5 @@
 use pop_backend_mir_interp::{MirInterpreter, MirValue};
+use pop_driver::artifact_sha256_hex;
 use pop_foundation::{BuiltinTypeId, FieldId, SymbolId, TypeId};
 use pop_mir::{
     MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutField, MirFfiValueClass, parse_mir_dump,
@@ -205,7 +206,7 @@ fn execute_round_trip(
     types: &mut TypeArena,
     element: TypeId,
     entries: Vec<MirFfiLayout>,
-    root_layout: FfiAbiLayoutId,
+    _root_layout: FfiAbiLayoutId,
     declarations: &str,
     value: MirValue,
 ) -> MirValue {
@@ -235,11 +236,16 @@ fn execute_round_trip(
         .expect("result");
     let boolean = types.source_type("Boolean").expect("Boolean");
     let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("target");
-    let catalog = MirFfiLayoutCatalog::new(&target, entries, types).expect("catalog");
-    let root = catalog.get(root_layout).expect("root layout");
+    let catalog =
+        MirFfiLayoutCatalog::new(&target, entries, types, artifact_sha256_hex).expect("catalog");
+    let root = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.element() == element)
+        .expect("root layout");
     let text = format!(
         "mir bubble b0 namespace n0\ndependencies\n{declarations}function s0 f0(t{size}, t{size}, t{element}) -> (t{element}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{size}, v2:t{element}):\n    do v3 gcSafePoint sp0 roots ()\n    v4:t{result} = ffiBufferOpen v0 element t{element} layout#{layout} size {element_size} align {alignment} result bt100 success resultCase#0 failure resultCase#1\n    v5:t{boolean} = resultIsOk bt100 v4\n    condBranch v5 b1 b2\n  b1():\n    v6:t{buffer} = resultGetOk bt100 v4\n    do v7 ffiBufferWrite v6 v1 v2 layout#{layout}\n    v8:t{element} = ffiBufferRead v6 v1 layout#{layout}\n    do v9 ffiBufferClose v6\n    return (v8)\n  b2():\n    v10:t{allocation_error} = resultGetError bt100 v4\n    return (v2)\n",
-        layout = root_layout.raw(),
+        layout = root.id().raw(),
         element_size = root.size(),
         alignment = root.alignment(),
         size = size.raw(),

@@ -1,3 +1,4 @@
+use pop_driver::artifact_sha256_hex;
 use pop_foundation::{BorrowRegionId, BuiltinTypeId, ResultCaseId, TypeId, ValueId};
 use pop_mir::{
     MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass, MirInstructionKind,
@@ -77,10 +78,12 @@ fn buffer_operations_round_trip_with_exact_layout_and_region_text() {
             MirFfiValueClass::Integer,
         )],
         &types,
+        artifact_sha256_hex,
     )
     .expect("catalog");
+    let layout_id = catalog.entries()[0].id().raw();
     let text = format!(
-        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{buffer}, t{integer}) -> () effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{buffer}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots (v1)\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#7 size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{size} = ffiBufferLength v1 layout#7\n    v6:t{integer} = ffiBufferRead v1 v0 layout#7\n    do v7 ffiBufferWrite v1 v0 v2 layout#7\n    v8:t{optional_pointer} = ffiBufferBorrow v1 v5 layout#7 region#9\n    do v9 ffiBufferEndBorrow v1 region#9\n    do v10 ffiBufferClose v1\n    return ()\n",
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{size}, t{buffer}, t{integer}) -> () effects[Allocates,MayTrap,GcSafePoint,Roots]\n  b0(v0:t{size}, v1:t{buffer}, v2:t{integer}):\n    do v3 gcSafePoint sp0 roots (v1)\n    v4:t{open_result} = ffiBufferOpen v0 element t{integer} layout#{layout_id} size 8 align 8 result bt100 success resultCase#0 failure resultCase#1\n    v5:t{size} = ffiBufferLength v1 layout#{layout_id}\n    v6:t{integer} = ffiBufferRead v1 v0 layout#{layout_id}\n    do v7 ffiBufferWrite v1 v0 v2 layout#{layout_id}\n    v8:t{optional_pointer} = ffiBufferBorrow v1 v5 layout#{layout_id} region#9\n    do v9 ffiBufferEndBorrow v1 region#9\n    do v10 ffiBufferClose v1\n    return ()\n",
         size = size.raw(),
         buffer = buffer.raw(),
         integer = integer.raw(),
@@ -94,7 +97,9 @@ fn buffer_operations_round_trip_with_exact_layout_and_region_text() {
     assert_eq!(verify_mir_bubble(&bubble, &types), Ok(()));
     let dump = bubble.dump();
     assert!(dump.contains("ffiBufferOpen v0 element"));
-    assert!(dump.contains("ffiBufferBorrow v1 v5 layout#7 region#9"));
+    assert!(dump.contains(&format!(
+        "ffiBufferBorrow v1 v5 layout#{layout_id} region#9"
+    )));
     assert!(dump.contains("ffiBufferEndBorrow v1 region#9"));
     assert_eq!(
         parse_mir_dump(&dump)
@@ -103,7 +108,15 @@ fn buffer_operations_round_trip_with_exact_layout_and_region_text() {
         bubble
     );
 
-    assert_invalid_buffer_variants(&text, &catalog, &types, integer, buffer, optional_pointer);
+    assert_invalid_buffer_variants(
+        &text,
+        &catalog,
+        &types,
+        integer,
+        buffer,
+        optional_pointer,
+        layout_id,
+    );
 }
 
 fn assert_invalid_buffer_variants(
@@ -113,9 +126,11 @@ fn assert_invalid_buffer_variants(
     integer: TypeId,
     buffer: TypeId,
     optional_pointer: TypeId,
+    layout_id: u64,
 ) {
+    let layout_text = format!("layout#{layout_id}");
     let invalid_texts = [
-        text.replace("layout#7", "layout#8"),
+        text.replace(&layout_text, "layout#1"),
         text.replace("ffiBufferRead v1 v0", "ffiBufferRead v1 v2"),
         text.replace(
             &format!("v6:t{} = ffiBufferRead", integer.raw()),
@@ -135,7 +150,7 @@ fn assert_invalid_buffer_variants(
         text.replace(
             "    do v9 ffiBufferEndBorrow",
             &format!(
-                "    v11:t{} = ffiBufferBorrow v1 v5 layout#7 region#10\n    do v9 ffiBufferEndBorrow",
+                "    v11:t{} = ffiBufferBorrow v1 v5 layout#{layout_id} region#10\n    do v9 ffiBufferEndBorrow",
                 optional_pointer.raw()
             ),
         ),

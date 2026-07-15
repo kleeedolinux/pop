@@ -549,7 +549,7 @@ pub fn load_poplib(path: &Path) -> Result<LoadedPoplib, PoplibError> {
         if bytes.len() as u64 != file.size {
             return Err(PoplibError::SizeMismatch);
         }
-        if sha256_hex(&bytes) != file.sha256 {
+        if artifact_sha256_hex(&bytes) != file.sha256 {
             return Err(PoplibError::HashMismatch);
         }
         if file.path == "reference.metadata" {
@@ -565,7 +565,7 @@ pub fn load_poplib(path: &Path) -> Result<LoadedPoplib, PoplibError> {
         }
     }
     let reference_bytes = reference_bytes.ok_or(PoplibError::MissingFile)?;
-    if sha256_hex(&reference_bytes) != manifest.identity.public_api_sha256 {
+    if artifact_sha256_hex(&reference_bytes) != manifest.identity.public_api_sha256 {
         return Err(PoplibError::HashMismatch);
     }
     let reference_metadata = decode_reference_metadata(&reference_bytes)
@@ -726,11 +726,12 @@ fn file_reference(path: &str, bytes: &[u8]) -> Result<PoplibFileReference, Popli
     Ok(PoplibFileReference {
         path: path.to_owned(),
         size: bytes.len() as u64,
-        sha256: sha256_hex(bytes),
+        sha256: artifact_sha256_hex(bytes),
     })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+#[must_use]
+pub fn artifact_sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

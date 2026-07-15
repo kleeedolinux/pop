@@ -56,6 +56,9 @@ pub(super) fn validate_entry(
             .get(&field.layout)
             .copied()
             .ok_or(MirFfiLayoutError::MissingFieldLayout(field.layout))?;
+        if child.abi != entry.abi {
+            return Err(MirFfiLayoutError::RecordAbiMismatch(entry.id));
+        }
         if source_fields[expected_index].1 != child.element {
             return Err(MirFfiLayoutError::InvalidRecordFields(entry.id));
         }
