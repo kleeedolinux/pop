@@ -7,12 +7,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BlockId, ClassId, ErrorId, FieldId, InterfaceId, MethodId, NominalInterfaceId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    BlockId, BorrowRegionId, BuiltinTypeId, ClassId, ErrorId, FieldId, InterfaceId, MethodId,
+    NominalInterfaceId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
-use pop_runtime_interface::{ArrayElementMap, ObjectMap, ObjectSlot, RootSlot};
+use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot};
 use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena, embedded_bootstrap_schema};
 
+use crate::MirFfiLayoutCatalog;
 use crate::ir::*;
 use crate::lowering::{
     array_element_map, expected_safe_point_roots, expected_suspend_frame_slots,
@@ -138,6 +139,7 @@ pub fn verify_mir_bubble(
             &async_functions,
             &async_references,
             &foreign_functions,
+            bubble.ffi_layouts(),
             &mut errors,
         );
     }
@@ -152,6 +154,7 @@ pub fn verify_mir_bubble(
             &async_functions,
             &async_references,
             &foreign_functions,
+            bubble.ffi_layouts(),
             &mut errors,
         );
     }
@@ -489,6 +492,7 @@ fn verify_function(
     async_functions: &BTreeSet<SymbolId>,
     async_references: &BTreeSet<SymbolIdentity>,
     foreign_functions: &BTreeSet<SymbolId>,
+    ffi_layouts: &MirFfiLayoutCatalog,
     errors: &mut Vec<MirVerificationError>,
 ) {
     verify_entry_parameters(function, errors);
@@ -581,6 +585,7 @@ fn verify_function(
         dominators: &dominators,
         blocks: &blocks,
     };
+    verify_ffi_buffer_borrows(function, &blocks, errors);
     let expected_suspend_frames = expected_suspend_frame_slots(function);
     let mut safe_points = BTreeSet::new();
     let mut coroutine_states = BTreeSet::new();
@@ -700,6 +705,7 @@ fn verify_function(
                     async_functions,
                     async_references,
                 },
+                ffi_layouts,
                 errors,
             );
             let expected_effects = expected_instruction_effects(
@@ -1784,6 +1790,193 @@ pub(crate) fn block_targets(block: &MirBlock) -> Vec<BlockId> {
 }
 
 #[derive(Clone, Copy)]
+struct FfiBufferBorrowDefinition {
+    buffer: ValueId,
+    expected_length: ValueId,
+    layout: FfiAbiLayoutId,
+}
+
+fn verify_ffi_buffer_borrows(
+    function: &MirFunction,
+    blocks: &BTreeMap<BlockId, &MirBlock>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let mut lengths = BTreeMap::new();
+    let mut borrows = BTreeMap::new();
+    let mut ends = BTreeMap::<BorrowRegionId, Vec<ValueId>>::new();
+    let mut borrowed_optionals = BTreeMap::new();
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            match instruction.kind() {
+                MirInstructionKind::FfiBufferLength { buffer, layout } => {
+                    lengths.insert(instruction.result(), (*buffer, *layout));
+                }
+                MirInstructionKind::FfiBufferBorrow {
+                    buffer,
+                    expected_length,
+                    layout,
+                    region,
+                } => {
+                    let definition = FfiBufferBorrowDefinition {
+                        buffer: *buffer,
+                        expected_length: *expected_length,
+                        layout: *layout,
+                    };
+                    if borrows.insert(*region, definition).is_some() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    borrowed_optionals.insert(instruction.result(), *region);
+                }
+                MirInstructionKind::FfiBufferEndBorrow { region, .. } => {
+                    ends.entry(*region).or_default().push(instruction.result());
+                }
+                _ => {}
+            }
+        }
+    }
+    for (region, definition) in &borrows {
+        if lengths.get(&definition.expected_length) != Some(&(definition.buffer, definition.layout))
+            || ends.get(region).map(Vec::len) != Some(1)
+        {
+            push_borrow_region_error(*region, errors);
+        }
+    }
+    for region in ends.keys() {
+        if !borrows.contains_key(region) {
+            push_borrow_region_error(*region, errors);
+        }
+    }
+
+    let mut borrowed_pointers = BTreeMap::new();
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            if let MirInstructionKind::OptionalGet { optional } = instruction.kind()
+                && let Some(region) = borrowed_optionals.get(optional)
+            {
+                borrowed_pointers.insert(instruction.result(), *region);
+            }
+        }
+    }
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            for operand in instruction_operands(instruction.kind()) {
+                if let Some(region) = borrowed_optionals.get(&operand)
+                    && !matches!(
+                        instruction.kind(),
+                        MirInstructionKind::OptionalIsPresent { .. }
+                            | MirInstructionKind::OptionalGet { .. }
+                    )
+                {
+                    push_borrow_region_error(*region, errors);
+                }
+                if let Some(region) = borrowed_pointers.get(&operand)
+                    && !matches!(instruction.kind(), MirInstructionKind::CallForeign { .. })
+                {
+                    push_borrow_region_error(*region, errors);
+                }
+            }
+        }
+        for operand in terminator_operands(block.terminator()) {
+            if let Some(region) = borrowed_optionals
+                .get(&operand)
+                .or_else(|| borrowed_pointers.get(&operand))
+            {
+                push_borrow_region_error(*region, errors);
+            }
+        }
+    }
+
+    let mut incoming = BTreeMap::from([(BlockId::from_raw(0), BTreeMap::new())]);
+    let mut pending = vec![BlockId::from_raw(0)];
+    while let Some(block_id) = pending.pop() {
+        let Some(block) = blocks.get(&block_id) else {
+            continue;
+        };
+        let mut active = incoming.get(&block_id).cloned().unwrap_or_default();
+        for instruction in block.instructions() {
+            match instruction.kind() {
+                MirInstructionKind::FfiBufferBorrow { buffer, region, .. } => {
+                    if active.contains_key(region)
+                        || active.values().any(|active_buffer| active_buffer == buffer)
+                    {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    active.insert(*region, *buffer);
+                }
+                MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+                    if active.remove(region) != Some(*buffer) {
+                        push_borrow_region_error(*region, errors);
+                    }
+                }
+                MirInstructionKind::FfiBufferClose { buffer } => {
+                    for region in active.iter().filter_map(|(region, active_buffer)| {
+                        (active_buffer == buffer).then_some(*region)
+                    }) {
+                        push_borrow_region_error(region, errors);
+                    }
+                }
+                _ => {}
+            }
+            if instruction.effects().contains(MirEffect::MayUnwind)
+                && instruction.unwind_action() == MirUnwindAction::Propagate
+            {
+                push_active_borrow_errors(&active, errors);
+            }
+            if let Some(target) = instruction_unwind_target(instruction) {
+                merge_borrow_state(target, &active, &mut incoming, &mut pending, errors);
+            }
+        }
+        if matches!(block.terminator(), MirTerminator::Suspend { .. }) {
+            push_active_borrow_errors(&active, errors);
+        }
+        let targets = terminator_targets(block.terminator());
+        if targets.is_empty()
+            && !matches!(
+                block.terminator(),
+                MirTerminator::Missing | MirTerminator::Trap(_) | MirTerminator::Unreachable
+            )
+        {
+            push_active_borrow_errors(&active, errors);
+        }
+        for target in targets {
+            merge_borrow_state(target, &active, &mut incoming, &mut pending, errors);
+        }
+    }
+}
+
+fn merge_borrow_state(
+    target: BlockId,
+    state: &BTreeMap<BorrowRegionId, ValueId>,
+    incoming: &mut BTreeMap<BlockId, BTreeMap<BorrowRegionId, ValueId>>,
+    pending: &mut Vec<BlockId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if let Some(existing) = incoming.get(&target) {
+        if existing != state {
+            for region in existing.keys().chain(state.keys()) {
+                push_borrow_region_error(*region, errors);
+            }
+        }
+        return;
+    }
+    incoming.insert(target, state.clone());
+    pending.push(target);
+}
+
+fn push_active_borrow_errors(
+    active: &BTreeMap<BorrowRegionId, ValueId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    for region in active.keys() {
+        push_borrow_region_error(*region, errors);
+    }
+}
+
+fn push_borrow_region_error(region: BorrowRegionId, errors: &mut Vec<MirVerificationError>) {
+    errors.push(MirVerificationError::InvalidFfiBufferBorrowRegion { region });
+}
+
+#[derive(Clone, Copy)]
 struct CallableSignatures<'a> {
     functions: &'a BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     references: &'a BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
@@ -1798,6 +1991,7 @@ fn verify_instruction_types(
     schema: &MirSchema<'_>,
     values: &BTreeMap<ValueId, TypeId>,
     signatures: CallableSignatures<'_>,
+    ffi_layouts: &MirFfiLayoutCatalog,
     errors: &mut Vec<MirVerificationError>,
 ) {
     let requires_effect_form = matches!(
@@ -1806,6 +2000,9 @@ fn verify_instruction_types(
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
             | MirInstructionKind::FfiHandleClose { .. }
+            | MirInstructionKind::FfiBufferWrite { .. }
+            | MirInstructionKind::FfiBufferEndBorrow { .. }
+            | MirInstructionKind::FfiBufferClose { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. }
@@ -1814,6 +2011,19 @@ fn verify_instruction_types(
         errors.push(MirVerificationError::InvalidInstructionType {
             instruction: instruction.result(),
             result_type: instruction.result_type(),
+        });
+        return;
+    }
+    let requires_value_form = matches!(
+        instruction.kind(),
+        MirInstructionKind::FfiBufferOpen { .. }
+            | MirInstructionKind::FfiBufferLength { .. }
+            | MirInstructionKind::FfiBufferRead { .. }
+            | MirInstructionKind::FfiBufferBorrow { .. }
+    );
+    if requires_value_form && !instruction.has_result() {
+        errors.push(MirVerificationError::InvalidFfiBufferOperation {
+            instruction: instruction.result(),
         });
         return;
     }
@@ -1867,6 +2077,104 @@ fn verify_instruction_types(
                     instruction: instruction.result(),
                 });
             }
+        }
+        MirInstructionKind::FfiBufferOpen {
+            length,
+            element,
+            layout,
+            element_size,
+            alignment,
+            result,
+            success,
+            failure,
+        } => {
+            let valid_layout = ffi_layouts.get(*layout).is_some_and(|entry| {
+                entry.element() == *element
+                    && entry.size() == *element_size
+                    && entry.alignment() == *alignment
+            });
+            let valid_result = match arena.get(instruction.result_type()) {
+                Some(SemanticType::Builtin {
+                    definition,
+                    arguments,
+                }) if *definition == *result && arguments.len() == 2 => {
+                    ffi_buffer_element(arena, arguments[0]) == Some(*element)
+                        && is_exact_ffi_builtin(
+                            arena,
+                            arguments[1],
+                            pop_types::FFI_ALLOCATION_ERROR_TYPE_ID,
+                            &[],
+                        )
+                }
+                _ => false,
+            };
+            let valid = value_has_type(values, *length, ffi_size_type(arena))
+                && valid_layout
+                && valid_result
+                && success.raw() == 0
+                && failure.raw() == 1;
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferLength { buffer, layout } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                ffi_layouts
+                    .get(*layout)
+                    .is_some_and(|entry| entry.element() == element)
+            }) && Some(instruction.result_type()) == ffi_size_type(arena);
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferRead {
+            buffer,
+            index,
+            layout,
+        } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                instruction.result_type() == element
+                    && ffi_layouts
+                        .get(*layout)
+                        .is_some_and(|entry| entry.element() == element)
+            }) && value_has_type(values, *index, ffi_size_type(arena));
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+            layout,
+        } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                values.get(value) == Some(&element)
+                    && ffi_layouts
+                        .get(*layout)
+                        .is_some_and(|entry| entry.element() == element)
+            }) && value_has_type(values, *index, ffi_size_type(arena));
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferBorrow {
+            buffer,
+            expected_length,
+            layout,
+            ..
+        } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                ffi_optional_pointer_element(arena, instruction.result_type()) == Some(element)
+                    && ffi_layouts
+                        .get(*layout)
+                        .is_some_and(|entry| entry.element() == element)
+            }) && value_has_type(values, *expected_length, ffi_size_type(arena));
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferEndBorrow { buffer, .. }
+        | MirInstructionKind::FfiBufferClose { buffer } => {
+            verify_ffi_buffer_operation(
+                instruction,
+                ffi_buffer_operand_element(arena, values, *buffer).is_some(),
+                errors,
+            );
         }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
@@ -2418,6 +2726,82 @@ fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
             Some(arguments[0])
         }
         _ => None,
+    }
+}
+
+fn ffi_buffer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn ffi_buffer_operand_element(
+    arena: &TypeArena,
+    values: &BTreeMap<ValueId, TypeId>,
+    buffer: ValueId,
+) -> Option<TypeId> {
+    values
+        .get(&buffer)
+        .and_then(|type_id| ffi_buffer_element(arena, *type_id))
+}
+
+fn ffi_optional_pointer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == BuiltinTypeId::from_raw(201) && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn ffi_size_type(arena: &TypeArena) -> Option<TypeId> {
+    arena.find(&SemanticType::Builtin {
+        definition: BuiltinTypeId::from_raw(221),
+        arguments: Vec::new(),
+    })
+}
+
+fn is_exact_ffi_builtin(
+    arena: &TypeArena,
+    type_id: TypeId,
+    definition: BuiltinTypeId,
+    arguments: &[TypeId],
+) -> bool {
+    matches!(
+        arena.get(type_id),
+        Some(SemanticType::Builtin {
+            definition: found,
+            arguments: found_arguments,
+        }) if *found == definition && found_arguments == arguments
+    )
+}
+
+fn value_has_type(
+    values: &BTreeMap<ValueId, TypeId>,
+    value: ValueId,
+    expected: Option<TypeId>,
+) -> bool {
+    expected.is_some_and(|expected| values.get(&value) == Some(&expected))
+}
+
+fn verify_ffi_buffer_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiBufferOperation {
+            instruction: instruction.result(),
+        });
     }
 }
 
@@ -4300,6 +4684,22 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         MirInstructionKind::FfiHandleOpen { value } => vec![*value],
         MirInstructionKind::FfiHandleGet { handle }
         | MirInstructionKind::FfiHandleClose { handle } => vec![*handle],
+        MirInstructionKind::FfiBufferOpen { length, .. } => vec![*length],
+        MirInstructionKind::FfiBufferLength { buffer, .. }
+        | MirInstructionKind::FfiBufferEndBorrow { buffer, .. }
+        | MirInstructionKind::FfiBufferClose { buffer } => vec![*buffer],
+        MirInstructionKind::FfiBufferRead { buffer, index, .. } => vec![*buffer, *index],
+        MirInstructionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+            ..
+        } => vec![*buffer, *index, *value],
+        MirInstructionKind::FfiBufferBorrow {
+            buffer,
+            expected_length,
+            ..
+        } => vec![*buffer, *expected_length],
         MirInstructionKind::Pin { value } => vec![*value],
         MirInstructionKind::Unpin { handle } => vec![*handle],
         MirInstructionKind::WriteBarrier {

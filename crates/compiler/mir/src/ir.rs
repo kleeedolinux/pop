@@ -8,14 +8,15 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId,
-    CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId,
-    InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId,
-    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
+    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId,
+    InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId,
+    NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
+    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
+    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap,
+    Trap, UnwindReason,
 };
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
@@ -173,6 +174,12 @@ impl MirBubble {
     #[must_use]
     pub const fn ffi_layouts(&self) -> &MirFfiLayoutCatalog {
         &self.ffi_layouts
+    }
+
+    #[must_use]
+    pub fn with_ffi_layouts(mut self, ffi_layouts: MirFfiLayoutCatalog) -> Self {
+        self.ffi_layouts = ffi_layouts;
+        self
     }
 
     #[must_use]
@@ -1457,6 +1464,44 @@ pub enum MirInstructionKind {
     FfiHandleClose {
         handle: ValueId,
     },
+    FfiBufferOpen {
+        length: ValueId,
+        element: TypeId,
+        layout: FfiAbiLayoutId,
+        element_size: u64,
+        alignment: u64,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    FfiBufferLength {
+        buffer: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiBufferRead {
+        buffer: ValueId,
+        index: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiBufferWrite {
+        buffer: ValueId,
+        index: ValueId,
+        value: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiBufferBorrow {
+        buffer: ValueId,
+        expected_length: ValueId,
+        layout: FfiAbiLayoutId,
+        region: BorrowRegionId,
+    },
+    FfiBufferEndBorrow {
+        buffer: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiBufferClose {
+        buffer: ValueId,
+    },
     Pin {
         value: ValueId,
     },
@@ -1788,6 +1833,12 @@ pub enum MirVerificationError {
     },
     InvalidFfiHandleOperation {
         instruction: ValueId,
+    },
+    InvalidFfiBufferOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiBufferBorrowRegion {
+        region: BorrowRegionId,
     },
     InvalidTaskOperation {
         instruction: ValueId,

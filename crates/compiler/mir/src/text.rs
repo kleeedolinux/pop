@@ -2,15 +2,16 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId,
-    CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FileId, FunctionId, InterfaceId,
-    InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId,
-    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
+    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FileId,
+    FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId,
+    MethodId, NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
+    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
+    ValueId,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
-    StackMap, Trap, TrapKind, UnwindReason,
+    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot,
+    SafePointId, StackMap, Trap, TrapKind, UnwindReason,
 };
 use pop_target::TargetSpec;
 use pop_types::{
@@ -897,6 +898,9 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::RetainRoot { .. }
                 | MirInstructionKind::ReleaseRoot { .. }
                 | MirInstructionKind::FfiHandleClose { .. }
+                | MirInstructionKind::FfiBufferWrite { .. }
+                | MirInstructionKind::FfiBufferEndBorrow { .. }
+                | MirInstructionKind::FfiBufferClose { .. }
                 | MirInstructionKind::Pin { .. }
                 | MirInstructionKind::Unpin { .. }
                 | MirInstructionKind::WriteBarrier { .. }
@@ -1389,6 +1393,98 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     if let Some(value) = text.strip_prefix("ffiHandleClose ") {
         return Ok(MirInstructionKind::FfiHandleClose {
             handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBufferOpen ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [
+            length,
+            "element",
+            element,
+            layout,
+            "size",
+            element_size,
+            "align",
+            alignment,
+            "result",
+            result,
+            "success",
+            success,
+            "failure",
+            failure,
+        ] = parts.as_slice()
+        else {
+            return Err(error(line, "FFI buffer open"));
+        };
+        return Ok(MirInstructionKind::FfiBufferOpen {
+            length: ValueId::from_raw(parse_prefixed(length, 'v', line)?),
+            element: TypeId::from_raw(parse_prefixed(element, 't', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+            element_size: parse_u64(element_size, line)?,
+            alignment: parse_u64(alignment, line)?,
+            result: parse_builtin_type_id(result, line)?,
+            success: ResultCaseId::from_raw(parse_hash(success, "resultCase#", line)?),
+            failure: ResultCaseId::from_raw(parse_hash(failure, "resultCase#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBufferLength ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [buffer, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI buffer length"));
+        };
+        return Ok(MirInstructionKind::FfiBufferLength {
+            buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBufferRead ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [buffer, index, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI buffer read"));
+        };
+        return Ok(MirInstructionKind::FfiBufferRead {
+            buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
+            index: ValueId::from_raw(parse_prefixed(index, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBufferWrite ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [buffer, index, value, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI buffer write"));
+        };
+        return Ok(MirInstructionKind::FfiBufferWrite {
+            buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
+            index: ValueId::from_raw(parse_prefixed(index, 'v', line)?),
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBufferBorrow ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [buffer, expected_length, layout, region] = parts.as_slice() else {
+            return Err(error(line, "FFI buffer borrow"));
+        };
+        return Ok(MirInstructionKind::FfiBufferBorrow {
+            buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
+            expected_length: ValueId::from_raw(parse_prefixed(expected_length, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+            region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiBufferEndBorrow ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [buffer, region] = parts.as_slice() else {
+            return Err(error(line, "FFI buffer end borrow"));
+        };
+        return Ok(MirInstructionKind::FfiBufferEndBorrow {
+            buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
+            region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
+        });
+    }
+    if let Some(buffer) = text.strip_prefix("ffiBufferClose ") {
+        return Ok(MirInstructionKind::FfiBufferClose {
+            buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
         });
     }
     if let Some(value) = text.strip_prefix("pin ") {
@@ -2418,6 +2514,19 @@ fn parse_hash(text: &str, prefix: &str, line: usize) -> Result<u32, MirParseErro
             .ok_or_else(|| error(line, "invalid entity ID"))?,
         line,
     )
+}
+
+fn parse_ffi_layout(text: &str, line: usize) -> Result<FfiAbiLayoutId, MirParseError> {
+    let raw = text
+        .strip_prefix("layout#")
+        .ok_or_else(|| error(line, "FFI layout identity"))?
+        .parse::<u64>()
+        .map_err(|_| error(line, "FFI layout identity"))?;
+    FfiAbiLayoutId::new(raw).ok_or_else(|| error(line, "FFI layout identity"))
+}
+
+fn parse_u64(text: &str, line: usize) -> Result<u64, MirParseError> {
+    text.parse().map_err(|_| error(line, "invalid integer"))
 }
 
 fn parse_u32(text: &str, line: usize) -> Result<u32, MirParseError> {

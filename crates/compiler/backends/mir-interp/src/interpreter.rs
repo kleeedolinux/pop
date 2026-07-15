@@ -4,20 +4,21 @@
 //! consumes resolved stable IDs only and delegates every runtime operation through
 //! the backend-neutral PLRI adapter.
 use crate::evaluation::*;
+use crate::ffi_buffer::{integer_u64, marshal, unmarshal};
 use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
-use pop_foundation::{NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
+use pop_foundation::{BorrowRegionId, NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
 use pop_mir::{
     MirBubble, MirCancellationMode, MirInstruction, MirInstructionKind, MirSuspendOperation,
     MirTaskDispatch, MirTerminator, MirUnwindAction, MirVerificationError, verify_mir_bubble,
 };
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
-    CancellationTokenId, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
-    TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle,
-    TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason,
-    WriteBarrier,
+    CancellationTokenId, FfiBufferBorrowId, FfiBufferOpenFailure, FfiBufferOpenRequest,
+    ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle,
+    RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, TableAllocationRequest,
+    TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle, TaskOwner,
+    TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason, WriteBarrier,
 };
 use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
@@ -166,6 +167,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             runtime: &mut *runtime,
             root_handles: BTreeMap::new(),
             ffi_handles: BTreeMap::new(),
+            ffi_buffer_borrows: BTreeMap::new(),
             pin_handles: BTreeMap::new(),
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
@@ -186,6 +188,7 @@ struct Engine<'mir, 'runtime, R> {
     runtime: &'runtime mut R,
     root_handles: BTreeMap<ValueId, RootHandle>,
     ffi_handles: BTreeMap<RootHandle, RuntimeValue>,
+    ffi_buffer_borrows: BTreeMap<BorrowRegionId, FfiBufferBorrowId>,
     pin_handles: BTreeMap<ValueId, PinHandle>,
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
@@ -1758,6 +1761,96 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 managed.install_relocated_reference(Some(reference))?;
                 return Ok(managed.clone());
             }
+            MirInstructionKind::FfiBufferOpen {
+                length,
+                element_size,
+                alignment,
+                layout,
+                result,
+                success,
+                failure,
+                ..
+            } => {
+                let length = integer_u64(&value(values, *length)?.visible)?;
+                let request = FfiBufferOpenRequest::new(length, *element_size, *alignment, *layout)
+                    .map_err(|_| self.runtime_invariant())?;
+                match self.runtime.ffi_buffer_open(&request) {
+                    Ok(reference) if reference.raw() != 0 => MirValue::Result {
+                        definition: *result,
+                        case: *success,
+                        arguments: vec![MirValue::FfiBuffer(reference)],
+                    },
+                    Ok(_) | Err(FfiBufferOpenFailure::Invariant(_)) => {
+                        return Err(self.runtime_invariant());
+                    }
+                    Err(FfiBufferOpenFailure::Allocation) => MirValue::Result {
+                        definition: *result,
+                        case: *failure,
+                        arguments: vec![MirValue::FfiAllocationError],
+                    },
+                }
+            }
+            MirInstructionKind::FfiBufferLength { buffer, layout } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let length = self
+                    .runtime
+                    .ffi_buffer_length(reference, *layout)
+                    .map_err(|_| self.runtime_invariant())?;
+                MirValue::Integer(
+                    IntegerValue::parse_decimal(&length.to_string(), IntegerKind::UInt64)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                )
+            }
+            MirInstructionKind::FfiBufferRead {
+                buffer,
+                index,
+                layout,
+            } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let index = integer_u64(&value(values, *index)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let mut bytes = vec![
+                    0;
+                    usize::try_from(entry.size())
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?
+                ];
+                self.runtime
+                    .ffi_buffer_read(reference, *layout, index, &mut bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                unmarshal(&bytes, entry, self.mir.ffi_layouts(), self.arena, self.mir)?
+            }
+            MirInstructionKind::FfiBufferBorrow {
+                buffer,
+                expected_length,
+                layout,
+                region,
+            } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let expected = integer_u64(&value(values, *expected_length)?.visible)?;
+                let borrow = self
+                    .runtime
+                    .ffi_buffer_borrow(reference, *layout)
+                    .map_err(|_| self.runtime_invariant())?;
+                if borrow.length() != expected
+                    || self
+                        .ffi_buffer_borrows
+                        .insert(*region, borrow.id())
+                        .is_some()
+                {
+                    return Err(self.runtime_invariant());
+                }
+                borrow.address().map_or(MirValue::Nil, MirValue::FfiPointer)
+            }
             MirInstructionKind::IntegerConstant(_)
             | MirInstructionKind::FloatConstant(_)
             | MirInstructionKind::CheckedIntegerAdd { .. }
@@ -1812,6 +1905,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
             | MirInstructionKind::FfiHandleClose { .. }
+            | MirInstructionKind::FfiBufferWrite { .. }
+            | MirInstructionKind::FfiBufferEndBorrow { .. }
+            | MirInstructionKind::FfiBufferClose { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. } => {
@@ -1819,6 +1915,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
         };
         Ok(RuntimeValue::visible(result))
+    }
+
+    fn runtime_invariant(&mut self) -> ExecutionError {
+        ExecutionError::Runtime(
+            self.runtime
+                .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+        )
     }
 
     fn evaluate_effect_instruction(
@@ -1983,6 +2086,55 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                             .raise_trap(Trap::new(TrapKind::ImpossibleState)),
                     )
                 })?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiBufferWrite {
+                buffer,
+                index,
+                value: stored,
+                layout,
+            } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let index = integer_u64(&value(values, *index)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let bytes = marshal(
+                    &value(values, *stored)?.visible,
+                    entry,
+                    self.mir.ffi_layouts(),
+                )?;
+                self.runtime
+                    .ffi_buffer_write(reference, *layout, index, &bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let borrow = self
+                    .ffi_buffer_borrows
+                    .get(region)
+                    .copied()
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.runtime
+                    .ffi_buffer_end_borrow(reference, borrow)
+                    .map_err(|_| self.runtime_invariant())?;
+                self.ffi_buffer_borrows.remove(region);
+                return Ok(());
+            }
+            MirInstructionKind::FfiBufferClose { buffer } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                self.runtime
+                    .ffi_buffer_close(reference)
+                    .map_err(|_| self.runtime_invariant())?;
                 return Ok(());
             }
             MirInstructionKind::Pin { value: pinned } => {

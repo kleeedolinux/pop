@@ -743,6 +743,91 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::FfiHandleClose { handle } => {
             let _ = write!(output, "ffiHandleClose v{}", handle.raw());
         }
+        MirInstructionKind::FfiBufferOpen {
+            length,
+            element,
+            layout,
+            element_size,
+            alignment,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferOpen v{} element t{} layout#{} size {} align {} result bt{} success resultCase#{} failure resultCase#{}",
+                length.raw(),
+                element.raw(),
+                layout.raw(),
+                element_size,
+                alignment,
+                result.raw(),
+                success.raw(),
+                failure.raw(),
+            );
+        }
+        MirInstructionKind::FfiBufferLength { buffer, layout } => {
+            let _ = write!(
+                output,
+                "ffiBufferLength v{} layout#{}",
+                buffer.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferRead {
+            buffer,
+            index,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferRead v{} v{} layout#{}",
+                buffer.raw(),
+                index.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferWrite v{} v{} v{} layout#{}",
+                buffer.raw(),
+                index.raw(),
+                value.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferBorrow {
+            buffer,
+            expected_length,
+            layout,
+            region,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferBorrow v{} v{} layout#{} region#{}",
+                buffer.raw(),
+                expected_length.raw(),
+                layout.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+            let _ = write!(
+                output,
+                "ffiBufferEndBorrow v{} region#{}",
+                buffer.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferClose { buffer } => {
+            let _ = write!(output, "ffiBufferClose v{}", buffer.raw());
+        }
         MirInstructionKind::Pin { value } => {
             let _ = write!(output, "pin v{}", value.raw());
         }

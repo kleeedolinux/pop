@@ -4826,6 +4826,22 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::FfiHandleClose { .. } => {
             MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
         }
+        MirInstructionKind::FfiBufferOpen { .. } => MirEffectSummary::from_effects([
+            MirEffect::Allocates,
+            MirEffect::MayTrap,
+            MirEffect::GcSafePoint,
+            MirEffect::Roots,
+        ]),
+        MirInstructionKind::FfiBufferClose { .. } => {
+            MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
+        }
+        MirInstructionKind::FfiBufferLength { .. }
+        | MirInstructionKind::FfiBufferRead { .. }
+        | MirInstructionKind::FfiBufferWrite { .. }
+        | MirInstructionKind::FfiBufferBorrow { .. }
+        | MirInstructionKind::FfiBufferEndBorrow { .. } => {
+            MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
         MirInstructionKind::WriteBarrier { .. } => {
             MirEffectSummary::empty().with(MirEffect::WritesManagedReference)
         }

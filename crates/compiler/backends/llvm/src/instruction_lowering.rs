@@ -981,6 +981,18 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::FfiBufferOpen { .. }
+        | MirInstructionKind::FfiBufferLength { .. }
+        | MirInstructionKind::FfiBufferRead { .. }
+        | MirInstructionKind::FfiBufferWrite { .. }
+        | MirInstructionKind::FfiBufferBorrow { .. }
+        | MirInstructionKind::FfiBufferEndBorrow { .. }
+        | MirInstructionKind::FfiBufferClose { .. } => {
+            return Err(LlvmLoweringError::UnsupportedInstruction {
+                function: FunctionId::from_raw(u32::MAX),
+                value: instruction.result(),
+            });
+        }
     };
     Ok(line)
 }

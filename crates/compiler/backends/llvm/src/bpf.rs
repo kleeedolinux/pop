@@ -492,6 +492,13 @@ fn validate_instruction(
         | MirInstructionKind::FfiHandleOpen { .. }
         | MirInstructionKind::FfiHandleGet { .. }
         | MirInstructionKind::FfiHandleClose { .. }
+        | MirInstructionKind::FfiBufferOpen { .. }
+        | MirInstructionKind::FfiBufferLength { .. }
+        | MirInstructionKind::FfiBufferRead { .. }
+        | MirInstructionKind::FfiBufferWrite { .. }
+        | MirInstructionKind::FfiBufferBorrow { .. }
+        | MirInstructionKind::FfiBufferEndBorrow { .. }
+        | MirInstructionKind::FfiBufferClose { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. }
         | MirInstructionKind::WriteBarrier { .. }
