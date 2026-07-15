@@ -163,8 +163,12 @@ Runtime:       gcSafePoint{stackMap}, writeBarrier,
                ffiBufferLength{layoutId}, ffiBufferRead{layoutId},
                ffiBufferWrite{layoutId},
                ffiBufferBorrow{layoutId, borrowRegion},
-               ffiBufferEndBorrow{borrowRegion}, ffiBufferClose, suspend, resume
+               ffiBufferEndBorrow{borrowRegion}, ffiBufferClose,
+               ffiBytesBorrow{borrowRegion},
+               ffiBytesBorrowLength{borrowRegion},
+               ffiBytesEndBorrow{borrowRegion}, suspend, resume
 Foreign:       enterForeign, callForeign{foreignId, abi, effects}, leaveForeign
+Scoped:        callScopedBorrow{borrowRegion, nestedFunction, captures}
 Debug:         debugValue, sourceScope
 ```
 
@@ -198,6 +202,13 @@ permitted pointer uses, forbids suspension/escape, and is released on every
 exit. Fixed-layout records carry a backend-neutral marshalling plan rather than
 an object-layout reinterpretation. Physical calling conventions, symbols, and
 object formats remain backend details selected from this contract.
+
+ADR 0087 fixes each source borrow body as one immediate synchronous closure.
+MIR names its nested function and captures in `callScopedBorrow`; the verifier
+checks the nested body with the caller's region provenance and balances the
+matching buffer or byte-payload end operation on every exit. `ffiBytesBorrow`
+and `ffiBytesBorrowLength` expose only the optional immutable payload pointer
+and exact length while the runtime token remains backend-private.
 
 ADR 0084 fixes the exact buffer operation shapes. Open constructs the exact
 typed `Result` only after distinguishing allocation, success, and invariant

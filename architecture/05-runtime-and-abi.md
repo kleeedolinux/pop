@@ -431,6 +431,15 @@ addresses refer only to its separately owned ABI storage. See
 [ADR 0083](./decisions/0083-ffi-resource-state-and-native-buffer-abi.md) and
 [ADR 0084](./decisions/0084-canonical-mir-ffi-buffer-operations.md).
 
+Native ABI 1.17 adds `pop_rt_ffi_bytes_borrow` and
+`pop_rt_ffi_bytes_end_borrow`. The runtime atomically pins the exact immutable
+`Bytes` owner and returns only a null-or-nonzero payload address plus exact
+length and a nonzero private token. Failure leaves outputs unchanged. The
+compiler and backends never calculate a payload offset from managed object
+layout. Scoped buffer and byte borrows execute only immediate synchronous
+closures through one verified MIR region call. See
+[ADR 0087](./decisions/0087-scoped-ffi-borrow-bodies-and-bytes-pin-abi.md).
+
 The compact nonzero `FfiAbiLayoutId` used by those operations is the first
 eight big-endian bytes of ADR 0086's full canonical SHA-256 layout fingerprint.
 Artifacts and generated metadata retain and compare the full fingerprint and

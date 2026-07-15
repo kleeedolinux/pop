@@ -138,6 +138,12 @@ HIR and MIR carry a typed borrow-region identity plus explicit `Pin`/`Unpin`;
 the verifier proves dominance, non-escape, no suspension, and every-exit
 cleanup. The MIR interpreter and every backend consume the same proof.
 
+ADR 0087 closes the body and runtime shapes: each borrow body is one immediate
+synchronous closure represented by a canonical scoped-region call, and native
+ABI 1.17 returns only the immutable `Bytes` payload pointer, length, and private
+borrow token. Ordinary function values and backend-derived object offsets are
+not permitted.
+
 Future managed containers may add separate overloads only after their
 contiguous storage, read/write aliasing, and view-lifetime contracts are
 accepted. `Array<T>`, a class instance, a closure, `String`, and a normal record

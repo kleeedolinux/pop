@@ -341,6 +341,15 @@ marshalled field-by-field into separate ABI storage and never make the normal
 record object layout foreign-visible. See
 [ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
+ADR 0087 requires each scoped borrow body to be a non-async closure expression
+written directly at the call site. Borrow provenance follows only checked
+nullability extraction and exact non-retaining foreign calls. Returning,
+storing, capturing, address-converting, calling ordinary code with, using
+`Ffi.Unsafe` on, nesting a borrow around, or suspending with that provenance is
+rejected statically. HIR and MIR retain the closure identity and
+`BorrowRegionId`; there is no runtime lifetime test or unrestricted matching
+function-value conversion.
+
 ADR 0086 makes that proof reproducible: the compiler recognizes the exact
 trusted `Ffi.C.Layout` identity on records, constructs canonical target/ABI
 descriptors, and binds their full SHA-256 fingerprints and compact

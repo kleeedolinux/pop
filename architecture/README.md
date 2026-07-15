@@ -157,6 +157,10 @@ transplanted into a Luau-shaped file.
   nonzero `FfiAbiLayoutId` execution keys derived from their first eight
   big-endian bytes. Full artifact facts detect collisions and mismatches before
   a backend or runtime can use foreign storage.
+- Scoped FFI borrow bodies are immediate synchronous closures represented by a
+  verified `BorrowRegionId` call, never unrestricted function values. Native
+  ABI 1.17 borrows only the immutable `Bytes` payload through a runtime-owned
+  token; no backend calculates a managed-object payload offset.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 
