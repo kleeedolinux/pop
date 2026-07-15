@@ -1,8 +1,9 @@
 use crate::{
-    ArrayAllocationRequest, ForeignCallMode, ForeignTransitionId, GarbageCollectorContract,
-    ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest, PanicPayload, PinHandle,
-    RootHandle, RootPublication, RuntimeFailure, SchedulerId, TableAllocationRequest, Trap,
-    WriteBarrier,
+    ArrayAllocationRequest, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignCallMode, ForeignTransitionId,
+    GarbageCollectorContract, ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest,
+    PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure, SchedulerId,
+    TableAllocationRequest, Trap, WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,6 +98,107 @@ pub trait RuntimeAdapter {
         &mut self,
         request: &TableAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure>;
+
+    /// Allocates zero-initialized foreign storage with one exact ABI layout.
+    ///
+    /// # Errors
+    ///
+    /// Distinguishes allocation exhaustion from a runtime invariant failure.
+    fn ffi_buffer_open(
+        &mut self,
+        request: &FfiBufferOpenRequest,
+    ) -> Result<ManagedReference, FfiBufferOpenFailure> {
+        let _ = request;
+        Err(FfiBufferOpenFailure::Invariant(
+            RuntimeFailure::runtime_invariant(),
+        ))
+    }
+
+    /// Returns the element length of a live buffer with the expected layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for an invalid, closed, or mismatched buffer.
+    fn ffi_buffer_length(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+    ) -> Result<u64, RuntimeFailure> {
+        let _ = (buffer, layout);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Copies one element from a live buffer without partially changing `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for invalid storage, layout, bounds, or size.
+    fn ffi_buffer_read(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+        index: u64,
+        output: &mut [u8],
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (buffer, layout, index, output);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Copies one exact element into a live buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for invalid storage, layout, bounds, or size.
+    fn ffi_buffer_write(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+        index: u64,
+        element: &[u8],
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (buffer, layout, index, element);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Starts the buffer's single lexical foreign-address borrow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for invalid or closed storage, a layout
+    /// mismatch, or an already-active borrow.
+    fn ffi_buffer_borrow(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+    ) -> Result<FfiBufferBorrow, RuntimeFailure> {
+        let _ = (buffer, layout);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Ends the exact active lexical borrow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for invalid storage or a stale, forged, or
+    /// non-current borrow identity.
+    fn ffi_buffer_end_borrow(
+        &mut self,
+        buffer: ManagedReference,
+        borrow: FfiBufferBorrowId,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (buffer, borrow);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Deterministically closes a buffer, with repeated completed closes allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for invalid storage or an active borrow.
+    fn ffi_buffer_close(&mut self, buffer: ManagedReference) -> Result<(), RuntimeFailure> {
+        let _ = buffer;
+        Err(RuntimeFailure::runtime_invariant())
+    }
 
     /// Registers a strong runtime root.
     ///

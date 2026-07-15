@@ -4,9 +4,10 @@
 //! tests. It models runtime capabilities without importing native ABI names or
 //! collector implementation details.
 use pop_runtime_interface::{
-    ArrayAllocationRequest, ArrayElementMap, GarbageCollectorContract, ManagedReference,
-    ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication,
-    RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointId, SafePointOutcome,
+    ArrayAllocationRequest, ArrayElementMap, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, GarbageCollectorContract,
+    ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle,
+    RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointId, SafePointOutcome,
     TableAllocationRequest, Trap, WriteBarrier,
 };
 use std::collections::BTreeMap;
@@ -46,10 +47,70 @@ pub struct ReferenceRuntimeAdapter {
     allocations: BTreeMap<ManagedReference, ObjectMap>,
     roots: BTreeMap<RootHandle, ManagedReference>,
     pins: BTreeMap<PinHandle, ManagedReference>,
+    ffi_buffers: BTreeMap<ManagedReference, ReferenceFfiBuffer>,
     next_reference: u64,
     next_root: u64,
     next_pin: u64,
+    next_ffi_borrow: u64,
+    next_foreign_address: u64,
     events: Vec<ReferenceRuntimeEvent>,
+}
+
+struct ReferenceFfiBuffer {
+    layout: FfiAbiLayoutId,
+    element_size: u64,
+    length: u64,
+    storage: Vec<u8>,
+    address: Option<ForeignAddress>,
+    borrow: Option<FfiBufferBorrowId>,
+    closed: bool,
+}
+
+fn live_ffi_buffer(
+    buffers: &BTreeMap<ManagedReference, ReferenceFfiBuffer>,
+    buffer: ManagedReference,
+    layout: FfiAbiLayoutId,
+) -> Result<&ReferenceFfiBuffer, RuntimeFailure> {
+    let state = buffers
+        .get(&buffer)
+        .ok_or_else(RuntimeFailure::runtime_invariant)?;
+    if state.closed || state.layout != layout {
+        return Err(RuntimeFailure::runtime_invariant());
+    }
+    Ok(state)
+}
+
+fn live_ffi_buffer_mut(
+    buffers: &mut BTreeMap<ManagedReference, ReferenceFfiBuffer>,
+    buffer: ManagedReference,
+    layout: FfiAbiLayoutId,
+) -> Result<&mut ReferenceFfiBuffer, RuntimeFailure> {
+    let state = buffers
+        .get_mut(&buffer)
+        .ok_or_else(RuntimeFailure::runtime_invariant)?;
+    if state.closed || state.layout != layout {
+        return Err(RuntimeFailure::runtime_invariant());
+    }
+    Ok(state)
+}
+
+fn ffi_element_range(
+    state: &ReferenceFfiBuffer,
+    index: u64,
+    supplied_size: usize,
+) -> Result<std::ops::Range<usize>, RuntimeFailure> {
+    if index >= state.length || u64::try_from(supplied_size) != Ok(state.element_size) {
+        return Err(RuntimeFailure::runtime_invariant());
+    }
+    let start = index
+        .checked_mul(state.element_size)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(RuntimeFailure::runtime_invariant)?;
+    let end = start
+        .checked_add(supplied_size)
+        .filter(|end| *end <= state.storage.len())
+        .ok_or_else(RuntimeFailure::runtime_invariant)?;
+    Ok(start..end)
 }
 
 impl ReferenceRuntimeAdapter {
@@ -121,6 +182,138 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
             value_map: request.value_map(),
         });
         Ok(self.allocate_map(request.object_map().clone()))
+    }
+
+    fn ffi_buffer_open(
+        &mut self,
+        request: &FfiBufferOpenRequest,
+    ) -> Result<ManagedReference, FfiBufferOpenFailure> {
+        let byte_length =
+            usize::try_from(request.byte_length()).map_err(|_| FfiBufferOpenFailure::Allocation)?;
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(byte_length)
+            .map_err(|_| FfiBufferOpenFailure::Allocation)?;
+        storage.resize(byte_length, 0);
+        let address = if byte_length == 0 {
+            None
+        } else {
+            let alignment = request.alignment();
+            let base = self.next_foreign_address.max(0x1000);
+            let aligned = base
+                .checked_add(alignment - 1)
+                .map(|value| value & !(alignment - 1))
+                .and_then(ForeignAddress::new)
+                .ok_or(FfiBufferOpenFailure::Allocation)?;
+            self.next_foreign_address = aligned
+                .raw()
+                .checked_add(request.byte_length().max(1))
+                .ok_or(FfiBufferOpenFailure::Allocation)?;
+            Some(aligned)
+        };
+        let reference =
+            self.allocate_map(ObjectMap::new(0, Vec::new()).map_err(|_| {
+                FfiBufferOpenFailure::Invariant(RuntimeFailure::runtime_invariant())
+            })?);
+        self.ffi_buffers.insert(
+            reference,
+            ReferenceFfiBuffer {
+                layout: request.layout(),
+                element_size: request.element_size(),
+                length: request.length(),
+                storage,
+                address,
+                borrow: None,
+                closed: false,
+            },
+        );
+        Ok(reference)
+    }
+
+    fn ffi_buffer_length(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+    ) -> Result<u64, RuntimeFailure> {
+        let state = live_ffi_buffer(&self.ffi_buffers, buffer, layout)?;
+        Ok(state.length)
+    }
+
+    fn ffi_buffer_read(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+        index: u64,
+        output: &mut [u8],
+    ) -> Result<(), RuntimeFailure> {
+        let state = live_ffi_buffer(&self.ffi_buffers, buffer, layout)?;
+        let range = ffi_element_range(state, index, output.len())?;
+        output.copy_from_slice(&state.storage[range]);
+        Ok(())
+    }
+
+    fn ffi_buffer_write(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+        index: u64,
+        element: &[u8],
+    ) -> Result<(), RuntimeFailure> {
+        let state = live_ffi_buffer_mut(&mut self.ffi_buffers, buffer, layout)?;
+        let range = ffi_element_range(state, index, element.len())?;
+        state.storage[range].copy_from_slice(element);
+        Ok(())
+    }
+
+    fn ffi_buffer_borrow(
+        &mut self,
+        buffer: ManagedReference,
+        layout: FfiAbiLayoutId,
+    ) -> Result<FfiBufferBorrow, RuntimeFailure> {
+        self.next_ffi_borrow = self
+            .next_ffi_borrow
+            .checked_add(1)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let borrow = FfiBufferBorrowId::new(self.next_ffi_borrow)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let state = live_ffi_buffer_mut(&mut self.ffi_buffers, buffer, layout)?;
+        if state.borrow.is_some() {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        state.borrow = Some(borrow);
+        Ok(FfiBufferBorrow::new(borrow, state.address, state.length))
+    }
+
+    fn ffi_buffer_end_borrow(
+        &mut self,
+        buffer: ManagedReference,
+        borrow: FfiBufferBorrowId,
+    ) -> Result<(), RuntimeFailure> {
+        let state = self
+            .ffi_buffers
+            .get_mut(&buffer)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if state.closed || state.borrow != Some(borrow) {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        state.borrow = None;
+        Ok(())
+    }
+
+    fn ffi_buffer_close(&mut self, buffer: ManagedReference) -> Result<(), RuntimeFailure> {
+        let state = self
+            .ffi_buffers
+            .get_mut(&buffer)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if state.borrow.is_some() {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        if !state.closed {
+            state.storage.clear();
+            state.address = None;
+            state.closed = true;
+        }
+        Ok(())
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
