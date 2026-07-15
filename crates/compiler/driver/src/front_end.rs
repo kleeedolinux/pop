@@ -72,6 +72,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let indexed = build_declaration_index(&module_inputs);
     let mut diagnostics = indexed.diagnostics().to_vec();
     validate_source_attribute_targets(&parsed, &mut diagnostics);
+    let mut namespace_attribute_work = define_namespace_attributes(&parsed, &mut diagnostics);
     let referenced_declarations = input
         .reference_metadata
         .iter()
@@ -169,6 +170,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut diagnostics,
     );
     let attribute_queries = resolve_source_attributes(
+        &mut namespace_attribute_work,
         &mut declaration_attributes,
         &mut functions,
         AttributeResolutionContext {
@@ -262,6 +264,13 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         hir_build_errors,
         types: resolver.into_arena(),
         attribute_queries,
+        namespace_attributes: namespace_attribute_work
+            .into_iter()
+            .map(|work| NamespaceAttributes {
+                module: work.module,
+                attributes: work.attributes,
+            })
+            .collect(),
         compile_time_evaluations,
         constants,
         diagnostics,
@@ -573,7 +582,8 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
             let supported = children.get(index).is_some_and(|node| {
                 matches!(
                     node.kind(),
-                    NodeKind::AttributeDeclaration
+                    NodeKind::NamespaceDeclaration
+                        | NodeKind::AttributeDeclaration
                         | NodeKind::ConstDeclaration
                         | NodeKind::RecordDeclaration
                         | NodeKind::UnionDeclaration
@@ -594,6 +604,37 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
             }
         }
     }
+}
+
+fn define_namespace_attributes(
+    modules: &[ParsedModule],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<NamespaceAttributeWork> {
+    let mut work = Vec::new();
+    for module in modules {
+        let mut attribute_uses = Vec::new();
+        for node in module.syntax.root().children() {
+            if node.kind() == NodeKind::AttributeUse {
+                match parse_attribute_use(&module.source, &module.syntax, node) {
+                    Ok(syntax) => attribute_uses.push(syntax),
+                    Err(error) => {
+                        diagnostics.push(syntax_error(error.span(), error.expectation()));
+                    }
+                }
+                continue;
+            }
+            if node.kind() == NodeKind::NamespaceDeclaration && !attribute_uses.is_empty() {
+                work.push(NamespaceAttributeWork {
+                    module: module.module,
+                    attribute_uses,
+                    attributes: Vec::new(),
+                });
+            }
+            break;
+        }
+    }
+    work.sort_by_key(|work| work.module);
+    work
 }
 
 fn define_constants(

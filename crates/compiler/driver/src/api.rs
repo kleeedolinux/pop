@@ -96,11 +96,30 @@ pub struct FrontEndResult {
     pub(crate) hir_build_errors: Vec<pop_hir::HirBuildError>,
     pub(crate) types: TypeArena,
     pub(crate) attribute_queries: AttributeQueryIndex,
+    pub(crate) namespace_attributes: Vec<NamespaceAttributes>,
     pub(crate) compile_time_evaluations: Vec<FrontEndCompileTimeEvaluation>,
     pub(crate) constants: Vec<FrontEndConstant>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) reference_metadata: Result<ReferenceMetadata, ReferenceMetadataError>,
     pub(crate) checked_documentation: Vec<CheckedDocumentation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamespaceAttributes {
+    pub(crate) module: ModuleId,
+    pub(crate) attributes: Vec<pop_types::ResolvedAttribute>,
+}
+
+impl NamespaceAttributes {
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub fn attributes(&self) -> &[pop_types::ResolvedAttribute] {
+        &self.attributes
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -546,6 +565,11 @@ impl FrontEndResult {
     #[must_use]
     pub const fn attribute_queries(&self) -> &AttributeQueryIndex {
         &self.attribute_queries
+    }
+
+    #[must_use]
+    pub fn namespace_attributes(&self) -> &[NamespaceAttributes] {
+        &self.namespace_attributes
     }
 
     #[must_use]

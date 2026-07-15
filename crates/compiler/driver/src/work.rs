@@ -55,6 +55,12 @@ pub(crate) struct DeclarationAttributeWork {
     pub(crate) attributes: Vec<ResolvedAttribute>,
 }
 
+pub(crate) struct NamespaceAttributeWork {
+    pub(crate) module: ModuleId,
+    pub(crate) attribute_uses: Vec<AttributeUseSyntax>,
+    pub(crate) attributes: Vec<ResolvedAttribute>,
+}
+
 pub(crate) struct ConstantWork {
     pub(crate) module: ModuleId,
     pub(crate) symbol: SymbolId,

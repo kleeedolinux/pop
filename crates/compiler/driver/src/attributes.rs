@@ -24,6 +24,7 @@ use crate::compile_time::{
 };
 use crate::work::{
     AttributeResolutionContext, CompileTimeContext, DeclarationAttributeWork, FunctionWork,
+    NamespaceAttributeWork,
 };
 
 pub(crate) fn classify_function_attributes(
@@ -309,6 +310,7 @@ fn resolve_attribute_validator(
 }
 
 pub(crate) fn resolve_source_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
     declarations: &mut [DeclarationAttributeWork],
     functions: &mut [FunctionWork],
     context: AttributeResolutionContext<'_>,
@@ -334,6 +336,13 @@ pub(crate) fn resolve_source_attributes(
         compile_time_evaluations,
         diagnostics,
     );
+    resolve_namespace_attributes(
+        namespaces,
+        context,
+        resolver,
+        compile_time_evaluations,
+        diagnostics,
+    );
     resolve_function_attributes(
         functions,
         context.database,
@@ -344,6 +353,39 @@ pub(crate) fn resolve_source_attributes(
         diagnostics,
     );
     build_attribute_query_index(declarations, functions, resolver)
+}
+
+fn resolve_namespace_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
+    context: AttributeResolutionContext<'_>,
+    resolver: &mut SignatureResolver<'_>,
+    compile_time_evaluations: &mut Vec<FrontEndCompileTimeEvaluation>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for namespace in namespaces {
+        let resolved_attributes = resolve_attribute_uses(
+            namespace.module,
+            AttributeTarget::Namespace,
+            &namespace.attribute_uses,
+            context.database,
+            context.signatures,
+            context.compile_time,
+            resolver,
+            compile_time_evaluations,
+            diagnostics,
+        );
+        let validated = resolver
+            .validate_attribute_attachments(AttributeTarget::Namespace, resolved_attributes);
+        diagnostics.extend(
+            validated
+                .errors()
+                .iter()
+                .map(attribute_attachment_diagnostic),
+        );
+        if let Some(attachments) = validated.attachment_set() {
+            namespace.attributes = attachments.attachments().to_vec();
+        }
+    }
 }
 
 fn resolve_function_attributes(
