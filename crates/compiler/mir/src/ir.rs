@@ -19,6 +19,7 @@ use pop_runtime_interface::{
 };
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
+use crate::MirFfiLayoutCatalog;
 use crate::render::{
     dump_declaration, dump_function, dump_function_reference, dump_nested_function,
 };
@@ -155,6 +156,7 @@ pub struct MirBubble {
     pub(crate) methods: Vec<MirMethod>,
     pub(crate) nested_functions: Vec<MirNestedFunction>,
     pub(crate) function_references: Vec<MirFunctionReference>,
+    pub(crate) ffi_layouts: MirFfiLayoutCatalog,
 }
 
 impl MirBubble {
@@ -166,6 +168,11 @@ impl MirBubble {
     #[must_use]
     pub fn function_references(&self) -> &[MirFunctionReference] {
         &self.function_references
+    }
+
+    #[must_use]
+    pub const fn ffi_layouts(&self) -> &MirFfiLayoutCatalog {
+        &self.ffi_layouts
     }
 
     #[must_use]

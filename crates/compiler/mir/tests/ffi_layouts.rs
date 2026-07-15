@@ -1,6 +1,7 @@
 use pop_foundation::{BuiltinTypeId, FieldId, TypeId};
 use pop_mir::{
     MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutError, MirFfiLayoutField, MirFfiValueClass,
+    parse_mir_dump,
 };
 use pop_runtime_interface::FfiAbiLayoutId;
 use pop_target::TargetSpec;
@@ -83,6 +84,18 @@ fn catalog_validates_and_orders_nested_target_layouts() {
 }
 
 #[test]
+fn every_mir_bubble_carries_an_exact_target_catalog() {
+    let catalog = MirFfiLayoutCatalog::empty(&target());
+    assert_eq!(catalog.target(), "x86_64-unknown-linux-gnu");
+    assert!(catalog.entries().is_empty());
+
+    let bubble =
+        parse_mir_dump("mir bubble b0 namespace n0\ndependencies\n").expect("minimal MIR bubble");
+    assert_eq!(bubble.ffi_layouts().target(), "x86_64-unknown-linux-gnu");
+    assert!(bubble.ffi_layouts().entries().is_empty());
+}
+
+#[test]
 fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
     let mut types = TypeArena::new();
     let integer = types.source_type("Int").expect("Int");
@@ -132,7 +145,15 @@ fn catalog_rejects_unsupported_targets_and_false_target_geometry() {
         TargetSpec::for_triple("bpfel-unknown-none").expect("target without an accepted C ABI");
 
     assert_eq!(
-        MirFfiLayoutCatalog::new(&unsupported, Vec::new(), &types),
+        MirFfiLayoutCatalog::empty(&unsupported).target(),
+        "bpfel-unknown-none"
+    );
+    assert_eq!(
+        MirFfiLayoutCatalog::new(
+            &unsupported,
+            vec![entry(1, c_int, 4, 4, MirFfiValueClass::Integer)],
+            &types,
+        ),
         Err(MirFfiLayoutError::UnsupportedTarget)
     );
     assert_eq!(

@@ -21,11 +21,13 @@ use pop_hir::{
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
 };
+use pop_target::TargetSpec;
 use pop_types::{
     FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType, SemanticType,
     TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
 };
 
+use crate::MirFfiLayoutCatalog;
 use crate::ir::*;
 use crate::verification::{
     instruction_operands, instruction_unwind_target, terminator_operands, terminator_targets,
@@ -37,9 +39,30 @@ use crate::verification::{
 /// # Errors
 ///
 /// Returns deterministic MIR invariant violations.
+///
+/// # Panics
+///
+/// Panics only if the toolchain's required native target is removed from the
+/// accepted target inventory.
 pub fn lower_hir_bubble(
     hir: &HirBubble,
     arena: &TypeArena,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu")
+        .expect("the accepted native target is part of the target inventory");
+    lower_hir_bubble_for_target(hir, arena, &target)
+}
+
+/// Lowers a verified HIR Bubble to canonical MIR for one exact target and
+/// verifies the result.
+///
+/// # Errors
+///
+/// Returns deterministic MIR invariant violations.
+pub fn lower_hir_bubble_for_target(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     let all_declarations = specialization_declarations(hir);
     let all_methods = specialization_methods(hir);
@@ -191,6 +214,7 @@ pub fn lower_hir_bubble(
         methods,
         nested_functions,
         function_references,
+        ffi_layouts: MirFfiLayoutCatalog::empty(target),
     };
     rewrite_foreign_calls(&mut mir);
     recompute_effects(&mut mir);

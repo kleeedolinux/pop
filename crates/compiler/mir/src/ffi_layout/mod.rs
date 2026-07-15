@@ -126,6 +126,15 @@ pub struct MirFfiLayoutCatalog {
 }
 
 impl MirFfiLayoutCatalog {
+    /// Constructs an empty catalog for an exact target.
+    #[must_use]
+    pub fn empty(target: &TargetSpec) -> Self {
+        Self {
+            target: target.triple().to_owned(),
+            entries: Vec::new(),
+        }
+    }
+
     /// Validates and canonicalizes one exact target layout catalog.
     ///
     /// # Errors

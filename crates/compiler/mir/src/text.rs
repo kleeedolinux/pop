@@ -12,6 +12,7 @@ use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
     StackMap, Trap, TrapKind, UnwindReason,
 };
+use pop_target::TargetSpec;
 use pop_types::{
     FloatKind, FloatValue, ForeignAbi, ForeignFunctionDeclaration, IntegerKind, IntegerValue,
 };
@@ -28,6 +29,7 @@ use super::{
     MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
     local_instruction_effects,
 };
+use crate::MirFfiLayoutCatalog;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirParseError {
@@ -65,6 +67,11 @@ impl Error for MirParseError {}
 ///
 /// Returns a line-addressed structural parse error. Semantic invalidity remains
 /// the MIR verifier's responsibility.
+///
+/// # Panics
+///
+/// Panics only if the toolchain's required native target is removed from the
+/// accepted target inventory.
 pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
     let lines: Vec<_> = text.lines().collect();
     let header = lines.first().ok_or_else(|| error(1, "missing header"))?;
@@ -130,6 +137,10 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
         methods,
         nested_functions,
         function_references,
+        ffi_layouts: MirFfiLayoutCatalog::empty(
+            &TargetSpec::for_triple("x86_64-unknown-linux-gnu")
+                .expect("the accepted native FFI target is part of the target inventory"),
+        ),
     })
 }
 
