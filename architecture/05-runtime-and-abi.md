@@ -409,6 +409,13 @@ live generation-checked handle. Creation/release retain their existing
 retain-root/release-root entries. Invalid, stale, forged, zero, or closed
 handles fail before a managed reference is returned.
 
+Native ABI 1.16 adds the exact managed-resource operations for
+`Ffi.Buffer<T>`. Open distinguishes allocation failure, success, and invariant
+failure; all other operations use checked status plus unchanged-on-failure
+outputs. Buffer state follows collector relocation while borrowed addresses
+refer only to its separately owned ABI storage. See
+[ADR 0083](./decisions/0083-ffi-resource-state-and-native-buffer-abi.md).
+
 ## Versioning
 
 Artifacts record the language version, MIR version when serialized, PLRI ABI
