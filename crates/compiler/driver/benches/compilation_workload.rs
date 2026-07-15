@@ -14,7 +14,7 @@ use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_hir::HirBubble;
 use pop_mir::{MirBubble, lower_hir_bubble, optimize_mir};
 use pop_source::SourceFile;
-use pop_target::{Endianness, PointerWidth, TargetSpec};
+use pop_target::TargetSpec;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompilationWorkloadConfiguration {
@@ -323,9 +323,5 @@ fn mir_item_count(mir: &MirBubble) -> usize {
 }
 
 fn benchmark_target() -> TargetSpec {
-    TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
-        .expect("benchmark target is complete")
+    TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("benchmark target is supported")
 }
