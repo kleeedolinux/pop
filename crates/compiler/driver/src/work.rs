@@ -11,8 +11,8 @@ use pop_resolve::ResolutionDatabase;
 use pop_source::SourceFile;
 use pop_syntax::{AttributeUseSyntax, FunctionBodySyntax, SyntaxTree};
 use pop_types::{
-    AttributeTarget, BootstrapSchema, ClassDefinition, ClassMethodDefinition, ResolvedAttribute,
-    ResolvedFunctionSignature,
+    AttributeTarget, BootstrapSchema, ClassDefinition, ClassMethodDefinition,
+    ForeignFunctionDeclaration, ResolvedAttribute, ResolvedFunctionSignature,
 };
 
 pub(crate) struct ParsedModule {
@@ -31,6 +31,7 @@ pub(crate) struct FunctionWork {
     pub(crate) is_compile_time: bool,
     pub(crate) attribute_uses: Vec<AttributeUseSyntax>,
     pub(crate) attributes: Vec<ResolvedAttribute>,
+    pub(crate) foreign: Option<ForeignFunctionDeclaration>,
 }
 
 pub(crate) struct CompileTimeContext {
@@ -59,6 +60,7 @@ pub(crate) struct NamespaceAttributeWork {
     pub(crate) module: ModuleId,
     pub(crate) attribute_uses: Vec<AttributeUseSyntax>,
     pub(crate) attributes: Vec<ResolvedAttribute>,
+    pub(crate) ffi_link_aliases: Vec<String>,
 }
 
 pub(crate) struct ConstantWork {

@@ -371,6 +371,11 @@ impl BootstrapSchema {
     }
 
     #[must_use]
+    pub fn type_by_id(&self, id: BuiltinTypeId) -> Option<&BootstrapTypeEntry> {
+        self.types.iter().find(|entry| entry.id == id)
+    }
+
+    #[must_use]
     pub fn iteration_protocol(&self) -> Option<BootstrapIterationProtocol> {
         let iteration = self.type_by_source_name("Iteration")?;
         let iterable = self.type_by_source_name("Iterable")?;

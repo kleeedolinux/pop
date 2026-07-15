@@ -23,7 +23,8 @@
 )]
 
 use pop_foundation::{
-    AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId,
+    AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, SourceSpan, SymbolId,
+    TypeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -308,6 +309,86 @@ pub enum Effect {
     CompilerQuery,
     GcSafePoint,
     Roots,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ForeignAbi {
+    C,
+    System,
+    CUnwind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ForeignFunctionDeclaration {
+    symbol: SymbolId,
+    external_symbol: String,
+    abi: ForeignAbi,
+    link_aliases: Vec<String>,
+    effects: EffectSummary,
+    span: SourceSpan,
+}
+
+impl ForeignFunctionDeclaration {
+    #[must_use]
+    pub fn new(
+        symbol: SymbolId,
+        external_symbol: impl Into<String>,
+        abi: ForeignAbi,
+        mut link_aliases: Vec<String>,
+        nonblocking: bool,
+        span: SourceSpan,
+    ) -> Self {
+        link_aliases.sort();
+        link_aliases.dedup();
+        let mut effects = EffectSummary::empty()
+            .with(Effect::ForeignFunction)
+            .with(Effect::UnsafeMemory)
+            .with(Effect::GcSafePoint);
+        if !nonblocking {
+            effects = effects.with(Effect::Blocks);
+        }
+        if abi == ForeignAbi::CUnwind {
+            effects = effects.with(Effect::MayUnwind);
+        }
+        Self {
+            symbol,
+            external_symbol: external_symbol.into(),
+            abi,
+            link_aliases,
+            effects,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub fn external_symbol(&self) -> &str {
+        &self.external_symbol
+    }
+
+    #[must_use]
+    pub const fn abi(&self) -> ForeignAbi {
+        self.abi
+    }
+
+    #[must_use]
+    pub fn link_aliases(&self) -> &[String] {
+        &self.link_aliases
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> EffectSummary {
+        self.effects
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
 }
 
 impl Effect {

@@ -13,8 +13,9 @@ use pop_resolve::{ResolutionDatabase, SymbolSpace};
 use pop_syntax::{AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind};
 use pop_types::{
     AttributeAttachmentError, AttributeConstant, AttributeQueryIndex, AttributeTarget,
-    AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole, ResolvedAttribute,
-    ResolvedFunctionSignature, SignatureResolver, TypeArena,
+    AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole, ForeignAbi,
+    ForeignFunctionDeclaration, PrimitiveType, ResolvedAttribute, ResolvedFunctionSignature,
+    SemanticType, SignatureResolver, TypeArena,
 };
 
 use crate::api::FrontEndCompileTimeEvaluation;
@@ -26,6 +27,331 @@ use crate::work::{
     AttributeResolutionContext, CompileTimeContext, DeclarationAttributeWork, FunctionWork,
     NamespaceAttributeWork,
 };
+
+pub(crate) fn resolve_ffi_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
+    functions: &mut [FunctionWork],
+    bootstrap: &BootstrapSchema,
+    has_ffi_dependency: bool,
+    types: &TypeArena,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !has_ffi_dependency {
+        return;
+    }
+    for namespace in namespaces.iter_mut() {
+        let mut ordinary = Vec::new();
+        let mut aliases = BTreeSet::new();
+        for attribute in std::mem::take(&mut namespace.attribute_uses) {
+            match ffi_attribute_role(bootstrap, &attribute) {
+                Some(CompilerAttributeRole::FfiLink) => {
+                    if let Some(alias) = parse_link_alias(&attribute) {
+                        if !aliases.insert(alias.clone()) {
+                            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                                attribute.span(),
+                                "duplicate Ffi.Link alias",
+                            ));
+                        }
+                    } else {
+                        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                            attribute.span(),
+                            "Ffi.Link requires one PascalCase alias string",
+                        ));
+                    }
+                }
+                Some(_) => diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "FFI attribute has the wrong attachment target",
+                )),
+                None => ordinary.push(attribute),
+            }
+        }
+        namespace.attribute_uses = ordinary;
+        namespace.ffi_link_aliases = aliases.into_iter().collect();
+    }
+    let aliases_by_module: BTreeMap<_, _> = namespaces
+        .iter()
+        .map(|namespace| (namespace.module, namespace.ffi_link_aliases.clone()))
+        .collect();
+    for function in functions {
+        resolve_foreign_function(
+            function,
+            aliases_by_module
+                .get(&function.module)
+                .cloned()
+                .unwrap_or_default(),
+            bootstrap,
+            types,
+            diagnostics,
+        );
+    }
+}
+
+fn resolve_foreign_function(
+    function: &mut FunctionWork,
+    link_aliases: Vec<String>,
+    bootstrap: &BootstrapSchema,
+    types: &TypeArena,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut ordinary = Vec::new();
+    let mut foreign = None;
+    let mut nonblocking = None;
+    let mut malformed = false;
+    for attribute in std::mem::take(&mut function.attribute_uses) {
+        match ffi_attribute_role(bootstrap, &attribute) {
+            Some(CompilerAttributeRole::FfiForeign) if foreign.is_none() => {
+                foreign = Some(attribute);
+            }
+            Some(CompilerAttributeRole::FfiNonblocking) if nonblocking.is_none() => {
+                nonblocking = Some(attribute);
+            }
+            Some(CompilerAttributeRole::FfiForeign | CompilerAttributeRole::FfiNonblocking) => {
+                malformed = true;
+                diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "duplicate foreign function attribute",
+                ));
+            }
+            Some(_) => {
+                malformed = true;
+                diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "FFI attribute has the wrong attachment target",
+                ));
+            }
+            None => ordinary.push(attribute),
+        }
+    }
+    function.attribute_uses = ordinary;
+    let Some(foreign_syntax) = foreign else {
+        if let Some(nonblocking) = nonblocking {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                nonblocking.span(),
+                "Ffi.Nonblocking requires Ffi.Foreign",
+            ));
+        }
+        return;
+    };
+    let initial_error_count = diagnostics.len();
+    let parsed = parse_foreign_contract(&foreign_syntax).or_else(|| {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            foreign_syntax.span(),
+            "Ffi.Foreign requires a symbol and a closed ABI",
+        ));
+        None
+    });
+    if nonblocking
+        .as_ref()
+        .is_some_and(|attribute| !attribute.arguments().is_empty())
+    {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            nonblocking
+                .as_ref()
+                .map_or(foreign_syntax.span(), |value| value.span()),
+            "Ffi.Nonblocking takes no arguments",
+        ));
+    }
+    if !function.body.statements().is_empty() {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign functions cannot have a Pop body",
+        ));
+    }
+    if function.signature.is_async() {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign functions cannot be async",
+        ));
+    }
+    if !function.signature.type_parameters().is_empty() {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign functions cannot be generic",
+        ));
+    }
+    let abi_types_valid = function.signature.parameters().iter().all(|parameter| {
+        parameter
+            .parameter_type()
+            .type_id()
+            .is_some_and(|type_id| valid_foreign_abi_type(type_id, types, bootstrap))
+    }) && function.signature.results().iter().all(|result| {
+        result
+            .type_id()
+            .is_some_and(|type_id| valid_foreign_abi_type(type_id, types, bootstrap))
+    });
+    if !abi_types_valid {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign signature contains a type without a direct ABI representation",
+        ));
+    }
+    if malformed || diagnostics.len() != initial_error_count {
+        return;
+    }
+    let Some((external_symbol, abi)) = parsed else {
+        return;
+    };
+    let declaration = ForeignFunctionDeclaration::new(
+        function.signature.symbol(),
+        external_symbol,
+        abi,
+        link_aliases,
+        nonblocking.is_some(),
+        foreign_syntax.span(),
+    );
+    function.signature = function
+        .signature
+        .clone()
+        .with_effects(declaration.effects());
+    function.foreign = Some(declaration);
+}
+
+fn ffi_attribute_role(
+    bootstrap: &BootstrapSchema,
+    attribute: &AttributeUseSyntax,
+) -> Option<CompilerAttributeRole> {
+    let name = attribute.path().join(".");
+    let entry = bootstrap.compiler_attribute_by_source_name(&name)?;
+    (entry.owner_bubble() == "Pop.Ffi").then(|| entry.role())
+}
+
+fn parse_link_alias(attribute: &AttributeUseSyntax) -> Option<String> {
+    let [argument] = attribute.arguments() else {
+        return None;
+    };
+    if argument.name().is_some() {
+        return None;
+    }
+    let ExpressionSyntaxKind::String(alias) = argument.value().kind() else {
+        return None;
+    };
+    valid_pascal_identifier(alias).then(|| alias.clone())
+}
+
+fn valid_pascal_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_uppercase())
+        && characters.all(|character| character.is_ascii_alphanumeric())
+}
+
+fn parse_foreign_contract(attribute: &AttributeUseSyntax) -> Option<(String, ForeignAbi)> {
+    let arguments = attribute.arguments();
+    if !(1..=2).contains(&arguments.len()) || arguments[0].name().is_some() {
+        return None;
+    }
+    let ExpressionSyntaxKind::String(symbol) = arguments[0].value().kind() else {
+        return None;
+    };
+    if symbol.is_empty() || symbol.chars().any(char::is_control) {
+        return None;
+    }
+    let abi = if let Some(argument) = arguments.get(1) {
+        if argument.name() != Some("abi") {
+            return None;
+        }
+        let ExpressionSyntaxKind::String(abi) = argument.value().kind() else {
+            return None;
+        };
+        match abi.as_str() {
+            "C" => ForeignAbi::C,
+            "System" => ForeignAbi::System,
+            "CUnwind" => ForeignAbi::CUnwind,
+            _ => return None,
+        }
+    } else {
+        ForeignAbi::C
+    };
+    Some((symbol.clone(), abi))
+}
+
+fn valid_foreign_abi_type(type_id: TypeId, types: &TypeArena, bootstrap: &BootstrapSchema) -> bool {
+    match types.get(type_id) {
+        Some(SemanticType::Primitive(
+            PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+        )) => true,
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) => {
+            let Some(entry) = bootstrap.type_by_id(*definition) else {
+                return false;
+            };
+            match entry.source_name() {
+                "Ffi.Pointer" | "Ffi.OptionalPointer" => {
+                    let [pointee] = arguments.as_slice() else {
+                        return false;
+                    };
+                    valid_foreign_pointer_target(*pointee, types, bootstrap)
+                }
+                "Ffi.Handle" => arguments.len() == 1,
+                "Ffi.Function" | "Ffi.OptionalFunction" => {
+                    let [signature] = arguments.as_slice() else {
+                        return false;
+                    };
+                    valid_foreign_callback_signature(*signature, types, bootstrap)
+                }
+                name if name.starts_with("Ffi.C.") => arguments.is_empty(),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn valid_foreign_pointer_target(
+    type_id: TypeId,
+    types: &TypeArena,
+    bootstrap: &BootstrapSchema,
+) -> bool {
+    match types.get(type_id) {
+        Some(
+            SemanticType::Primitive(
+                PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+            )
+            | SemanticType::Opaque(_),
+        ) => true,
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) => bootstrap.type_by_id(*definition).is_some_and(|entry| {
+            if entry.source_name().starts_with("Ffi.C.") {
+                arguments.is_empty()
+            } else if matches!(entry.source_name(), "Ffi.Pointer" | "Ffi.OptionalPointer") {
+                let [pointee] = arguments.as_slice() else {
+                    return false;
+                };
+                valid_foreign_pointer_target(*pointee, types, bootstrap)
+            } else {
+                false
+            }
+        }),
+        _ => false,
+    }
+}
+
+fn valid_foreign_callback_signature(
+    type_id: TypeId,
+    types: &TypeArena,
+    bootstrap: &BootstrapSchema,
+) -> bool {
+    let Some(SemanticType::Function {
+        is_async,
+        parameters,
+        results,
+        ..
+    }) = types.get(type_id)
+    else {
+        return false;
+    };
+    !is_async
+        && parameters
+            .iter()
+            .chain(results)
+            .all(|type_id| valid_foreign_abi_type(*type_id, types, bootstrap))
+}
 
 pub(crate) fn classify_function_attributes(
     database: &ResolutionDatabase,

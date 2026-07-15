@@ -13,7 +13,9 @@ use pop_foundation::{
 use pop_hir::{HirBubble, HirDeclaration, HirFunction, HirMethod};
 use pop_library_bridge::{FoundationBubble, NativeEffect, NativeExport, PopAbiType};
 use pop_source::SourceFile;
-use pop_types::{AttributeQueryIndex, BootstrapSchema, PrimitiveType, TypeArena};
+use pop_types::{
+    AttributeQueryIndex, BootstrapSchema, ForeignFunctionDeclaration, PrimitiveType, TypeArena,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::front_end::diagnostic_snapshot;
@@ -115,6 +117,7 @@ pub struct FrontEndResult {
     pub(crate) types: TypeArena,
     pub(crate) attribute_queries: AttributeQueryIndex,
     pub(crate) namespace_attributes: Vec<NamespaceAttributes>,
+    pub(crate) foreign_declarations: Vec<ForeignFunctionDeclaration>,
     pub(crate) compile_time_evaluations: Vec<FrontEndCompileTimeEvaluation>,
     pub(crate) constants: Vec<FrontEndConstant>,
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -588,6 +591,11 @@ impl FrontEndResult {
     #[must_use]
     pub fn namespace_attributes(&self) -> &[NamespaceAttributes] {
         &self.namespace_attributes
+    }
+
+    #[must_use]
+    pub fn foreign_declarations(&self) -> &[ForeignFunctionDeclaration] {
+        &self.foreign_declarations
     }
 
     #[must_use]

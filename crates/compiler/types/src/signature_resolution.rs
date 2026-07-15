@@ -195,6 +195,12 @@ impl ResolvedFunctionSignature {
         self
     }
 
+    #[must_use]
+    pub const fn with_effects(mut self, effects: crate::EffectSummary) -> Self {
+        self.effects = effects;
+        self
+    }
+
     /// Rehydrates one already-verified public reference signature in the
     /// consumer's isolated type arena.
     #[must_use]

@@ -34,7 +34,9 @@ use pop_types::{
 };
 
 use crate::api::*;
-use crate::attributes::{classify_function_attributes, resolve_source_attributes};
+use crate::attributes::{
+    classify_function_attributes, resolve_ffi_attributes, resolve_source_attributes,
+};
 use crate::compile_time::{
     build_compile_time_context, check_compile_time_function_bodies,
     compile_time_attribute_constant, evaluate_declaration_defaults, evaluate_source_constants,
@@ -135,6 +137,14 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &database,
         &bootstrap,
         &mut resolver,
+        &mut diagnostics,
+    );
+    resolve_ffi_attributes(
+        &mut namespace_attribute_work,
+        &mut functions,
+        &bootstrap,
+        input.ffi_dependency.is_some(),
+        resolver.arena(),
         &mut diagnostics,
     );
     let mut signatures = reference_signatures(&input.reference_metadata, &database, &mut resolver);
@@ -273,6 +283,10 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
                 module: work.module,
                 attributes: work.attributes,
             })
+            .collect(),
+        foreign_declarations: functions
+            .iter()
+            .filter_map(|function| function.foreign.clone())
             .collect(),
         compile_time_evaluations,
         constants,
@@ -631,6 +645,7 @@ fn define_namespace_attributes(
                     module: module.module,
                     attribute_uses,
                     attributes: Vec::new(),
+                    ffi_link_aliases: Vec::new(),
                 });
             }
             break;
@@ -717,7 +732,7 @@ fn build_runtime_hir(
     let mut hir_build_errors = Vec::new();
     let mut typed_functions = Vec::new();
     for (index, function) in functions.iter().enumerate() {
-        if function.is_compile_time {
+        if function.is_compile_time || function.foreign.is_some() {
             continue;
         }
         let typed = BodyChecker::new(function.module, resolver, signatures)
@@ -1581,6 +1596,7 @@ fn resolve_function(
         is_compile_time,
         attribute_uses,
         attributes: Vec::new(),
+        foreign: None,
     })
 }
 
