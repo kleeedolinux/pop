@@ -417,6 +417,7 @@ impl RuntimeAdapter for GenerationalRuntime {
     }
 
     fn write_barrier(&mut self, barrier: WriteBarrier) -> Result<(), RuntimeFailure> {
+        self.ensure_mutable(barrier.owner())?;
         self.validate_ownership_edge(barrier.owner(), barrier.value())?;
         self.nursery.write_barrier(barrier)?;
         self.record_satb(barrier.previous());

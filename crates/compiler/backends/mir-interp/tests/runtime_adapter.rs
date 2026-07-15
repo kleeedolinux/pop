@@ -3,7 +3,7 @@ use pop_backend_mir_interp::{
 };
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{lower_hir_bubble, parse_mir_dump};
+use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
 use pop_runtime_collector::{BootstrapRuntime, HeapLimits};
 use pop_runtime_interface::{
     ArrayAllocationRequest, CollectionStatistics, GarbageCollectorContract, ManagedReference,
@@ -210,6 +210,29 @@ fn managed_field_mutation_routes_the_explicit_write_barrier() {
         .expect("verified MIR");
     assert_eq!(interpreter.call(symbol, &[]), Ok(Vec::new()));
     assert_eq!(interpreter.runtime().barriers, 1);
+}
+
+#[test]
+fn interpreter_omits_only_a_verified_unpublished_owner_barrier() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public class Holder\n\
+             public values: {Int}\n\
+         end\n\
+         public function run(): Holder\n\
+             local holder = Holder { values = { 1 } }\n\
+             holder.values = { 2 }\n\
+             return holder\n\
+         end\n",
+    );
+    let optimized = optimize_mir(mir, &types).expect("optimized MIR");
+    let interpreter = MirInterpreter::with_runtime(&optimized, &types, RecordingRuntime::default())
+        .expect("verified optimized MIR");
+
+    interpreter
+        .call(optimized.functions()[0].symbol(), &[])
+        .expect("execute optimized store");
+    assert_eq!(interpreter.runtime().barriers, 0);
 }
 
 #[test]

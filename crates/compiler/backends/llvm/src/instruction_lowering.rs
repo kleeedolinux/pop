@@ -485,7 +485,12 @@ pub(crate) fn lower_instruction(
             native_runtime_symbol(RuntimeOperation::Unpin),
             handle.raw()
         ),
-        MirInstructionKind::WriteBarrier { owner, .. } => format!(
+        MirInstructionKind::WriteBarrier { proof: Some(_), .. } => {
+            "; verified managed write barrier elided".to_owned()
+        }
+        MirInstructionKind::WriteBarrier {
+            owner, proof: None, ..
+        } => format!(
             "call void @{}(i64 %v{})",
             native_runtime_symbol(RuntimeOperation::SatbWriteBarrier),
             owner.raw()

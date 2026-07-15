@@ -32,7 +32,7 @@ pub use generational::{
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use ownership::{
-    IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
-    PublicationStatistics,
+    FreezeStatistics, IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectMutability,
+    ObjectOwnership, PublicationStatistics,
 };
 pub use relocation::{CollectorGeneration, CollectorObjectId, RelocationRuntime};

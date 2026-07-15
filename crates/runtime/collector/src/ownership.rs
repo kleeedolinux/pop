@@ -78,6 +78,32 @@ pub enum ObjectOwnership {
     Shared,
 }
 
+/// Runtime mutability metadata kept distinct from ownership and placement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ObjectMutability {
+    #[default]
+    Mutable,
+    SharedImmutable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreezeStatistics {
+    objects_frozen: u64,
+}
+
+impl FreezeStatistics {
+    pub(crate) fn new(objects_frozen: usize) -> Self {
+        Self {
+            objects_frozen: u64::try_from(objects_frozen).unwrap_or(u64::MAX),
+        }
+    }
+
+    #[must_use]
+    pub const fn objects_frozen(self) -> u64 {
+        self.objects_frozen
+    }
+}
+
 impl Default for ObjectOwnership {
     fn default() -> Self {
         Self::SchedulerLocal(SchedulerId::new(1))

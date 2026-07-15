@@ -1947,7 +1947,11 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 slot,
                 previous,
                 value: stored,
+                proof,
             } => {
+                if proof.is_some() {
+                    return Ok(());
+                }
                 let owner = value(values, *owner)?
                     .reference
                     .ok_or(ExecutionError::TypeMismatch)?;

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_runtime_interface::{ManagedReference, ObjectSlot, PinHandle, RootHandle, RuntimeFailure};
 
 use crate::heap::{Allocation, CollectorMetrics, SlotValue};
-use crate::ownership::ObjectOwnership;
+use crate::ownership::{ObjectMutability, ObjectOwnership};
 
 use super::table::ObjectTable;
 
@@ -24,6 +24,7 @@ pub(crate) struct RelocationAllocation {
     pub(crate) generation: CollectorGeneration,
     pub(crate) allocation: Allocation,
     pub(crate) ownership: ObjectOwnership,
+    pub(crate) mutability: ObjectMutability,
 }
 
 pub struct RelocationRuntime {

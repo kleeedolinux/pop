@@ -1470,6 +1470,50 @@ fn abi_two_safe_points_reload_roots_before_later_uses() {
 }
 
 #[test]
+fn llvm_omits_only_a_verified_unpublished_owner_barrier() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/barrier.pop",
+        "namespace Main\n\
+         public class Holder\n\
+             public values: {Int}\n\
+         end\n\
+         public function replace(values: {Int}, replacement: {Int}): Holder\n\
+             local holder = Holder { values = values }\n\
+             holder.values = replacement\n\
+             return holder\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(front_end.diagnostics().is_empty());
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(mir, front_end.types()).expect("optimized MIR");
+    let module = lower_mir_to_llvm_ir(
+        &optimized,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM lowering");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("; verified managed write barrier elided"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("call void @pop_rt_satb_write_barrier"),
+        "{text}"
+    );
+}
+
+#[test]
 fn abi_two_root_reload_flows_through_control_flow_arguments() {
     let mut types = pop_types::TypeArena::new();
     let integer = types.source_type("Int").expect("Int");

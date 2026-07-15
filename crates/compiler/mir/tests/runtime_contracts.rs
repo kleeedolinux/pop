@@ -382,6 +382,63 @@ fn managed_field_writes_have_an_explicit_barrier_before_the_store() {
 }
 
 #[test]
+fn optimizer_retains_a_verified_proof_when_eliding_an_unpublished_owner_barrier() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public class Holder\n\
+             public values: {Int}\n\
+         end\n\
+         public function replace(values: {Int}, replacement: {Int}): Holder\n\
+             local holder = Holder { values = values }\n\
+             holder.values = replacement\n\
+             return holder\n\
+         end\n",
+    );
+
+    let optimized = pop_mir::optimize_mir(mir, &types).expect("optimized MIR");
+    let dump = optimized.dump();
+    assert!(
+        dump.contains("proof UnpublishedOwner"),
+        "optimized MIR must retain the barrier-elision proof: {dump}"
+    );
+    assert!(
+        optimized.functions()[0]
+            .effects()
+            .contains(MirEffect::WritesManagedReference)
+    );
+    assert!(verify_mir_bubble(&optimized, &types).is_ok());
+}
+
+#[test]
+fn verifier_rejects_a_forged_unpublished_owner_barrier_proof() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public class Holder\n\
+             public values: {Int}\n\
+             public function Holder:set(values: {Int})\n\
+                 self.values = values\n\
+             end\n\
+         end\n",
+    );
+    let dump = mir.dump();
+    let barrier = dump
+        .lines()
+        .find(|line| line.contains("writeBarrier"))
+        .expect("write barrier");
+    let forged =
+        parse_mir_dump(&dump.replacen(barrier, &format!("{barrier} proof UnpublishedOwner"), 1))
+            .expect("proof-bearing MIR");
+
+    assert!(matches!(
+        verify_mir_bubble(&forged, &types),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidBarrierElisionProof { .. }
+        ))
+    ));
+}
+
+#[test]
 fn textual_trap_panic_unwind_and_root_actions_are_explicit_and_verified() {
     let mut types = pop_types::TypeArena::new();
     let integer = types.source_type("Int").expect("Int");

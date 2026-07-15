@@ -15,7 +15,7 @@ use pop_runtime_interface::{
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
 use super::{
-    MirBlock, MirBlockArgument, MirBubble, MirBuiltinInterfaceImplementation,
+    BarrierElisionProof, MirBlock, MirBlockArgument, MirBubble, MirBuiltinInterfaceImplementation,
     MirBuiltinInterfaceMethodImplementation, MirCancellationMode, MirCapture, MirCaptureMode,
     MirClassDeclaration, MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration,
     MirDeclarationKind, MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
@@ -1667,14 +1667,25 @@ fn parse_object_map(text: &str, line: usize) -> Result<ObjectMap, MirParseError>
 
 fn parse_write_barrier(rest: &str, line: usize) -> Result<MirInstructionKind, MirParseError> {
     let parts = rest.split_whitespace().collect::<Vec<_>>();
-    if parts.len() != 7 || parts[1] != "slot" || parts[3] != "previous" || parts[5] != "value" {
+    if !matches!(parts.len(), 7 | 9)
+        || parts[1] != "slot"
+        || parts[3] != "previous"
+        || parts[5] != "value"
+        || (parts.len() == 9 && parts[7] != "proof")
+    {
         return Err(error(line, "write barrier"));
     }
+    let proof = match parts.get(8).copied() {
+        None => None,
+        Some("UnpublishedOwner") => Some(BarrierElisionProof::UnpublishedOwner),
+        Some(_) => return Err(error(line, "write barrier proof")),
+    };
     Ok(MirInstructionKind::WriteBarrier {
         owner: ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?),
         slot: ObjectSlot::new(parse_u32(parts[2], line)?),
         previous: parse_optional_value(parts[4], line)?,
         value: parse_optional_value(parts[6], line)?,
+        proof,
     })
 }
 

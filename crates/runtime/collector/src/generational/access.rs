@@ -63,6 +63,7 @@ impl GenerationalRuntime {
         owner: ManagedReference,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
+        self.ensure_mutable(owner)?;
         let (length, element_map) = self
             .nursery
             .objects
@@ -109,6 +110,7 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
+        self.ensure_mutable(owner)?;
         let allocation = self
             .nursery
             .objects
@@ -154,6 +156,7 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
+        self.ensure_mutable(owner)?;
         let element_map = self
             .nursery
             .objects
@@ -210,6 +213,7 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
+        self.ensure_mutable(owner)?;
         let is_reference = self
             .nursery
             .objects

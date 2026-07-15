@@ -128,6 +128,8 @@ not table or runtime-name lookup.
 - mutable typed root updates, runtime-profile/backend capability negotiation,
   and a real single-mutator relocation conformance collector before production
   TLAB/parallel-evacuation claims (ADR 0039);
+- atomic shared-graph freezing with mutability kept separate from ownership,
+  plus verified backend-neutral `UnpublishedOwner` barrier proofs (ADR 0080);
 - `Pop.Standard` I/O, time, tasks, and platform adapters;
 - debug locations and stack traces;
 - differential tests against the MIR interpreter.

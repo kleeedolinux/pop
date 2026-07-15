@@ -713,6 +713,7 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             slot,
             previous,
             value,
+            proof,
         } => {
             let _ = write!(
                 output,
@@ -723,6 +724,12 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             dump_optional_value(output, *previous);
             output.push_str(" value ");
             dump_optional_value(output, *value);
+            if let Some(proof) = proof {
+                output.push_str(" proof ");
+                output.push_str(match proof {
+                    BarrierElisionProof::UnpublishedOwner => "UnpublishedOwner",
+                });
+            }
         }
         _ => unreachable!("specialized MIR dumper accepts every remaining instruction"),
     }

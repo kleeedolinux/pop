@@ -1392,7 +1392,14 @@ pub enum MirInstructionKind {
         slot: ObjectSlot,
         previous: Option<ValueId>,
         value: Option<ValueId>,
+        proof: Option<BarrierElisionProof>,
     },
+}
+
+/// Closed backend-neutral reasons why a managed store needs no runtime barrier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BarrierElisionProof {
+    UnpublishedOwner,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1845,6 +1852,10 @@ pub enum MirVerificationError {
     },
     UnexpectedWriteBarrier {
         instruction: ValueId,
+    },
+    InvalidBarrierElisionProof {
+        instruction: ValueId,
+        proof: BarrierElisionProof,
     },
     InvalidUnwindAction {
         instruction: ValueId,
