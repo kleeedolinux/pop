@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, BlockId, CaptureId, ClassId, CleanupScopeId, FieldId, FileId, FunctionId, LocalId,
-    MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId,
-    ValueId, ValueParameterId,
+    BindingId, BlockId, CaptureId, ClassId, CleanupScopeId, CoroutineStateId, FieldId, FileId,
+    FunctionId, LocalId, MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange,
+    TextSize, TypeId, ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
@@ -48,6 +48,7 @@ pub fn lower_hir_bubble(
         .iter()
         .map(|reference| MirFunctionReference {
             identity: reference.identity(),
+            is_async: reference.is_async(),
             parameters: reference.parameters().to_vec(),
             results: reference.results().to_vec(),
             effects: lower_effect_summary(reference.effects()),
@@ -796,6 +797,8 @@ struct FunctionBuilder<'hir> {
     loop_stack: Vec<LoopContext>,
     active_cleanups: Vec<ActiveCleanup<'hir>>,
     next_cleanup_scope: u32,
+    next_coroutine_state: u32,
+    next_suspend_safe_point: u32,
     current_cleanup: Option<MirCleanupBlock>,
 }
 
@@ -925,7 +928,7 @@ fn visit_statement_closures(
                 }
             }
         }
-        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+        HirStatementKind::Defer { body } => {
             for nested in body {
                 visit_statement_closures(nested, parameters, locals);
             }
@@ -1026,9 +1029,7 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         HirStatementKind::ResultMatch { arms, .. } => arms
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
-        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
-            contains_continue_for_current_loop(body)
-        }
+        HirStatementKind::Defer { body } => contains_continue_for_current_loop(body),
         HirStatementKind::While { .. }
         | HirStatementKind::OptionalWhile { .. }
         | HirStatementKind::RepeatUntil { .. }
@@ -1079,8 +1080,7 @@ fn visit_expression_closures(
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
         | HirExpressionKind::NumericConvert { value: base, .. }
-        | HirExpressionKind::StringFormat { value: base, .. }
-        | HirExpressionKind::Await { task: base } => {
+        | HirExpressionKind::StringFormat { value: base, .. } => {
             visit_expression_closures(base, parameters, locals);
         }
         HirExpressionKind::TableGet { table, key } => {
@@ -1185,6 +1185,9 @@ fn visit_expression_closures(
         | HirExpressionKind::OptionalNarrow { optional } => {
             visit_expression_closures(optional, parameters, locals);
         }
+        HirExpressionKind::Await { task } => {
+            visit_expression_closures(task, parameters, locals);
+        }
         HirExpressionKind::ResultPropagate { result, .. } => {
             visit_expression_closures(result, parameters, locals);
         }
@@ -1280,7 +1283,7 @@ impl<'hir> FunctionBuilder<'hir> {
             .collect();
         Self::from_parts(
             owner,
-            false,
+            closure.is_async(),
             parameter_specs,
             closure.results().to_vec(),
             closure.body(),
@@ -1352,6 +1355,8 @@ impl<'hir> FunctionBuilder<'hir> {
             loop_stack: Vec::new(),
             active_cleanups: Vec::new(),
             next_cleanup_scope: 0,
+            next_coroutine_state: 0,
+            next_suspend_safe_point: 0,
             current_cleanup: None,
         }
     }
@@ -1620,7 +1625,7 @@ impl<'hir> FunctionBuilder<'hir> {
                     result_type,
                     arms,
                 } => self.lower_result_match(scrutinee, *result, *result_type, arms),
-                HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                HirStatementKind::Defer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
                     self.active_cleanups.push(ActiveCleanup { scope, body });
@@ -2914,9 +2919,6 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::Function(function) => {
                 MirInstructionKind::FunctionReference(*function)
             }
-            HirExpressionKind::Await { task } => MirInstructionKind::Await {
-                task: self.lower_expression(task),
-            },
             HirExpressionKind::Tuple(elements) => MirInstructionKind::TupleMake(
                 elements
                     .iter()
@@ -3038,9 +3040,23 @@ impl<'hir> FunctionBuilder<'hir> {
             }
             HirExpressionKind::Call {
                 dispatch,
+                is_async,
                 arguments,
                 ..
-            } => self.lower_call(dispatch, arguments),
+            } => {
+                if *is_async {
+                    return self.lower_task_create(
+                        dispatch,
+                        arguments,
+                        expression.type_id(),
+                        expression.span(),
+                    );
+                }
+                self.lower_call(dispatch, arguments)
+            }
+            HirExpressionKind::Await { task } => {
+                return self.lower_await(task, expression.type_id(), expression.span());
+            }
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
@@ -3268,6 +3284,7 @@ impl<'hir> FunctionBuilder<'hir> {
         self.nested_functions.push(MirNestedFunction {
             owner: self.owner,
             function: closure.function(),
+            is_async: closure.is_async(),
             captures: closure
                 .captures()
                 .iter()
@@ -3673,6 +3690,143 @@ impl<'hir> FunctionBuilder<'hir> {
             .iter()
             .map(|field| (field.field(), self.lower_expression(field.value())))
             .collect()
+    }
+
+    fn lower_task_create(
+        &mut self,
+        dispatch: &HirCallDispatch,
+        arguments: &[HirExpression],
+        task_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let completion_type = match self.arena.get(task_type) {
+            Some(SemanticType::Builtin { arguments, .. }) if arguments.len() == 1 => arguments[0],
+            _ => unreachable!("verified async calls produce exact Task<T> values"),
+        };
+        let dispatch = match dispatch {
+            HirCallDispatch::Direct { function } => MirTaskDispatch::Direct(*function),
+            HirCallDispatch::Referenced { function } => MirTaskDispatch::Referenced(*function),
+            HirCallDispatch::Indirect { callee } => {
+                MirTaskDispatch::Indirect(self.lower_expression(callee))
+            }
+            HirCallDispatch::Standard { .. }
+            | HirCallDispatch::DirectMethod { .. }
+            | HirCallDispatch::InterfaceMethod { .. }
+            | HirCallDispatch::BuiltinInterfaceMethod { .. } => {
+                unreachable!("verified async calls use function dispatch")
+            }
+        };
+        let arguments = arguments
+            .iter()
+            .map(|argument| self.lower_expression(argument))
+            .collect::<Vec<_>>();
+        let argument_types = arguments
+            .iter()
+            .map(|argument| self.value_type(*argument))
+            .collect::<Vec<_>>();
+        let object_map = task_object_map(&dispatch, &argument_types, completion_type, self.arena);
+        self.emit(
+            MirInstructionKind::TaskCreate {
+                dispatch,
+                arguments,
+                completion_type,
+                object_map,
+            },
+            task_type,
+            span,
+        )
+    }
+
+    fn lower_await(
+        &mut self,
+        task: &HirExpression,
+        result_type: TypeId,
+        span: SourceSpan,
+    ) -> ValueId {
+        let task = self.lower_expression(task);
+        let state = self.live_state(span);
+        let mut frame_values = vec![task];
+        frame_values.extend(self.state_values(&state));
+        frame_values.extend(self.parameter_cells.values().copied());
+        frame_values.extend(self.local_cells.values().copied());
+        let mut seen = BTreeSet::new();
+        frame_values.retain(|value| seen.insert(*value));
+
+        let coroutine_state = CoroutineStateId::from_raw(self.next_coroutine_state);
+        self.next_coroutine_state = self.next_coroutine_state.saturating_add(1);
+        let safe_point = SafePointId::new(self.next_suspend_safe_point);
+        self.next_suspend_safe_point = self.next_suspend_safe_point.saturating_add(1);
+        let slots = frame_values
+            .into_iter()
+            .map(|value| MirFrameSlot {
+                value,
+                type_id: self.value_type(value),
+            })
+            .collect::<Vec<_>>();
+        let root_slots = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                is_managed_reference_type_id(slot.type_id, Some(self.arena))
+                    .then(|| RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+            })
+            .collect();
+        let stack_map = StackMap::new(safe_point, root_slots)
+            .expect("coroutine frame slots produce a canonical stack map");
+        let live_frame = MirLiveFrame {
+            state: coroutine_state,
+            slots,
+            stack_map,
+        };
+
+        let suspended = self.current;
+        let cancellation = self.build_suspend_exit(
+            MirCleanupExitReason::Cancellation,
+            MirTerminator::ContinueUnwind(pop_runtime_interface::UnwindReason::Cancellation),
+        );
+        let unwind = if self.active_cleanups.is_empty() {
+            MirUnwindAction::Propagate
+        } else {
+            MirUnwindAction::Cleanup(
+                self.build_suspend_exit(MirCleanupExitReason::Unwind, MirTerminator::ResumeUnwind),
+            )
+        };
+        let (resume, result) = self.new_block_with_argument(result_type, span);
+        self.current = suspended;
+        self.terminate(MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { task, result_type },
+            resume,
+            cancellation,
+            unwind,
+            safe_point,
+            live_frame,
+        });
+        self.current = resume;
+        result
+    }
+
+    fn build_suspend_exit(
+        &mut self,
+        reason: MirCleanupExitReason,
+        terminator: MirTerminator,
+    ) -> BlockId {
+        let suspended = self.current;
+        let registered = self.active_cleanups.clone();
+        let scope = registered.last().map_or_else(
+            || {
+                let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                scope
+            },
+            |cleanup| cleanup.scope,
+        );
+        let entry = self.new_cleanup_block(MirCleanupBlock { scope, reason });
+        self.current = entry;
+        self.emit_cleanups_to(0, reason);
+        self.terminate(terminator);
+        self.active_cleanups = registered;
+        self.current = suspended;
+        entry
     }
 
     fn lower_call(
@@ -4252,6 +4406,41 @@ pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeA
     )
 }
 
+pub(crate) fn task_object_map(
+    dispatch: &MirTaskDispatch,
+    argument_types: &[TypeId],
+    completion_type: TypeId,
+    arena: &TypeArena,
+) -> ObjectMap {
+    let indirect_offset = u32::from(matches!(dispatch, MirTaskDispatch::Indirect(_)));
+    let mut references = Vec::new();
+    if indirect_offset != 0 {
+        references.push(ObjectSlot::new(0));
+    }
+    references.extend(
+        argument_types
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument_type)| {
+                is_managed_reference_type_id(*argument_type, Some(arena)).then(|| {
+                    ObjectSlot::new(
+                        u32::try_from(index)
+                            .unwrap_or(u32::MAX)
+                            .saturating_add(indirect_offset),
+                    )
+                })
+            }),
+    );
+    let completion_slot = u32::try_from(argument_types.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(indirect_offset);
+    if is_managed_reference_type_id(completion_type, Some(arena)) {
+        references.push(ObjectSlot::new(completion_slot));
+    }
+    ObjectMap::new(completion_slot.saturating_add(1), references)
+        .expect("verified task captures form a canonical logical object map")
+}
+
 pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectSummary {
     match kind {
         MirInstructionKind::CheckedIntegerAdd { .. }
@@ -4312,6 +4501,11 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
                 MirEffect::GcSafePoint,
             ])
         }
+        MirInstructionKind::TaskCreate { .. } => MirEffectSummary::from_effects([
+            MirEffect::Allocates,
+            MirEffect::MayUnwind,
+            MirEffect::GcSafePoint,
+        ]),
         MirInstructionKind::StringConcat { .. } | MirInstructionKind::StringFormat { .. } => {
             MirEffectSummary::from_effects([
                 MirEffect::Allocates,
@@ -4379,9 +4573,6 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::CallIndirect {
             declared_effects, ..
         } => *declared_effects,
-        MirInstructionKind::Await { .. } => {
-            MirEffectSummary::from_effects([MirEffect::Suspends, MirEffect::GcSafePoint])
-        }
         MirInstructionKind::IntegerConstant(_)
         | MirInstructionKind::FloatConstant(_)
         | MirInstructionKind::StringConstant(_)
@@ -4444,6 +4635,11 @@ pub(crate) fn terminator_effects(terminator: &MirTerminator) -> MirEffectSummary
         MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
         | MirTerminator::ResumeUnwind => MirEffectSummary::empty().with(MirEffect::MayUnwind),
+        MirTerminator::Suspend { .. } => MirEffectSummary::from_effects([
+            MirEffect::Suspends,
+            MirEffect::MayUnwind,
+            MirEffect::GcSafePoint,
+        ]),
         MirTerminator::Missing
         | MirTerminator::Branch { .. }
         | MirTerminator::ConditionalBranch { .. }
@@ -4580,10 +4776,18 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) ->
     let mut next_safe_point = function
         .blocks
         .iter()
-        .flat_map(|block| block.instructions.iter())
-        .filter_map(|instruction| match instruction.kind {
-            MirInstructionKind::GcSafePoint { safe_point, .. } => Some(safe_point.raw()),
-            _ => None,
+        .flat_map(|block| {
+            block
+                .instructions
+                .iter()
+                .filter_map(|instruction| match instruction.kind {
+                    MirInstructionKind::GcSafePoint { safe_point, .. } => Some(safe_point.raw()),
+                    _ => None,
+                })
+                .chain(match block.terminator {
+                    MirTerminator::Suspend { safe_point, .. } => Some(safe_point.raw()),
+                    _ => None,
+                })
         })
         .max()
         .map_or(0, |safe_point| safe_point.saturating_add(1));
@@ -4646,6 +4850,7 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) ->
         block.instructions = instructions;
     }
     populate_stack_maps(function, arena);
+    populate_suspend_frames(function, arena);
     changed
 }
 
@@ -4690,10 +4895,72 @@ fn populate_stack_maps(function: &mut MirFunction, arena: &TypeArena) {
     }
 }
 
-pub(crate) fn expected_safe_point_roots(
+fn populate_suspend_frames(function: &mut MirFunction, arena: &TypeArena) {
+    let expected = expected_suspend_frame_slots(function);
+    for block in &mut function.blocks {
+        let MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { task, .. },
+            safe_point,
+            live_frame,
+            ..
+        } = &mut block.terminator
+        else {
+            continue;
+        };
+        let _ = task;
+        live_frame.slots = expected.get(&block.block).cloned().unwrap_or_default();
+        let roots = live_frame
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                is_managed_reference_type_id(slot.type_id, Some(arena))
+                    .then(|| RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+            })
+            .collect();
+        live_frame.stack_map = StackMap::new(*safe_point, roots)
+            .expect("generated coroutine frame root slots are unique");
+    }
+}
+
+pub(crate) fn expected_suspend_frame_slots(
     function: &MirFunction,
-    arena: &TypeArena,
-) -> BTreeMap<ValueId, Vec<ValueId>> {
+) -> BTreeMap<BlockId, Vec<MirFrameSlot>> {
+    let (value_types, _, live_out) = live_value_facts(function);
+    function
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let MirTerminator::Suspend {
+                operation: MirSuspendOperation::Task { task, .. },
+                ..
+            } = block.terminator()
+            else {
+                return None;
+            };
+            let mut live = live_out.get(&block.block).cloned().unwrap_or_default();
+            live.insert(*task);
+            let slots = live
+                .into_iter()
+                .filter_map(|value| {
+                    value_types
+                        .get(&value)
+                        .copied()
+                        .map(|type_id| MirFrameSlot { value, type_id })
+                })
+                .collect();
+            Some((block.block(), slots))
+        })
+        .collect()
+}
+
+fn live_value_facts(
+    function: &MirFunction,
+) -> (
+    BTreeMap<ValueId, TypeId>,
+    BTreeMap<BlockId, BTreeSet<ValueId>>,
+    BTreeMap<BlockId, BTreeSet<ValueId>>,
+) {
     let blocks: BTreeMap<_, _> = function
         .blocks
         .iter()
@@ -4748,6 +5015,14 @@ pub(crate) fn expected_safe_point_roots(
             break;
         }
     }
+    (value_types, live_in, live_out)
+}
+
+pub(crate) fn expected_safe_point_roots(
+    function: &MirFunction,
+    arena: &TypeArena,
+) -> BTreeMap<ValueId, Vec<ValueId>> {
+    let (value_types, live_in, live_out) = live_value_facts(function);
 
     let mut maps = BTreeMap::new();
     for block in &function.blocks {
@@ -4808,6 +5083,24 @@ fn normal_live_out(
             .iter()
             .flat_map(|arm| live_in.get(&arm.target).into_iter().flatten().copied())
             .collect(),
+        MirTerminator::Suspend {
+            resume,
+            cancellation,
+            unwind,
+            ..
+        } => {
+            let mut outgoing = live_in.get(resume).cloned().unwrap_or_default();
+            if let Some(resume_block) = blocks.get(resume) {
+                for argument in resume_block.arguments() {
+                    outgoing.remove(&argument.value());
+                }
+            }
+            outgoing.extend(live_in.get(cancellation).into_iter().flatten().copied());
+            if let MirUnwindAction::Cleanup(target) = unwind {
+                outgoing.extend(live_in.get(target).into_iter().flatten().copied());
+            }
+            outgoing
+        }
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)

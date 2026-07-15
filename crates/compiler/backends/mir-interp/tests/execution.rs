@@ -85,6 +85,74 @@ fn trap(kind: TrapKind) -> ExecutionError {
 }
 
 #[test]
+fn async_tasks_stay_cold_until_await_and_resume_with_the_exact_completion() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         private async function failIfStarted(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public function leaveCold(): Int\n\
+             local task = failIfStarted()\n\
+             return 7\n\
+         end\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public async function consume(): Int\n\
+             local retained = \"live\"\n\
+             local value = await load(42)\n\
+             print(retained)\n\
+             return value\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified async MIR");
+
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Ok(vec![MirValue::Integer(
+            IntegerValue::parse_decimal("7", IntegerKind::Int64).expect("seven"),
+        )])
+    );
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(3), &[]),
+        Ok(vec![MirValue::Integer(
+            IntegerValue::parse_decimal("42", IntegerKind::Int64).expect("forty two"),
+        )])
+    );
+}
+
+#[test]
+fn failed_async_task_does_not_poison_later_interpreter_work() {
+    let (mir, types) = executable_source(
+        "namespace Main\n\
+         private async function fail(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public async function observeFailure(): Int\n\
+             return await fail()\n\
+         end\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public async function continueWorking(): Int\n\
+             return await load(9)\n\
+         end\n",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified async MIR");
+
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(trap(TrapKind::DivisionByZero))
+    );
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(3), &[]),
+        Ok(vec![MirValue::Integer(
+            IntegerValue::parse_decimal("9", IntegerKind::Int64).expect("nine"),
+        )])
+    );
+}
+
+#[test]
 fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
     let (mir, types) = executable_source(
         "namespace Main\n\

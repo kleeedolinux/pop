@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_runtime_interface::{ManagedReference, RootHandle, RootPublication, RuntimeFailure};
 
+use crate::SchedulerId;
 use crate::heap::BootstrapRuntime;
 use crate::ownership::{
     IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
-    PublicationStatistics, SchedulerId,
+    PublicationStatistics,
 };
 use crate::relocation::CollectorGeneration;
 

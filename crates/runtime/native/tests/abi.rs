@@ -4,13 +4,13 @@ use pop_runtime_native::{
     pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_initialized_object,
     pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get,
     pop_rt_array_get_checked, pop_rt_array_length, pop_rt_array_set, pop_rt_field_get,
-    pop_rt_field_set, pop_rt_gc_stage, pop_rt_iteration_acquire, pop_rt_iteration_next,
-    pop_rt_list_add, pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked,
-    pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_range_create, pop_rt_release_root,
-    pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_suspend, pop_rt_table_get,
-    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_task_cancel,
-    pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
+    pop_rt_field_set, pop_rt_gc_safe_point_v2, pop_rt_gc_stage, pop_rt_iteration_acquire,
+    pop_rt_iteration_next, pop_rt_list_add, pop_rt_list_create, pop_rt_list_get,
+    pop_rt_list_get_checked, pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_range_create,
+    pop_rt_release_root, pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat,
+    pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read, pop_rt_supports_abi,
+    pop_rt_suspend, pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set,
+    pop_rt_task_cancel, pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
 use std::ffi::CString;
@@ -29,6 +29,43 @@ fn native_runtime_exports_the_stable_generational_abi_identity() {
     assert_eq!(pop_rt_abi_major(), 1);
     assert_eq!(pop_rt_abi_minor(), 11);
     assert_eq!(pop_rt_gc_stage(), 2);
+    assert_eq!(pop_rt_supports_abi(1, 11), 1);
+    assert_eq!(pop_rt_supports_abi(2, 0), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn writable_abi_two_safe_point_is_failure_atomic_but_not_advertised() {
+    let _guard = abi_test_lock();
+    let root = pop_rt_allocate_object(0);
+    assert_ne!(root, 0);
+    let mut roots = [root];
+    assert!(request_abi_collection());
+
+    // SAFETY: The pointer addresses the exact writable root array declared by
+    // the count for the duration of the call.
+    assert_eq!(
+        unsafe { pop_rt_gc_safe_point_v2(9, roots.as_mut_ptr(), roots.len() as u64) },
+        1
+    );
+    assert_eq!(roots, [root], "stable conformance does not relocate tokens");
+
+    let mut invalid = [u64::MAX];
+    let before = invalid;
+    // SAFETY: The pointer is writable and the invalid token must be rejected
+    // without changing the caller's array.
+    assert_eq!(
+        unsafe { pop_rt_gc_safe_point_v2(10, invalid.as_mut_ptr(), invalid.len() as u64) },
+        0
+    );
+    assert_eq!(invalid, before);
+
+    // SAFETY: A null pointer is deliberately supplied with a nonzero count to
+    // verify the closed ABI rejection.
+    assert_eq!(
+        unsafe { pop_rt_gc_safe_point_v2(11, std::ptr::null_mut(), 1) },
+        0
+    );
 }
 
 #[test]
@@ -152,10 +189,8 @@ fn allocation_churn_uses_the_native_stable_generational_path() {
         );
         total = total.checked_add(value).expect("benchmark checksum");
         if index.is_multiple_of(8_192) {
-            assert_eq!(
-                abi_safe_point(u32::try_from(index).expect("test range fits u32"), &[]),
-                1
-            );
+            let safe_point = u32::try_from(index).expect("bounded safe-point identity");
+            assert_eq!(abi_safe_point(safe_point, &[]), 1);
         }
     }
     assert_eq!(total, 200_010_000);

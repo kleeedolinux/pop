@@ -145,34 +145,18 @@ fn parses_local_and_anonymous_functions_without_table_desugaring() {
 }
 
 #[test]
-fn parses_async_closures_await_and_async_cleanup_as_distinct_nodes() {
+fn parses_async_closures_and_prefix_await_without_dynamic_coroutines() {
     let body = parse_body(
         "namespace Example\n\
-         public async function make(fetch: function(): Task<Int>): Task<Int>\n\
-             local async function load(): Int\n\
-                 return await fetch()\n\
+         public async function make(): Int\n\
+             local operation = async function(value: Int): Int\n\
+                 return value\n\
              end\n\
-             local callback = async function(): Int\n\
-                 return await load()\n\
-             end\n\
-             async defer\n\
-                 await cleanup()\n\
-             end\n\
-             return await callback()\n\
+             return await operation(42)\n\
          end\n",
     );
 
-    let StatementSyntaxKind::LocalFunction { function, .. } = body.statements()[0].kind() else {
-        panic!("async local function");
-    };
-    assert!(function.is_async());
-    assert!(matches!(
-        function.body()[0].kind(),
-        StatementSyntaxKind::Return { values }
-            if matches!(values[0].kind(), ExpressionSyntaxKind::Await { .. })
-    ));
-
-    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[1].kind() else {
+    let StatementSyntaxKind::Local { initializer, .. } = body.statements()[0].kind() else {
         panic!("async closure local");
     };
     let ExpressionSyntaxKind::Function(function) = initializer.kind() else {
@@ -180,16 +164,13 @@ fn parses_async_closures_await_and_async_cleanup_as_distinct_nodes() {
     };
     assert!(function.is_async());
 
+    let StatementSyntaxKind::Return { values } = body.statements()[1].kind() else {
+        panic!("awaited return");
+    };
     assert!(matches!(
-        body.statements()[2].kind(),
-        StatementSyntaxKind::AsyncDefer { body }
-            if matches!(body[0].kind(), StatementSyntaxKind::Expression(expression)
-                if matches!(expression.kind(), ExpressionSyntaxKind::Await { .. }))
-    ));
-    assert!(matches!(
-        body.statements()[3].kind(),
-        StatementSyntaxKind::Return { values }
-            if matches!(values[0].kind(), ExpressionSyntaxKind::Await { .. })
+        values[0].kind(),
+        ExpressionSyntaxKind::Await { operand }
+            if matches!(operand.kind(), ExpressionSyntaxKind::Call { .. })
     ));
 }
 

@@ -101,6 +101,12 @@ fn typed_fixture() -> TypedFixture {
              end\n\
              local value = try input\n\
              return Result.Ok(String(value))\n\
+         end\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         private async function consume(): Int\n\
+             return await load(42)\n\
          end\n",
     )
     .expect("source");
@@ -156,6 +162,41 @@ fn typed_fixture() -> TypedFixture {
         arena: resolver.into_arena(),
         functions,
     }
+}
+
+#[test]
+fn construction_retains_async_identity_and_typed_await_until_mir() {
+    let fixture = typed_fixture();
+    let known: BTreeSet<_> = fixture
+        .functions
+        .iter()
+        .map(|(signature, _, _)| signature.symbol())
+        .collect();
+    let (signature, body, visibility) = fixture
+        .functions
+        .iter()
+        .find(|(signature, _, _)| signature.name() == "consume")
+        .expect("consume");
+    let hir = build_hir_function(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(4),
+        *visibility,
+        signature,
+        body,
+        &fixture.arena,
+        &known,
+    )
+    .expect("verified async HIR");
+
+    assert!(hir.is_async());
+    let HirStatementKind::Return { values } = hir.body()[0].kind() else {
+        panic!("async HIR return");
+    };
+    assert!(matches!(
+        values[0].kind(),
+        HirExpressionKind::Await { task }
+            if matches!(task.kind(), HirExpressionKind::Call { .. })
+    ));
 }
 
 #[test]

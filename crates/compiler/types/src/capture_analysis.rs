@@ -125,7 +125,7 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 }
             }
         }
-        TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
+        TypedStatementKind::Defer { body } => {
             for statement in body {
                 finalize_statement_captures(statement, written);
             }
@@ -321,7 +321,8 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
                 finalize_expression_captures(argument, written);
             }
         }
-        TypedExpressionKind::Unary { operand, .. } => {
+        TypedExpressionKind::Unary { operand, .. }
+        | TypedExpressionKind::Await { task: operand } => {
             finalize_expression_captures(operand, written);
         }
         TypedExpressionKind::Binary { left, right, .. } => {
@@ -337,9 +338,6 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         }
         TypedExpressionKind::ResultPropagate { result, .. } => {
             finalize_expression_captures(result, written);
-        }
-        TypedExpressionKind::Await { task } => {
-            finalize_expression_captures(task, written);
         }
         TypedExpressionKind::OptionalNarrow { optional } => {
             finalize_expression_captures(optional, written);
@@ -360,7 +358,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::StringFormat { value, .. } => {
             finalize_expression_captures(value, written);
         }
-        TypedExpressionKind::IndirectCall { callee, arguments } => {
+        TypedExpressionKind::IndirectCall {
+            callee, arguments, ..
+        } => {
             finalize_expression_captures(callee, written);
             for argument in arguments {
                 finalize_expression_captures(argument, written);

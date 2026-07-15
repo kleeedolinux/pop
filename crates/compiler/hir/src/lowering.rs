@@ -547,12 +547,6 @@ fn lower_statement(
                 .map(|statement| lower_statement(statement, interface_slots))
                 .collect(),
         },
-        TypedStatementKind::AsyncDefer { body } => HirStatementKind::AsyncDefer {
-            body: body
-                .iter()
-                .map(|statement| lower_statement(statement, interface_slots))
-                .collect(),
-        },
         TypedStatementKind::FieldSet { base, field, value } => HirStatementKind::FieldSet {
             base: lower_expression(base, interface_slots),
             field: *field,
@@ -699,6 +693,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
         TypedCallDispatch::DirectMethod { method, receiver } => {
             return HirCall {
                 dispatch: HirCallDispatch::DirectMethod { method: *method },
+                is_async: call.is_async(),
                 type_arguments: call.type_arguments().to_vec(),
                 arguments: receiver
                     .iter()
@@ -723,6 +718,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                     method: *method,
                     slot: interface_slots[&(*interface, *method)],
                 },
+                is_async: call.is_async(),
                 type_arguments: call.type_arguments().to_vec(),
                 arguments: std::iter::once(lower_expression(receiver, interface_slots))
                     .chain(
@@ -744,6 +740,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                     interface: *interface,
                     method: *method,
                 },
+                is_async: call.is_async(),
                 type_arguments: call.type_arguments().to_vec(),
                 arguments: std::iter::once(lower_expression(receiver, interface_slots))
                     .chain(
@@ -761,6 +758,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
     };
     HirCall {
         dispatch,
+        is_async: call.is_async(),
         type_arguments: call.type_arguments().to_vec(),
         arguments: call
             .arguments()
@@ -1007,9 +1005,6 @@ fn lower_expression(
             error_type: *error_type,
             enclosing_result: *enclosing_result,
         },
-        TypedExpressionKind::Await { task } => HirExpressionKind::Await {
-            task: Box::new(lower_expression(task, interface_slots)),
-        },
         TypedExpressionKind::OptionalNarrow { optional } => HirExpressionKind::OptionalNarrow {
             optional: Box::new(lower_expression(optional, interface_slots)),
         },
@@ -1021,6 +1016,9 @@ fn lower_expression(
             condition: Box::new(lower_expression(condition, interface_slots)),
             when_true: Box::new(lower_expression(when_true, interface_slots)),
             when_false: Box::new(lower_expression(when_false, interface_slots)),
+        },
+        TypedExpressionKind::Await { task } => HirExpressionKind::Await {
+            task: Box::new(lower_expression(task, interface_slots)),
         },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
@@ -1063,6 +1061,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::Standard {
                 function: *function,
             },
+            is_async: false,
             type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
@@ -1071,12 +1070,14 @@ fn lower_call_expression(
         },
         TypedExpressionKind::DirectCall {
             function,
+            is_async,
             type_arguments,
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Direct {
                 function: *function,
             },
+            is_async: *is_async,
             type_arguments: type_arguments.clone(),
             arguments: arguments
                 .iter()
@@ -1085,22 +1086,29 @@ fn lower_call_expression(
         },
         TypedExpressionKind::ReferencedCall {
             function,
+            is_async,
             type_arguments,
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Referenced {
                 function: *function,
             },
+            is_async: *is_async,
             type_arguments: type_arguments.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| lower_expression(argument, interface_slots))
                 .collect(),
         },
-        TypedExpressionKind::IndirectCall { callee, arguments } => HirExpressionKind::Call {
+        TypedExpressionKind::IndirectCall {
+            callee,
+            is_async,
+            arguments,
+        } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::Indirect {
                 callee: Box::new(lower_expression(callee, interface_slots)),
             },
+            is_async: *is_async,
             type_arguments: Vec::new(),
             arguments: arguments
                 .iter()
@@ -1113,6 +1121,7 @@ fn lower_call_expression(
             arguments,
         } => HirExpressionKind::Call {
             dispatch: HirCallDispatch::DirectMethod { method: *method },
+            is_async: false,
             type_arguments: Vec::new(),
             arguments: receiver
                 .iter()
@@ -1135,6 +1144,7 @@ fn lower_call_expression(
                 method: *method,
                 slot: interface_slots[&(*interface, *method)],
             },
+            is_async: false,
             type_arguments: Vec::new(),
             arguments: std::iter::once(lower_expression(receiver, interface_slots))
                 .chain(
@@ -1154,6 +1164,7 @@ fn lower_call_expression(
                 interface: *interface,
                 method: *method,
             },
+            is_async: false,
             type_arguments: Vec::new(),
             arguments: std::iter::once(lower_expression(receiver, interface_slots))
                 .chain(
@@ -1170,6 +1181,7 @@ fn lower_call_expression(
 fn lower_closure(closure: &TypedClosure, interface_slots: &HirInterfaceSlotMap) -> HirClosure {
     HirClosure {
         function: closure.function(),
+        is_async: closure.is_async(),
         parameters: closure
             .parameters()
             .iter()
@@ -1346,9 +1358,7 @@ fn first_unknown_interface_call(
                 arms.iter()
                     .find_map(|arm| first_unknown_interface_call(arm.body(), slots))
             }),
-            TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
-                first_unknown_interface_call(body, slots)
-            }
+            TypedStatementKind::Defer { body } => first_unknown_interface_call(body, slots),
             TypedStatementKind::FieldSet { base, value, .. } => {
                 first_unknown_interface_expression(base, slots)
                     .or_else(|| first_unknown_interface_expression(value, slots))
@@ -1552,7 +1562,8 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .find_map(|argument| first_unknown_interface_expression(argument, slots)),
-        TypedExpressionKind::Unary { operand, .. } => {
+        TypedExpressionKind::Unary { operand, .. }
+        | TypedExpressionKind::Await { task: operand } => {
             first_unknown_interface_expression(operand, slots)
         }
         TypedExpressionKind::Binary { left, right, .. } => {
@@ -1570,7 +1581,6 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::ResultPropagate { result, .. } => {
             first_unknown_interface_expression(result, slots)
         }
-        TypedExpressionKind::Await { task } => first_unknown_interface_expression(task, slots),
         TypedExpressionKind::Conditional {
             condition,
             when_true,
@@ -1585,13 +1595,13 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::StringFormat { value, .. } => {
             first_unknown_interface_expression(value, slots)
         }
-        TypedExpressionKind::IndirectCall { callee, arguments } => {
-            first_unknown_interface_expression(callee, slots).or_else(|| {
-                arguments
-                    .iter()
-                    .find_map(|argument| first_unknown_interface_expression(argument, slots))
-            })
-        }
+        TypedExpressionKind::IndirectCall {
+            callee, arguments, ..
+        } => first_unknown_interface_expression(callee, slots).or_else(|| {
+            arguments
+                .iter()
+                .find_map(|argument| first_unknown_interface_expression(argument, slots))
+        }),
         TypedExpressionKind::DirectMethodCall {
             receiver,
             arguments,
@@ -1701,9 +1711,7 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 arms.iter()
                     .find_map(|arm| first_compile_time_only_statement(arm.body()))
             }),
-            TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
-                first_compile_time_only_statement(body)
-            }
+            TypedStatementKind::Defer { body } => first_compile_time_only_statement(body),
             TypedStatementKind::FieldSet { base, value, .. } => {
                 first_compile_time_only_expression(base)
                     .or_else(|| first_compile_time_only_expression(value))
@@ -1859,7 +1867,10 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::StandardCall { arguments, .. } => arguments
             .iter()
             .find_map(first_compile_time_only_expression),
-        TypedExpressionKind::Unary { operand, .. } => first_compile_time_only_expression(operand),
+        TypedExpressionKind::Unary { operand, .. }
+        | TypedExpressionKind::Await { task: operand } => {
+            first_compile_time_only_expression(operand)
+        }
         TypedExpressionKind::Binary { left, right, .. } => first_compile_time_only_expression(left)
             .or_else(|| first_compile_time_only_expression(right)),
         TypedExpressionKind::OptionalDefault { optional, fallback } => {
@@ -1873,7 +1884,6 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::ResultPropagate { result, .. } => {
             first_compile_time_only_expression(result)
         }
-        TypedExpressionKind::Await { task } => first_compile_time_only_expression(task),
         TypedExpressionKind::Conditional {
             condition,
             when_true,
@@ -1888,13 +1898,13 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::StringFormat { value, .. } => {
             first_compile_time_only_expression(value)
         }
-        TypedExpressionKind::IndirectCall { callee, arguments } => {
-            first_compile_time_only_expression(callee).or_else(|| {
-                arguments
-                    .iter()
-                    .find_map(first_compile_time_only_expression)
-            })
-        }
+        TypedExpressionKind::IndirectCall {
+            callee, arguments, ..
+        } => first_compile_time_only_expression(callee).or_else(|| {
+            arguments
+                .iter()
+                .find_map(first_compile_time_only_expression)
+        }),
         TypedExpressionKind::DirectMethodCall {
             receiver,
             arguments,

@@ -28,7 +28,6 @@ use crate::module_lowering::{
     render_string_literals, runtime_declarations,
 };
 
-pub(crate) const GC_POLL_INTERVAL: u32 = 16_384;
 pub(crate) const GC_POLL_BUDGET: &str = "%pop_gc_poll_budget";
 
 pub(crate) fn native_runtime_symbol(operation: RuntimeOperation) -> &'static str {
@@ -50,6 +49,25 @@ pub fn lower_mir_to_llvm_ir(
     options: LlvmLoweringOptions,
 ) -> Result<LlvmModule, LlvmLoweringError> {
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
+    if bubble
+        .functions()
+        .iter()
+        .any(pop_mir::MirFunction::is_async)
+        || bubble
+            .methods()
+            .iter()
+            .any(|method| method.function().is_async())
+        || bubble
+            .nested_functions()
+            .iter()
+            .any(pop_mir::MirNestedFunction::is_async)
+        || bubble
+            .function_references()
+            .iter()
+            .any(pop_mir::MirFunctionReference::is_async)
+    {
+        return Err(LlvmLoweringError::UnsupportedAsync);
+    }
     let field_layout = collect_field_layout(bubble);
     let record_fields = collect_record_fields(bubble);
     let record_field_types = collect_record_field_types(bubble);
@@ -116,7 +134,7 @@ pub fn lower_mir_to_llvm_ir(
     functions.extend(lower_indirect_dispatchers(bubble, types)?);
     let entry_point = options
         .entry_point
-        .map(|symbol| lower_entry_point(symbol, bubble, types))
+        .map(|symbol| lower_entry_point(symbol, bubble, types, options.runtime_profile))
         .transpose()?;
     let mut declarations = vec![
         format!(
@@ -142,7 +160,14 @@ pub fn lower_mir_to_llvm_ir(
         ),
         format!(
             "declare i8 @{}(i32, ptr, i64) cold nounwind",
-            native_runtime_symbol(RuntimeOperation::GcSafePoint)
+            if matches!(
+                options.runtime_profile,
+                pop_backend_api::RuntimeProfile::ProductionGenerational
+            ) {
+                pop_runtime_native_abi::GC_SAFE_POINT_V2_SYMBOL
+            } else {
+                native_runtime_symbol(RuntimeOperation::GcSafePoint)
+            }
         ),
         format!(
             "declare i64 @{}(i64)",
@@ -197,6 +222,15 @@ pub fn lower_mir_to_llvm_ir(
     ];
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
+    if matches!(
+        options.runtime_profile,
+        pop_backend_api::RuntimeProfile::ProductionGenerational
+    ) {
+        declarations.push(format!(
+            "declare i8 @{}(i16, i16)",
+            pop_runtime_native_abi::ABI_SUPPORT_SYMBOL
+        ));
+    }
     for reference in bubble.function_references() {
         let result = llvm_results(reference.results(), types)?;
         let parameters = reference
@@ -278,6 +312,7 @@ pub(crate) fn lower_entry_point(
     symbol: SymbolId,
     bubble: &MirBubble,
     types: &TypeArena,
+    runtime_profile: pop_backend_api::RuntimeProfile,
 ) -> Result<String, LlvmLoweringError> {
     let function = bubble
         .functions()
@@ -301,6 +336,26 @@ pub(crate) fn lower_entry_point(
         return Err(LlvmLoweringError::UnsupportedEntryPointSignature(symbol));
     }
     let entry = function_name(bubble.bubble(), symbol);
+    let abi_guard = if matches!(
+        runtime_profile,
+        pop_backend_api::RuntimeProfile::ProductionGenerational
+    ) {
+        let version = pop_runtime_native_abi::NATIVE_ABI_2_VERSION;
+        format!(
+            "  %pop_abi_supported = call i8 @{}(i16 {}, i16 {})\n  %pop_abi_valid = icmp eq i8 %pop_abi_supported, 1\n  br i1 %pop_abi_valid, label %abi_valid, label %trap\nabi_valid:\n",
+            pop_runtime_native_abi::ABI_SUPPORT_SYMBOL,
+            version.major(),
+            version.minor()
+        )
+    } else {
+        String::new()
+    };
+    let abi_trap = (!abi_guard.is_empty()).then(|| {
+        format!(
+            "\ntrap:\n  call void @{}()\n  unreachable",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        )
+    });
     if takes_arguments {
         let invocation = if returns_status {
             format!(
@@ -310,7 +365,7 @@ pub(crate) fn lower_entry_point(
             format!("  call void @{entry}(i64 %pop_arguments)\n  ret i32 0")
         };
         return Ok(format!(
-            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n{invocation}\n}}"
+            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n{invocation}\n}}"
         ));
     }
     let invocation = if returns_status {
@@ -321,7 +376,8 @@ pub(crate) fn lower_entry_point(
         format!("  call void @{entry}()\n  ret i32 0")
     };
     Ok(format!(
-        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{invocation}\n}}"
+        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}{invocation}{}\n}}",
+        abi_trap.unwrap_or_default()
     ))
 }
 
@@ -621,6 +677,20 @@ impl DirectScalarArrays {
                         rejected.insert(*origin);
                     }
                 }
+                MirTerminator::Suspend {
+                    operation,
+                    live_frame,
+                    ..
+                } => {
+                    let pop_mir::MirSuspendOperation::Task { task, .. } = operation;
+                    rejected.extend(aliases.get(task).copied());
+                    rejected.extend(
+                        live_frame
+                            .slots()
+                            .iter()
+                            .filter_map(|slot| aliases.get(&slot.value()).copied()),
+                    );
+                }
                 MirTerminator::Missing
                 | MirTerminator::Trap(_)
                 | MirTerminator::Panic(_)
@@ -706,13 +776,30 @@ pub(crate) fn lower_function_parts(
         }
     }
     let direct_scalar_arrays = DirectScalarArrays::analyze(function_blocks, &value_types, types);
-    let mut incoming_edges: BTreeMap<BlockId, Vec<(String, Vec<ValueId>)>> = BTreeMap::new();
+    let writable_roots = matches!(
+        options.runtime_profile,
+        pop_backend_api::RuntimeProfile::ProductionGenerational
+    );
+    let writable_root_values = function_blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::GcSafePoint { roots, .. } if writable_roots => Some(roots),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .filter(|root| direct_scalar_arrays.origin(*root).is_none())
+        .collect::<BTreeSet<_>>();
+    let mut incoming_edges: BTreeMap<BlockId, Vec<(BlockId, String, Vec<ValueId>)>> =
+        BTreeMap::new();
     let mut union_payload_sources = BTreeMap::new();
     let mut has_union_switch = false;
     for predecessor in function_blocks {
         match predecessor.terminator() {
             MirTerminator::Branch { target, arguments } => {
                 incoming_edges.entry(*target).or_default().push((
+                    predecessor.block(),
                     llvm_block_exit_label(
                         predecessor,
                         &proven_non_overflow_adds,
@@ -726,7 +813,7 @@ pub(crate) fn lower_function_parts(
             } => {
                 has_union_switch = true;
                 for arm in arms {
-                    union_payload_sources.insert(arm.target(), *scrutinee);
+                    union_payload_sources.insert(arm.target(), (predecessor.block(), *scrutinee));
                 }
             }
             MirTerminator::ErrorSwitch {
@@ -734,7 +821,7 @@ pub(crate) fn lower_function_parts(
             } => {
                 has_union_switch = true;
                 for arm in arms {
-                    union_payload_sources.insert(arm.target(), *scrutinee);
+                    union_payload_sources.insert(arm.target(), (predecessor.block(), *scrutinee));
                 }
             }
             _ => {}
@@ -746,10 +833,19 @@ pub(crate) fn lower_function_parts(
             block,
             incoming_edges.get(&block.block()).map(Vec::as_slice),
             union_payload_sources.get(&block.block()).copied(),
+            &writable_root_values,
             types,
         )?;
+        instructions.extend(initialize_block_root_cells(block, &writable_root_values));
         if block_index == 0 {
-            let mut initialization = initialize_gc_poll(has_gc_safe_point);
+            let mut initialization =
+                initialize_gc_poll(has_gc_safe_point, options.gc_poll_interval.get());
+            initialization.splice(
+                0..0,
+                writable_root_values
+                    .iter()
+                    .map(|root| format!("%v{}_gc_root = alloca i64", root.raw())),
+            );
             initialization.extend(initialize_array_outputs(
                 function_blocks,
                 &direct_scalar_arrays,
@@ -760,7 +856,19 @@ pub(crate) fn lower_function_parts(
             if options.emit_comments {
                 instructions.push(format!("; mir v{}", instruction.result().raw()));
             }
-            instructions.push(lower_instruction(
+            let use_aliases = load_root_cell_uses(
+                instruction
+                    .operands()
+                    .into_iter()
+                    .chain(match instruction.kind() {
+                        MirInstructionKind::GcSafePoint { roots, .. } => roots.clone(),
+                        _ => Vec::new(),
+                    }),
+                &writable_root_values,
+                &format!("v{}", instruction.result().raw()),
+                &mut instructions,
+            );
+            let lowered = lower_instruction(
                 bubble,
                 instruction,
                 &value_types,
@@ -772,17 +880,60 @@ pub(crate) fn lower_function_parts(
                 environment,
                 &proven_non_overflow_adds,
                 &direct_scalar_arrays,
-            )?);
+                options,
+            )?;
+            let lowered = rewrite_relocated_value_uses(&lowered, &use_aliases);
+            verify_rewritten_root_uses(
+                &lowered,
+                &use_aliases,
+                &format!("v{}", instruction.result().raw()),
+            )?;
+            instructions.push(lowered);
+            if writable_roots
+                && let MirInstructionKind::GcSafePoint { roots, .. } = instruction.kind()
+            {
+                for root in roots {
+                    if writable_root_values.contains(root) {
+                        instructions.push(format!(
+                            "store i64 %v{}_after_v{}, ptr %v{}_gc_root",
+                            root.raw(),
+                            instruction.result().raw(),
+                            root.raw()
+                        ));
+                    }
+                }
+            } else if writable_root_values.contains(&instruction.result()) {
+                instructions.push(format!(
+                    "store i64 %v{}, ptr %v{}_gc_root",
+                    instruction.result().raw(),
+                    instruction.result().raw()
+                ));
+            }
         }
+        let mut terminator_prefix = Vec::new();
+        let terminator = lower_terminator(
+            block.terminator(),
+            &value_types,
+            types,
+            &direct_scalar_arrays,
+        )?;
+        let terminator_aliases = load_root_cell_uses(
+            terminator_values(block.terminator()),
+            &writable_root_values,
+            &format!("b{}_exit", block.block().raw()),
+            &mut terminator_prefix,
+        );
+        instructions.extend(terminator_prefix);
+        let terminator = rewrite_relocated_value_uses(&terminator, &terminator_aliases);
+        verify_rewritten_root_uses(
+            &terminator,
+            &terminator_aliases,
+            &format!("b{} terminator", block.block().raw()),
+        )?;
         blocks.push(PrivateBlock {
             label: format!("b{}", block.block().raw()),
             instructions,
-            terminator: lower_terminator(
-                block.terminator(),
-                &value_types,
-                types,
-                &direct_scalar_arrays,
-            )?,
+            terminator,
         });
     }
     if has_union_switch {
@@ -812,6 +963,150 @@ pub(crate) fn lower_function_parts(
         blocks,
         attributes: llvm_function_attributes(effects, memory_none),
     })
+}
+
+fn rewrite_relocated_value_uses(
+    text: &str,
+    relocated_values: &BTreeMap<ValueId, String>,
+) -> String {
+    let mut rewritten = text.to_owned();
+    for (value, relocated) in relocated_values {
+        rewritten = replace_llvm_value_token(&rewritten, &format!("%v{}", value.raw()), relocated);
+    }
+    rewritten
+}
+
+fn initialize_block_root_cells(
+    block: &pop_mir::MirBlock,
+    writable_root_values: &BTreeSet<ValueId>,
+) -> Vec<String> {
+    block
+        .arguments()
+        .iter()
+        .filter(|argument| writable_root_values.contains(&argument.value()))
+        .map(|argument| {
+            format!(
+                "store i64 %v{}, ptr %v{}_gc_root",
+                argument.value().raw(),
+                argument.value().raw()
+            )
+        })
+        .collect()
+}
+
+fn load_root_cell_uses(
+    values: impl IntoIterator<Item = ValueId>,
+    writable_root_values: &BTreeSet<ValueId>,
+    location: &str,
+    instructions: &mut Vec<String>,
+) -> BTreeMap<ValueId, String> {
+    values
+        .into_iter()
+        .filter(|value| writable_root_values.contains(value))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|value| {
+            let alias = format!("%v{}_before_{location}", value.raw());
+            instructions.push(format!("{alias} = load i64, ptr %v{}_gc_root", value.raw()));
+            (value, alias)
+        })
+        .collect()
+}
+
+fn terminator_values(terminator: &MirTerminator) -> Vec<ValueId> {
+    match terminator {
+        MirTerminator::Branch { arguments, .. } => arguments.clone(),
+        MirTerminator::ConditionalBranch { condition, .. } => vec![*condition],
+        MirTerminator::UnionSwitch { scrutinee, .. }
+        | MirTerminator::ErrorSwitch { scrutinee, .. } => vec![*scrutinee],
+        MirTerminator::Return { values } => values.clone(),
+        MirTerminator::Suspend {
+            operation,
+            live_frame,
+            ..
+        } => {
+            let pop_mir::MirSuspendOperation::Task { task, .. } = operation;
+            std::iter::once(*task)
+                .chain(live_frame.slots().iter().map(|slot| slot.value()))
+                .collect()
+        }
+        MirTerminator::Missing
+        | MirTerminator::Trap(_)
+        | MirTerminator::Panic(_)
+        | MirTerminator::ContinueUnwind(_)
+        | MirTerminator::ResumeUnwind
+        | MirTerminator::Unreachable => Vec::new(),
+    }
+}
+
+fn replace_llvm_value_token(text: &str, original: &str, replacement: &str) -> String {
+    let mut rewritten = String::with_capacity(text.len());
+    let mut remainder = text;
+    while let Some(index) = remainder.find(original) {
+        let after = &remainder[index + original.len()..];
+        rewritten.push_str(&remainder[..index]);
+        if after
+            .as_bytes()
+            .first()
+            .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_')
+        {
+            rewritten.push_str(original);
+        } else {
+            rewritten.push_str(replacement);
+        }
+        remainder = after;
+    }
+    rewritten.push_str(remainder);
+    rewritten
+}
+
+fn verify_rewritten_root_uses(
+    text: &str,
+    aliases: &BTreeMap<ValueId, String>,
+    location: &str,
+) -> Result<(), LlvmLoweringError> {
+    for value in aliases.keys() {
+        if contains_llvm_value_token(text, &format!("%v{}", value.raw())) {
+            return Err(LlvmLoweringError::StaleManagedReference {
+                value: *value,
+                location: location.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn contains_llvm_value_token(text: &str, value: &str) -> bool {
+    let mut remainder = text;
+    while let Some(index) = remainder.find(value) {
+        let after = &remainder[index + value.len()..];
+        if !after
+            .as_bytes()
+            .first()
+            .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_')
+        {
+            return true;
+        }
+        remainder = after;
+    }
+    false
+}
+
+#[cfg(test)]
+mod relocation_verification_tests {
+    use super::*;
+
+    #[test]
+    fn writable_root_verifier_rejects_an_old_post_safe_point_ssa_use() {
+        let value = ValueId::from_raw(7);
+        let aliases = BTreeMap::from([(value, "%v7_before_v9".to_owned())]);
+
+        assert!(verify_rewritten_root_uses("call i64 @consume(i64 %v7)", &aliases, "v9").is_err());
+        assert!(
+            verify_rewritten_root_uses("call i64 @consume(i64 %v7_before_v9)", &aliases, "v9")
+                .is_ok()
+        );
+    }
 }
 
 pub(crate) fn proven_counted_reduction_adds(blocks: &[pop_mir::MirBlock]) -> BTreeSet<ValueId> {
@@ -954,6 +1249,17 @@ pub(crate) fn can_reach_block(
             MirTerminator::ErrorSwitch { arms, .. } => {
                 pending.extend(arms.iter().map(|arm| arm.target()));
             }
+            MirTerminator::Suspend {
+                resume,
+                cancellation,
+                unwind,
+                ..
+            } => {
+                pending.extend([*resume, *cancellation]);
+                if let pop_mir::MirUnwindAction::Cleanup(target) = unwind {
+                    pending.push(*target);
+                }
+            }
             MirTerminator::Missing
             | MirTerminator::Return { .. }
             | MirTerminator::Trap(_)
@@ -1070,13 +1376,13 @@ pub(crate) fn llvm_memory_none_instruction(instruction: &MirInstructionKind) -> 
     )
 }
 
-pub(crate) fn initialize_gc_poll(has_gc_safe_point: bool) -> Vec<String> {
+pub(crate) fn initialize_gc_poll(has_gc_safe_point: bool, interval: u32) -> Vec<String> {
     if !has_gc_safe_point {
         return Vec::new();
     }
     vec![
         format!("{GC_POLL_BUDGET} = alloca i32, align 4"),
-        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
+        format!("store i32 {interval}, ptr {GC_POLL_BUDGET}, align 4"),
     ]
 }
 
@@ -1161,8 +1467,9 @@ pub(crate) fn llvm_block_exit_label(
 
 pub(crate) fn lower_block_arguments(
     block: &pop_mir::MirBlock,
-    incoming: Option<&[(String, Vec<ValueId>)]>,
-    union_payload_source: Option<ValueId>,
+    incoming: Option<&[(BlockId, String, Vec<ValueId>)]>,
+    union_payload_source: Option<(BlockId, ValueId)>,
+    writable_root_values: &BTreeSet<ValueId>,
     types: &TypeArena,
 ) -> Result<Vec<String>, LlvmLoweringError> {
     if let Some(incoming) = incoming {
@@ -1173,11 +1480,16 @@ pub(crate) fn lower_block_arguments(
             .map(|(index, argument)| {
                 let incoming_values = incoming
                     .iter()
-                    .map(|(predecessor, values)| {
+                    .map(|(predecessor, predecessor_label, values)| {
                         let value = values
                             .get(index)
                             .ok_or(LlvmLoweringError::InvalidType(argument.type_id()))?;
-                        Ok(format!("[ %v{}, %{predecessor} ]", value.raw()))
+                        let incoming_value = if writable_root_values.contains(value) {
+                            format!("%v{}_before_b{}_exit", value.raw(), predecessor.raw())
+                        } else {
+                            format!("%v{}", value.raw())
+                        };
+                        Ok(format!("[ {incoming_value}, %{predecessor_label} ]"))
                     })
                     .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
                 Ok(format!(
@@ -1189,18 +1501,35 @@ pub(crate) fn lower_block_arguments(
             })
             .collect();
     }
-    let Some(scrutinee) = union_payload_source else {
+    let Some((_predecessor, scrutinee)) = union_payload_source else {
         return Ok(Vec::new());
     };
     let mut instructions = Vec::new();
+    let scrutinee_alias = writable_root_values.contains(&scrutinee).then(|| {
+        let alias = format!(
+            "%v{}_before_b{}_entry",
+            scrutinee.raw(),
+            block.block().raw()
+        );
+        instructions.push(format!(
+            "{alias} = load i64, ptr %v{}_gc_root",
+            scrutinee.raw()
+        ));
+        alias
+    });
     for (index, argument) in block.arguments().iter().enumerate() {
-        instructions.extend(lower_runtime_slot_load(
+        let loads = lower_runtime_slot_load(
             argument.value(),
             argument.type_id(),
             scrutinee,
             index + 2,
             types,
-        )?);
+        )?;
+        instructions.extend(loads.into_iter().map(|load| {
+            scrutinee_alias.as_ref().map_or(load.clone(), |alias| {
+                replace_llvm_value_token(&load, &format!("%v{}", scrutinee.raw()), alias)
+            })
+        }));
     }
     Ok(instructions)
 }

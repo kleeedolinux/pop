@@ -60,6 +60,96 @@ fn execute_pair(
 }
 
 #[test]
+fn completed_async_tasks_reuse_the_exact_completion_after_optimization() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private async function build(): (Int, Int)\n\
+             return 20, 22\n\
+         end\n\
+         public async function run(): Int\n\
+             local task = build()\n\
+             local first = await task\n\
+             local second = await task\n\
+             return first[1] + second[2]\n\
+         end\n",
+        "run",
+    );
+
+    let (returned, events) = execute_pair(&mir, &arena, entry);
+    assert_eq!(returned, vec![integer("42")]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ReferenceRuntimeEvent::AllocateObject { .. }))
+            .count(),
+        2,
+        "one cold task and one retained tuple completion must be allocated: {events:?}"
+    );
+    let task_map = events.iter().find_map(|event| match event {
+        ReferenceRuntimeEvent::AllocateObject { object_map, .. }
+            if object_map.slot_count() == 1 =>
+        {
+            Some(object_map)
+        }
+        _ => None,
+    });
+    assert!(
+        task_map.is_some_and(|map| {
+            map.reference_slots() == &[pop_runtime_interface::ObjectSlot::new(0)]
+        }),
+        "the retained managed completion must occupy the compiler-proven task slot: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ReferenceRuntimeEvent::WriteBarrier(_))),
+        "publishing the managed completion must use the task object's barrier: {events:?}"
+    );
+}
+
+#[test]
+fn cold_task_arguments_evaluate_once_before_start_after_optimization() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private async function identity(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public async function run(): Int\n\
+             local counter = 0\n\
+             local function next(): Int\n\
+                 counter += 1\n\
+                 return counter\n\
+             end\n\
+             local task = identity(next())\n\
+             local beforeAwait = counter\n\
+             local first = await task\n\
+             local second = await task\n\
+             return beforeAwait * 100 + first * 10 + second\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("111")]);
+}
+
+#[test]
+fn indirect_async_closures_preserve_typed_captures_after_optimization() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public async function run(): Int\n\
+             local base = 40\n\
+             local operation = async function(value: Int): Int\n\
+                 return base + value\n\
+             end\n\
+             return await operation(2)\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("42")]);
+}
+
+#[test]
 fn specialized_generics_execute_identically_before_and_after_optimization() {
     let (mir, arena, entry) = lower(
         "namespace Main\n\

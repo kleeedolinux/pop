@@ -10,17 +10,16 @@ use pop_foundation::{
     BlockId, ClassId, ErrorId, FieldId, InterfaceId, MethodId, NominalInterfaceId, SymbolId,
     SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
-use pop_runtime_interface::{ArrayElementMap, ObjectMap, ObjectSlot};
+use pop_runtime_interface::{ArrayElementMap, ObjectMap, ObjectSlot, RootSlot};
 use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena, embedded_bootstrap_schema};
 
 use crate::ir::*;
 use crate::lowering::{
-    array_element_map, expected_safe_point_roots, is_managed_reference_type_id, list_element_map,
-    local_instruction_effects, table_element_maps, terminator_effects,
+    array_element_map, expected_safe_point_roots, expected_suspend_frame_slots,
+    is_managed_reference_type_id, list_element_map, local_instruction_effects, table_element_maps,
+    task_object_map, terminator_effects,
 };
 use crate::render::{float_kind_text, integer_kind_text};
-
-type CallableSignature = (bool, Vec<TypeId>, Vec<TypeId>, MirEffectSummary);
 
 /// Verifies canonical MIR block, value, type, call, and return invariants.
 ///
@@ -38,7 +37,6 @@ pub fn verify_mir_bubble(
             (
                 function.symbol(),
                 (
-                    function.is_async(),
                     function.parameters().to_vec(),
                     function.results().to_vec(),
                     function.effects(),
@@ -53,7 +51,6 @@ pub fn verify_mir_bubble(
             (
                 method.method,
                 (
-                    method.function.is_async(),
                     method.function.parameters().to_vec(),
                     method.function.results().to_vec(),
                     method.function.effects(),
@@ -61,11 +58,16 @@ pub fn verify_mir_bubble(
             )
         })
         .collect();
+    let async_functions: BTreeSet<_> = bubble
+        .functions
+        .iter()
+        .filter(|function| function.is_async())
+        .map(MirFunction::symbol)
+        .collect();
     let mut errors = Vec::new();
     let mut reference_signatures = BTreeMap::new();
     for reference in &bubble.function_references {
         let signature = (
-            false,
             reference.parameters.clone(),
             reference.results.clone(),
             reference.effects,
@@ -84,6 +86,12 @@ pub fn verify_mir_bubble(
             ));
         }
     }
+    let async_references: BTreeSet<_> = bubble
+        .function_references
+        .iter()
+        .filter(|reference| reference.is_async())
+        .map(MirFunctionReference::identity)
+        .collect();
     let schema = MirSchema::collect(bubble, arena, &method_signatures, &mut errors);
     for function in &bubble.functions {
         verify_function(
@@ -93,6 +101,8 @@ pub fn verify_mir_bubble(
             &signatures,
             &reference_signatures,
             &method_signatures,
+            &async_functions,
+            &async_references,
             &mut errors,
         );
     }
@@ -104,6 +114,8 @@ pub fn verify_mir_bubble(
             &signatures,
             &reference_signatures,
             &method_signatures,
+            &async_functions,
+            &async_references,
             &mut errors,
         );
     }
@@ -135,7 +147,7 @@ impl<'mir> MirSchema<'mir> {
     fn collect(
         bubble: &'mir MirBubble,
         arena: &TypeArena,
-        method_signatures: &BTreeMap<MethodId, CallableSignature>,
+        method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
         errors: &mut Vec<MirVerificationError>,
     ) -> Self {
         let mut schema = Self {
@@ -269,7 +281,7 @@ impl<'mir> MirSchema<'mir> {
 
     fn verify_interface_implementations(
         &self,
-        method_signatures: &BTreeMap<MethodId, CallableSignature>,
+        method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
         errors: &mut Vec<MirVerificationError>,
     ) {
         for class in self.classes.values() {
@@ -298,7 +310,7 @@ impl<'mir> MirSchema<'mir> {
                             && mapping.slot() == required.slot()
                             && class.methods().contains(&mapping.class_method())
                             && method_signatures.get(&mapping.class_method()).is_some_and(
-                                |(_, parameters, results, _)| {
+                                |(parameters, results, _)| {
                                     parameters.first() == Some(&class.type_id())
                                         && parameters[1..] == required.parameters()[..]
                                         && results == required.results()
@@ -350,7 +362,7 @@ impl<'mir> MirSchema<'mir> {
 fn verify_builtin_interface_implementations(
     class: &MirClassDeclaration,
     arena: &TypeArena,
-    method_signatures: &BTreeMap<MethodId, CallableSignature>,
+    method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     let Some(protocol) = embedded_bootstrap_schema()
@@ -410,7 +422,7 @@ fn verify_builtin_interface_implementations(
                     && class.methods().contains(&mapping.class_method())
                     && expected_result.is_some_and(|expected_result| {
                         method_signatures.get(&mapping.class_method()).is_some_and(
-                            |(_, parameters, results, _)| {
+                            |(parameters, results, _)| {
                                 parameters.as_slice() == [class.type_id()]
                                     && results.as_slice() == [expected_result]
                             },
@@ -435,9 +447,11 @@ fn verify_function(
     function: &MirFunction,
     arena: &TypeArena,
     schema: &MirSchema<'_>,
-    signatures: &BTreeMap<SymbolId, CallableSignature>,
-    reference_signatures: &BTreeMap<SymbolIdentity, CallableSignature>,
-    method_signatures: &BTreeMap<MethodId, CallableSignature>,
+    signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    async_functions: &BTreeSet<SymbolId>,
+    async_references: &BTreeSet<SymbolIdentity>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     verify_entry_parameters(function, errors);
@@ -445,8 +459,19 @@ fn verify_function(
     let cleanup_targets: BTreeSet<_> = function
         .blocks()
         .iter()
-        .flat_map(|block| block.instructions())
-        .filter_map(instruction_unwind_target)
+        .flat_map(|block| {
+            block
+                .instructions()
+                .iter()
+                .filter_map(instruction_unwind_target)
+                .chain(match block.terminator() {
+                    MirTerminator::Suspend {
+                        unwind: MirUnwindAction::Cleanup(target),
+                        ..
+                    } => Some(*target),
+                    _ => None,
+                })
+        })
         .collect();
     let mut unwind_cleanup_reachable = cleanup_targets.clone();
     let mut pending_cleanup_blocks: Vec<_> = cleanup_targets.iter().copied().collect();
@@ -519,6 +544,33 @@ fn verify_function(
         dominators: &dominators,
         blocks: &blocks,
     };
+    let expected_suspend_frames = expected_suspend_frame_slots(function);
+    let mut safe_points = BTreeSet::new();
+    let mut coroutine_states = BTreeSet::new();
+    for block in &function.blocks {
+        for instruction in &block.instructions {
+            if let MirInstructionKind::GcSafePoint { safe_point, .. } = instruction.kind()
+                && !safe_points.insert(*safe_point)
+            {
+                errors.push(MirVerificationError::DuplicateSafePoint(*safe_point));
+            }
+        }
+        if let MirTerminator::Suspend {
+            safe_point,
+            live_frame,
+            ..
+        } = block.terminator()
+        {
+            if !safe_points.insert(*safe_point) {
+                errors.push(MirVerificationError::DuplicateSafePoint(*safe_point));
+            }
+            if !coroutine_states.insert(live_frame.state) {
+                errors.push(MirVerificationError::DuplicateCoroutineState(
+                    live_frame.state,
+                ));
+            }
+        }
+    }
     let mut required_function_effects = MirEffectSummary::empty();
     for block in &function.blocks {
         if let Some(cleanup) = block.cleanup() {
@@ -584,6 +636,8 @@ fn verify_function(
                     functions: signatures,
                     references: reference_signatures,
                     methods: method_signatures,
+                    async_functions,
+                    async_references,
                 },
                 errors,
             );
@@ -605,7 +659,15 @@ fn verify_function(
         }
         required_function_effects =
             required_function_effects.union(terminator_effects(block.terminator()));
-        verify_terminator(block, function, arena, schema, &facts, errors);
+        verify_terminator(
+            block,
+            function,
+            arena,
+            schema,
+            &facts,
+            &expected_suspend_frames,
+            errors,
+        );
         if matches!(block.terminator(), MirTerminator::ResumeUnwind)
             && (!unwind_cleanup_reachable.contains(&block.block())
                 || !block
@@ -652,22 +714,22 @@ fn verify_entry_parameters(function: &MirFunction, errors: &mut Vec<MirVerificat
 
 fn expected_instruction_effects(
     instruction: &MirInstruction,
-    signatures: &BTreeMap<SymbolId, CallableSignature>,
-    reference_signatures: &BTreeMap<SymbolIdentity, CallableSignature>,
-    method_signatures: &BTreeMap<MethodId, CallableSignature>,
+    signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
 ) -> MirEffectSummary {
     match instruction.kind() {
         MirInstructionKind::CallDirect { function, .. } => signatures
             .get(function)
-            .map(|(_, _, _, effects)| *effects)
+            .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
         MirInstructionKind::CallReferenced { function, .. } => reference_signatures
             .get(function)
-            .map(|(_, _, _, effects)| *effects)
+            .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
         MirInstructionKind::CallDirectMethod { method, .. } => method_signatures
             .get(method)
-            .map(|(_, _, _, effects)| *effects)
+            .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
         MirInstructionKind::CallIndirect {
             declared_effects, ..
@@ -772,6 +834,26 @@ fn verify_gc_contracts(
                 } => {
                     if schema.classes.get(class).is_some_and(|declaration| {
                         expected_class_object_map(declaration, arena) != *object_map
+                    }) {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::TaskCreate {
+                    dispatch,
+                    arguments,
+                    completion_type,
+                    object_map,
+                    ..
+                } => {
+                    let argument_types = arguments
+                        .iter()
+                        .map(|argument| facts.values.get(argument).copied())
+                        .collect::<Option<Vec<_>>>();
+                    if argument_types.is_some_and(|argument_types| {
+                        task_object_map(dispatch, &argument_types, *completion_type, arena)
+                            != *object_map
                     }) {
                         errors.push(MirVerificationError::InvalidObjectMap {
                             instruction: instruction.result(),
@@ -1479,6 +1561,18 @@ pub(crate) fn terminator_targets(terminator: &MirTerminator) -> Vec<BlockId> {
         } => vec![*when_true, *when_false],
         MirTerminator::UnionSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
         MirTerminator::ErrorSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
+        MirTerminator::Suspend {
+            resume,
+            cancellation,
+            unwind,
+            ..
+        } => {
+            let mut targets = vec![*resume, *cancellation];
+            if let MirUnwindAction::Cleanup(target) = unwind {
+                targets.push(*target);
+            }
+            targets
+        }
         MirTerminator::Missing
         | MirTerminator::Return { .. }
         | MirTerminator::Trap(_)
@@ -1495,6 +1589,9 @@ pub(crate) fn terminator_operands(terminator: &MirTerminator) -> Vec<ValueId> {
         MirTerminator::ConditionalBranch { condition, .. } => vec![*condition],
         MirTerminator::UnionSwitch { scrutinee, .. } => vec![*scrutinee],
         MirTerminator::ErrorSwitch { scrutinee, .. } => vec![*scrutinee],
+        MirTerminator::Suspend { operation, .. } => match operation {
+            MirSuspendOperation::Task { task, .. } => vec![*task],
+        },
         MirTerminator::Missing
         | MirTerminator::Branch { .. }
         | MirTerminator::Trap(_)
@@ -1527,9 +1624,11 @@ pub(crate) fn block_targets(block: &MirBlock) -> Vec<BlockId> {
 
 #[derive(Clone, Copy)]
 struct CallableSignatures<'a> {
-    functions: &'a BTreeMap<SymbolId, CallableSignature>,
-    references: &'a BTreeMap<SymbolIdentity, CallableSignature>,
-    methods: &'a BTreeMap<MethodId, CallableSignature>,
+    functions: &'a BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    references: &'a BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    methods: &'a BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    async_functions: &'a BTreeSet<SymbolId>,
+    async_references: &'a BTreeSet<SymbolIdentity>,
 }
 
 fn verify_instruction_types(
@@ -1565,16 +1664,7 @@ fn verify_instruction_types(
     if verify_schema_instruction(instruction, arena, schema, values, errors) {
         return;
     }
-    if verify_callable_instruction(
-        instruction,
-        arena,
-        schema,
-        values,
-        signatures.functions,
-        signatures.references,
-        signatures.methods,
-        errors,
-    ) {
+    if verify_callable_instruction(instruction, arena, schema, values, signatures, errors) {
         return;
     }
     match instruction.kind() {
@@ -3007,17 +3097,15 @@ fn verify_callable_instruction(
     arena: &TypeArena,
     schema: &MirSchema<'_>,
     values: &BTreeMap<ValueId, TypeId>,
-    signatures: &BTreeMap<SymbolId, CallableSignature>,
-    reference_signatures: &BTreeMap<SymbolIdentity, CallableSignature>,
-    method_signatures: &BTreeMap<MethodId, CallableSignature>,
+    signatures: CallableSignatures<'_>,
     errors: &mut Vec<MirVerificationError>,
 ) -> bool {
     match instruction.kind() {
         MirInstructionKind::FunctionReference(function) => {
-            if let Some((is_async, parameters, results, _)) = signatures.get(function)
+            if let Some((parameters, results, _)) = signatures.functions.get(function)
                 && arena.get(instruction.result_type())
                     != Some(&SemanticType::Function {
-                        is_async: *is_async,
+                        is_async: signatures.async_functions.contains(function),
                         parameters: parameters.clone(),
                         results: results.clone(),
                         effects: pop_types::EffectSummary::empty(),
@@ -3029,22 +3117,79 @@ fn verify_callable_instruction(
                 });
             }
         }
+        MirInstructionKind::TaskCreate {
+            dispatch,
+            arguments,
+            completion_type,
+            ..
+        } => {
+            let signature = match dispatch {
+                MirTaskDispatch::Direct(function) => signatures
+                    .async_functions
+                    .contains(function)
+                    .then(|| signatures.functions.get(function))
+                    .flatten(),
+                MirTaskDispatch::Referenced(function) => signatures
+                    .async_references
+                    .contains(function)
+                    .then(|| signatures.references.get(function))
+                    .flatten(),
+                MirTaskDispatch::Indirect(callee) => {
+                    let Some(callee_type) = values.get(callee).copied() else {
+                        return true;
+                    };
+                    let Some(SemanticType::Function {
+                        is_async: true,
+                        parameters,
+                        results,
+                        ..
+                    }) = arena.get(callee_type)
+                    else {
+                        errors.push(MirVerificationError::InvalidCallableOperand {
+                            instruction: instruction.result(),
+                            operand: *callee,
+                            found: callee_type,
+                        });
+                        return true;
+                    };
+                    verify_task_signature(
+                        instruction,
+                        arguments,
+                        parameters,
+                        results,
+                        *completion_type,
+                        arena,
+                        values,
+                        errors,
+                    );
+                    return true;
+                }
+            };
+            if let Some((parameters, results, _)) = signature {
+                verify_task_signature(
+                    instruction,
+                    arguments,
+                    parameters,
+                    results,
+                    *completion_type,
+                    arena,
+                    values,
+                    errors,
+                );
+            } else {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::CallDirect {
             function,
             arguments,
             ..
         } => {
-            if let Some((is_async, parameters, results, _)) = signatures.get(function) {
-                verify_call_signature(
-                    instruction,
-                    arguments,
-                    parameters,
-                    results,
-                    *is_async,
-                    arena,
-                    values,
-                    errors,
-                );
+            if let Some((parameters, results, _)) = signatures.functions.get(function) {
+                verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
         MirInstructionKind::CallReferenced {
@@ -3052,17 +3197,8 @@ fn verify_callable_instruction(
             arguments,
             ..
         } => {
-            if let Some((is_async, parameters, results, _)) = reference_signatures.get(function) {
-                verify_call_signature(
-                    instruction,
-                    arguments,
-                    parameters,
-                    results,
-                    *is_async,
-                    arena,
-                    values,
-                    errors,
-                );
+            if let Some((parameters, results, _)) = signatures.references.get(function) {
+                verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
         MirInstructionKind::CallStandard {
@@ -3079,32 +3215,14 @@ fn verify_callable_instruction(
                 }
             };
             if let Some(parameter) = parameter {
-                verify_call_signature(
-                    instruction,
-                    arguments,
-                    &[parameter],
-                    &[],
-                    false,
-                    arena,
-                    values,
-                    errors,
-                );
+                verify_call_signature(instruction, arguments, &[parameter], &[], values, errors);
             }
         }
         MirInstructionKind::CallDirectMethod {
             method, arguments, ..
         } => {
-            if let Some((is_async, parameters, results, _)) = method_signatures.get(method) {
-                verify_call_signature(
-                    instruction,
-                    arguments,
-                    parameters,
-                    results,
-                    *is_async,
-                    arena,
-                    values,
-                    errors,
-                );
+            if let Some((parameters, results, _)) = signatures.methods.get(method) {
+                verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
         MirInstructionKind::CallInterface {
@@ -3169,8 +3287,6 @@ fn verify_callable_instruction(
                 arguments,
                 &parameters,
                 required.results(),
-                false,
-                arena,
                 values,
                 errors,
             );
@@ -3183,6 +3299,46 @@ fn verify_callable_instruction(
         _ => return false,
     }
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_task_signature(
+    instruction: &MirInstruction,
+    arguments: &[ValueId],
+    parameters: &[TypeId],
+    results: &[TypeId],
+    completion_type: TypeId,
+    arena: &TypeArena,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    for (argument, expected) in arguments.iter().zip(parameters) {
+        verify_operand_type(instruction.result(), *argument, *expected, values, errors);
+    }
+    let expected_completion = match results {
+        [result] => Some(*result),
+        results => arena.find(&SemanticType::Tuple(results.to_vec())),
+    };
+    let task_definition = embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.type_by_source_name("Task").copied())
+        .map(|entry| entry.id());
+    let valid_result = matches!(
+        (task_definition, arena.get(instruction.result_type())),
+        (
+            Some(expected),
+            Some(SemanticType::Builtin { definition, arguments })
+        ) if *definition == expected && arguments.as_slice() == [completion_type]
+    );
+    if arguments.len() != parameters.len()
+        || expected_completion != Some(completion_type)
+        || !valid_result
+    {
+        errors.push(MirVerificationError::InvalidInstructionType {
+            instruction: instruction.result(),
+            result_type: instruction.result_type(),
+        });
+    }
 }
 
 fn verify_indirect_call(
@@ -3199,7 +3355,6 @@ fn verify_indirect_call(
     let Some(SemanticType::Function {
         parameters,
         results,
-        is_async,
         ..
     }) = arena.get(callee_type).cloned()
     else {
@@ -3215,8 +3370,6 @@ fn verify_indirect_call(
         arguments,
         &parameters,
         &results,
-        is_async,
-        arena,
         values,
         errors,
     );
@@ -3227,68 +3380,30 @@ fn verify_call_signature(
     arguments: &[ValueId],
     parameters: &[TypeId],
     results: &[TypeId],
-    is_async: bool,
-    arena: &TypeArena,
     values: &BTreeMap<ValueId, TypeId>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     for (argument, expected) in arguments.iter().zip(parameters) {
         verify_operand_type(instruction.result(), *argument, *expected, values, errors);
     }
-    let expected_results = if is_async { 1 } else { results.len() };
     let found_results = usize::from(instruction.has_result());
-    if arguments.len() != parameters.len() || expected_results != found_results {
+    if arguments.len() != parameters.len() || results.len() != found_results {
         errors.push(MirVerificationError::InvalidCallSignature {
             instruction: instruction.result(),
             expected_arguments: parameters.len(),
             found_arguments: arguments.len(),
-            expected_results,
+            expected_results: results.len(),
             found_results,
         });
         return;
     }
-    let result_matches = if is_async {
-        instruction
-            .optional_result_type()
-            .is_some_and(|found| is_task_completion(arena, found, results))
-    } else {
-        match (results, instruction.optional_result_type()) {
-            ([expected], Some(found)) => *expected == found,
-            ([], None) => true,
-            _ => true,
-        }
-    };
-    if !result_matches {
+    if let ([expected], Some(found)) = (results, instruction.optional_result_type())
+        && *expected != found
+    {
         errors.push(MirVerificationError::InvalidInstructionType {
             instruction: instruction.result(),
-            result_type: instruction.result_type(),
+            result_type: found,
         });
-    }
-}
-
-fn is_task_completion(arena: &TypeArena, candidate: TypeId, results: &[TypeId]) -> bool {
-    let Some(task_definition) = embedded_bootstrap_schema()
-        .ok()
-        .and_then(|schema| schema.type_by_source_name("Task").copied())
-        .map(|entry| entry.id())
-    else {
-        return false;
-    };
-    let Some(SemanticType::Builtin {
-        definition,
-        arguments,
-    }) = arena.get(candidate)
-    else {
-        return false;
-    };
-    if *definition != task_definition || arguments.len() != 1 {
-        return false;
-    }
-    match results {
-        [completion] => arguments[0] == *completion,
-        _ => arena
-            .get(arguments[0])
-            .is_some_and(|completion| completion == &SemanticType::Tuple(results.to_vec())),
     }
 }
 
@@ -3384,6 +3499,7 @@ fn verify_terminator(
     arena: &TypeArena,
     schema: &MirSchema<'_>,
     facts: &ControlFlowFacts<'_, '_>,
+    expected_suspend_frames: &BTreeMap<BlockId, Vec<MirFrameSlot>>,
     errors: &mut Vec<MirVerificationError>,
 ) {
     let use_instruction = block.instructions.len();
@@ -3530,6 +3646,94 @@ fn verify_terminator(
                 }
             }
         }
+        MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { task, result_type },
+            resume,
+            cancellation,
+            unwind,
+            safe_point,
+            live_frame,
+        } => {
+            if !function.is_async {
+                errors.push(MirVerificationError::SuspendOutsideAsync(block.block));
+            }
+            verify_value_use(*task, block.block, use_instruction, facts, errors);
+            let task_definition = embedded_bootstrap_schema()
+                .ok()
+                .and_then(|schema| schema.type_by_source_name("Task").copied())
+                .map(|entry| entry.id());
+            let valid_task = matches!(
+                (task_definition, facts.values.get(task).and_then(|type_id| arena.get(*type_id))),
+                (
+                    Some(expected),
+                    Some(SemanticType::Builtin { definition, arguments })
+                ) if *definition == expected && arguments.as_slice() == [*result_type]
+            );
+            if !valid_task {
+                errors.push(MirVerificationError::InvalidSuspendTask(block.block));
+            }
+
+            verify_target(*resume, facts.blocks, errors);
+            if !facts.blocks.get(resume).is_some_and(|target| {
+                target.arguments.len() == 1 && target.arguments[0].type_id == *result_type
+            }) {
+                errors.push(MirVerificationError::InvalidSuspendResume(block.block));
+            }
+            verify_target(*cancellation, facts.blocks, errors);
+            if !facts.blocks.get(cancellation).is_some_and(|target| {
+                target.arguments.is_empty()
+                    && target
+                        .cleanup
+                        .is_some_and(|cleanup| cleanup.reason == MirCleanupExitReason::Cancellation)
+            }) {
+                errors.push(MirVerificationError::InvalidSuspendCancellation(
+                    block.block,
+                ));
+            }
+            if let MirUnwindAction::Cleanup(target) = unwind {
+                verify_target(*target, facts.blocks, errors);
+                if !facts.blocks.get(target).is_some_and(|target| {
+                    target.arguments.is_empty()
+                        && target
+                            .cleanup
+                            .is_some_and(|cleanup| cleanup.reason == MirCleanupExitReason::Unwind)
+                }) {
+                    errors.push(MirVerificationError::InvalidSuspendFrame(block.block));
+                }
+            }
+
+            let mut values = BTreeSet::new();
+            let expected_roots = live_frame
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    verify_value_use(slot.value, block.block, use_instruction, facts, errors);
+                    if facts.values.get(&slot.value) != Some(&slot.type_id)
+                        || !values.insert(slot.value)
+                    {
+                        errors.push(MirVerificationError::InvalidSuspendFrame(block.block));
+                    }
+                    is_managed_reference_type_id(slot.type_id, Some(arena))
+                        .then(|| RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+                })
+                .collect::<Vec<_>>();
+            if live_frame.state.raw()
+                >= function
+                    .blocks
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(candidate.terminator, MirTerminator::Suspend { .. })
+                    })
+                    .count() as u32
+                || live_frame.stack_map.safe_point() != *safe_point
+                || live_frame.stack_map.root_slots() != expected_roots
+                || expected_suspend_frames.get(&block.block) != Some(&live_frame.slots)
+                || !values.contains(task)
+            {
+                errors.push(MirVerificationError::InvalidSuspendFrame(block.block));
+            }
+        }
         MirTerminator::Trap(_)
         | MirTerminator::Panic(_)
         | MirTerminator::ContinueUnwind(_)
@@ -3627,6 +3831,16 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::ErrorMake {
             arguments: values, ..
         } => values.clone(),
+        MirInstructionKind::TaskCreate {
+            dispatch,
+            arguments,
+            ..
+        } => match dispatch {
+            MirTaskDispatch::Direct(_) | MirTaskDispatch::Referenced(_) => arguments.clone(),
+            MirTaskDispatch::Indirect(callee) => std::iter::once(*callee)
+                .chain(arguments.iter().copied())
+                .collect(),
+        },
         MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
         MirInstructionKind::IterationIsItem { iteration, .. }
         | MirInstructionKind::IterationGetItem { iteration, .. } => vec![*iteration],
@@ -3665,7 +3879,6 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. }
         | MirInstructionKind::StringConcat { left, right } => vec![*left, *right],
         MirInstructionKind::BooleanNot { operand }
-        | MirInstructionKind::Await { task: operand }
         | MirInstructionKind::OptionalIsPresent { optional: operand }
         | MirInstructionKind::OptionalGet { optional: operand }
         | MirInstructionKind::IntegerNegate { operand, .. }

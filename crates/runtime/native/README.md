@@ -17,10 +17,65 @@ Heap storage, reachability, roots, pins, and collection policy remain in
 `pop-runtime-native-abi`. See
 [ADR 0038](../../../architecture/decisions/0038-modular-portable-runtime-implementation.md).
 The native collector transition is specified by
-[ADR 0071](../../../architecture/decisions/0071-native-stable-generational-transition.md).
+[ADR 0070](../../../architecture/decisions/0070-native-stable-generational-transition.md).
 Atomic initialized publication is specified by
 [ADR 0072](../../../architecture/decisions/0072-atomic-initialized-object-allocation.md).
 
 The facade is divided into `identity`, `allocation`, `storage`, `text`, `roots`,
-`failure`, and private `state` modules. This keeps ABI exports grouped by the
-runtime service they adapt while retaining one static library and one native ABI.
+`failure`, `scheduler`, and private `state` modules. The scheduler provides the
+bounded synchronized M:N correctness implementation, deterministic
+per-dispatch work budgets and record/replay, typed collector-transition hooks,
+bounded scheduler-work-unit ready and driver-delivery percentiles, and a
+separate bounded blocking pool plus bounded host/virtual timer and
+external-event delivery. Native shutdown records one bounded blocking-pool
+drain/join delay and remains idempotent under subsequent drop cleanup. These
+contracts are specified by the
+[scheduler runtime design](../../../architecture/23.1-scheduler-runtime-implementation.md).
+This keeps ABI exports grouped by the runtime service they adapt while
+retaining one static library and one native ABI.
+
+[ADR 0077](../../../architecture/decisions/0077-scheduler-mutator-and-task-root-binding.md)
+defines the scheduler/collector binding. Each normal worker now owns one
+detached mutator registration for its lifetime, enters managed state only while
+polling a task, carries an exact thread-local scheduler/mutator binding through
+serialized native ABI operations, acknowledges active collection epochs at
+managed safe points, and unregisters on shutdown. Every ready or suspended task
+frame owns one collector-visible precise root container. ABI 1 remains the
+stable-token serialized correctness stage; moving native execution still waits
+for the ABI 2 backend reload proof. The staged
+`pop_rt_gc_safe_point_v2` entry performs failure-atomic writable slot
+installation, but this stable facade deliberately rejects ABI 2 capability
+negotiation.
+
+The checksum-validated synchronized-reference benchmark is available with:
+
+```text
+cargo bench -p pop-runtime-native --bench scheduler -- \
+  --profile local-declared --workload all --workers standard
+```
+
+Its `pop-scheduler-benchmark-v3` records label the target, scheduler stage,
+workload, worker profile, logical work, initial dispatch latency scope, queue
+depths and high-water marks, steal outcomes, worker lifecycle, bounded
+scheduler-work delay percentiles, and labelled operating-system memory and
+context-switch observations. The default run is local optimization evidence,
+not a portable performance claim; scale and GC-coupled evidence must use the
+explicit profiles below.
+
+The scale and collector profiles are explicit rather than implied by the
+default run:
+
+```text
+cargo bench -p pop-runtime-native --bench scheduler -- \
+  --samples 1 --tasks 1000000 --polls-per-task 1 --workers available \
+  --workload suspended_frames --profile million-suspended-minimal-frames
+
+cargo bench -p pop-runtime-native --bench scheduler -- \
+  --samples 5 --tasks 8192 --polls-per-task 16 --workers available \
+  --workload scheduler_gc_interaction --profile scheduler-gc-interaction
+```
+
+`local_wake`, `foreign_wake`, `ping_pong`, `steal_storm`, and
+`continuous_event_fairness` select the corresponding typed latency/fairness
+workloads. `task_control` includes the park/unpark path, while
+`burst_injection` is the global-injection profile.

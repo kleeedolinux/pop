@@ -8,6 +8,10 @@ It defines Pop Lang's accepted concurrency, isolation, supervision, and
 distribution architecture. Exact library signatures may grow through normal
 API review, but they cannot weaken the semantic boundaries here.
 
+The private native scheduler design, research basis, GC transition boundaries,
+and implementation gates are detailed in
+[Scheduler runtime implementation](./23.1-scheduler-runtime-implementation.md).
+
 ## Product contract
 
 Pop Lang combines four properties:
@@ -60,7 +64,10 @@ local page = try await task
 
 The call evaluates arguments once and allocates the task/frame, but the body
 does not begin until direct `await` or `Task.start(group, task)` takes
-ownership. Async and synchronous function types never convert implicitly.
+ownership. The task/frame allocation carries an exact compiler-proven object
+map for its captured dispatch environment, arguments, and retained completion
+slot according to their verified MIR representation. Async and synchronous
+function types never convert implicitly.
 
 `await` accepts exactly `Task<T>`, is valid only in async code, and yields
 exactly `T`. It is a suspension, cancellation, scheduling, flow-fact, and GC

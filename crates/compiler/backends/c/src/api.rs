@@ -36,6 +36,7 @@ pub enum CBackendError {
     UnsupportedType(TypeId),
     UnsupportedDeclarations,
     UnsupportedEffects(FunctionId),
+    UnsupportedAsync(FunctionId),
     UnsupportedInstruction {
         function: FunctionId,
         value: ValueId,
@@ -69,6 +70,11 @@ impl fmt::Display for CBackendError {
             Self::UnsupportedEffects(function) => write!(
                 formatter,
                 "C backend does not support the effects of MIR function f{}",
+                function.raw()
+            ),
+            Self::UnsupportedAsync(function) => write!(
+                formatter,
+                "experimental C backend does not support async function f{}",
                 function.raw()
             ),
             Self::UnsupportedInstruction { function, value } => write!(

@@ -8,11 +8,11 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId, EnumCaseId,
-    ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId,
-    IterationProtocolMethodId, MethodId, NamespaceId, NestedFunctionId, NominalInterfaceId,
-    ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
-    ValueId,
+    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId,
+    CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId,
+    InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId,
+    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
@@ -224,6 +224,7 @@ impl MirBubble {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirFunctionReference {
     pub(crate) identity: SymbolIdentity,
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: MirEffectSummary,
@@ -233,6 +234,11 @@ impl MirFunctionReference {
     #[must_use]
     pub const fn identity(&self) -> SymbolIdentity {
         self.identity
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -617,6 +623,7 @@ pub struct MirNestedFunction {
     pub(crate) owner: SymbolId,
     pub(crate) function: NestedFunctionId,
     pub(crate) captures: Vec<MirCapture>,
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: MirEffectSummary,
@@ -632,6 +639,10 @@ impl MirNestedFunction {
     #[must_use]
     pub const fn function(&self) -> NestedFunctionId {
         self.function
+    }
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
     #[must_use]
     pub fn captures(&self) -> &[MirCapture] {
@@ -979,6 +990,12 @@ pub enum MirInstructionKind {
         discriminant: u32,
     },
     FunctionReference(SymbolId),
+    TaskCreate {
+        dispatch: MirTaskDispatch,
+        arguments: Vec<ValueId>,
+        completion_type: TypeId,
+        object_map: ObjectMap,
+    },
     TupleMake(Vec<ValueId>),
     TupleGet {
         tuple: ValueId,
@@ -1238,9 +1255,6 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
-    Await {
-        task: ValueId,
-    },
     RecordMake {
         record: SymbolId,
         fields: Vec<(FieldId, ValueId)>,
@@ -1342,6 +1356,60 @@ pub enum MirInstructionKind {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MirTaskDispatch {
+    Direct(SymbolId),
+    Referenced(SymbolIdentity),
+    Indirect(ValueId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirFrameSlot {
+    pub(crate) value: ValueId,
+    pub(crate) type_id: TypeId,
+}
+
+impl MirFrameSlot {
+    #[must_use]
+    pub const fn value(self) -> ValueId {
+        self.value
+    }
+
+    #[must_use]
+    pub const fn type_id(self) -> TypeId {
+        self.type_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirLiveFrame {
+    pub(crate) state: CoroutineStateId,
+    pub(crate) slots: Vec<MirFrameSlot>,
+    pub(crate) stack_map: StackMap,
+}
+
+impl MirLiveFrame {
+    #[must_use]
+    pub const fn state(&self) -> CoroutineStateId {
+        self.state
+    }
+
+    #[must_use]
+    pub fn slots(&self) -> &[MirFrameSlot] {
+        &self.slots
+    }
+
+    #[must_use]
+    pub const fn stack_map(&self) -> &StackMap {
+        &self.stack_map
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirSuspendOperation {
+    Task { task: ValueId, result_type: TypeId },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MirClosureCapture {
     pub(crate) capture: CaptureId,
@@ -1432,6 +1500,14 @@ pub enum MirTerminator {
         scrutinee: ValueId,
         error: ErrorId,
         arms: Vec<MirErrorSwitchArm>,
+    },
+    Suspend {
+        operation: MirSuspendOperation,
+        resume: BlockId,
+        cancellation: BlockId,
+        unwind: MirUnwindAction,
+        safe_point: SafePointId,
+        live_frame: MirLiveFrame,
     },
     Return {
         values: Vec<ValueId>,
@@ -1530,6 +1606,13 @@ pub enum MirVerificationError {
         expected: TypeId,
         found: TypeId,
     },
+    SuspendOutsideAsync(BlockId),
+    InvalidSuspendTask(BlockId),
+    InvalidSuspendResume(BlockId),
+    InvalidSuspendCancellation(BlockId),
+    InvalidSuspendFrame(BlockId),
+    DuplicateSafePoint(SafePointId),
+    DuplicateCoroutineState(CoroutineStateId),
     UnknownFunction(SymbolId),
     UnknownReferencedFunction(SymbolIdentity),
     UnknownMethod(MethodId),

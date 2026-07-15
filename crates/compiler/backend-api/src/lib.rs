@@ -325,7 +325,7 @@ impl ProgramRequirements {
             | MirInstructionKind::CaptureStore { .. } => {
                 self.require_runtime(RuntimeContract::ClosureEnvironment, origin);
             }
-            MirInstructionKind::Await { .. } => {
+            MirInstructionKind::TaskCreate { .. } => {
                 self.require_runtime(RuntimeContract::CoroutineScheduler, origin);
             }
             _ => {}

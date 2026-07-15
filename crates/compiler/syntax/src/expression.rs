@@ -17,8 +17,8 @@ use crate::{Token, TokenKind, TypeSyntax};
 impl BodyParser<'_> {
     pub(crate) fn parse_capture_function(
         &mut self,
-        is_async: bool,
         start: TextSize,
+        is_async: bool,
     ) -> Result<CaptureFunctionSyntax, FunctionBodyError> {
         self.expect(TokenKind::LeftParenthesis, "`(`")?;
         let mut parameters = Vec::new();
@@ -320,14 +320,14 @@ impl BodyParser<'_> {
                 end,
             )),
             TokenKind::Nil => Ok(self.expression(ExpressionSyntaxKind::Nil, start, end)),
-            TokenKind::Function => {
-                let function = self.parse_capture_function(false, start)?;
+            TokenKind::Async => {
+                self.expect(TokenKind::Function, "`function` after `async`")?;
+                let function = self.parse_capture_function(start, true)?;
                 let end = function.span().range().end();
                 Ok(self.expression(ExpressionSyntaxKind::Function(function), start, end))
             }
-            TokenKind::Async => {
-                self.expect(TokenKind::Function, "`function` after `async`")?;
-                let function = self.parse_capture_function(true, start)?;
+            TokenKind::Function => {
+                let function = self.parse_capture_function(start, false)?;
                 let end = function.span().range().end();
                 Ok(self.expression(ExpressionSyntaxKind::Function(function), start, end))
             }

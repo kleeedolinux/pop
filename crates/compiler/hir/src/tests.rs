@@ -401,6 +401,7 @@ fn bubble_verifier_rejects_direct_call_argument_and_result_spoofing() {
         vec![
             HirStatement {
                 kind: HirStatementKind::Call(HirCall {
+                    is_async: false,
                     dispatch: HirCallDispatch::Direct {
                         function: SymbolId::from_raw(1),
                     },
@@ -414,6 +415,7 @@ fn bubble_verifier_rejects_direct_call_argument_and_result_spoofing() {
                 kind: HirStatementKind::Return {
                     values: vec![HirExpression {
                         kind: HirExpressionKind::Call {
+                            is_async: false,
                             dispatch: HirCallDispatch::Direct {
                                 function: SymbolId::from_raw(1),
                             },
@@ -486,6 +488,7 @@ fn bubble_verifier_rejects_indirect_call_argument_and_result_spoofing() {
         vec![
             HirStatement {
                 kind: HirStatementKind::Call(HirCall {
+                    is_async: false,
                     dispatch: HirCallDispatch::Indirect {
                         callee: Box::new(parameter_expression(0, callable, span)),
                     },
@@ -499,6 +502,7 @@ fn bubble_verifier_rejects_indirect_call_argument_and_result_spoofing() {
                 kind: HirStatementKind::Return {
                     values: vec![HirExpression {
                         kind: HirExpressionKind::Call {
+                            is_async: false,
                             dispatch: HirCallDispatch::Indirect {
                                 callee: Box::new(parameter_expression(0, callable, span)),
                             },
@@ -662,6 +666,7 @@ fn bubble_verifier_checks_receiver_method_signatures_against_class_schema() {
         vec![
             HirStatement {
                 kind: HirStatementKind::Call(HirCall {
+                    is_async: false,
                     dispatch: HirCallDispatch::DirectMethod { method },
                     type_arguments: Vec::new(),
                     arguments: vec![string_expression(string, span)],
@@ -673,6 +678,7 @@ fn bubble_verifier_checks_receiver_method_signatures_against_class_schema() {
                 kind: HirStatementKind::Return {
                     values: vec![HirExpression {
                         kind: HirExpressionKind::Call {
+                            is_async: false,
                             dispatch: HirCallDispatch::DirectMethod { method },
                             type_arguments: Vec::new(),
                             arguments: vec![
@@ -917,6 +923,7 @@ fn closure_verifier_rejects_duplicate_mistyped_and_wrongly_owned_captures() {
             kind: HirStatementKind::Expression(HirExpression {
                 kind: HirExpressionKind::Closure(HirClosure {
                     function: NestedFunctionId::from_raw(0),
+                    is_async: false,
                     parameters: Vec::new(),
                     results: Vec::new(),
                     captures: vec![
@@ -1209,6 +1216,7 @@ fn interface_verifier_rejects_wrong_slots_mappings_arguments_and_results() {
             kind: HirStatementKind::Return {
                 values: vec![HirExpression {
                     kind: HirExpressionKind::Call {
+                        is_async: false,
                         dispatch: HirCallDispatch::InterfaceMethod {
                             interface: interface_id,
                             method: interface_method,

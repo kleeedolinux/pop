@@ -290,6 +290,7 @@ pub enum HirBubbleError {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirFunctionReference {
     pub(crate) identity: SymbolIdentity,
+    pub(crate) is_async: bool,
     pub(crate) type_parameters: Vec<TypeId>,
     pub(crate) type_parameter_bounds: Vec<Option<TypeId>>,
     pub(crate) parameters: Vec<TypeId>,
@@ -302,6 +303,7 @@ impl HirFunctionReference {
     #[must_use]
     pub fn new(
         identity: SymbolIdentity,
+        is_async: bool,
         type_parameters: Vec<TypeId>,
         type_parameter_bounds: Vec<Option<TypeId>>,
         parameters: Vec<TypeId>,
@@ -310,6 +312,7 @@ impl HirFunctionReference {
     ) -> Self {
         Self {
             identity,
+            is_async,
             type_parameters,
             type_parameter_bounds,
             parameters,
@@ -317,6 +320,11 @@ impl HirFunctionReference {
             effects,
             specialization_capsule: None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]
@@ -2084,9 +2092,7 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
-            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
-                remap_aggregate_statements(body, instances);
-            }
+            HirStatementKind::Defer { body } => remap_aggregate_statements(body, instances),
             HirStatementKind::FieldSet { base, field, value } => {
                 remap_aggregate_expression(base, instances);
                 *field = instances.field(base.type_id(), *field);
@@ -2391,6 +2397,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             if let HirCallDispatch::Indirect { callee } = dispatch {
                 remap_aggregate_expression(callee, instances);
@@ -2617,9 +2624,7 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
                     collect_statement_calls(&arm.body, calls);
                 }
             }
-            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
-                collect_statement_calls(body, calls);
-            }
+            HirStatementKind::Defer { body } => collect_statement_calls(body, calls),
             HirStatementKind::FieldSet { base, value, .. }
             | HirStatementKind::CompoundFieldSet { base, value, .. } => {
                 collect_expression_calls(base, calls);
@@ -2826,6 +2831,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             let target = match dispatch {
                 HirCallDispatch::Direct { function } => {
@@ -3056,7 +3062,7 @@ fn specialize_statement(
                 specialize_statements(&mut arm.body, substitutions, instances, arena)?;
             }
         }
-        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+        HirStatementKind::Defer { body } => {
             specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::FieldSet { base, value, .. } => {
@@ -3339,6 +3345,7 @@ fn specialize_expression(
             dispatch,
             type_arguments,
             arguments,
+            ..
         } => {
             for argument in type_arguments.iter_mut() {
                 specialize_type(argument, substitutions, arena)?;
@@ -3582,9 +3589,6 @@ pub enum HirStatementKind {
         arms: Vec<HirResultMatchArm>,
     },
     Defer {
-        body: Vec<HirStatement>,
-    },
-    AsyncDefer {
         body: Vec<HirStatement>,
     },
     FieldSet {
@@ -3904,12 +3908,18 @@ impl HirMatchBinding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirCall {
     pub(crate) dispatch: HirCallDispatch,
+    pub(crate) is_async: bool,
     pub(crate) type_arguments: Vec<TypeId>,
     pub(crate) arguments: Vec<HirExpression>,
     pub(crate) span: SourceSpan,
 }
 
 impl HirCall {
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
+    }
+
     #[must_use]
     pub const fn dispatch(&self) -> &HirCallDispatch {
         &self.dispatch
@@ -4095,9 +4105,6 @@ pub enum HirExpressionKind {
         error_type: TypeId,
         enclosing_result: TypeId,
     },
-    Await {
-        task: Box<HirExpression>,
-    },
     OptionalNarrow {
         optional: Box<HirExpression>,
     },
@@ -4106,8 +4113,12 @@ pub enum HirExpressionKind {
         when_true: Box<HirExpression>,
         when_false: Box<HirExpression>,
     },
+    Await {
+        task: Box<HirExpression>,
+    },
     Call {
         dispatch: HirCallDispatch,
+        is_async: bool,
         type_arguments: Vec<TypeId>,
         arguments: Vec<HirExpression>,
     },
@@ -4124,6 +4135,7 @@ pub enum HirExpressionKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HirClosure {
     pub(crate) function: NestedFunctionId,
+    pub(crate) is_async: bool,
     pub(crate) parameters: Vec<HirClosureParameter>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) captures: Vec<HirCapture>,
@@ -4136,6 +4148,11 @@ impl HirClosure {
     #[must_use]
     pub const fn function(&self) -> NestedFunctionId {
         self.function
+    }
+
+    #[must_use]
+    pub const fn is_async(&self) -> bool {
+        self.is_async
     }
 
     #[must_use]

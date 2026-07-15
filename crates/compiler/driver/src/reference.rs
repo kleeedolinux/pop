@@ -128,6 +128,7 @@ pub(crate) fn emit_reference_metadata(
             module: function.module(),
             namespace: declaration.namespace().to_owned(),
             name: function.name().to_owned(),
+            is_async: function.is_async(),
             type_parameters,
             parameters,
             results,
@@ -380,6 +381,7 @@ pub(crate) fn reference_signatures(
                 ResolvedFunctionSignature::referenced_generic(
                     declaration.symbol(),
                     function.name(),
+                    function.is_async(),
                     type_parameters,
                     parameters,
                     results,
@@ -418,6 +420,7 @@ pub(crate) fn hir_function_references(
             let signature = signatures.get(&symbol).expect("referenced signature");
             let reference = pop_hir::HirFunctionReference::new(
                 function.identity(),
+                function.is_async(),
                 signature
                     .type_parameters()
                     .iter()

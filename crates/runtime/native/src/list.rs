@@ -5,7 +5,7 @@ use pop_runtime_interface::{
     TableAllocationRequest,
 };
 
-use crate::state::{ListMetadata, abi_lists, abi_runtime};
+use crate::state::{ListMetadata, abi_lists, lock_abi_runtime};
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
@@ -27,7 +27,7 @@ pub extern "C" fn pop_rt_list_create(capacity: u64, managed_elements: u8) -> u64
     ) else {
         return 0;
     };
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(reference) = runtime.allocate_table(&request) else {
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn pop_rt_list_length(reference: u64, output: *mut u64) ->
 fn list_value(reference: u64, index: u64) -> Option<u64> {
     let zero_based = index.checked_sub(1)?;
     let zero_based = u32::try_from(zero_based).ok()?;
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return None;
     };
     let Ok(lists) = abi_lists().lock() else {
@@ -140,7 +140,7 @@ pub extern "C" fn pop_rt_list_set(
     else {
         return 0;
     };
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(lists) = abi_lists().lock() else {
@@ -169,7 +169,7 @@ pub extern "C" fn pop_rt_list_set(
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_list_add(reference: u64, value: u64, managed_elements: u8) -> u8 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(mut lists) = abi_lists().lock() else {

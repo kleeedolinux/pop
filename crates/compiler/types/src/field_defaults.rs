@@ -128,9 +128,9 @@ fn evaluate_constant(
             }
         }
         ExpressionSyntaxKind::InterpolatedString(_)
+        | ExpressionSyntaxKind::Await { .. }
         | ExpressionSyntaxKind::OptionalPropagate { .. }
         | ExpressionSyntaxKind::ResultPropagate { .. }
-        | ExpressionSyntaxKind::Await { .. }
         | ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }

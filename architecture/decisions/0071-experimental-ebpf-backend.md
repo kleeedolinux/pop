@@ -1,4 +1,4 @@
-# ADR 0070: Experimental eBPF Backend
+# ADR 0071: Experimental eBPF Backend
 
 - Status: accepted
 - Date: 2026-07-14

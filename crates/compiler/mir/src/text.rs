@@ -2,11 +2,11 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId, EnumCaseId,
-    ErrorCaseId, ErrorId, FieldId, FileId, FunctionId, InterfaceId, InterfaceMethodId,
-    IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId, NestedFunctionId,
-    NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
-    TextRange, TextSize, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId,
+    CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FileId, FunctionId, InterfaceId,
+    InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId,
+    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
+    SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
@@ -19,11 +19,12 @@ use super::{
     MirBuiltinInterfaceMethodImplementation, MirCapture, MirCaptureMode, MirClassDeclaration,
     MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration, MirDeclarationKind,
     MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
-    MirErrorDeclaration, MirErrorSwitchArm, MirField, MirFunction, MirFunctionReference,
-    MirInstruction, MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation,
-    MirInterfaceMethod, MirInterfaceMethodImplementation, MirMethod, MirNestedFunction,
-    MirRecordDeclaration, MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm,
-    MirUnwindAction, local_instruction_effects,
+    MirErrorDeclaration, MirErrorSwitchArm, MirField, MirFrameSlot, MirFunction,
+    MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
+    MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirLiveFrame,
+    MirMethod, MirNestedFunction, MirRecordDeclaration, MirSuspendOperation, MirTaskDispatch,
+    MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
+    local_instruction_effects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,7 +80,9 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
     let mut nested_functions = Vec::new();
     let mut function_references = Vec::new();
     while position < lines.len() {
-        if lines[position].starts_with("reference ") {
+        if lines[position].starts_with("reference ")
+            || lines[position].starts_with("async reference ")
+        {
             function_references.push(parse_function_reference(lines[position], position + 1)?);
             position += 1;
         } else if lines[position].starts_with("type.") {
@@ -99,7 +102,9 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
                 function,
             });
             position = next;
-        } else if lines[position].starts_with("nested ") {
+        } else if lines[position].starts_with("nested ")
+            || lines[position].starts_with("async nested ")
+        {
             let (function, next) = parse_nested_function(&lines, position)?;
             nested_functions.push(function);
             position = next;
@@ -125,6 +130,9 @@ fn parse_function_reference(
     line: &str,
     number: usize,
 ) -> Result<MirFunctionReference, MirParseError> {
+    let (is_async, line) = line
+        .strip_prefix("async ")
+        .map_or((false, line), |line| (true, line));
     let parts: Vec<_> = line.split_whitespace().collect();
     if parts.len() != 5 || parts[0] != "reference" {
         return Err(error(number, "malformed function reference"));
@@ -142,6 +150,7 @@ fn parse_function_reference(
             BubbleId::from_raw(parse_u32(identity.0, number)?),
             SymbolId::from_raw(parse_u32(identity.1, number)?),
         ),
+        is_async,
         parameters: parse_wrapped_types(parts[2], "params(", number)?,
         results: parse_wrapped_types(parts[3], "results(", number)?,
         effects: parse_effects(effects, number)?,
@@ -511,7 +520,9 @@ fn parse_dependencies(line: &str, number: usize) -> Result<Vec<BubbleId>, MirPar
 
 fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), MirParseError> {
     let number = start + 1;
-    let header = lines[start];
+    let (is_async, header) = lines[start]
+        .strip_prefix("async ")
+        .map_or((false, lines[start]), |header| (true, header));
     let rest = header
         .strip_prefix("function s")
         .ok_or_else(|| error(number, "expected function"))?;
@@ -554,7 +565,7 @@ fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), 
         MirFunction {
             function: FunctionId::from_raw(function),
             symbol: SymbolId::from_raw(symbol),
-            is_async: false,
+            is_async,
             parameters,
             results,
             effects,
@@ -570,7 +581,10 @@ fn parse_nested_function(
     start: usize,
 ) -> Result<(MirNestedFunction, usize), MirParseError> {
     let line = start + 1;
-    let parts: Vec<_> = lines[start].split_whitespace().collect();
+    let (is_async, header) = lines[start]
+        .strip_prefix("async ")
+        .map_or((false, lines[start]), |header| (true, header));
+    let parts: Vec<_> = header.split_whitespace().collect();
     if parts.len() != 8 || parts[0] != "nested" || parts[3] != "captures" {
         return Err(error(line, "nested function header"));
     }
@@ -598,6 +612,7 @@ fn parse_nested_function(
         MirNestedFunction {
             owner,
             function,
+            is_async,
             captures,
             parameters,
             results,
@@ -872,9 +887,36 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             parse_prefixed(function, 's', line)?,
         )));
     }
-    if let Some(task) = text.strip_prefix("await ") {
-        return Ok(MirInstructionKind::Await {
-            task: ValueId::from_raw(parse_prefixed(task, 'v', line)?),
+    if let Some(rest) = text.strip_prefix("task.create ") {
+        let (dispatch, rest) = rest
+            .split_once(" completion:t")
+            .ok_or_else(|| error(line, "task creation dispatch"))?;
+        let (completion_type, rest) = rest
+            .split_once(' ')
+            .ok_or_else(|| error(line, "task creation completion type"))?;
+        let (object_map, arguments) = rest
+            .split_once(" args ")
+            .ok_or_else(|| error(line, "task creation arguments"))?;
+        let dispatch = if let Some(function) = dispatch.strip_prefix("direct:s") {
+            MirTaskDispatch::Direct(SymbolId::from_raw(parse_u32(function, line)?))
+        } else if let Some(reference) = dispatch.strip_prefix("reference:b") {
+            let (bubble, symbol) = reference
+                .split_once(":s")
+                .ok_or_else(|| error(line, "task reference identity"))?;
+            MirTaskDispatch::Referenced(SymbolIdentity::new(
+                BubbleId::from_raw(parse_u32(bubble, line)?),
+                SymbolId::from_raw(parse_u32(symbol, line)?),
+            ))
+        } else if let Some(callee) = dispatch.strip_prefix("indirect:v") {
+            MirTaskDispatch::Indirect(ValueId::from_raw(parse_u32(callee, line)?))
+        } else {
+            return Err(error(line, "task creation dispatch"));
+        };
+        return Ok(MirInstructionKind::TaskCreate {
+            dispatch,
+            arguments: parse_values(arguments, line)?,
+            completion_type: TypeId::from_raw(parse_u32(completion_type, line)?),
+            object_map: parse_object_map(object_map, line)?,
         });
     }
     if let Some(operands) = text.strip_prefix("string.concat ") {
@@ -1689,6 +1731,73 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
     }
     if text == "resumeCurrentUnwind" {
         return Ok(MirTerminator::ResumeUnwind);
+    }
+    if let Some(rest) = text.strip_prefix("suspend.task ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        if parts.len() != 9 {
+            return Err(error(line, "malformed task suspension"));
+        }
+        let task = ValueId::from_raw(parse_prefixed(parts[0], 'v', line)?);
+        let result_type = TypeId::from_raw(parse_named_prefix(parts[1], "result:t", line)?);
+        let resume = BlockId::from_raw(parse_named_prefix(parts[2], "resume:b", line)?);
+        let cancellation = BlockId::from_raw(parse_named_prefix(parts[3], "cancellation:b", line)?);
+        let unwind = parts[4]
+            .strip_prefix("unwind:")
+            .ok_or_else(|| error(line, "task suspension unwind"))?;
+        let unwind = if unwind == "propagate" {
+            MirUnwindAction::Propagate
+        } else if let Some(target) = unwind.strip_prefix("cleanup:b") {
+            MirUnwindAction::Cleanup(BlockId::from_raw(parse_u32(target, line)?))
+        } else {
+            return Err(error(line, "task suspension unwind"));
+        };
+        let safe_point = SafePointId::new(parse_named_prefix(parts[5], "safePoint:sp", line)?);
+        let state = CoroutineStateId::from_raw(parse_named_prefix(parts[6], "state:cs", line)?);
+        let frame = parts[7]
+            .strip_prefix("frame[")
+            .and_then(|frame| frame.strip_suffix(']'))
+            .ok_or_else(|| error(line, "task suspension frame"))?;
+        let slots = if frame.is_empty() {
+            Vec::new()
+        } else {
+            frame
+                .split(',')
+                .map(|slot| {
+                    let (value, type_id) = slot
+                        .split_once(':')
+                        .ok_or_else(|| error(line, "task suspension frame slot"))?;
+                    Ok(MirFrameSlot {
+                        value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+                        type_id: TypeId::from_raw(parse_prefixed(type_id, 't', line)?),
+                    })
+                })
+                .collect::<Result<Vec<_>, MirParseError>>()?
+        };
+        let roots = parts[8]
+            .strip_prefix("roots[")
+            .and_then(|roots| roots.strip_suffix(']'))
+            .ok_or_else(|| error(line, "task suspension roots"))?;
+        let roots = if roots.is_empty() {
+            Vec::new()
+        } else {
+            roots
+                .split(',')
+                .map(|root| parse_u32(root, line).map(RootSlot::new))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        return Ok(MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { task, result_type },
+            resume,
+            cancellation,
+            unwind,
+            safe_point,
+            live_frame: MirLiveFrame {
+                state,
+                slots,
+                stack_map: StackMap::new(safe_point, roots)
+                    .map_err(|_| error(line, "task suspension stack map"))?,
+            },
+        });
     }
     if let Some(values) = text.strip_prefix("return ") {
         return Ok(MirTerminator::Return {

@@ -88,6 +88,21 @@ fn emits_deterministic_strict_c11_with_checked_direct_calls_and_entry() {
 }
 
 #[test]
+fn runtime_free_c_rejects_async_functions_without_sync_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         private async function work(): Int\n\
+             return 42\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        lower_mir_to_c(&mir, &types, CLoweringOptions::default()),
+        Err(CBackendError::UnsupportedAsync(_))
+    ));
+}
+
+#[test]
 fn checked_numeric_conversions_and_complete_ordering_execute_as_strict_c11() {
     let (mir, types) = lower(
         "namespace Main\n\

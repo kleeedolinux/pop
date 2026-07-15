@@ -2,7 +2,7 @@
 
 use pop_runtime_interface::{ObjectSlot, RuntimeTypeId};
 
-use crate::ownership::SchedulerId;
+use crate::SchedulerId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_field_names)]

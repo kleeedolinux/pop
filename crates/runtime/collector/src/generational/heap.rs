@@ -22,6 +22,7 @@ use super::memory::{
 };
 use super::ownership::IsolationState;
 use super::pinning::{PinningConfig, PinningState, PinningTelemetry};
+use super::task_roots::{TaskFrameRootConfig, TaskFrameRootState};
 use super::workers::{
     BackgroundWorkerConfig, BackgroundWorkerPool, BackgroundWorkerStartError,
     BackgroundWorkerTelemetry,
@@ -195,6 +196,7 @@ pub struct GenerationalRuntime {
     pub(crate) major_epoch: Option<CollectorEpoch>,
     pub(crate) major_root_snapshots: BTreeMap<MutatorId, RootPublication>,
     pub(crate) mutator_schedulers: BTreeMap<MutatorId, SchedulerId>,
+    pub(crate) task_frame_roots: TaskFrameRootState,
 }
 
 impl GenerationalRuntime {
@@ -240,7 +242,15 @@ impl GenerationalRuntime {
             major_epoch: None,
             major_root_snapshots: BTreeMap::new(),
             mutator_schedulers: BTreeMap::new(),
+            task_frame_roots: TaskFrameRootState::new(TaskFrameRootConfig::default()),
         }
+    }
+
+    #[must_use]
+    pub fn with_task_frame_root_config(config: TaskFrameRootConfig) -> Self {
+        let mut runtime = Self::new();
+        runtime.task_frame_roots = TaskFrameRootState::new(config);
+        runtime
     }
 
     pub fn select_scheduler(&mut self, scheduler: SchedulerId) {

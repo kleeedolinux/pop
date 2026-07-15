@@ -9,7 +9,7 @@ use pop_runtime_interface::{
 };
 use pop_runtime_native_abi::StringFormatTag;
 
-use crate::state::abi_runtime;
+use crate::state::lock_abi_runtime;
 
 /// Materializes one immutable, valid UTF-8 string from compiler-emitted bytes.
 ///
@@ -34,7 +34,7 @@ pub unsafe extern "C" fn pop_rt_string_literal(bytes: *const u8, length: u64) ->
 /// Safe Rust adapter for the native string-literal ABI.
 #[must_use]
 pub fn allocate_utf8_string_literal(bytes: &[u8]) -> u64 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     allocate_utf8_string(&mut runtime, bytes).map_or(0, ManagedReference::raw)
@@ -54,7 +54,7 @@ pub fn allocate_utf8_string_literal(bytes: &[u8]) -> u64 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pop_rt_string_read(reference: u64, target: *mut u8, capacity: u64) -> u64 {
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Some(values) =
@@ -132,7 +132,7 @@ pub fn allocate_process_arguments(arguments: &[&[u8]]) -> u64 {
         length,
         ArrayElementMap::ManagedReference,
     );
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(array) = runtime.allocate_array(&request) else {
@@ -206,7 +206,7 @@ pub unsafe extern "C" fn pop_rt_process_arguments(
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_string_equal(left: u64, right: u64) -> u8 {
-    let Ok(runtime) = abi_runtime().lock() else {
+    let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
     u8::from(runtime.strings_equal(ManagedReference::new(left), ManagedReference::new(right)))
@@ -216,7 +216,7 @@ pub extern "C" fn pop_rt_string_equal(left: u64, right: u64) -> u8 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_string_concat(left: u64, right: u64) -> u64 {
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Some(left) =

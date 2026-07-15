@@ -133,60 +133,67 @@ fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
 }
 
 #[test]
-fn public_overloads_round_trip_and_select_exact_referenced_symbols() {
-    let library_bubble = BubbleId::from_raw(5);
-    let library = analyze_bubble(FrontEndBubbleInput::new(
-        library_bubble,
-        NamespaceId::from_raw(5),
+fn async_identity_survives_reference_metadata_and_dependent_mir_lowering() {
+    let producer_bubble = BubbleId::from_raw(12);
+    let producer = analyze_bubble(FrontEndBubbleInput::new(
+        producer_bubble,
+        NamespaceId::from_raw(12),
         Vec::new(),
         vec![module(
             0,
-            "src/choose.pop",
-            "namespace Library\n\
-             public function choose(value: Int): Int return value + 1 end\n\
-             public function choose(value: String): String return value .. \"!\" end\n",
+            "src/load.pop",
+            "namespace Service\n\
+             public async function load(value: Int): Int\n\
+                 return value\n\
+             end\n",
         )],
     ));
     assert!(
-        library.diagnostics().is_empty(),
+        producer.diagnostics().is_empty(),
         "{}",
-        library.diagnostic_snapshot()
+        producer.diagnostic_snapshot()
     );
-    let encoded = encode_reference_metadata(
-        library
-            .reference_metadata()
-            .expect("overload reference metadata"),
-    )
-    .expect("encode overload reference metadata");
-    let metadata = decode_reference_metadata(&encoded).expect("decode overload reference metadata");
-    assert_eq!(metadata.functions().len(), 2);
+    let metadata = producer
+        .reference_metadata()
+        .expect("async public metadata");
+    let [function] = metadata.functions() else {
+        panic!("one async public function");
+    };
+    assert!(function.is_async());
+    let encoded = encode_reference_metadata(metadata).expect("encode async metadata");
+    let decoded = decode_reference_metadata(&encoded).expect("decode async metadata");
+    assert!(decoded.functions()[0].is_async());
 
     let consumer = analyze_bubble(
         FrontEndBubbleInput::new(
-            BubbleId::from_raw(7),
-            NamespaceId::from_raw(7),
-            vec![library_bubble],
+            BubbleId::from_raw(13),
+            NamespaceId::from_raw(13),
+            vec![producer_bubble],
             vec![module(
                 0,
                 "src/main.pop",
                 "namespace Application\n\
-                 using Library\n\
-                 public function number(): Int return choose(41) end\n\
-                 public function text(): String return choose(\"pop\") end\n",
+                 using Service\n\
+                 public async function consume(): Int\n\
+                     return await load(42)\n\
+                 end\n",
             )],
         )
-        .with_reference_metadata(vec![metadata]),
+        .with_reference_metadata(vec![decoded]),
     );
     assert!(
         consumer.diagnostics().is_empty(),
         "{}",
         consumer.diagnostic_snapshot()
     );
-    let hir = consumer.hir().expect("referenced overload HIR");
-    let dump = hir.dump(consumer.types());
-    assert!(dump.contains("call.reference b5:s0"), "{dump}");
-    assert!(dump.contains("call.reference b5:s1"), "{dump}");
-    lower_hir_bubble(hir, consumer.types()).expect("verified referenced overload MIR");
+    let hir = consumer.hir().expect("async consumer HIR");
+    let [reference] = hir.function_references() else {
+        panic!("one async HIR reference");
+    };
+    assert!(reference.is_async());
+    let mir = lower_hir_bubble(hir, consumer.types()).expect("async consumer MIR");
+    assert!(mir.dump().contains("task.create reference:b12:s0"));
+    assert!(mir.function_references()[0].is_async());
 }
 
 #[test]

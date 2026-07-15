@@ -271,6 +271,59 @@ Post-baseline library work has begun without widening the release foundation:
     adaptive worker sizing and stealing policy, concurrent card refinement and
     page reclamation, stack watermarks, race/stress proof, and latency
     measurements.
+    - [x] Add the bounded synchronized M:N correctness scheduler, deterministic
+      record/replay, explicit migration refusal, isolated bounded blocking
+      workers, host/virtual timers, external events, failure containment, and
+      initial wake/cancellation/migration stress coverage.
+    - [x] Add bounded enabled-set schedule exploration and the versioned,
+      checksum-validated synchronized-reference benchmark for task control,
+      ready polls, injection, hot-queue stealing, suspended frames, timers,
+      external events, and blocking saturation.
+    - [x] Add exact current/high-water queue and blocking depth, bounded steal
+      search/outcome/batch, and worker lifecycle telemetry, including a final
+      shutdown snapshot and the `pop-scheduler-benchmark-v2` schema.
+    - [ ] Bind scheduler transition events to native mutator registration,
+      precise suspended-frame root publication, collector epochs, and the ABI 2
+      writable-root transition before claiming production GC integration.
+      ADR 0077 requires the stronger ready-and-suspended task-frame root
+      lifecycle rather than rooting only explicit suspension.
+      - [x] Move canonical `SchedulerId` ownership into PLRI and add typed,
+        bounded retained task-root container identities.
+      - [x] Retain exact initial/nonterminal frame roots before queue
+        publication and restore relocated `RootSlot` values before dispatch.
+      - [x] Register each normal worker as a detached mutator, bind managed
+        native entries per dispatch, and make safe points acknowledge epochs
+        exactly once.
+      - [x] Prove scheduler-local allocation ownership, root-container
+        migration/refusal, and exact cleanup under forced minor/major GC.
+    - [ ] Extend declared benchmark profiles with local/foreign wake and
+      ping-pong latency, continuous I/O fairness, steal-storm and million-frame
+      memory evidence, operating-system resource counters, and scheduler/GC
+      interaction after the production collector binding exists.
+      The synchronized-reference v3 profiles are implemented. Its local
+      12-worker x86-64 Linux scale run completed 1,000,000 suspended minimal
+      frames and 2,000,000 polls in 19.397 seconds with zero stale entries,
+      339,070,976 bytes observed peak RSS, 2,070,200,320 bytes observed virtual
+      memory, 839,376 voluntary and 10,984 involuntary context switches. These
+      figures are host evidence, not portable performance gates. The checkbox
+      remains open until ABI 2 permits the required production collector run.
+    - [x] Add work-budget exhaustion, event/timer poll and delivery-delay,
+      blocking shutdown-delay, ready-to-run percentile, and scheduler migration
+      telemetry before treating observability as complete.
+    - [x] Remove fixed-neighbor steal bias with deterministic per-worker search
+      rounds that vary the first victim while covering every eligible peer
+      exactly once and preserving bounded simultaneous search admission.
+    - [x] Prevent repeated migration of one task within the same ready
+      publication, and make the optimized steal-storm benchmark reject
+      migration amplification, duplicate/lost work, or repeated peer scans.
+    - [x] Close the complete scheduler after worker startup or runtime-
+      transition failure, convert a panicked trusted transition into the same
+      typed collector-state incident, propagate migration errors instead of
+      treating them as ordinary migration refusal, and reject later task
+      admission while preserving ordinary task-panic isolation.
+    - [x] Add replay-seeded concurrent admission stress that publishes work
+      only after every worker is observably parked, then proves exact terminal
+      counts, queue drainage, terminal release, and no stale ready entries.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.
@@ -307,6 +360,56 @@ Post-baseline library work has begun without widening the release foundation:
     Direct page-backed access and removal of the process-global common-path
     mutex remain open; repeat both workloads and add production-collector
     throughput/tail-latency gates once selectable.
+
+#### Remaining heap problems
+
+- [ ] **Heap changes can optimize one workload while regressing another.**
+  `allocationChurn` and `objectArray` are not yet one mandatory performance
+  gate. Fix this by rejecting any heap change that regresses either 50-sample
+  median by more than 5%, breaks its checksum, or materially worsens P99 or
+  peak memory.
+- [ ] **Logical pages do not own physical object payloads.** Objects still keep
+  separate host allocations and duplicate object/placement metadata, so page
+  locality does not accelerate ordinary reads, writes, or scanning. Fix this
+  with monomorphic page-backed payloads, page-shared layouts, compact side
+  metadata, and token-derived placement.
+- [ ] **The native common path is globally serialized.** Allocation, array
+  access, field access, and barriers repeatedly lock the process-global runtime
+  and look up opaque tokens. Fix this with scheduler/thread-local active pages,
+  TLAB cursors, barrier buffers, and checked direct access; keep global work on
+  explicit refill, publication, safe-point, and collection slow paths.
+- [ ] **Allocation rebuilds layout information at runtime.** Pointer maps are
+  cloned, sorted, and searched even though the compiler already knows each
+  allocation layout. Fix this with compiler-emitted static layout and
+  allocation-site descriptors shared by allocation, access, barriers, and
+  tracing.
+- [ ] **Reference stores still pay too much barrier machinery.** The runtime
+  reaches generic SATB/generational logic for cases that can be classified
+  cheaply. Fix this with inline conditional barriers, per-mutator buffers,
+  range barriers, unpublished-initialization elision, and adaptive pretenuring
+  for allocation sites with sustained high survival.
+- [ ] **ABI 1 prevents native nursery relocation.** LLVM roots are published
+  but cannot be rewritten and reloaded across every control-flow path, forcing
+  native allocations into stable mature space. Fix this with ABI 2 writable
+  roots, forced-relocation tests, stale-token rejection, and verified reloads
+  for stacks, registers, coroutines, unwind paths, and FFI transitions.
+  ABI 2 native execution now forces token changes under LLVM `-O3` across
+  straight-line, divergent merge, and loop-backedge paths. Backend-private
+  root cells preserve the current token across control flow, lowering rejects
+  direct old-token operands, and negative mutations prove the conformance
+  runtime rejects stale uses. Exact ABI 2.0 load/link negotiation now fails
+  against the stable ABI 1 facade before normal entry. Unwind, coroutine, and
+  FFI transition proofs keep this item open.
+- [ ] **The production concurrent collector is not selectable.** Native
+  scheduler integration, concurrent mature work, card refinement, lazy sweep,
+  stack watermarks, bounded assists, and race/stress proof remain incomplete.
+  Fix all of them before reporting `ProductionConcurrentGenerational`.
+- [ ] **Retained-object throughput is still far from the target.** The current
+  local result is about 34 ms. Fix the page/access bottlenecks without a churn
+  regression, reach below 25 ms first and below 12 ms next, then compare Pop
+  against other runtimes only when P99, GC CPU, memory, and pause budgets also
+  pass.
+
 - [ ] Prove representative programs behave the same through canonical MIR, the
   MIR interpreter, optimized MIR, and LLVM native execution.
 

@@ -3,10 +3,239 @@
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{
-    MirCleanupExitReason, MirDeclarationKind, MirInstruction, MirInstructionKind, MirTerminator,
-    MirVerificationError, lower_hir_bubble, parse_mir_dump, verify_mir_bubble,
+    MirCleanupExitReason, MirDeclarationKind, MirEffect, MirInstruction, MirInstructionKind,
+    MirSuspendOperation, MirTerminator, MirVerificationError, lower_hir_bubble, parse_mir_dump,
+    verify_mir_bubble,
 };
 use pop_source::SourceFile;
+
+#[test]
+fn cold_task_frames_carry_static_capture_maps() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/taskMaps.pop",
+        "namespace Main\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         private async function relay(task: Task<Int>): Int\n\
+             return await task\n\
+         end\n\
+         public async function consume(): Int\n\
+             local inner = load(42)\n\
+             return await relay(inner)\n\
+         end\n\
+         public async function consumeIndirect(): Int\n\
+             local operation = async function(): Int\n\
+                 return 42\n\
+             end\n\
+             return await operation()\n\
+         end\n\
+         private async function text(): String\n\
+             return \"retained\"\n\
+         end\n\
+         public async function consumeText(): String\n\
+             return await text()\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("async HIR"), front_end.types())
+        .expect("verified async MIR");
+    let maps = mir
+        .functions()
+        .iter()
+        .flat_map(|function| function.blocks())
+        .flat_map(|block| block.instructions())
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::TaskCreate { object_map, .. } => Some(object_map.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(maps.len(), 4);
+    assert_eq!(maps[0].slot_count(), 2);
+    assert!(maps[0].reference_slots().is_empty());
+    assert_eq!(maps[1].slot_count(), 2);
+    assert_eq!(
+        maps[1].reference_slots(),
+        &[pop_runtime_interface::ObjectSlot::new(0)]
+    );
+    assert_eq!(maps[2].slot_count(), 2);
+    assert_eq!(
+        maps[2].reference_slots(),
+        &[pop_runtime_interface::ObjectSlot::new(0)]
+    );
+    assert!(maps.iter().any(|map| {
+        map.slot_count() == 1
+            && map.reference_slots() == &[pop_runtime_interface::ObjectSlot::new(0)]
+    }));
+
+    let dump = mir.dump();
+    let invalid = parse_mir_dump(&dump.replacen("map[2:0]", "map[2:]", 1))
+        .expect("structurally valid stale task map");
+    assert!(matches!(
+        verify_mir_bubble(&invalid, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidObjectMap { .. }
+        ))
+    ));
+}
+
+#[test]
+fn async_await_lowers_to_cold_task_and_verified_suspend_frame() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/async.pop",
+        "namespace Main\n\
+         private async function load(value: Int): Int\n\
+             return value\n\
+         end\n\
+         public async function consume(): Int\n\
+             local retained = \"live across await\"\n\
+             local value = await load(42)\n\
+             print(retained)\n\
+             return value\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("async HIR");
+    let consume_symbol = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "consume")
+        .expect("consume HIR")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified async MIR");
+    let consume = mir
+        .functions()
+        .iter()
+        .find(|function| function.symbol() == consume_symbol)
+        .expect("consume MIR");
+
+    assert!(consume.is_async());
+    assert!(consume.effects().contains(MirEffect::Allocates));
+    assert!(consume.effects().contains(MirEffect::Suspends));
+    assert!(consume.effects().contains(MirEffect::GcSafePoint));
+    assert!(
+        consume
+            .blocks()
+            .iter()
+            .flat_map(|block| block.instructions())
+            .any(|instruction| matches!(instruction.kind(), MirInstructionKind::TaskCreate { .. }))
+    );
+    let (resume, cancellation, frame) = consume
+        .blocks()
+        .iter()
+        .find_map(|block| match block.terminator() {
+            MirTerminator::Suspend {
+                operation: MirSuspendOperation::Task { .. },
+                resume,
+                cancellation,
+                live_frame,
+                ..
+            } => Some((*resume, *cancellation, live_frame)),
+            _ => None,
+        })
+        .expect("task suspend terminator");
+    let integer = front_end.types().source_type("Int").expect("Int");
+    let resume_block = &consume.blocks()[resume.raw() as usize];
+    assert_eq!(resume_block.arguments().len(), 1);
+    assert_eq!(resume_block.arguments()[0].type_id(), integer);
+    assert!(matches!(
+        consume.blocks()[cancellation.raw() as usize].cleanup(),
+        Some(cleanup) if cleanup.reason() == MirCleanupExitReason::Cancellation
+    ));
+    assert!(frame.slots().iter().any(|slot| {
+        front_end.types().get(slot.type_id())
+            == Some(&pop_types::SemanticType::Primitive(
+                pop_types::PrimitiveType::String,
+            ))
+    }));
+    assert!(!frame.stack_map().root_slots().is_empty());
+
+    let dump = mir.dump();
+    assert!(dump.contains("task.create"), "{dump}");
+    assert!(dump.contains("suspend.task"), "{dump}");
+    let reparsed = parse_mir_dump(&dump).expect("async MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+    assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
+
+    let async_header = format!("async function s{} ", consume_symbol.raw());
+    let sync_header = format!("function s{} ", consume_symbol.raw());
+    let sync_suspend = parse_mir_dump(&dump.replacen(&async_header, &sync_header, 1))
+        .expect("structurally valid sync suspension");
+    assert!(matches!(
+        verify_mir_bubble(&sync_suspend, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::SuspendOutsideAsync(_)
+        ))
+    ));
+
+    let suspend_line = dump
+        .lines()
+        .find(|line| line.contains("suspend.task"))
+        .expect("suspend line");
+    let resume = suspend_line
+        .split_whitespace()
+        .find(|part| part.starts_with("resume:b"))
+        .expect("resume target");
+    let cancellation = suspend_line
+        .split_whitespace()
+        .find(|part| part.starts_with("cancellation:b"))
+        .expect("cancellation target");
+    let invalid_cancellation = parse_mir_dump(&dump.replacen(
+        cancellation,
+        &format!("cancellation:{}", resume.trim_start_matches("resume:")),
+        1,
+    ))
+    .expect("structurally valid invalid cancellation edge");
+    assert!(matches!(
+        verify_mir_bubble(&invalid_cancellation, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidSuspendCancellation(_)
+        ))
+    ));
+
+    let roots = suspend_line
+        .split_whitespace()
+        .find(|part| part.starts_with("roots["))
+        .expect("suspend roots");
+    assert_ne!(roots, "roots[]");
+    let incomplete_frame =
+        parse_mir_dump(&dump.replacen(roots, "roots[]", 1)).expect("incomplete frame parses");
+    assert!(matches!(
+        verify_mir_bubble(&incomplete_frame, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidSuspendFrame(_)
+        ))
+    ));
+}
 
 #[test]
 fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
@@ -73,7 +302,7 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
 }
 
 #[test]
-fn async_await_lowers_to_explicit_suspending_mir_instruction() {
+fn additional_await_lowers_to_explicit_suspend_state_machine() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/async.pop",
@@ -81,13 +310,7 @@ fn async_await_lowers_to_explicit_suspending_mir_instruction() {
          public async function load(): Int\n\
              return 42\n\
          end\n\
-         public async function close(): Int\n\
-             return 0\n\
-         end\n\
          public async function useTask(): Int\n\
-             async defer\n\
-                 local ignored = await close()\n\
-             end\n\
              local pending = load()\n\
              return await pending\n\
          end\n",
@@ -130,17 +353,20 @@ fn async_await_lowers_to_explicit_suspending_mir_instruction() {
         .iter()
         .find(|function| function.symbol() == use_task_symbol)
         .expect("useTask MIR");
-    let await_instruction = use_task
-        .blocks()
-        .iter()
-        .flat_map(|block| block.instructions())
-        .find(|instruction| matches!(instruction.kind(), MirInstructionKind::Await { .. }))
-        .expect("await MIR instruction");
     assert!(
-        await_instruction
-            .effects()
-            .contains(pop_mir::MirEffect::Suspends)
+        use_task
+            .blocks()
+            .iter()
+            .flat_map(|block| block.instructions())
+            .any(|instruction| matches!(instruction.kind(), MirInstructionKind::TaskCreate { .. }))
     );
+    assert!(use_task.blocks().iter().any(|block| matches!(
+        block.terminator(),
+        MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { .. },
+            ..
+        }
+    )));
 }
 
 #[test]

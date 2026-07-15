@@ -30,6 +30,7 @@ pub enum MirValue {
     },
     Table(Vec<(Self, Self)>),
     Function(SymbolId),
+    Task(SymbolId),
     Enum {
         definition: SymbolId,
         case: EnumCaseId,

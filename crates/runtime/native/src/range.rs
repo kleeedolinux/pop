@@ -6,7 +6,7 @@ use pop_runtime_interface::{
 };
 use pop_runtime_native_abi::IterationStatus;
 
-use crate::state::abi_runtime;
+use crate::state::lock_abi_runtime;
 
 pub(crate) const FIRST_SLOT: u32 = 0;
 pub(crate) const LAST_SLOT: u32 = 1;
@@ -30,7 +30,7 @@ pub extern "C" fn pop_rt_range_create(
     if step & mask == 0 {
         return 0;
     }
-    let Ok(mut runtime) = abi_runtime().lock() else {
+    let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
     let Ok(object_map) = ObjectMap::new(5, Vec::new()) else {

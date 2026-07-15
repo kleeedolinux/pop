@@ -11,7 +11,7 @@ use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::api::LlvmLoweringError;
+use crate::api::{LlvmLoweringError, LlvmLoweringOptions};
 use crate::lowering::*;
 
 pub(crate) fn lower_instruction(
@@ -26,6 +26,7 @@ pub(crate) fn lower_instruction(
     environment: Option<(&str, &BTreeSet<u32>)>,
     proven_non_overflow_adds: &BTreeSet<ValueId>,
     direct_scalar_arrays: &DirectScalarArrays,
+    options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
@@ -305,6 +306,9 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::FunctionReference(symbol) => {
             format!("{result} = add i64 0, {}", direct_function_tag(*symbol))
         }
+        MirInstructionKind::TaskCreate { .. } => {
+            return Err(LlvmLoweringError::UnsupportedAsync);
+        }
         MirInstructionKind::CallDirect {
             function: callee,
             arguments,
@@ -354,16 +358,19 @@ pub(crate) fn lower_instruction(
                 }
             }
         }
-        MirInstructionKind::Await { task } => lower_await(
-            &result,
-            instruction.result(),
-            instruction.result_type(),
-            *task,
-            types,
-        )?,
         MirInstructionKind::GcSafePoint {
             safe_point, roots, ..
-        } => lower_gc_safe_point(&result, safe_point.raw(), roots, direct_scalar_arrays),
+        } => lower_gc_safe_point(
+            &result,
+            safe_point.raw(),
+            roots,
+            direct_scalar_arrays,
+            matches!(
+                options.runtime_profile,
+                pop_backend_api::RuntimeProfile::ProductionGenerational
+            ),
+            options.gc_poll_interval.get(),
+        ),
         MirInstructionKind::RetainRoot { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
             native_runtime_symbol(RuntimeOperation::RetainRoot),
@@ -1074,6 +1081,7 @@ pub(crate) fn lower_terminator(
                 scrutinee.raw()
             )
         }
+        MirTerminator::Suspend { .. } => return Err(LlvmLoweringError::UnsupportedAsync),
     };
     if matches!(terminator, MirTerminator::Return { .. })
         && !direct_scalar_arrays.allocations.is_empty()
@@ -2420,6 +2428,8 @@ pub(crate) fn lower_gc_safe_point(
     safe_point: u32,
     roots: &[ValueId],
     direct_scalar_arrays: &DirectScalarArrays,
+    writable_roots: bool,
+    poll_interval: u32,
 ) -> String {
     let roots = roots
         .iter()
@@ -2433,7 +2443,22 @@ pub(crate) fn lower_gc_safe_point(
     let expected = format!("{result}_poll_expired_expected");
     let slow = format!("{label}_poll_slow");
     let continuation = format!("{label}_poll_continue");
-    let mut lines = vec![
+    let root_array = format!("{result}_roots");
+    let mut lines = Vec::new();
+    if !roots.is_empty() {
+        lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
+        for (index, root) in roots.iter().enumerate() {
+            let entry = format!("{root_array}_{index}");
+            lines.extend([
+                format!(
+                    "{entry} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                    roots.len()
+                ),
+                format!("store i64 %v{}, ptr {entry}", root.raw()),
+            ]);
+        }
+    }
+    lines.extend([
         format!("{budget} = load i32, ptr {GC_POLL_BUDGET}, align 4"),
         format!("{remaining} = sub i32 {budget}, 1"),
         format!("store i32 {remaining}, ptr {GC_POLL_BUDGET}, align 4"),
@@ -2441,40 +2466,88 @@ pub(crate) fn lower_gc_safe_point(
         format!("{expected} = call i1 @llvm.expect.i1(i1 {expired}, i1 false)"),
         format!("br i1 {expected}, label %{slow}, label %{continuation}"),
         format!("{slow}:"),
-        format!("store i32 {GC_POLL_INTERVAL}, ptr {GC_POLL_BUDGET}, align 4"),
-    ];
+        format!("store i32 {poll_interval}, ptr {GC_POLL_BUDGET}, align 4"),
+    ]);
+    let safe_point_symbol = if writable_roots {
+        pop_runtime_native_abi::GC_SAFE_POINT_V2_SYMBOL
+    } else {
+        native_runtime_symbol(RuntimeOperation::GcSafePoint)
+    };
     if roots.is_empty() {
+        if writable_roots {
+            let status = format!("{result}_gc_status");
+            let accepted = format!("{result}_gc_accepted");
+            let rejected = format!("{label}_gc_rejected");
+            lines.extend([
+                format!(
+                    "{status} = call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
+                    safe_point_symbol
+                ),
+                format!("{accepted} = icmp eq i8 {status}, 1"),
+                format!("br i1 {accepted}, label %{continuation}, label %{rejected}"),
+                format!("{rejected}:"),
+                format!(
+                    "call void @{}()",
+                    native_runtime_symbol(RuntimeOperation::Trap)
+                ),
+                "unreachable".to_owned(),
+                format!("{continuation}:"),
+            ]);
+        } else {
+            lines.extend([
+                format!(
+                    "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
+                    safe_point_symbol
+                ),
+                format!("br label %{continuation}"),
+                format!("{continuation}:"),
+            ]);
+        }
+        return lines.join("\n");
+    }
+    if writable_roots {
+        let status = format!("{result}_gc_status");
+        let accepted = format!("{result}_gc_accepted");
+        let rejected = format!("{label}_gc_rejected");
         lines.extend([
             format!(
-                "call i8 @{}(i32 {safe_point}, ptr null, i64 0)",
-                native_runtime_symbol(RuntimeOperation::GcSafePoint)
+                "{status} = call i8 @{}(i32 {safe_point}, ptr {root_array}, i64 {})",
+                safe_point_symbol,
+                roots.len()
+            ),
+            format!("{accepted} = icmp eq i8 {status}, 1"),
+            format!("br i1 {accepted}, label %{continuation}, label %{rejected}"),
+            format!("{rejected}:"),
+            format!(
+                "call void @{}()",
+                native_runtime_symbol(RuntimeOperation::Trap)
+            ),
+            "unreachable".to_owned(),
+            format!("{continuation}:"),
+        ]);
+    } else {
+        lines.extend([
+            format!(
+                "call i8 @{}(i32 {safe_point}, ptr {root_array}, i64 {})",
+                safe_point_symbol,
+                roots.len()
             ),
             format!("br label %{continuation}"),
             format!("{continuation}:"),
         ]);
-        return lines.join("\n");
     }
-    let root_array = format!("{result}_roots");
-    lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
-    for (index, root) in roots.iter().enumerate() {
-        let entry = format!("{root_array}_{index}");
-        lines.extend([
-            format!(
-                "{entry} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
-                roots.len()
-            ),
-            format!("store i64 %v{}, ptr {entry}", root.raw()),
-        ]);
+    if writable_roots {
+        for (index, root) in roots.iter().enumerate() {
+            let entry = format!("{root_array}_{index}_reload");
+            lines.extend([
+                format!(
+                    "{entry} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                    roots.len()
+                ),
+                format!("%v{}_after_{} = load i64, ptr {entry}", root.raw(), label),
+            ]);
+        }
     }
-    lines.push(format!(
-        "call i8 @{}(i32 {safe_point}, ptr {root_array}, i64 {})",
-        native_runtime_symbol(RuntimeOperation::GcSafePoint),
-        roots.len()
-    ));
-    lines.extend([
-        format!("br label %{continuation}"),
-        format!("{continuation}:"),
-    ]);
     lines.join("\n")
 }
 
@@ -3182,32 +3255,6 @@ fn optional_inner_type(types: &TypeArena, optional: TypeId) -> Option<TypeId> {
         [inner] => Some(*inner),
         [] => None,
         _ => types.find(&SemanticType::Union(present)),
-    }
-}
-
-fn lower_await(
-    result: &str,
-    value: ValueId,
-    result_type: TypeId,
-    task: ValueId,
-    types: &TypeArena,
-) -> Result<String, LlvmLoweringError> {
-    let raw = format!("{result}_raw");
-    let call = format!(
-        "{raw} = call i64 @{}(i64 %v{})",
-        native_runtime_symbol(RuntimeOperation::Suspend),
-        task.raw()
-    );
-    match llvm_type(result_type, types)?.as_str() {
-        "i64" => Ok(format!("{call}\n{result} = add i64 0, {raw}")),
-        "i32" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i32")),
-        "i16" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i16")),
-        "i8" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i8")),
-        "i1" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i1")),
-        _ => Err(LlvmLoweringError::UnsupportedInstruction {
-            function: FunctionId::from_raw(u32::MAX),
-            value,
-        }),
     }
 }
 

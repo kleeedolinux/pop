@@ -119,21 +119,24 @@ fn blocking_effect_requires_a_distinct_blocking_pool_contract() {
 }
 
 #[test]
-fn await_instruction_requires_coroutine_scheduler_contract() {
+fn task_creation_requires_coroutine_scheduler_contract() {
     let mir = parse_mir_dump(concat!(
         "mir bubble b0 namespace n0\n",
         "dependencies\n",
-        "function s0 f0() -> (t5) effects[]\n",
+        "async function s1 f1() -> (t5) effects[]\n",
         "  b0():\n",
-        "    v0:t15 = const.integer Int64 0\n",
-        "    v1:t5 = await v0\n",
-        "    return (v1)\n",
+        "    v0:t5 = const.integer Int64 0\n",
+        "    return (v0)\n",
+        "function s0 f0() -> (t15) effects[]\n",
+        "  b0():\n",
+        "    v0:t15 = task.create direct:s1 completion:t5 map[0:] args ()\n",
+        "    return (v0)\n",
     ))
     .expect("structural MIR");
     let requirements = ProgramRequirements::derive_from_mir(&mir);
     let origin = RequirementOrigin::Instruction {
         function: FunctionId::from_raw(0),
-        value: ValueId::from_raw(1),
+        value: ValueId::from_raw(0),
     };
 
     assert!(

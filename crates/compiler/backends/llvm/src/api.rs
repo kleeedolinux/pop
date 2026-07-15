@@ -4,6 +4,7 @@
 //! Inkwell values or the backend-private lowering representation.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use inkwell::OptimizationLevel;
@@ -16,16 +17,32 @@ use inkwell::targets::{
 
 use inkwell::targets::TargetTriple;
 
+use pop_backend_api::RuntimeProfile;
 use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
 
 use crate::lowering::PrivateModule;
 
 const LLVM_OPTIMIZATION_PIPELINE: &str = "default<O3>";
+const DEFAULT_GC_POLL_INTERVAL: NonZeroU32 =
+    NonZeroU32::new(16_384).expect("the default GC poll interval is nonzero");
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LlvmLoweringOptions {
     pub(crate) emit_comments: bool,
     pub(crate) entry_point: Option<SymbolId>,
+    pub(crate) runtime_profile: RuntimeProfile,
+    pub(crate) gc_poll_interval: NonZeroU32,
+}
+
+impl Default for LlvmLoweringOptions {
+    fn default() -> Self {
+        Self {
+            emit_comments: false,
+            entry_point: None,
+            runtime_profile: RuntimeProfile::BootstrapStableHandles,
+            gc_poll_interval: DEFAULT_GC_POLL_INTERVAL,
+        }
+    }
 }
 
 impl LlvmLoweringOptions {
@@ -38,6 +55,18 @@ impl LlvmLoweringOptions {
     #[must_use]
     pub const fn with_entry_point(mut self, symbol: SymbolId) -> Self {
         self.entry_point = Some(symbol);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_runtime_profile(mut self, profile: RuntimeProfile) -> Self {
+        self.runtime_profile = profile;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_gc_poll_interval(mut self, interval: NonZeroU32) -> Self {
+        self.gc_poll_interval = interval;
         self
     }
 }
@@ -174,10 +203,15 @@ pub enum LlvmLoweringError {
         function: FunctionId,
         value: ValueId,
     },
+    StaleManagedReference {
+        value: ValueId,
+        location: String,
+    },
     InvalidType(TypeId),
     InvalidFieldLayout(FieldId),
     InvalidEntryPoint(SymbolId),
     UnsupportedEntryPointSignature(SymbolId),
+    UnsupportedAsync,
 }
 
 impl fmt::Display for LlvmLoweringError {
@@ -190,6 +224,11 @@ impl fmt::Display for LlvmLoweringError {
                 formatter,
                 "LLVM backend does not support MIR instruction f{} v{}",
                 function.raw(),
+                value.raw()
+            ),
+            Self::StaleManagedReference { value, location } => write!(
+                formatter,
+                "LLVM ABI 2 lowering retained stale managed value v{} at {location}",
                 value.raw()
             ),
             Self::InvalidType(type_id) => write!(formatter, "invalid MIR type t{}", type_id.raw()),
@@ -207,6 +246,10 @@ impl fmt::Display for LlvmLoweringError {
                 formatter,
                 "entry point s{} must accept () or (Array<String>) and return () or Int",
                 symbol.raw()
+            ),
+            Self::UnsupportedAsync => write!(
+                formatter,
+                "LLVM backend does not yet support async task state machines"
             ),
         }
     }

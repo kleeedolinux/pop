@@ -1,0 +1,1024 @@
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use pop_runtime_collector::SchedulerId;
+use pop_runtime_interface::{RootPublication, SafePointId, StackMap};
+use pop_runtime_native::{
+    NativeScheduler, SchedulerConfiguration, SchedulerConfigurationError, SchedulerError,
+    SchedulerRuntimeTransition, SchedulerRuntimeTransitionControl,
+    SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
+    SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskId,
+    SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState, SchedulerTelemetry,
+    abi_safe_point, pop_rt_allocate_object, request_abi_collection,
+};
+
+const WAIT_TIMEOUT: Duration = Duration::from_mins(5);
+pub const SCHEDULER_BENCHMARK_SCHEMA: &str = "pop-scheduler-benchmark-v3";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchedulerBenchmarkConfiguration {
+    pub workers: usize,
+    pub tasks: usize,
+    pub polls_per_task: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerBenchmarkError {
+    InvalidConfiguration,
+    CounterOverflow,
+    InvariantViolation,
+    Configuration(SchedulerConfigurationError),
+    Scheduler(SchedulerError),
+}
+
+impl From<SchedulerConfigurationError> for SchedulerBenchmarkError {
+    fn from(error: SchedulerConfigurationError) -> Self {
+        Self::Configuration(error)
+    }
+}
+
+impl From<SchedulerError> for SchedulerBenchmarkError {
+    fn from(error: SchedulerError) -> Self {
+        Self::Scheduler(error)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerWorkload {
+    TaskControl,
+    ReadyPolls,
+    LocalWake,
+    ForeignWake,
+    BurstInjection,
+    HotQueueSteal,
+    PingPong,
+    StealStorm,
+    SuspendedFrames,
+    TimerFanOut,
+    ExternalEventFanOut,
+    ContinuousEventFairness,
+    BlockingSaturation,
+    SchedulerGcInteraction,
+}
+
+impl SchedulerWorkload {
+    pub const ALL: [Self; 14] = [
+        Self::TaskControl,
+        Self::ReadyPolls,
+        Self::LocalWake,
+        Self::ForeignWake,
+        Self::BurstInjection,
+        Self::HotQueueSteal,
+        Self::PingPong,
+        Self::StealStorm,
+        Self::SuspendedFrames,
+        Self::TimerFanOut,
+        Self::ExternalEventFanOut,
+        Self::ContinuousEventFairness,
+        Self::BlockingSaturation,
+        Self::SchedulerGcInteraction,
+    ];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TaskControl => "task_control",
+            Self::ReadyPolls => "ready_polls",
+            Self::LocalWake => "local_wake",
+            Self::ForeignWake => "foreign_wake",
+            Self::BurstInjection => "burst_injection",
+            Self::HotQueueSteal => "hot_queue_steal",
+            Self::PingPong => "ping_pong",
+            Self::StealStorm => "steal_storm",
+            Self::SuspendedFrames => "suspended_frames",
+            Self::TimerFanOut => "timer_fan_out",
+            Self::ExternalEventFanOut => "external_event_fan_out",
+            Self::ContinuousEventFairness => "continuous_event_fairness",
+            Self::BlockingSaturation => "blocking_saturation",
+            Self::SchedulerGcInteraction => "scheduler_gc_interaction",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|workload| workload.name() == name)
+    }
+
+    const fn suspends(self) -> bool {
+        matches!(
+            self,
+            Self::ForeignWake
+                | Self::SuspendedFrames
+                | Self::TimerFanOut
+                | Self::ExternalEventFanOut
+                | Self::BlockingSaturation
+        )
+    }
+
+    const fn task_polls(self, configuration: SchedulerBenchmarkConfiguration) -> usize {
+        if self.suspends() {
+            2
+        } else if matches!(self, Self::TaskControl | Self::StealStorm) {
+            1
+        } else {
+            configuration.polls_per_task
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchedulerWorkloadCounters {
+    pub workload: &'static str,
+    pub workers: usize,
+    pub tasks: u64,
+    pub operations: u64,
+    pub checksum: u64,
+    pub polls: u64,
+    pub completions: u64,
+    pub suspensions: u64,
+    pub wake_requests: u64,
+    pub tasks_stolen: u64,
+    pub blocking_submissions: u64,
+    pub timers_delivered: u64,
+    pub external_events_delivered: u64,
+    pub local_queue_depth: usize,
+    pub maximum_local_queue_depth: usize,
+    pub injection_queue_depth: usize,
+    pub maximum_injection_queue_depth: usize,
+    pub blocking_queue_depth: usize,
+    pub maximum_blocking_queue_depth: usize,
+    pub active_blocking_operations: usize,
+    pub maximum_active_blocking_operations: usize,
+    pub steal_searches: u64,
+    pub steal_victims_examined: u64,
+    pub steal_successes: u64,
+    pub steal_failures: u64,
+    pub maximum_stolen_batch: usize,
+    pub worker_starts: u64,
+    pub worker_parks: u64,
+    pub worker_unparks: u64,
+    pub worker_stops: u64,
+    pub stale_ready_entries: u64,
+    pub work_budget_exhaustions: u64,
+    pub scheduler_migrations: u64,
+    pub gc_delayed_migrations: u64,
+    pub ready_delay_samples: u64,
+    pub ready_delay_p50_work_units: u64,
+    pub ready_delay_p95_work_units: u64,
+    pub ready_delay_p99_work_units: u64,
+    pub ready_delay_p999_work_units: u64,
+    pub ready_delay_max_work_units: u64,
+    pub timer_delay_samples: u64,
+    pub timer_delay_p99_work_units: u64,
+    pub timer_delay_max_work_units: u64,
+    pub external_event_delay_samples: u64,
+    pub external_event_delay_p99_work_units: u64,
+    pub external_event_delay_max_work_units: u64,
+    pub blocking_shutdown_delay_samples: u64,
+    pub blocking_shutdown_delay_max_work_units: u64,
+    pub resource_counter_source: &'static str,
+    pub resident_memory_bytes: u64,
+    pub virtual_memory_bytes: u64,
+    pub voluntary_context_switches: u64,
+    pub involuntary_context_switches: u64,
+    pub first_poll_latency_p50_nanoseconds: u64,
+    pub first_poll_latency_p95_nanoseconds: u64,
+    pub first_poll_latency_p99_nanoseconds: u64,
+    pub first_poll_latency_p999_nanoseconds: u64,
+    pub first_poll_latency_max_nanoseconds: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ResourceSnapshot {
+    source: &'static str,
+    resident_memory_bytes: u64,
+    virtual_memory_bytes: u64,
+    voluntary_context_switches: u64,
+    involuntary_context_switches: u64,
+}
+
+impl ResourceSnapshot {
+    const fn unavailable() -> Self {
+        Self {
+            source: "unavailable",
+            resident_memory_bytes: 0,
+            virtual_memory_bytes: 0,
+            voluntary_context_switches: 0,
+            involuntary_context_switches: 0,
+        }
+    }
+
+    fn observation_since(self, earlier: Self) -> Self {
+        if self.source != earlier.source || self.source == "unavailable" {
+            return Self::unavailable();
+        }
+        Self {
+            source: self.source,
+            resident_memory_bytes: self
+                .resident_memory_bytes
+                .max(earlier.resident_memory_bytes),
+            virtual_memory_bytes: self.virtual_memory_bytes.max(earlier.virtual_memory_bytes),
+            voluntary_context_switches: self
+                .voluntary_context_switches
+                .saturating_sub(earlier.voluntary_context_switches),
+            involuntary_context_switches: self
+                .involuntary_context_switches
+                .saturating_sub(earlier.involuntary_context_switches),
+        }
+    }
+}
+
+struct Latencies(Mutex<Vec<u64>>);
+
+impl Latencies {
+    fn record(&self, ready_at: Instant) {
+        let elapsed = u64::try_from(ready_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.0
+            .lock()
+            .expect("benchmark latency samples")
+            .push(elapsed);
+    }
+
+    fn percentiles(&self) -> (u64, u64, u64, u64, u64) {
+        let mut samples = self.0.lock().expect("benchmark latency samples").clone();
+        samples.sort_unstable();
+        (
+            percentile(&samples, 500),
+            percentile(&samples, 950),
+            percentile(&samples, 990),
+            percentile(&samples, 999),
+            samples.last().copied().unwrap_or(0),
+        )
+    }
+}
+
+fn percentile(samples: &[u64], per_thousand: usize) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let index = (samples.len() - 1).saturating_mul(per_thousand) / 1_000;
+    samples[index]
+}
+
+#[cfg(target_os = "linux")]
+fn read_resource_snapshot() -> ResourceSnapshot {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(resident_memory_bytes) = linux_status_kib(&status, "VmRSS:") else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(virtual_memory_bytes) = linux_status_kib(&status, "VmSize:") else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(voluntary_context_switches) = linux_status_count(&status, "voluntary_ctxt_switches:")
+    else {
+        return ResourceSnapshot::unavailable();
+    };
+    let Some(involuntary_context_switches) =
+        linux_status_count(&status, "nonvoluntary_ctxt_switches:")
+    else {
+        return ResourceSnapshot::unavailable();
+    };
+    ResourceSnapshot {
+        source: "linux-procfs",
+        resident_memory_bytes,
+        virtual_memory_bytes,
+        voluntary_context_switches,
+        involuntary_context_switches,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_resource_snapshot() -> ResourceSnapshot {
+    ResourceSnapshot::unavailable()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status_kib(status: &str, label: &str) -> Option<u64> {
+    linux_status_count(status, label)?.checked_mul(1_024)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status_count(status: &str, label: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(label))?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+struct BenchmarkTask {
+    token: u64,
+    remaining_polls: usize,
+    suspend_once: bool,
+    checksum: Arc<AtomicU64>,
+    latencies: Arc<Latencies>,
+    ready_at: Instant,
+    first_poll: bool,
+    gc_interaction: bool,
+}
+
+impl SchedulerTaskFrame for BenchmarkTask {
+    fn frame_stack_map(&self) -> StackMap {
+        StackMap::new(SafePointId::new(1), Vec::new()).expect("benchmark empty frame map")
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        RootPublication::new(self.frame_stack_map(), Vec::new())
+            .map_err(|_| SchedulerTaskFrameError::PublicationRejected)
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() == &self.frame_stack_map() {
+            Ok(())
+        } else {
+            Err(SchedulerTaskFrameError::RestorationRejected)
+        }
+    }
+}
+
+impl SchedulerTask for BenchmarkTask {
+    fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        if self.first_poll {
+            self.first_poll = false;
+            self.latencies.record(self.ready_at);
+        }
+        if self.gc_interaction {
+            assert_ne!(pop_rt_allocate_object(4), 0, "managed benchmark allocation");
+            assert!(request_abi_collection(), "request benchmark collection");
+            assert_ne!(
+                abi_safe_point(u32::try_from(context.task().raw()).unwrap_or(u32::MAX), &[],),
+                0,
+                "benchmark collection safe point"
+            );
+        }
+        self.checksum.fetch_add(self.token, Ordering::Relaxed);
+        if self.suspend_once {
+            self.suspend_once = false;
+            SchedulerTaskPoll::Pending
+        } else if self.remaining_polls == 1 {
+            self.remaining_polls = 0;
+            SchedulerTaskPoll::Complete
+        } else {
+            self.remaining_polls -= 1;
+            SchedulerTaskPoll::Ready
+        }
+    }
+}
+
+struct PingPongTask {
+    participant: usize,
+    participants: usize,
+    token: u64,
+    remaining_turns: usize,
+    turn: Arc<AtomicUsize>,
+    checksum: Arc<AtomicU64>,
+    latencies: Arc<Latencies>,
+    ready_at: Instant,
+    first_poll: bool,
+}
+
+impl SchedulerTaskFrame for PingPongTask {
+    fn frame_stack_map(&self) -> StackMap {
+        StackMap::new(SafePointId::new(2), Vec::new()).expect("ping-pong empty frame map")
+    }
+
+    fn publish_frame_roots(&mut self) -> Result<RootPublication, SchedulerTaskFrameError> {
+        RootPublication::new(self.frame_stack_map(), Vec::new())
+            .map_err(|_| SchedulerTaskFrameError::PublicationRejected)
+    }
+
+    fn restore_frame_roots(
+        &mut self,
+        publication: RootPublication,
+    ) -> Result<(), SchedulerTaskFrameError> {
+        if publication.stack_map() == &self.frame_stack_map() {
+            Ok(())
+        } else {
+            Err(SchedulerTaskFrameError::RestorationRejected)
+        }
+    }
+}
+
+impl SchedulerTask for PingPongTask {
+    fn poll(&mut self, context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        if self.first_poll {
+            self.first_poll = false;
+            self.latencies.record(self.ready_at);
+        }
+        let _ = context.consume_work(1);
+        if self.turn.load(Ordering::Acquire) != self.participant {
+            return SchedulerTaskPoll::Ready;
+        }
+        self.checksum.fetch_add(self.token, Ordering::Relaxed);
+        self.remaining_turns -= 1;
+        self.turn.store(
+            (self.participant + 1) % self.participants,
+            Ordering::Release,
+        );
+        if self.remaining_turns == 0 {
+            SchedulerTaskPoll::Complete
+        } else {
+            SchedulerTaskPoll::Ready
+        }
+    }
+}
+
+struct PermitRuntimeTransitions;
+
+impl SchedulerRuntimeTransitions for PermitRuntimeTransitions {
+    fn apply(
+        &self,
+        _transition: SchedulerRuntimeTransition,
+    ) -> Result<SchedulerRuntimeTransitionControl, SchedulerRuntimeTransitionFailure> {
+        Ok(SchedulerRuntimeTransitionControl::Continue)
+    }
+}
+
+struct WorkloadState {
+    scheduler: NativeScheduler,
+    workers: usize,
+    checksum: Arc<AtomicU64>,
+    latencies: Arc<Latencies>,
+    maximum_resident_memory_bytes: AtomicU64,
+    maximum_virtual_memory_bytes: AtomicU64,
+}
+
+impl WorkloadState {
+    fn new(
+        configuration: SchedulerBenchmarkConfiguration,
+        migration: bool,
+    ) -> Result<Self, SchedulerBenchmarkError> {
+        validate(configuration)?;
+        let scheduler_configuration = SchedulerConfiguration::new(
+            configuration.workers,
+            configuration.workers,
+            configuration.tasks,
+            configuration.tasks,
+            configuration.tasks,
+            1,
+        )?
+        .with_blocking_pool(configuration.workers, configuration.tasks)?
+        .with_event_driver(
+            configuration.tasks,
+            configuration.tasks,
+            configuration.tasks,
+        )?;
+        let scheduler = if migration {
+            NativeScheduler::new_with_runtime_transitions(
+                scheduler_configuration,
+                Arc::new(PermitRuntimeTransitions),
+            )?
+        } else {
+            NativeScheduler::new(scheduler_configuration)?
+        };
+        let resources = read_resource_snapshot();
+        Ok(Self {
+            scheduler,
+            workers: configuration.workers,
+            checksum: Arc::new(AtomicU64::new(0)),
+            latencies: Arc::new(Latencies(Mutex::new(Vec::with_capacity(
+                configuration.tasks,
+            )))),
+            maximum_resident_memory_bytes: AtomicU64::new(resources.resident_memory_bytes),
+            maximum_virtual_memory_bytes: AtomicU64::new(resources.virtual_memory_bytes),
+        })
+    }
+
+    fn task(&self, token: u64, polls: usize, suspend_once: bool) -> BenchmarkTask {
+        BenchmarkTask {
+            token,
+            remaining_polls: polls,
+            suspend_once,
+            checksum: Arc::clone(&self.checksum),
+            latencies: Arc::clone(&self.latencies),
+            ready_at: Instant::now(),
+            first_poll: true,
+            gc_interaction: false,
+        }
+    }
+
+    fn gc_task(&self, token: u64, polls: usize) -> BenchmarkTask {
+        BenchmarkTask {
+            gc_interaction: true,
+            ..self.task(token, polls, false)
+        }
+    }
+
+    fn observe_resources(&self) {
+        let resources = read_resource_snapshot();
+        if resources.source != "unavailable" {
+            self.maximum_resident_memory_bytes
+                .fetch_max(resources.resident_memory_bytes, Ordering::Relaxed);
+            self.maximum_virtual_memory_bytes
+                .fetch_max(resources.virtual_memory_bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+fn validate(configuration: SchedulerBenchmarkConfiguration) -> Result<(), SchedulerBenchmarkError> {
+    if configuration.workers == 0
+        || configuration.tasks == 0
+        || configuration.polls_per_task == 0
+        || configuration.workers > configuration.tasks
+    {
+        Err(SchedulerBenchmarkError::InvalidConfiguration)
+    } else {
+        Ok(())
+    }
+}
+
+/// Runs one bounded scheduler benchmark workload and verifies its logical work.
+///
+/// # Errors
+///
+/// Rejects invalid bounds, counter overflow, scheduler failures, and any lost
+/// or duplicated logical work detected by the checksum and telemetry contract.
+pub fn run_scheduler_workload(
+    workload: SchedulerWorkload,
+    configuration: SchedulerBenchmarkConfiguration,
+) -> Result<SchedulerWorkloadCounters, SchedulerBenchmarkError> {
+    let resource_start = read_resource_snapshot();
+    let task_polls = workload.task_polls(configuration);
+    let state = WorkloadState::new(
+        configuration,
+        matches!(
+            workload,
+            SchedulerWorkload::HotQueueSteal | SchedulerWorkload::StealStorm
+        ),
+    )?;
+    let task_ids = match workload {
+        SchedulerWorkload::TaskControl => run_task_control(&state, configuration.tasks)?,
+        SchedulerWorkload::ReadyPolls | SchedulerWorkload::LocalWake => {
+            run_balanced_ready(&state, configuration.tasks, task_polls)?
+        }
+        SchedulerWorkload::ForeignWake | SchedulerWorkload::SuspendedFrames => {
+            run_suspended(&state, configuration.tasks, ResumeSource::Wake)?
+        }
+        SchedulerWorkload::BurstInjection => {
+            run_burst_injection(&state, configuration.tasks, task_polls)?
+        }
+        SchedulerWorkload::HotQueueSteal | SchedulerWorkload::StealStorm => {
+            run_hot_queue(&state, configuration.tasks, task_polls)?
+        }
+        SchedulerWorkload::PingPong => run_ping_pong(&state, configuration.tasks, task_polls)?,
+        SchedulerWorkload::TimerFanOut => {
+            run_suspended(&state, configuration.tasks, ResumeSource::Timer)?
+        }
+        SchedulerWorkload::ExternalEventFanOut => {
+            run_suspended(&state, configuration.tasks, ResumeSource::ExternalEvent)?
+        }
+        SchedulerWorkload::ContinuousEventFairness => {
+            run_continuous_event_fairness(&state, configuration)?
+        }
+        SchedulerWorkload::BlockingSaturation => {
+            run_suspended(&state, configuration.tasks, ResumeSource::Blocking)?
+        }
+        SchedulerWorkload::SchedulerGcInteraction => {
+            run_scheduler_gc_interaction(&state, configuration.tasks, task_polls)?
+        }
+    };
+    state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
+    let telemetry = state.scheduler.telemetry();
+    let checksum = state.checksum.load(Ordering::Relaxed);
+    let default_operations = expected_operations(configuration.tasks, task_polls)?;
+    let default_checksum = expected_checksum(configuration.tasks, task_polls)?;
+    let (operations, expected_checksum) = match workload {
+        SchedulerWorkload::ContinuousEventFairness => continuous_event_expectations(configuration)?,
+        _ => (default_operations, default_checksum),
+    };
+    let poll_count_valid = if matches!(workload, SchedulerWorkload::PingPong) {
+        telemetry.polls() >= operations
+    } else {
+        telemetry.polls() == operations
+    };
+    let steal_storm_valid = !matches!(workload, SchedulerWorkload::StealStorm)
+        || (telemetry.tasks_stolen() <= operations
+            && telemetry.scheduler_migrations() == telemetry.tasks_stolen()
+            && telemetry.steal_victims_examined()
+                <= telemetry
+                    .steal_searches()
+                    .saturating_mul(u64::try_from(configuration.workers - 1).unwrap_or(u64::MAX)));
+    if !poll_count_valid
+        || !steal_storm_valid
+        || telemetry.completions() != u64::try_from(configuration.tasks).unwrap_or(u64::MAX)
+        || checksum != expected_checksum
+        || telemetry.stale_ready_entries() != 0
+    {
+        return Err(SchedulerBenchmarkError::InvariantViolation);
+    }
+    for task in task_ids {
+        state.scheduler.release_terminal_task(task)?;
+    }
+    let latencies = state.latencies.percentiles();
+    state.observe_resources();
+    let maximum_resident_memory_bytes = state.maximum_resident_memory_bytes.load(Ordering::Relaxed);
+    let maximum_virtual_memory_bytes = state.maximum_virtual_memory_bytes.load(Ordering::Relaxed);
+    let final_telemetry = state.scheduler.shutdown_with_telemetry()?;
+    let mut resources = read_resource_snapshot().observation_since(resource_start);
+    if resources.source != "unavailable" {
+        resources.resident_memory_bytes = resources
+            .resident_memory_bytes
+            .max(maximum_resident_memory_bytes);
+        resources.virtual_memory_bytes = resources
+            .virtual_memory_bytes
+            .max(maximum_virtual_memory_bytes);
+    }
+    Ok(counters(
+        workload,
+        configuration,
+        &final_telemetry,
+        checksum,
+        latencies,
+        resources,
+        operations,
+    ))
+}
+
+fn run_task_control(
+    state: &WorkloadState,
+    tasks: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let mut task_ids = Vec::with_capacity(tasks);
+    for index in 0..tasks {
+        let task = state
+            .scheduler
+            .schedule(state.task(token(index)?, 1, false))?;
+        state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
+        task_ids.push(task);
+    }
+    Ok(task_ids)
+}
+
+fn run_balanced_ready(
+    state: &WorkloadState,
+    tasks: usize,
+    polls: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let mut task_ids = Vec::with_capacity(tasks);
+    for index in 0..tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(index % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            state.task(token(index)?, polls, false),
+        )?);
+    }
+    Ok(task_ids)
+}
+
+fn run_burst_injection(
+    state: &WorkloadState,
+    tasks: usize,
+    polls: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    (0..tasks)
+        .map(|index| {
+            state
+                .scheduler
+                .schedule(state.task(token(index)?, polls, false))
+                .map_err(Into::into)
+        })
+        .collect()
+}
+
+fn run_hot_queue(
+    state: &WorkloadState,
+    tasks: usize,
+    polls: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let batch: Result<Vec<_>, SchedulerBenchmarkError> = (0..tasks)
+        .map(|index| Ok(state.task(token(index)?, polls, false)))
+        .collect();
+    Ok(state.scheduler.schedule_batch_on(
+        SchedulerId::new(1),
+        SchedulerTaskMobility::Movable,
+        batch?,
+    )?)
+}
+
+fn run_ping_pong(
+    state: &WorkloadState,
+    tasks: usize,
+    turns: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let turn = Arc::new(AtomicUsize::new(0));
+    let mut task_ids = Vec::with_capacity(tasks);
+    for participant in 0..tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(participant % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            PingPongTask {
+                participant,
+                participants: tasks,
+                token: token(participant)?,
+                remaining_turns: turns,
+                turn: Arc::clone(&turn),
+                checksum: Arc::clone(&state.checksum),
+                latencies: Arc::clone(&state.latencies),
+                ready_at: Instant::now(),
+                first_poll: true,
+            },
+        )?);
+    }
+    Ok(task_ids)
+}
+
+fn run_scheduler_gc_interaction(
+    state: &WorkloadState,
+    tasks: usize,
+    polls: usize,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let mut task_ids = Vec::with_capacity(tasks);
+    for index in 0..tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(index % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            state.gc_task(token(index)?, polls),
+        )?);
+    }
+    Ok(task_ids)
+}
+
+fn run_continuous_event_fairness(
+    state: &WorkloadState,
+    configuration: SchedulerBenchmarkConfiguration,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let event_tasks = (configuration.tasks / 2).max(1);
+    let continuous_polls = configuration
+        .polls_per_task
+        .checked_mul(event_tasks)
+        .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+    let mut task_ids = Vec::with_capacity(configuration.tasks);
+    for index in 0..event_tasks {
+        task_ids.push(
+            state
+                .scheduler
+                .schedule(state.task(token(index)?, 1, true))?,
+        );
+    }
+    state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
+    let mut events = Vec::with_capacity(event_tasks);
+    for task in &task_ids {
+        events.push(state.scheduler.register_external_event(*task)?);
+    }
+    for index in event_tasks..configuration.tasks {
+        let scheduler = SchedulerId::new(
+            u32::try_from(index % state.workers + 1)
+                .map_err(|_| SchedulerBenchmarkError::CounterOverflow)?,
+        );
+        task_ids.push(state.scheduler.schedule_on(
+            scheduler,
+            SchedulerTaskMobility::Affine,
+            state.task(token(index)?, continuous_polls, false),
+        )?);
+    }
+    for event in &events {
+        state.scheduler.signal_external_event(*event)?;
+    }
+    wait_until_terminal(&state.scheduler, &task_ids)?;
+    for event in events {
+        state.scheduler.release_external_event(event)?;
+    }
+    Ok(task_ids)
+}
+
+fn continuous_event_expectations(
+    configuration: SchedulerBenchmarkConfiguration,
+) -> Result<(u64, u64), SchedulerBenchmarkError> {
+    let event_tasks = (configuration.tasks / 2).max(1);
+    let continuous_polls = configuration
+        .polls_per_task
+        .checked_mul(event_tasks)
+        .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+    let mut operations = 0_u64;
+    let mut checksum = 0_u64;
+    for index in 0..configuration.tasks {
+        let polls = if index < event_tasks {
+            2
+        } else {
+            continuous_polls
+        };
+        let polls = u64::try_from(polls).map_err(|_| SchedulerBenchmarkError::CounterOverflow)?;
+        operations = operations
+            .checked_add(polls)
+            .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+        checksum = checksum
+            .checked_add(
+                token(index)?
+                    .checked_mul(polls)
+                    .ok_or(SchedulerBenchmarkError::CounterOverflow)?,
+            )
+            .ok_or(SchedulerBenchmarkError::CounterOverflow)?;
+    }
+    Ok((operations, checksum))
+}
+
+#[derive(Clone, Copy)]
+enum ResumeSource {
+    Wake,
+    Timer,
+    ExternalEvent,
+    Blocking,
+}
+
+fn run_suspended(
+    state: &WorkloadState,
+    tasks: usize,
+    source: ResumeSource,
+) -> Result<Vec<SchedulerTaskId>, SchedulerBenchmarkError> {
+    let task_ids: Vec<_> = (0..tasks)
+        .map(|index| {
+            state
+                .scheduler
+                .schedule(state.task(token(index)?, 1, true))
+                .map_err(Into::into)
+        })
+        .collect::<Result<_, SchedulerBenchmarkError>>()?;
+    state.scheduler.wait_until_idle(WAIT_TIMEOUT)?;
+    state.observe_resources();
+    match source {
+        ResumeSource::Wake => {
+            for task in &task_ids {
+                state.scheduler.wake(*task)?;
+            }
+        }
+        ResumeSource::Timer => {
+            for task in &task_ids {
+                state.scheduler.schedule_wake_after(*task, Duration::ZERO)?;
+            }
+            wait_until_terminal(&state.scheduler, &task_ids)?;
+        }
+        ResumeSource::ExternalEvent => {
+            let mut events = Vec::with_capacity(task_ids.len());
+            for task in &task_ids {
+                let event = state.scheduler.register_external_event(*task)?;
+                state.scheduler.signal_external_event(event)?;
+                events.push(event);
+            }
+            wait_until_terminal(&state.scheduler, &task_ids)?;
+            for event in events {
+                state.scheduler.release_external_event(event)?;
+            }
+        }
+        ResumeSource::Blocking => {
+            for task in &task_ids {
+                state.scheduler.submit_blocking(*task, || {})?;
+            }
+        }
+    }
+    Ok(task_ids)
+}
+
+fn wait_until_terminal(
+    scheduler: &NativeScheduler,
+    tasks: &[SchedulerTaskId],
+) -> Result<(), SchedulerBenchmarkError> {
+    let deadline = Instant::now()
+        .checked_add(WAIT_TIMEOUT)
+        .ok_or(SchedulerBenchmarkError::InvariantViolation)?;
+    loop {
+        let mut all_terminal = true;
+        for task in tasks {
+            all_terminal &= matches!(
+                scheduler.task_state(*task)?,
+                SchedulerTaskState::Completed
+                    | SchedulerTaskState::Cancelled
+                    | SchedulerTaskState::Panicked
+            );
+        }
+        if all_terminal {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(SchedulerBenchmarkError::Scheduler(
+                SchedulerError::WaitTimedOut,
+            ));
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn token(index: usize) -> Result<u64, SchedulerBenchmarkError> {
+    u64::try_from(index + 1).map_err(|_| SchedulerBenchmarkError::CounterOverflow)
+}
+
+fn expected_operations(tasks: usize, polls: usize) -> Result<u64, SchedulerBenchmarkError> {
+    u64::try_from(tasks)
+        .ok()
+        .and_then(|tasks| {
+            u64::try_from(polls)
+                .ok()
+                .and_then(|polls| tasks.checked_mul(polls))
+        })
+        .ok_or(SchedulerBenchmarkError::CounterOverflow)
+}
+
+fn expected_checksum(tasks: usize, polls: usize) -> Result<u64, SchedulerBenchmarkError> {
+    let tasks = u64::try_from(tasks).map_err(|_| SchedulerBenchmarkError::CounterOverflow)?;
+    let polls = u64::try_from(polls).map_err(|_| SchedulerBenchmarkError::CounterOverflow)?;
+    tasks
+        .checked_mul(
+            tasks
+                .checked_add(1)
+                .ok_or(SchedulerBenchmarkError::CounterOverflow)?,
+        )
+        .and_then(|sum| sum.checked_div(2))
+        .and_then(|sum| sum.checked_mul(polls))
+        .ok_or(SchedulerBenchmarkError::CounterOverflow)
+}
+
+fn counters(
+    workload: SchedulerWorkload,
+    configuration: SchedulerBenchmarkConfiguration,
+    telemetry: &SchedulerTelemetry,
+    checksum: u64,
+    latencies: (u64, u64, u64, u64, u64),
+    resources: ResourceSnapshot,
+    operations: u64,
+) -> SchedulerWorkloadCounters {
+    let ready_delay = telemetry.ready_to_run_delay();
+    let timer_delay = telemetry.timer_delivery_delay();
+    let external_event_delay = telemetry.external_event_delivery_delay();
+    let blocking_shutdown_delay = telemetry.blocking_shutdown_delay();
+    SchedulerWorkloadCounters {
+        workload: workload.name(),
+        workers: configuration.workers,
+        tasks: u64::try_from(configuration.tasks).unwrap_or(u64::MAX),
+        operations,
+        checksum,
+        polls: telemetry.polls(),
+        completions: telemetry.completions(),
+        suspensions: telemetry.suspensions(),
+        wake_requests: telemetry.wake_requests(),
+        tasks_stolen: telemetry.tasks_stolen(),
+        blocking_submissions: telemetry.blocking_submissions(),
+        timers_delivered: telemetry.timers_delivered(),
+        external_events_delivered: telemetry.external_events_delivered(),
+        local_queue_depth: telemetry.local_queue_depth(),
+        maximum_local_queue_depth: telemetry.maximum_local_queue_depth(),
+        injection_queue_depth: telemetry.injection_queue_depth(),
+        maximum_injection_queue_depth: telemetry.maximum_injection_queue_depth(),
+        blocking_queue_depth: telemetry.blocking_queue_depth(),
+        maximum_blocking_queue_depth: telemetry.maximum_blocking_queue_depth(),
+        active_blocking_operations: telemetry.active_blocking_operations(),
+        maximum_active_blocking_operations: telemetry.maximum_active_blocking_operations(),
+        steal_searches: telemetry.steal_searches(),
+        steal_victims_examined: telemetry.steal_victims_examined(),
+        steal_successes: telemetry.steal_successes(),
+        steal_failures: telemetry.steal_failures(),
+        maximum_stolen_batch: telemetry.maximum_stolen_batch(),
+        worker_starts: telemetry.worker_starts(),
+        worker_parks: telemetry.worker_parks(),
+        worker_unparks: telemetry.worker_unparks(),
+        worker_stops: telemetry.worker_stops(),
+        stale_ready_entries: telemetry.stale_ready_entries(),
+        work_budget_exhaustions: telemetry.work_budget_exhaustions(),
+        scheduler_migrations: telemetry.scheduler_migrations(),
+        gc_delayed_migrations: telemetry.gc_delayed_migrations(),
+        ready_delay_samples: ready_delay.samples(),
+        ready_delay_p50_work_units: ready_delay.p50_work_units(),
+        ready_delay_p95_work_units: ready_delay.p95_work_units(),
+        ready_delay_p99_work_units: ready_delay.p99_work_units(),
+        ready_delay_p999_work_units: ready_delay.p999_work_units(),
+        ready_delay_max_work_units: ready_delay.maximum_work_units(),
+        timer_delay_samples: timer_delay.samples(),
+        timer_delay_p99_work_units: timer_delay.p99_work_units(),
+        timer_delay_max_work_units: timer_delay.maximum_work_units(),
+        external_event_delay_samples: external_event_delay.samples(),
+        external_event_delay_p99_work_units: external_event_delay.p99_work_units(),
+        external_event_delay_max_work_units: external_event_delay.maximum_work_units(),
+        blocking_shutdown_delay_samples: blocking_shutdown_delay.samples(),
+        blocking_shutdown_delay_max_work_units: blocking_shutdown_delay.maximum_work_units(),
+        resource_counter_source: resources.source,
+        resident_memory_bytes: resources.resident_memory_bytes,
+        virtual_memory_bytes: resources.virtual_memory_bytes,
+        voluntary_context_switches: resources.voluntary_context_switches,
+        involuntary_context_switches: resources.involuntary_context_switches,
+        first_poll_latency_p50_nanoseconds: latencies.0,
+        first_poll_latency_p95_nanoseconds: latencies.1,
+        first_poll_latency_p99_nanoseconds: latencies.2,
+        first_poll_latency_p999_nanoseconds: latencies.3,
+        first_poll_latency_max_nanoseconds: latencies.4,
+    }
+}

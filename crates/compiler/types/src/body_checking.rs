@@ -176,6 +176,73 @@ pub struct BodyChecker<'resolver, 'index> {
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
+    pub(crate) fn call_result_types(
+        &mut self,
+        is_async: bool,
+        results: Vec<TypeId>,
+    ) -> Option<Vec<TypeId>> {
+        if !is_async {
+            return Some(results);
+        }
+        let completion = match results.as_slice() {
+            [completion] => *completion,
+            _ => self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Tuple(results))
+                .ok()?,
+        };
+        let task = self.resolver.schema().type_by_source_name("Task")?.id();
+        let task_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: task,
+                arguments: vec![completion],
+            })
+            .ok()?;
+        Some(vec![task_type])
+    }
+
+    fn check_await(
+        &mut self,
+        operand: &ExpressionSyntax,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        if !self
+            .signature_stack
+            .last()
+            .is_some_and(ResolvedFunctionSignature::is_async)
+        {
+            self.diagnostics
+                .push(type_diagnostics::await_outside_async(span));
+            return None;
+        }
+        let task = self.check_expression(operand)?;
+        let task_definition = self.resolver.schema().type_by_source_name("Task")?.id();
+        let completion = match self.resolver.arena().get(task.type_id()) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == task_definition && arguments.len() == 1 => arguments[0],
+            _ => {
+                self.diagnostics.push(type_diagnostics::await_non_task(
+                    operand.span(),
+                    self.type_name(task.type_id()),
+                ));
+                return None;
+            }
+        };
+        self.invalidate_flow_narrowings();
+        Some(TypedExpression {
+            kind: TypedExpressionKind::Await {
+                task: Box::new(task),
+            },
+            type_id: completion,
+            span,
+        })
+    }
+
     #[must_use]
     pub fn new(
         module: ModuleId,
@@ -415,6 +482,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 let signature = self.signature_stack.last()?.clone();
                 self.check_closure_expression(&signature, function)
             }
+            ExpressionSyntaxKind::Await { operand } => self.check_await(operand, span),
             ExpressionSyntaxKind::Name(path) => self.check_name(path, expected, span),
             ExpressionSyntaxKind::Index { base, index } => self.check_array_get(base, index, span),
             ExpressionSyntaxKind::Construct { type_name, fields } => self.check_class_construct(
@@ -471,37 +539,6 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     unreachable!()
                 };
                 self.check_result_propagate(operand, span)
-            }
-            ExpressionSyntaxKind::Await { operand } => {
-                if !self
-                    .signature_stack
-                    .last()
-                    .is_some_and(ResolvedFunctionSignature::is_async)
-                {
-                    self.diagnostics.push(type_diagnostics::invalid_operator(
-                        span,
-                        "await",
-                        "async function",
-                    ));
-                    return None;
-                }
-                let task = self.check_expression(operand)?;
-                let Some(completion) = self.resolver.task_completion_type(task.type_id()) else {
-                    self.diagnostics.push(type_diagnostics::invalid_operator(
-                        span,
-                        "await",
-                        self.type_name(task.type_id()),
-                    ));
-                    return None;
-                };
-                self.invalidate_flow_narrowings();
-                Some(TypedExpression {
-                    type_id: completion,
-                    kind: TypedExpressionKind::Await {
-                        task: Box::new(task),
-                    },
-                    span,
-                })
             }
             ExpressionSyntaxKind::Binary {
                 operator,
@@ -786,7 +823,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                         .substitute_type_parameters(result.type_id()?, &substitutions)
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let mut checked_arguments = Vec::with_capacity(arguments.len());
+            let result_types = self.call_result_types(signature.is_async(), result_types)?;
+            let mut typed_arguments = Vec::with_capacity(arguments.len());
             for (argument, parameter_type) in arguments.iter().zip(parameter_types) {
                 let typed = self.check_expression_expected(
                     argument,
@@ -798,7 +836,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     typed.span(),
                     argument.span(),
                 );
-                checked_arguments.push(typed);
+                typed_arguments.push(typed);
             }
             let dispatch = self
                 .resolver
@@ -812,8 +850,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return self.checked_call_expression(CheckedCall {
                 call: TypedCall {
                     dispatch,
+                    is_async: signature.is_async(),
                     type_arguments: resolved_arguments,
-                    arguments: checked_arguments,
+                    arguments: typed_arguments,
                     span,
                 },
                 results: result_types,
@@ -1667,7 +1706,6 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::NumericFor { .. }
         | TypedStatementKind::GeneralizedFor { .. }
         | TypedStatementKind::Defer { .. }
-        | TypedStatementKind::AsyncDefer { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }
