@@ -1,4 +1,6 @@
-use pop_runtime_interface::{ForeignCallMode, ForeignTransitionId, RuntimeOperation};
+use pop_runtime_interface::{
+    ForeignCallMode, ForeignTransitionId, ManagedThreadBindingId, RuntimeOperation,
+};
 
 #[test]
 fn foreign_call_modes_are_closed_and_explicit() {
@@ -23,6 +25,13 @@ fn foreign_transition_id_is_a_distinct_nonzero_identity() {
 }
 
 #[test]
+fn managed_thread_binding_id_is_distinct_and_nonzero() {
+    assert_eq!(ManagedThreadBindingId::new(0), None);
+    let binding = ManagedThreadBindingId::new(23).expect("nonzero managed binding identity");
+    assert_eq!(binding.raw(), 23);
+}
+
+#[test]
 fn foreign_transitions_are_distinct_runtime_operations() {
     assert_ne!(
         RuntimeOperation::EnterForeign,
@@ -31,5 +40,9 @@ fn foreign_transitions_are_distinct_runtime_operations() {
     assert_ne!(
         RuntimeOperation::EnterForeign,
         RuntimeOperation::GcSafePoint
+    );
+    assert_ne!(
+        RuntimeOperation::AttachManagedThread,
+        RuntimeOperation::DetachManagedThread
     );
 }

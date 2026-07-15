@@ -1,7 +1,8 @@
 use crate::{
     ArrayAllocationRequest, ForeignCallMode, ForeignTransitionId, GarbageCollectorContract,
-    ManagedReference, ObjectAllocationRequest, PanicPayload, PinHandle, RootHandle,
-    RootPublication, RuntimeFailure, TableAllocationRequest, Trap, WriteBarrier,
+    ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest, PanicPayload, PinHandle,
+    RootHandle, RootPublication, RuntimeFailure, SchedulerId, TableAllocationRequest, Trap,
+    WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,6 +135,35 @@ pub trait RuntimeAdapter {
     /// unavailable.
     fn unpin(&mut self, pin: PinHandle) -> Result<(), RuntimeFailure> {
         let _ = pin;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Attaches the current host thread to one logical scheduler before
+    /// managed execution begins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic when attachment is unavailable or the
+    /// current thread is already bound.
+    fn attach_managed_thread(
+        &mut self,
+        scheduler: SchedulerId,
+    ) -> Result<ManagedThreadBindingId, RuntimeFailure> {
+        let _ = scheduler;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Detaches and consumes one exact managed-thread binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic for a stale, wrong-thread, or active native
+    /// transition binding.
+    fn detach_managed_thread(
+        &mut self,
+        binding: ManagedThreadBindingId,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = binding;
         Err(RuntimeFailure::runtime_invariant())
     }
 

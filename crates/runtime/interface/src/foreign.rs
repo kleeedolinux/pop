@@ -45,3 +45,22 @@ impl ForeignTransitionId {
         self.0.get()
     }
 }
+
+/// Explicit authority for one runtime-registered managed thread binding.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ManagedThreadBindingId(NonZeroU64);
+
+impl ManagedThreadBindingId {
+    #[must_use]
+    pub const fn new(raw: u64) -> Option<Self> {
+        match NonZeroU64::new(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0.get()
+    }
+}

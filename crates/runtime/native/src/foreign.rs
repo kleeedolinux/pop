@@ -26,6 +26,10 @@ thread_local! {
     static FOREIGN_TRANSITIONS: RefCell<Vec<ForeignTransition>> = const { RefCell::new(Vec::new()) };
 }
 
+pub(crate) fn has_active_foreign_transition() -> bool {
+    FOREIGN_TRANSITIONS.with(|transitions| !transitions.borrow().is_empty())
+}
+
 /// Enters one statically resolved foreign call after publishing its exact live
 /// managed roots. Zero reports a closed native-boundary failure.
 ///

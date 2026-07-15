@@ -1,6 +1,7 @@
 //! Native host facade for the Pop Lang Runtime Interface.
 
 mod allocation;
+mod binding;
 mod failure;
 mod foreign;
 mod identity;
@@ -15,6 +16,7 @@ mod task;
 mod text;
 
 pub use allocation::*;
+pub use binding::*;
 pub use failure::*;
 pub use foreign::*;
 pub use identity::*;

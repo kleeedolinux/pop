@@ -35,6 +35,8 @@ pub enum RuntimeOperation {
     ReleaseRoot,
     Pin,
     Unpin,
+    AttachManagedThread,
+    DetachManagedThread,
     EnterForeign,
     LeaveForeign,
     PublishRoots,

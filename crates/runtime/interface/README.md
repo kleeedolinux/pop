@@ -14,3 +14,6 @@ single-use `ForeignTransitionId` values plus distinct `EnterForeign` and
 `LeaveForeign` operations. Physical token allocation, thread binding, and C
 symbol spellings remain runtime-adapter concerns under
 [ADR 0081](../../../architecture/decisions/0081-statically-bound-native-ffi.md).
+Native entry authority is separately represented by the nonzero,
+single-use `ManagedThreadBindingId` and balanced `AttachManagedThread`/
+`DetachManagedThread` operations.

@@ -9,6 +9,9 @@ ABI 1.13 adds `pop_rt_enter_foreign` and `pop_rt_leave_foreign` as distinct,
 balanced transition entries with writable exact root arrays. ABI 1.12 remains
 the immutable task-frame descriptor and both earlier descriptors stay
 supported.
+ABI 1.14 adds explicit `pop_rt_attach_managed_thread` and
+`pop_rt_detach_managed_thread` entries without changing the 1.13 transition
+shape.
 
 [ADR 0078](../../../architecture/decisions/0078-native-abi-2-writable-root-coexistence.md)
 adds distinct immutable ABI 1.11 and ABI 2.0 descriptors. ABI 2 owns the
