@@ -9,13 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_compile_time::CompileTimeValue;
 use pop_diagnostics::compile_time as compile_time_diagnostics;
 use pop_foundation::{Diagnostic, FunctionId, ModuleId, SymbolId, TypeId};
-use pop_resolve::{ResolutionDatabase, SymbolSpace};
+use pop_resolve::{ResolutionDatabase, SymbolSpace, Visibility};
 use pop_syntax::{AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind};
 use pop_types::{
     AttributeAttachmentError, AttributeConstant, AttributeQueryIndex, AttributeTarget,
     AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole, ForeignAbi,
-    ForeignFunctionDeclaration, PrimitiveType, ResolvedAttribute, ResolvedFunctionSignature,
-    SemanticType, SignatureResolver, TypeArena,
+    ForeignFunctionDeclaration, ResolvedAttribute, ResolvedFunctionSignature, SignatureResolver,
+    TypeArena,
 };
 
 use crate::api::FrontEndCompileTimeEvaluation;
@@ -31,9 +31,10 @@ use crate::work::{
 pub(crate) fn resolve_ffi_attributes(
     namespaces: &mut [NamespaceAttributeWork],
     functions: &mut [FunctionWork],
+    database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
     has_ffi_dependency: bool,
-    types: &TypeArena,
+    resolver: &SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if !has_ffi_dependency {
@@ -43,7 +44,7 @@ pub(crate) fn resolve_ffi_attributes(
         let mut ordinary = Vec::new();
         let mut aliases = BTreeSet::new();
         for attribute in std::mem::take(&mut namespace.attribute_uses) {
-            match ffi_attribute_role(bootstrap, &attribute) {
+            match ffi_attribute_role(database, bootstrap, namespace.module, &attribute) {
                 Some(CompilerAttributeRole::FfiLink) => {
                     if let Some(alias) = parse_link_alias(&attribute) {
                         if !aliases.insert(alias.clone()) {
@@ -80,8 +81,9 @@ pub(crate) fn resolve_ffi_attributes(
                 .get(&function.module)
                 .cloned()
                 .unwrap_or_default(),
+            database,
             bootstrap,
-            types,
+            resolver,
             diagnostics,
         );
     }
@@ -103,15 +105,12 @@ pub(crate) fn resolve_ffi_layout_attributes(
         let mut ordinary = Vec::new();
         for attribute in std::mem::take(&mut declaration.attribute_uses) {
             let name = attribute.path().join(".");
-            let shadowed = database
-                .resolve(
-                    declaration.module,
-                    &name,
-                    SymbolSpace::Type,
-                    attribute.span(),
-                )
-                .symbol()
-                .is_some();
+            let shadowed = source_attribute_shadows_trusted_identity(
+                database,
+                declaration.module,
+                &name,
+                attribute.span(),
+            );
             let role = (!shadowed)
                 .then(|| bootstrap.compiler_attribute_by_source_name(&name))
                 .flatten()
@@ -159,8 +158,9 @@ pub(crate) fn resolve_ffi_layout_attributes(
 fn resolve_foreign_function(
     function: &mut FunctionWork,
     link_aliases: Vec<String>,
+    database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
-    types: &TypeArena,
+    resolver: &SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let mut ordinary = Vec::new();
@@ -168,7 +168,7 @@ fn resolve_foreign_function(
     let mut nonblocking = None;
     let mut malformed = false;
     for attribute in std::mem::take(&mut function.attribute_uses) {
-        match ffi_attribute_role(bootstrap, &attribute) {
+        match ffi_attribute_role(database, bootstrap, function.module, &attribute) {
             Some(CompilerAttributeRole::FfiForeign) if foreign.is_none() => {
                 foreign = Some(attribute);
             }
@@ -239,15 +239,26 @@ fn resolve_foreign_function(
             "foreign functions cannot be generic",
         ));
     }
+    if function.visibility == Visibility::Public
+        && database
+            .index()
+            .module(function.module)
+            .is_none_or(|module| module.namespace().rsplit('.').next() != Some("Unsafe"))
+    {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "public foreign functions require a final Unsafe namespace",
+        ));
+    }
     let abi_types_valid = function.signature.parameters().iter().all(|parameter| {
         parameter
             .parameter_type()
             .type_id()
-            .is_some_and(|type_id| valid_foreign_abi_type(type_id, types, bootstrap))
+            .is_some_and(|type_id| resolver.ffi_foreign_abi_type_is_valid(type_id))
     }) && function.signature.results().iter().all(|result| {
         result
             .type_id()
-            .is_some_and(|type_id| valid_foreign_abi_type(type_id, types, bootstrap))
+            .is_some_and(|type_id| resolver.ffi_foreign_abi_type_is_valid(type_id))
     });
     if !abi_types_valid {
         diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
@@ -277,12 +288,50 @@ fn resolve_foreign_function(
 }
 
 fn ffi_attribute_role(
+    database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
+    module: ModuleId,
     attribute: &AttributeUseSyntax,
 ) -> Option<CompilerAttributeRole> {
     let name = attribute.path().join(".");
     let entry = bootstrap.compiler_attribute_by_source_name(&name)?;
-    (entry.owner_bubble() == "Pop.Ffi").then(|| entry.role())
+    let shadowed =
+        source_attribute_shadows_trusted_identity(database, module, &name, attribute.span());
+    (entry.owner_bubble() == "Pop.Ffi" && !shadowed).then(|| entry.role())
+}
+
+fn source_attribute_shadows_trusted_identity(
+    database: &ResolutionDatabase,
+    module: ModuleId,
+    name: &str,
+    span: pop_foundation::SourceSpan,
+) -> bool {
+    if database
+        .resolve(module, name, SymbolSpace::Type, span)
+        .symbol()
+        .is_some()
+        || !database
+            .index()
+            .declaration_by_qualified_name(name, SymbolSpace::Type)
+            .is_empty()
+    {
+        return true;
+    }
+    let Some((root, tail)) = name.split_once('.') else {
+        return false;
+    };
+    database.index().module(module).is_some_and(|context| {
+        context.usings().iter().any(|using| {
+            using.alias() == Some(root)
+                && !database
+                    .index()
+                    .declaration_by_qualified_name(
+                        &format!("{}.{}", using.namespace(), tail),
+                        SymbolSpace::Type,
+                    )
+                    .is_empty()
+        })
+    })
 }
 
 fn parse_link_alias(attribute: &AttributeUseSyntax) -> Option<String> {
@@ -338,101 +387,6 @@ fn parse_foreign_contract(attribute: &AttributeUseSyntax) -> Option<(String, For
         ForeignAbi::C
     };
     Some((symbol.clone(), abi))
-}
-
-fn valid_foreign_abi_type(type_id: TypeId, types: &TypeArena, bootstrap: &BootstrapSchema) -> bool {
-    match types.get(type_id) {
-        Some(SemanticType::Primitive(
-            PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
-        )) => true,
-        Some(SemanticType::Builtin {
-            definition,
-            arguments,
-        }) => {
-            let Some(entry) = bootstrap.type_by_id(*definition) else {
-                return false;
-            };
-            match entry.source_name() {
-                "Ffi.Pointer"
-                | "Ffi.OptionalPointer"
-                | "Ffi.ReadOnlyPointer"
-                | "Ffi.OptionalReadOnlyPointer" => {
-                    let [pointee] = arguments.as_slice() else {
-                        return false;
-                    };
-                    valid_foreign_pointer_target(*pointee, types, bootstrap)
-                }
-                "Ffi.Handle" => arguments.len() == 1,
-                "Ffi.Function" | "Ffi.OptionalFunction" => {
-                    let [signature] = arguments.as_slice() else {
-                        return false;
-                    };
-                    valid_foreign_callback_signature(*signature, types, bootstrap)
-                }
-                name if name.starts_with("Ffi.C.") => arguments.is_empty(),
-                _ => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-fn valid_foreign_pointer_target(
-    type_id: TypeId,
-    types: &TypeArena,
-    bootstrap: &BootstrapSchema,
-) -> bool {
-    match types.get(type_id) {
-        Some(
-            SemanticType::Primitive(
-                PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
-            )
-            | SemanticType::Opaque(_),
-        ) => true,
-        Some(SemanticType::Builtin {
-            definition,
-            arguments,
-        }) => bootstrap.type_by_id(*definition).is_some_and(|entry| {
-            if entry.source_name().starts_with("Ffi.C.") {
-                arguments.is_empty()
-            } else if matches!(
-                entry.source_name(),
-                "Ffi.Pointer"
-                    | "Ffi.OptionalPointer"
-                    | "Ffi.ReadOnlyPointer"
-                    | "Ffi.OptionalReadOnlyPointer"
-            ) {
-                let [pointee] = arguments.as_slice() else {
-                    return false;
-                };
-                valid_foreign_pointer_target(*pointee, types, bootstrap)
-            } else {
-                false
-            }
-        }),
-        _ => false,
-    }
-}
-
-fn valid_foreign_callback_signature(
-    type_id: TypeId,
-    types: &TypeArena,
-    bootstrap: &BootstrapSchema,
-) -> bool {
-    let Some(SemanticType::Function {
-        is_async,
-        parameters,
-        results,
-        ..
-    }) = types.get(type_id)
-    else {
-        return false;
-    };
-    !is_async
-        && parameters
-            .iter()
-            .chain(results)
-            .all(|type_id| valid_foreign_abi_type(*type_id, types, bootstrap))
 }
 
 pub(crate) fn classify_function_attributes(

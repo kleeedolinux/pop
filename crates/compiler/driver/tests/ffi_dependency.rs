@@ -390,6 +390,48 @@ fn ffi_layout_records_reject_missing_trust_and_managed_fields() {
 }
 
 #[test]
+fn ffi_layout_records_reject_defaults_and_invalid_nested_abi_storage() {
+    let ffi = BubbleId::from_raw(20);
+    for (name, field) in [
+        ("defaulted", "value: Int32 = 0"),
+        ("managedPointer", "value: Ffi.Pointer<String>"),
+        ("invalidCallback", "value: Ffi.Function<InvalidCallback>"),
+        ("scalarHandle", "value: Ffi.Handle<Int32>"),
+    ] {
+        let source = format!(
+            "namespace Layout\n\
+             private type InvalidCallback = function(input: String): Int32\n\
+             @Ffi.C.Layout\n\
+             public record Invalid\n\
+                 {field}\n\
+             end\n\
+             public function allocate(length: Ffi.C.Size)\n\
+                 Ffi.Buffer.open<<Invalid>>(length)\n\
+             end\n"
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![FrontEndModule::new(
+                    ModuleId::from_raw(0),
+                    SourceFile::new(FileId::from_raw(0), format!("src/{name}.pop"), source)
+                        .expect("source"),
+                )],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{name} must not reach HIR");
+        assert!(
+            result.diagnostic_snapshot().contains("POP5000"),
+            "{name}: {}",
+            result.diagnostic_snapshot()
+        );
+    }
+}
+
+#[test]
 fn user_attributes_cannot_spoof_the_trusted_ffi_layout_identity() {
     let ffi = BubbleId::from_raw(20);
     let attribute = FrontEndModule::new(
@@ -1284,6 +1326,208 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
 }
 
 #[test]
+fn foreign_declarations_accept_only_closed_layout_pointer_callback_and_handle_types() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/closedAbi.pop",
+            "namespace Native.Unsafe\n\
+             @Ffi.C.Layout\n\
+             public record Pair\n\
+                 left: Int32\n\
+                 right: Ffi.C.Int\n\
+             end\n\
+             private type Callback = function(input: Int32): Int32\n\
+             @Ffi.Foreign(\"accept_pair\")\n\
+             internal function acceptPair(value: Pair): Pair\n\
+             end\n\
+             @Ffi.Foreign(\"accept_pair_pointer\")\n\
+             internal function acceptPairPointer(value: Ffi.Pointer<Pair>)\n\
+             end\n\
+             @Ffi.Foreign(\"accept_handle\")\n\
+             internal function acceptHandle(value: Ffi.Handle<String>)\n\
+             end\n\
+             @Ffi.Foreign(\"accept_callback\")\n\
+             internal function acceptCallback(value: Ffi.Function<Callback>)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    assert_eq!(result.foreign_declarations().len(), 4);
+    assert!(result.hir().is_some());
+}
+
+#[test]
+fn trusted_ffi_attributes_cannot_be_spoofed_by_user_source_names() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/spoofedForeign.pop",
+            "@Ffi.Link(\"UserLibrary\")\n\
+             namespace Ffi\n\
+             @AttributeUsage(targets = { AttributeTarget.Namespace }, repeatable = false)\n\
+             public attribute Link(alias: String)\n\
+             @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+             public attribute Foreign(symbol: String)\n\
+             @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+             public attribute Nonblocking()\n\
+             @Ffi.Foreign(\"user_function\")\n\
+             @Ffi.Nonblocking\n\
+             internal function userFunction(value: Int32): Int32\n\
+                 return value\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    assert!(result.foreign_declarations().is_empty());
+    let [namespace] = result.namespace_attributes() else {
+        panic!("one user namespace attribute");
+    };
+    assert_eq!(namespace.attributes().len(), 1);
+}
+
+#[test]
+fn inaccessible_user_ffi_attributes_do_not_fall_back_to_trusted_identities() {
+    let ffi = BubbleId::from_raw(20);
+    let owner = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/userForeign.pop",
+            "namespace Ffi\n\
+             @AttributeUsage(targets = { AttributeTarget.Function }, repeatable = false)\n\
+             private attribute Foreign(symbol: String)\n",
+        )
+        .expect("source"),
+    );
+    let consumer = FrontEndModule::new(
+        ModuleId::from_raw(1),
+        SourceFile::new(
+            FileId::from_raw(1),
+            "src/consumer.pop",
+            "namespace Consumer\n\
+             @Ffi.Foreign(\"user_function\")\n\
+             internal function userFunction(value: Int32): Int32\n\
+                 return value\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![owner, consumer],
+        )
+        .with_ffi_dependency(ffi),
+    );
+
+    assert!(result.hir().is_none());
+    assert!(result.foreign_declarations().is_empty());
+    assert!(!result.diagnostic_snapshot().contains("POP5000"));
+}
+
+#[test]
+fn public_foreign_declarations_require_a_final_unsafe_namespace() {
+    let ffi = BubbleId::from_raw(20);
+    let accepted = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![FrontEndModule::new(
+                ModuleId::from_raw(0),
+                SourceFile::new(
+                    FileId::from_raw(0),
+                    "src/publicUnsafe.pop",
+                    "namespace Example.Native.Unsafe\n\
+                     @Ffi.Foreign(\"native_public\")\n\
+                     public function nativePublic(value: Int32): Int32\n\
+                     end\n",
+                )
+                .expect("source"),
+            )],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        accepted.diagnostics().is_empty(),
+        "{}",
+        accepted.diagnostic_snapshot()
+    );
+    assert_eq!(accepted.foreign_declarations().len(), 1);
+
+    for (name, namespace) in [
+        ("safe", "Example.Native"),
+        ("unsafeNotFinal", "Example.Unsafe.Native"),
+        ("wrongCase", "Example.Native.unsafe"),
+    ] {
+        let source = format!(
+            "namespace {namespace}\n\
+             @Ffi.Foreign(\"native_public\")\n\
+             public function nativePublic(value: Int32): Int32\n\
+             end\n"
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![FrontEndModule::new(
+                    ModuleId::from_raw(0),
+                    SourceFile::new(FileId::from_raw(0), format!("src/{name}.pop"), source)
+                        .expect("source"),
+                )],
+            )
+            .with_ffi_dependency(ffi),
+        );
+
+        assert!(result.hir().is_none(), "{name} must not reach HIR");
+        assert!(
+            result.diagnostic_snapshot().contains("POP5000"),
+            "{name}: {}",
+            result.diagnostic_snapshot()
+        );
+        assert!(result.foreign_declarations().is_empty());
+    }
+}
+
+#[test]
 fn front_end_rejects_invalid_foreign_declaration_contracts() {
     for (name, declaration) in [
         (
@@ -1306,6 +1550,21 @@ fn front_end_rejects_invalid_foreign_declaration_contracts() {
              end\n",
         ),
         (
+            "boolean",
+            "@Ffi.Foreign(\"native_boolean\")\n\
+             internal function invalid(value: Boolean)\n\
+             end\n",
+        ),
+        (
+            "unannotatedRecord",
+            "private record Plain\n\
+                 value: Int32\n\
+             end\n\
+             @Ffi.Foreign(\"native_record\")\n\
+             internal function invalid(value: Plain)\n\
+             end\n",
+        ),
+        (
             "managedStringPointer",
             "@Ffi.Foreign(\"native_string_pointer\")\n\
              internal function invalid(value: Ffi.Pointer<String>)\n\
@@ -1324,6 +1583,32 @@ fn front_end_rejects_invalid_foreign_declaration_contracts() {
              end\n",
         ),
         (
+            "scalarHandle",
+            "@Ffi.Foreign(\"native_handle\")\n\
+             internal function invalid(value: Ffi.Handle<Int32>)\n\
+             end\n",
+        ),
+        (
+            "singletonErrorHandle",
+            "@Ffi.Foreign(\"native_handle\")\n\
+             internal function invalid(value: Ffi.Handle<Ffi.NullPointerError>)\n\
+             end\n",
+        ),
+        (
+            "managedCallbackParameter",
+            "private type InvalidCallback = function(input: String): Int32\n\
+             @Ffi.Foreign(\"native_callback\")\n\
+             internal function invalid(value: Ffi.Function<InvalidCallback>)\n\
+             end\n",
+        ),
+        (
+            "asyncCallback",
+            "private type AsyncCallback = async function(): Int32\n\
+             @Ffi.Foreign(\"native_callback\")\n\
+             internal function invalid(value: Ffi.Function<AsyncCallback>)\n\
+             end\n",
+        ),
+        (
             "abi",
             "@Ffi.Foreign(\"native_abi\", abi = \"Lua\")\n\
              internal function invalid(value: Int32)\n\
@@ -1336,29 +1621,32 @@ fn front_end_rejects_invalid_foreign_declaration_contracts() {
              end\n",
         ),
     ] {
-        let ffi = BubbleId::from_raw(20);
-        let source = format!("namespace Native\n{declaration}");
-        let module = FrontEndModule::new(
-            ModuleId::from_raw(0),
-            SourceFile::new(FileId::from_raw(0), format!("src/{name}.pop"), source)
-                .expect("source"),
-        );
-        let result = analyze_bubble(
-            FrontEndBubbleInput::new(
-                BubbleId::from_raw(10),
-                NamespaceId::from_raw(10),
-                vec![ffi],
-                vec![module],
-            )
-            .with_ffi_dependency(ffi),
-        );
-
-        assert!(result.hir().is_none(), "{name} must not reach HIR");
-        assert!(
-            result.diagnostic_snapshot().contains("POP5000"),
-            "{name}: {}",
-            result.diagnostic_snapshot()
-        );
-        assert!(result.foreign_declarations().is_empty());
+        assert_invalid_foreign_contract(name, declaration);
     }
+}
+
+fn assert_invalid_foreign_contract(name: &str, declaration: &str) {
+    let ffi = BubbleId::from_raw(20);
+    let source = format!("namespace Native\n{declaration}");
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(FileId::from_raw(0), format!("src/{name}.pop"), source).expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+
+    assert!(result.hir().is_none(), "{name} must not reach HIR");
+    assert!(
+        result.diagnostic_snapshot().contains("POP5000"),
+        "{name}: {}",
+        result.diagnostic_snapshot()
+    );
+    assert!(result.foreign_declarations().is_empty());
 }

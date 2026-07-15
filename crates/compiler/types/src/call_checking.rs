@@ -437,24 +437,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             ));
             return None;
         }
-        let managed = matches!(
-            self.resolver.arena().get(payload),
-            Some(
-                SemanticType::Primitive(PrimitiveType::String)
-                    | SemanticType::Tuple(_)
-                    | SemanticType::Array(_)
-                    | SemanticType::Table { .. }
-                    | SemanticType::Class { .. }
-                    | SemanticType::Interface { .. }
-                    | SemanticType::Function { .. }
-                    | SemanticType::ErrorUnion { .. }
-            )
-        ) || matches!(
-            self.resolver.arena().get(payload),
-            Some(SemanticType::Builtin { definition, .. })
-                if !crate::is_ffi_abi_builtin_type(*definition)
-        );
-        if !managed {
+        if !self.resolver.ffi_handle_payload_is_valid(payload) {
             self.diagnostics.push(type_diagnostics::type_mismatch(
                 argument.span(),
                 "managed reference",

@@ -140,20 +140,21 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
-    resolve_ffi_attributes(
-        &mut namespace_attribute_work,
-        &mut functions,
-        &bootstrap,
-        input.ffi_dependency.is_some(),
-        resolver.arena(),
-        &mut diagnostics,
-    );
     resolve_ffi_layout_attributes(
         &mut declaration_attributes,
         &database,
         &bootstrap,
         input.ffi_dependency.is_some(),
         &mut resolver,
+        &mut diagnostics,
+    );
+    resolve_ffi_attributes(
+        &mut namespace_attribute_work,
+        &mut functions,
+        &database,
+        &bootstrap,
+        input.ffi_dependency.is_some(),
+        &resolver,
         &mut diagnostics,
     );
     let mut signatures = reference_signatures(&input.reference_metadata, &database, &mut resolver);

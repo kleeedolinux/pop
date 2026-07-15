@@ -1578,6 +1578,100 @@ impl<'index> SignatureResolver<'index> {
         self.ffi_c_layout_is_valid_inner(symbol, &mut BTreeSet::new())
     }
 
+    /// Returns whether one exact type belongs to the accepted direct foreign
+    /// ABI mapping. The proof recursively validates pointer elements,
+    /// callback packs, handle payload representation, and trusted layout
+    /// records; wrappers never make an invalid nested type ABI-compatible.
+    #[must_use]
+    pub fn ffi_foreign_abi_type_is_valid(&self, type_id: TypeId) -> bool {
+        self.ffi_foreign_abi_type_is_valid_inner(type_id, &mut BTreeSet::new())
+    }
+
+    fn ffi_foreign_abi_type_is_valid_inner(
+        &self,
+        type_id: TypeId,
+        visiting: &mut BTreeSet<SymbolId>,
+    ) -> bool {
+        match self.arena.get(type_id) {
+            Some(SemanticType::Primitive(
+                PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+            )) => true,
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if crate::is_ffi_integer_abi_builtin_type(*definition) => arguments.is_empty(),
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if crate::is_ffi_pointer_type_constructor(*definition) => {
+                let [element] = arguments.as_slice() else {
+                    return false;
+                };
+                matches!(self.arena.get(*element), Some(SemanticType::Opaque(_)))
+                    || self.ffi_foreign_abi_type_is_valid_inner(*element, visiting)
+            }
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if crate::is_ffi_function_type_constructor(*definition) => {
+                let [signature] = arguments.as_slice() else {
+                    return false;
+                };
+                let Some(SemanticType::Function {
+                    is_async,
+                    parameters,
+                    results,
+                    ..
+                }) = self.arena.get(*signature)
+                else {
+                    return false;
+                };
+                !is_async
+                    && parameters
+                        .iter()
+                        .chain(results)
+                        .all(|type_id| self.ffi_foreign_abi_type_is_valid_inner(*type_id, visiting))
+            }
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == crate::FFI_HANDLE_TYPE_ID => {
+                let [payload] = arguments.as_slice() else {
+                    return false;
+                };
+                self.ffi_handle_payload_is_valid(*payload)
+            }
+            Some(SemanticType::Record(_)) => self
+                .records_by_type
+                .get(&type_id)
+                .is_some_and(|record| self.ffi_c_layout_is_valid_inner(*record, visiting)),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn ffi_handle_payload_is_valid(&self, payload: TypeId) -> bool {
+        matches!(
+            self.arena.get(payload),
+            Some(
+                SemanticType::Primitive(PrimitiveType::String)
+                    | SemanticType::Tuple(_)
+                    | SemanticType::Array(_)
+                    | SemanticType::Table { .. }
+                    | SemanticType::Class { .. }
+                    | SemanticType::Interface { .. }
+                    | SemanticType::Function { .. }
+                    | SemanticType::ErrorUnion { .. }
+            )
+        ) || matches!(
+            self.arena.get(payload),
+            Some(SemanticType::Builtin { definition, .. })
+                if !crate::is_ffi_abi_builtin_type(*definition)
+                    && *definition != crate::FFI_NULL_POINTER_ERROR_TYPE_ID
+                    && *definition != crate::FFI_ALLOCATION_ERROR_TYPE_ID
+        )
+    }
+
     fn ffi_c_layout_is_valid_inner(
         &self,
         symbol: SymbolId,
@@ -1589,25 +1683,11 @@ impl<'index> SignatureResolver<'index> {
         if !definition.ffi_c_layout || definition.fields.is_empty() || !visiting.insert(symbol) {
             return false;
         }
-        let valid = definition
-            .fields
-            .iter()
-            .all(|field| match self.arena.get(field.field_type) {
-                Some(SemanticType::Primitive(
-                    PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
-                )) => true,
-                Some(SemanticType::Builtin { definition, .. }) => {
-                    crate::is_ffi_integer_abi_builtin_type(*definition)
-                        || crate::is_ffi_pointer_type_constructor(*definition)
-                        || crate::is_ffi_function_type_constructor(*definition)
-                        || *definition == crate::FFI_HANDLE_TYPE_ID
-                }
-                Some(SemanticType::Record(_)) => self
-                    .records_by_type
-                    .get(&field.field_type)
-                    .is_some_and(|nested| self.ffi_c_layout_is_valid_inner(*nested, visiting)),
-                _ => false,
-            });
+        let valid = definition.fields.iter().all(|field| {
+            !field.has_default()
+                && field.pending_default().is_none()
+                && self.ffi_foreign_abi_type_is_valid_inner(field.field_type, visiting)
+        });
         visiting.remove(&symbol);
         valid
     }
