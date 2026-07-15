@@ -165,6 +165,78 @@ fn llvm_lowers_foreign_calls_with_exact_abi_and_balanced_transitions() {
 }
 
 #[test]
+fn llvm_contains_c_unwind_at_one_balanced_foreign_boundary() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nativeUnwind.pop",
+        "namespace Native\n\
+         @Ffi.Foreign(\"native_may_unwind\", abi = \"CUnwind\")\n\
+         internal function mayUnwind(value: Ffi.C.Int): Ffi.C.Int\n\
+         end\n\
+         internal function cleanup()\n\
+             return\n\
+         end\n\
+         internal function invoke(value: Ffi.C.Int): Ffi.C.Int\n\
+             defer\n\
+                 cleanup()\n\
+             end\n\
+             return mayUnwind(value)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    assert!(matches!(
+        lower_mir_to_llvm_ir(
+            &mir,
+            front_end.types(),
+            &target(),
+            LlvmLoweringOptions::default(),
+        ),
+        Err(pop_backend_llvm::LlvmLoweringError::UnsupportedForeignFunction(_))
+    ));
+    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
+        .pointer_width(PointerWidth::Bits64)
+        .endianness(Endianness::Little)
+        .capability(TargetCapability::PreciseStackMaps)
+        .capability(TargetCapability::Exceptions)
+        .build()
+        .expect("exception-capable target");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target,
+        LlvmLoweringOptions::default(),
+    )
+    .expect("CUnwind LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("invoke i64 @pop_b0_s0"), "{text}");
+    assert!(text.contains("landingpad { ptr, i32 } cleanup"), "{text}");
+    let landing = text
+        .split("landingpad { ptr, i32 } cleanup")
+        .nth(1)
+        .expect("one CUnwind landing pad");
+    assert!(landing.contains("@pop_rt_leave_foreign"), "{text}");
+    assert!(landing.contains("@pop_rt_continue_unwind"), "{text}");
+    assert!(module.verify().is_ok(), "CUnwind LLVM must verify: {text}");
+}
+
+#[test]
 fn llvm_executes_read_only_and_optional_read_only_foreign_pointers() {
     let ffi = BubbleId::from_raw(9);
     let source = SourceFile::new(

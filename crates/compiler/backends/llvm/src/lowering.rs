@@ -12,7 +12,7 @@ use pop_mir::{
     verify_mir_bubble,
 };
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
-use pop_target::{CAbiScalarKind, CAbiSignedness, TargetSpec};
+use pop_target::{CAbiScalarKind, CAbiSignedness, TargetCapability, TargetSpec};
 use pop_types::{
     ForeignAbi, IntegerKind, PrimitiveType, SemanticType, TypeArena, embedded_bootstrap_schema,
 };
@@ -85,6 +85,17 @@ pub fn lower_mir_to_llvm_ir(
     crate::api::validate_llvm_runtime_profile(options.runtime_profile, target, native_abi)
         .map_err(LlvmLoweringError::RuntimeProfile)?;
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
+    let c_unwind = bubble
+        .foreign_functions()
+        .iter()
+        .find(|function| function.declaration().abi() == ForeignAbi::CUnwind);
+    if let Some(function) = c_unwind
+        && !target.supports(TargetCapability::Exceptions)
+    {
+        return Err(LlvmLoweringError::UnsupportedForeignFunction(
+            function.symbol(),
+        ));
+    }
     let field_layout = collect_field_layout(bubble);
     let record_fields = collect_record_fields(bubble);
     let record_field_types = collect_record_field_types(bubble);
@@ -436,6 +447,9 @@ pub fn lower_mir_to_llvm_ir(
         "declare noalias ptr @malloc(i64) nounwind".to_owned(),
         "declare void @free(ptr) nounwind".to_owned(),
     ];
+    if c_unwind.is_some() {
+        declarations.push("declare i32 @__gcc_personality_v0(...)".to_owned());
+    }
     declarations.extend(foreign_declarations);
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
@@ -639,8 +653,7 @@ fn lower_foreign_function(
     types: &TypeArena,
     target: &TargetSpec,
 ) -> Result<(PrivateFunction, String), LlvmLoweringError> {
-    if function.declaration().abi() == ForeignAbi::CUnwind
-        || function.results().len() > 1
+    if function.results().len() > 1
         || function.declaration().abi() == ForeignAbi::System
             && target.operating_system() == pop_target::OperatingSystem::None
     {
@@ -1527,12 +1540,23 @@ pub(crate) fn lower_function_parts(
             .map(|(index, type_id)| llvm_type(*type_id, types).map(|ty| format!("{ty} %v{index}")))
             .collect::<Result<Vec<_>, LlvmLoweringError>>()?,
     );
+    let has_c_unwind_call = function_blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .any(|instruction| {
+            matches!(instruction.kind(), MirInstructionKind::CallForeign { .. })
+                && instruction.effects().contains(MirEffect::MayUnwind)
+        });
+    let mut attributes = llvm_function_attributes(effects, memory_none);
+    if has_c_unwind_call {
+        attributes.push("personality ptr @__gcc_personality_v0");
+    }
     Ok(PrivateFunction {
         name,
         parameters,
         result: llvm_results(result_types, types)?,
         blocks,
-        attributes: llvm_function_attributes(effects, memory_none),
+        attributes,
     })
 }
 

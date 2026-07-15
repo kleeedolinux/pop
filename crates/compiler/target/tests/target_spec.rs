@@ -27,6 +27,7 @@ fn native_target_declares_relocating_nursery_feasibility() {
 
     assert!(target.supports(TargetCapability::PreciseStackMaps));
     assert!(target.supports(TargetCapability::RelocatingNursery));
+    assert!(target.supports(TargetCapability::Exceptions));
 }
 
 #[test]

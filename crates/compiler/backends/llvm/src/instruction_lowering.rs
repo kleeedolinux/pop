@@ -458,6 +458,7 @@ pub(crate) fn lower_instruction(
             arguments,
             safe_point,
             roots,
+            unwind,
             ..
         } => lower_foreign_call(
             bubble,
@@ -468,6 +469,7 @@ pub(crate) fn lower_instruction(
             safe_point.raw(),
             roots,
             instruction.effects(),
+            *unwind,
             value_types,
             types,
             matches!(
@@ -1840,6 +1842,7 @@ fn lower_foreign_call(
     safe_point: u32,
     roots: &[ValueId],
     effects: pop_mir::MirEffectSummary,
+    unwind: pop_mir::MirUnwindAction,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     writable_roots: bool,
@@ -1884,14 +1887,32 @@ fn lower_foreign_call(
             "br i1 {result}_foreign_entered, label %{label}_call, label %{label}_trap"
         ),
         format!("{label}_call:"),
-        call_line(
+    ]);
+    if effects.contains(pop_mir::MirEffect::MayUnwind) {
+        let call = call_line(
             &result,
             result_type,
             &format!("@{}", function_name(bubble, callee)),
             arguments,
             values,
             types,
-        )?,
+        )?;
+        let invoke = call.replacen("call ", "invoke ", 1);
+        lines.extend([
+            format!("{invoke} to label %{label}_returned unwind label %{label}_unwind"),
+            format!("{label}_returned:"),
+        ]);
+    } else {
+        lines.push(call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(bubble, callee)),
+            arguments,
+            values,
+            types,
+        )?);
+    }
+    lines.extend([
         format!(
             "{result}_foreign_left = call i8 @{}(i64 {result}_foreign_transition, ptr {root_pointer}, i64 {})",
             native_runtime_symbol(RuntimeOperation::LeaveForeign),
@@ -1904,8 +1925,53 @@ fn lower_foreign_call(
         format!("{label}_trap:"),
         format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
         "  unreachable".to_owned(),
-        format!("{label}_ready:"),
     ]);
+    if effects.contains(pop_mir::MirEffect::MayUnwind) {
+        lines.extend([
+            format!("{label}_unwind:"),
+            format!("{result}_foreign_landing = landingpad {{ ptr, i32 }} cleanup"),
+            format!(
+                "{result}_foreign_unwind_left = call i8 @{}(i64 {result}_foreign_transition, ptr {root_pointer}, i64 {})",
+                native_runtime_symbol(RuntimeOperation::LeaveForeign),
+                roots.len()
+            ),
+            format!(
+                "{result}_foreign_unwind_leave_valid = icmp eq i8 {result}_foreign_unwind_left, 1"
+            ),
+            format!(
+                "br i1 {result}_foreign_unwind_leave_valid, label %{label}_unwind_ready, label %{label}_trap"
+            ),
+            format!("{label}_unwind_ready:"),
+        ]);
+        if writable_roots {
+            for (index, root) in roots.iter().enumerate() {
+                let slot = format!("{root_array}_{index}_unwind_reload");
+                let reloaded =
+                    format!("%v{}_after_foreign_unwind_v{}", root.raw(), result_id.raw());
+                lines.extend([
+                    format!(
+                        "{slot} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                        roots.len()
+                    ),
+                    format!("{reloaded} = load i64, ptr {slot}"),
+                    format!("store i64 {reloaded}, ptr %v{}_gc_root", root.raw()),
+                ]);
+            }
+        }
+        match unwind {
+            pop_mir::MirUnwindAction::Cleanup(target) => {
+                lines.push(format!("br label %b{}", target.raw()));
+            }
+            pop_mir::MirUnwindAction::Propagate => lines.extend([
+                format!(
+                    "call void @{}()",
+                    native_runtime_symbol(RuntimeOperation::ContinueUnwind)
+                ),
+                "unreachable".to_owned(),
+            ]),
+        }
+    }
+    lines.push(format!("{label}_ready:"));
     if writable_roots {
         for (index, root) in roots.iter().enumerate() {
             let slot = format!("{root_array}_{index}_reload");

@@ -126,6 +126,7 @@ impl TargetSpec {
                 .object_format(ObjectFormat::Elf)
                 .operating_system(OperatingSystem::Linux)
                 .capability(TargetCapability::Threads)
+                .capability(TargetCapability::Exceptions)
                 .capability(TargetCapability::PreciseStackMaps)
                 .capability(TargetCapability::RelocatingNursery)
                 .build(),
