@@ -431,6 +431,12 @@ addresses refer only to its separately owned ABI storage. See
 [ADR 0083](./decisions/0083-ffi-resource-state-and-native-buffer-abi.md) and
 [ADR 0084](./decisions/0084-canonical-mir-ffi-buffer-operations.md).
 
+The compact nonzero `FfiAbiLayoutId` used by those operations is the first
+eight big-endian bytes of ADR 0086's full canonical SHA-256 layout fingerprint.
+Artifacts and generated metadata retain and compare the full fingerprint and
+all descriptor facts; zero or a compact collision between unequal full
+fingerprints fails before native execution.
+
 ## Versioning
 
 Artifacts record the language version, MIR version when serialized, PLRI ABI

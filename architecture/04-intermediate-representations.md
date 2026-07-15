@@ -207,6 +207,13 @@ generation remains backend-private state indexed by the canonical
 `ffiBufferLength` value. Every backend consumes the same validated target
 layout catalog.
 
+ADR 0086 derives each catalog key from the first eight big-endian bytes of the
+full canonical SHA-256 layout fingerprint and rejects zero or unequal full
+fingerprints sharing that compact key. HIR preserves the resolved trusted
+`Ffi.C.Layout` identity; target-selected lowering constructs the catalog before
+MIR verification. Neither HIR/MIR nor a backend substitutes a session-local
+`TypeId`, declaration ordinal, host layout, or spelling-based attribute check.
+
 Public `Ffi.Handle<T>` operations remain typed ordinary MIR values:
 `ffiHandleOpen` maps exact managed `T` to `Ffi.Handle<T>`, `ffiHandleGet` maps
 that exact handle back to `T`, and `ffiHandleClose` consumes the runtime

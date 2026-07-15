@@ -341,6 +341,13 @@ marshalled field-by-field into separate ABI storage and never make the normal
 record object layout foreign-visible. See
 [ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
+ADR 0086 makes that proof reproducible: the compiler recognizes the exact
+trusted `Ffi.C.Layout` identity on records, constructs canonical target/ABI
+descriptors, and binds their full SHA-256 fingerprints and compact
+`FfiAbiLayoutId` values into HIR/MIR. The source `Ffi.Buffer` intrinsics are
+available only through a verified direct `Pop.Ffi` dependency and only when
+ordinary resolution found no user declaration at the same path.
+
 ## Attribute typing
 
 An UDA constructor is type-checked like a constant constructor call. Attachment

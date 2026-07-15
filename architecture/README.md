@@ -153,6 +153,10 @@ transplanted into a Luau-shaped file.
   lexical payload borrow, never a Pop object address. Immutable `Bytes` uses a
   read-only pin; general native storage uses explicitly closed
   `Ffi.Buffer<T>`; retained managed values use generation-checked handles.
+- Canonical FFI layout descriptors use full SHA-256 fingerprints and compact
+  nonzero `FfiAbiLayoutId` execution keys derived from their first eight
+  big-endian bytes. Full artifact facts detect collisions and mismatches before
+  a backend or runtime can use foreign storage.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 
