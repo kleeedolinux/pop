@@ -156,8 +156,11 @@ Runtime:       gcSafePoint{stackMap}, writeBarrier,
                pin{borrowRegion, payloadKind}, unpin{borrowRegion},
                ffiHandleOpen{managedType}, ffiHandleGet{managedType},
                ffiHandleClose{managedType},
-               ffiBufferOpen, ffiBufferRead, ffiBufferWrite,
-               ffiBufferBorrow{borrowRegion}, ffiBufferClose, suspend, resume
+               ffiBufferOpen{elementType, layoutId, resultCases},
+               ffiBufferLength{layoutId}, ffiBufferRead{layoutId},
+               ffiBufferWrite{layoutId},
+               ffiBufferBorrow{layoutId, borrowRegion},
+               ffiBufferEndBorrow{borrowRegion}, ffiBufferClose, suspend, resume
 Foreign:       enterForeign, callForeign{foreignId, abi, effects}, leaveForeign
 Debug:         debugValue, sourceScope
 ```
@@ -176,6 +179,14 @@ permitted pointer uses, forbids suspension/escape, and is released on every
 exit. Fixed-layout records carry a backend-neutral marshalling plan rather than
 an object-layout reinterpretation. Physical calling conventions, symbols, and
 object formats remain backend details selected from this contract.
+
+ADR 0084 fixes the exact buffer operation shapes. Open constructs the exact
+typed `Result` only after distinguishing allocation, success, and invariant
+outcomes. Borrow publishes only the scoped optional pointer; its opaque native
+generation remains backend-private state indexed by the canonical
+`BorrowRegionId`, and the native returned length must equal the dominating
+`ffiBufferLength` value. Every backend consumes the same validated target
+layout catalog.
 
 Public `Ffi.Handle<T>` operations remain typed ordinary MIR values:
 `ffiHandleOpen` maps exact managed `T` to `Ffi.Handle<T>`, `ffiHandleGet` maps

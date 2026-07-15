@@ -108,7 +108,9 @@ carry one lexical borrow-region identity, and the verifier proves dominance,
 no escape or suspension, balanced end-borrow cleanup, and no close while live.
 
 The MIR interpreter implements the same layout, zero initialization, bounds,
-lifecycle, and status semantics without consulting LLVM or host C layout.
+lifecycle, and status semantics without consulting LLVM or host C layout. ADR
+0084 fixes the exact instruction operands, typed open result, target layout
+catalog, and backend-private borrow-generation handling.
 
 ## Consequences
 

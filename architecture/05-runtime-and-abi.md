@@ -415,7 +415,8 @@ failure; all other operations use checked status plus unchanged-on-failure
 outputs. Buffer reads and writes use the same one-based indexing contract as
 Pop collections. Buffer state follows collector relocation while borrowed
 addresses refer only to its separately owned ABI storage. See
-[ADR 0083](./decisions/0083-ffi-resource-state-and-native-buffer-abi.md).
+[ADR 0083](./decisions/0083-ffi-resource-state-and-native-buffer-abi.md) and
+[ADR 0084](./decisions/0084-canonical-mir-ffi-buffer-operations.md).
 
 ## Versioning
 
