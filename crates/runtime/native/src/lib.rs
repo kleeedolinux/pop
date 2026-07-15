@@ -3,6 +3,7 @@
 mod allocation;
 mod binding;
 mod failure;
+mod ffi_buffer;
 mod foreign;
 mod identity;
 mod iteration;
@@ -18,6 +19,7 @@ mod text;
 pub use allocation::*;
 pub use binding::*;
 pub use failure::*;
+pub use ffi_buffer::*;
 pub use foreign::*;
 pub use identity::*;
 pub use iteration::*;
