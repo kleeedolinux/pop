@@ -99,10 +99,11 @@ fn ffi_element_range(
     index: u64,
     supplied_size: usize,
 ) -> Result<std::ops::Range<usize>, RuntimeFailure> {
-    if index >= state.length || u64::try_from(supplied_size) != Ok(state.element_size) {
+    if index == 0 || index > state.length || u64::try_from(supplied_size) != Ok(state.element_size)
+    {
         return Err(RuntimeFailure::runtime_invariant());
     }
-    let start = index
+    let start = (index - 1)
         .checked_mul(state.element_size)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(RuntimeFailure::runtime_invariant)?;

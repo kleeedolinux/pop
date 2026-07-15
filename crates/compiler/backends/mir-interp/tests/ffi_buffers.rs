@@ -16,24 +16,29 @@ fn reference_buffers_are_zeroed_bounded_borrowed_and_deterministically_closed() 
 
     let mut element = [9_u8; 4];
     runtime
-        .ffi_buffer_read(buffer, layout(7), 0, &mut element)
+        .ffi_buffer_read(buffer, layout(7), 1, &mut element)
         .expect("zeroed read");
     assert_eq!(element, [0; 4]);
     runtime
-        .ffi_buffer_write(buffer, layout(7), 1, &[1, 2, 3, 4])
+        .ffi_buffer_write(buffer, layout(7), 2, &[1, 2, 3, 4])
         .expect("write");
     runtime
-        .ffi_buffer_read(buffer, layout(7), 1, &mut element)
+        .ffi_buffer_read(buffer, layout(7), 2, &mut element)
         .expect("read");
     assert_eq!(element, [1, 2, 3, 4]);
 
     let before = element;
     assert!(
         runtime
-            .ffi_buffer_read(buffer, layout(7), 2, &mut element)
+            .ffi_buffer_read(buffer, layout(7), 0, &mut element)
             .is_err()
     );
     assert_eq!(element, before, "failed reads are output-atomic");
+    assert!(
+        runtime
+            .ffi_buffer_read(buffer, layout(7), 3, &mut element)
+            .is_err()
+    );
     assert!(runtime.ffi_buffer_length(buffer, layout(8)).is_err());
 
     let borrow = runtime

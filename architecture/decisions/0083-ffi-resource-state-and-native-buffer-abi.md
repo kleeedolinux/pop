@@ -92,8 +92,10 @@ operation other than repeated close rejects a closed Buffer.
 
 Read and write copy exactly one canonical element through backend-owned
 temporary ABI storage. They check the complete index and byte range before
-touching either side. Layout-record marshalling uses the ADR 0082 field plan;
-the runtime only moves verified bytes and never interprets Pop object layout.
+touching either side. The source, PLRI, and native ABI index is one-based:
+exactly `1..length` is valid, including after optimization and across every
+backend. Layout-record marshalling uses the ADR 0082 field plan; the runtime
+only moves verified bytes and never interprets Pop object layout.
 
 ### Verified MIR behavior
 
@@ -142,8 +144,8 @@ must not share an expected-error path.
   typed values;
 - zero and nonzero open, checked multiplication, alignment, zeroed bytes,
   allocation failure, and invariant-status separation;
-- read/write first, last, and out-of-bounds indices for scalar, pointer,
-  handle, and layout-record elements;
+- read/write first, last, zero, and greater-than-length indices for scalar,
+  pointer, handle, and layout-record elements;
 - idempotent close, use-after-close, close-during-borrow, forged reference,
   wrong layout, wrong element size, and unchanged outputs on failure;
 - zero/nonzero borrow pointers, generation-checked end-borrow, no escape or

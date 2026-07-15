@@ -102,8 +102,10 @@ public function Ffi.Buffer.close<T>(buffer: Ffi.Buffer<T>)
 
 `open` checks `length * sizeOf(T)` and returns `AllocationError` without a
 partial allocation. Storage is aligned for `T` and zero-initialized. `read`
-and `write` are bounds-checked. A zero-length buffer supplies an absent pointer
-and length zero; a non-empty live buffer supplies a present pointer.
+and `write` use Pop's one-based indexing and accept exactly `1..length`; zero
+and values greater than `length` are out of bounds. A zero-length buffer
+supplies an absent pointer and length zero; a non-empty live buffer supplies a
+present pointer.
 
 `close` is idempotent so it is safe in `defer`. Every other operation on a
 closed buffer is an invariant panic. Closing, moving, or resizing a buffer
