@@ -7,9 +7,10 @@ use pop_runtime_native::{
     pop_rt_field_set, pop_rt_gc_safe_point_v2, pop_rt_gc_stage, pop_rt_iteration_acquire,
     pop_rt_iteration_next, pop_rt_list_add, pop_rt_list_create, pop_rt_list_get,
     pop_rt_list_get_checked, pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_range_create,
-    pop_rt_release_root, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_supports_abi, pop_rt_table_get,
-    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_unpin, request_abi_collection,
+    pop_rt_release_root, pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat,
+    pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read, pop_rt_supports_abi,
+    pop_rt_suspend, pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set,
+    pop_rt_task_cancel, pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
 use std::ffi::CString;
