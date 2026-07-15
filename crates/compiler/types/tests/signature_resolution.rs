@@ -82,6 +82,90 @@ fn foundational_and_generic_types_resolve_to_canonical_ids() {
 }
 
 #[test]
+fn ffi_types_require_an_explicit_verified_dependency() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/native.pop",
+        "namespace Native\n\
+         internal function read(pointer: Ffi.Pointer<Ffi.C.Int>): Ffi.C.Size\n\
+         end\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let parsed = function_signature(&source, &syntax);
+    let indexed = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(0),
+        &source,
+        &syntax,
+    )]);
+    let function = indexed
+        .index()
+        .declaration_by_qualified_name("Native.read", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+
+    let mut without_dependency =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let rejected = without_dependency.resolve(ModuleId::from_raw(0), function, &parsed);
+    assert!(rejected.signature().is_none());
+    assert!(rejected.diagnostic_snapshot().starts_with("POP1002@"));
+
+    let mut with_dependency =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"))
+            .with_ffi_dependency();
+    let accepted = with_dependency.resolve(ModuleId::from_raw(0), function, &parsed);
+    assert!(
+        accepted.diagnostics().is_empty(),
+        "{}",
+        accepted.diagnostic_snapshot()
+    );
+    let signature = accepted.signature().expect("FFI signature");
+    assert!(matches!(
+        signature.parameters()[0].parameter_type().kind(),
+        ResolvedTypeKind::Builtin { definition, arguments }
+            if definition.raw() == 200
+                && matches!(arguments[0].kind(), ResolvedTypeKind::Builtin { definition, .. }
+                    if definition.raw() == 215)
+    ));
+    assert!(matches!(
+        signature.results()[0].kind(),
+        ResolvedTypeKind::Builtin { definition, arguments }
+            if definition.raw() == 221 && arguments.is_empty()
+    ));
+}
+
+#[test]
+fn ffi_dependency_does_not_add_ffi_types_to_the_prelude() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/native.pop",
+        "namespace Native\ninternal function invalid(pointer: Pointer<Int>)\nend\n",
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let parsed = function_signature(&source, &syntax);
+    let indexed = build_declaration_index(&[ModuleInput::new(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(0),
+        &source,
+        &syntax,
+    )]);
+    let function = indexed
+        .index()
+        .declaration_by_qualified_name("Native.invalid", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"))
+            .with_ffi_dependency();
+    let result = resolver.resolve(ModuleId::from_raw(0), function, &parsed);
+
+    assert!(result.signature().is_none());
+    assert!(result.diagnostic_snapshot().starts_with("POP1002@"));
+}
+
+#[test]
 fn async_function_types_resolve_as_distinct_function_types() {
     let source = SourceFile::new(
         FileId::from_raw(0),

@@ -650,6 +650,7 @@ impl ResolvedSignatureResult {
 pub struct SignatureResolver<'index> {
     database: &'index ResolutionDatabase,
     schema: BootstrapSchema,
+    has_ffi_dependency: bool,
     pub(crate) arena: TypeArena,
     next_parameter: u32,
     pub(crate) next_field: u32,
@@ -712,6 +713,7 @@ impl<'index> SignatureResolver<'index> {
         Self {
             database,
             schema,
+            has_ffi_dependency: false,
             arena: TypeArena::new(),
             next_parameter: 0,
             next_field: 0,
@@ -759,6 +761,14 @@ impl<'index> SignatureResolver<'index> {
             interfaces_by_type: BTreeMap::new(),
             attribute_definitions: BTreeMap::new(),
         }
+    }
+
+    /// Enables compiler-owned `Pop.Ffi` types after the caller verifies an
+    /// explicit dependency on the reserved `Pop.Ffi` Bubble identity.
+    #[must_use]
+    pub const fn with_ffi_dependency(mut self) -> Self {
+        self.has_ffi_dependency = true;
+        self
     }
 
     #[must_use]
@@ -2029,10 +2039,16 @@ impl<'index> SignatureResolver<'index> {
         if let Some(entry) = simple
             .and_then(|name| self.schema.type_by_source_name(name))
             .copied()
+            .filter(|entry| self.bootstrap_type_is_available(*entry))
         {
             return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
         }
-        if let Some(entry) = self.schema.type_by_source_name(&path.join(".")).copied() {
+        if let Some(entry) = self
+            .schema
+            .type_by_source_name(&path.join("."))
+            .copied()
+            .filter(|entry| self.bootstrap_type_is_available(*entry))
+        {
             return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
         }
         let name = path.join(".");
@@ -2265,6 +2281,10 @@ impl<'index> SignatureResolver<'index> {
             type_id,
             syntax.span(),
         ))
+    }
+
+    fn bootstrap_type_is_available(&self, entry: crate::BootstrapTypeEntry) -> bool {
+        entry.owner_bubble() != "Pop.Ffi" || self.has_ffi_dependency
     }
 
     fn resolve_builtin(

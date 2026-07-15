@@ -46,6 +46,7 @@ pub struct FrontEndBubbleInput {
     pub(crate) bubble: BubbleId,
     pub(crate) namespace: NamespaceId,
     pub(crate) dependencies: Vec<BubbleId>,
+    pub(crate) ffi_dependency: Option<BubbleId>,
     pub(crate) modules: Vec<FrontEndModule>,
     pub(crate) implicit_main_module: Option<ModuleId>,
     pub(crate) reference_metadata: Vec<ReferenceMetadata>,
@@ -66,10 +67,27 @@ impl FrontEndBubbleInput {
             bubble,
             namespace,
             dependencies,
+            ffi_dependency: None,
             modules,
             implicit_main_module: None,
             reference_metadata: Vec::new(),
         }
+    }
+
+    /// Supplies the exact `Pop.Ffi` Bubble selected by verified Package
+    /// resolution. The Bubble must be a direct dependency of this input.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the supplied Bubble is not a direct dependency.
+    #[must_use]
+    pub fn with_ffi_dependency(mut self, bubble: BubbleId) -> Self {
+        assert!(
+            self.dependencies.contains(&bubble),
+            "Pop.Ffi must be a direct Bubble dependency"
+        );
+        self.ffi_dependency = Some(bubble);
+        self
     }
 
     /// Allows the binary-root `function main(...)` shorthand for one Module.

@@ -115,6 +115,9 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     validate_standard_native_exports(&bootstrap, pop_standard::NATIVE_EXPORTS)
         .expect("repository-validated native Standard adapters");
     let mut resolver = SignatureResolver::new(&database, bootstrap.clone());
+    if input.ffi_dependency.is_some() {
+        resolver = resolver.with_ffi_dependency();
+    }
     define_type_aliases(&parsed, &database, &mut resolver, &mut diagnostics);
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,

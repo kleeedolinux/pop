@@ -44,6 +44,7 @@ const STANDARD_BUBBLE: BubbleId = BubbleId::from_raw(2);
 const FIRST_PACKAGE_BUBBLE: u32 = 3;
 const INTERNAL_PACKAGE_NAME: &str = "Pop.Internal";
 const STANDARD_PACKAGE_NAME: &str = "Pop.Standard";
+const FFI_PACKAGE_NAME: &str = "Pop.Ffi";
 
 const USAGE: &str = "\
 Usage:
@@ -919,6 +920,10 @@ fn lower_package_recursive(
         .iter()
         .map(ResolvedPackageLibrary::artifact_dependency)
         .collect::<Vec<_>>();
+    let ffi_dependency = external_libraries
+        .iter()
+        .find(|library| library.package == FFI_PACKAGE_NAME)
+        .map(|library| library.metadata.bubble());
     let relative_paths: Vec<_> = source_paths.keys().map(String::as_str).collect();
     let bubbles = discover_conventional_bubbles(&manifest, &relative_paths)
         .map_err(|error| eprintln!("pop: {error}"))
@@ -965,6 +970,7 @@ fn lower_package_recursive(
             bubble.kind() == BubbleKind::Binary,
             dependency_metadata,
             Vec::new(),
+            ffi_dependency,
         )?;
         if bubble.kind() == BubbleKind::Library {
             let reference = encode_reference_metadata(&program.reference_metadata)
@@ -1723,6 +1729,7 @@ fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
         true,
         vec![standard.metadata],
         Vec::new(),
+        None,
     )
 }
 
@@ -1776,6 +1783,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         false,
         Vec::new(),
         vec![INTERNAL_BUBBLE],
+        None,
     )?;
     let reference = encode_reference_metadata(&program.reference_metadata)
         .map_err(|error| eprintln!("pop: Standard metadata encoding failed: {error}"))
@@ -1810,6 +1818,7 @@ fn lower_native_bubble(
     requires_entry: bool,
     dependency_metadata: Vec<ReferenceMetadata>,
     additional_dependencies: Vec<BubbleId>,
+    ffi_dependency: Option<BubbleId>,
 ) -> Option<NativeProgram> {
     let modules = modules
         .iter()
@@ -1847,6 +1856,11 @@ fn lower_native_bubble(
         modules,
     )
     .with_reference_metadata(dependency_metadata);
+    let input = if let Some(ffi_dependency) = ffi_dependency {
+        input.with_ffi_dependency(ffi_dependency)
+    } else {
+        input
+    };
     let input = if requires_entry {
         input.with_implicit_main_entry(ModuleId::from_raw(0))
     } else {

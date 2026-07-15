@@ -641,6 +641,49 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
 }
 
 #[test]
+fn package_check_enables_ffi_types_for_an_explicit_pop_ffi_dependency() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .to_path_buf();
+    let package = repository
+        .join("target")
+        .join(format!("pop-ffi-dependency-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create FFI consumer Package");
+    std::fs::write(
+        package.join("bubble.toml"),
+        "[package]\n\
+         name = \"Native.Consumer\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [dependencies]\n\
+         PopFfi = { path = \"../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }\n",
+    )
+    .expect("write FFI consumer manifest");
+    std::fs::write(
+        package.join("src/lib.pop"),
+        "namespace Native.Consumer\n\
+         public function close(pointer: Ffi.Pointer<Ffi.C.Int>)\n\
+         end\n",
+    )
+    .expect("write FFI consumer source");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop check resolves explicit Pop.Ffi dependency");
+
+    assert!(
+        check.status.success(),
+        "FFI dependency check failed: {}",
+        output_text(&check.stderr)
+    );
+    std::fs::remove_dir_all(package).expect("remove temporary FFI consumer Package");
+}
+
+#[test]
 fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
     let package =
         std::env::temp_dir().join(format!("pop-implicit-standard-{}", std::process::id()));
