@@ -46,6 +46,7 @@ pub fn verify_mir_bubble(
         })
         .collect();
     let mut errors = Vec::new();
+    let mut referenced_identities = BTreeSet::new();
     for function in &bubble.foreign_functions {
         let declaration = function.declaration();
         let valid = declaration.symbol() == function.symbol()
@@ -60,6 +61,14 @@ pub fn verify_mir_bubble(
             errors.push(MirVerificationError::InvalidForeignFunction(
                 function.symbol(),
             ));
+        }
+        if let Some(identity) = function.reference_identity() {
+            if !referenced_identities.insert(identity) {
+                errors.push(MirVerificationError::DuplicateReferencedFunction(identity));
+            }
+            if !bubble.dependencies.contains(&identity.bubble()) {
+                errors.push(MirVerificationError::UnknownReferencedFunction(identity));
+            }
         }
         if signatures
             .insert(
@@ -112,10 +121,10 @@ pub fn verify_mir_bubble(
             reference.results.clone(),
             reference.effects,
         );
-        if reference_signatures
+        let duplicate_signature = reference_signatures
             .insert(reference.identity, signature)
-            .is_some()
-        {
+            .is_some();
+        if duplicate_signature || !referenced_identities.insert(reference.identity) {
             errors.push(MirVerificationError::DuplicateReferencedFunction(
                 reference.identity,
             ));

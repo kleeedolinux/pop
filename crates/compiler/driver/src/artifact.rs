@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ResolvedNativeProvider;
 use crate::api::ReferenceMetadata;
-use crate::reference::invalid_reference_capsule;
+use crate::reference::{invalid_reference_capsule, invalid_reference_foreign_contract};
 
 const REFERENCE_SCHEMA_VERSION: u16 = 1;
 const MAX_REFERENCE_BYTES: usize = 16 * 1024 * 1024;
@@ -38,6 +38,7 @@ pub enum ReferenceMetadataDecodeError {
     UnsupportedSchema,
     TooLarge,
     InvalidCapsule(SymbolIdentity),
+    InvalidForeignDeclaration(SymbolIdentity),
 }
 
 impl fmt::Display for ReferenceMetadataDecodeError {
@@ -97,6 +98,11 @@ pub fn decode_reference_metadata(
 fn validate_metadata(metadata: &ReferenceMetadata) -> Result<(), ReferenceMetadataDecodeError> {
     if let Some(identity) = invalid_reference_capsule(std::slice::from_ref(metadata)) {
         return Err(ReferenceMetadataDecodeError::InvalidCapsule(identity));
+    }
+    if let Some(identity) = invalid_reference_foreign_contract(std::slice::from_ref(metadata)) {
+        return Err(ReferenceMetadataDecodeError::InvalidForeignDeclaration(
+            identity,
+        ));
     }
     Ok(())
 }

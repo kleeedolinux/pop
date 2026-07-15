@@ -57,6 +57,34 @@ pub(crate) fn invalid_reference_capsule(metadata: &[ReferenceMetadata]) -> Optio
         })
 }
 
+pub(crate) fn invalid_reference_foreign_contract(
+    metadata: &[ReferenceMetadata],
+) -> Option<SymbolIdentity> {
+    metadata
+        .iter()
+        .flat_map(ReferenceMetadata::functions)
+        .find_map(|function| {
+            let declaration = function.foreign_declaration()?;
+            let aliases_are_canonical = declaration
+                .link_aliases()
+                .windows(2)
+                .all(|aliases| aliases[0] < aliases[1])
+                && declaration
+                    .link_aliases()
+                    .iter()
+                    .all(|alias| !alias.is_empty() && !alias.chars().any(char::is_control));
+            (function.is_async()
+                || !function.type_parameters().is_empty()
+                || declaration.symbol() != function.identity().symbol()
+                || declaration.external_symbol().is_empty()
+                || declaration.external_symbol().chars().any(char::is_control)
+                || !aliases_are_canonical
+                || !declaration.has_valid_effects()
+                || declaration.effects() != function.effects())
+            .then_some(function.identity())
+        })
+}
+
 pub(crate) fn emit_reference_metadata(
     hir: &HirBubble,
     index: &pop_resolve::DeclarationIndex,
@@ -133,6 +161,7 @@ pub(crate) fn emit_reference_metadata(
             parameters,
             results,
             effects: function.effects(),
+            foreign_declaration: None,
             span: function
                 .parameters()
                 .first()
@@ -182,6 +211,7 @@ pub(crate) fn emit_reference_metadata(
             parameters,
             results,
             effects: function.effects(),
+            foreign_declaration: Some(function.declaration().clone()),
             span: function.declaration().span(),
             specialization_capsule: None,
         });
@@ -488,7 +518,8 @@ pub(crate) fn hir_function_references(
                     .filter_map(pop_types::ResolvedType::type_id)
                     .collect(),
                 function.effects(),
-            );
+            )
+            .with_foreign_declaration(function.foreign_declaration().cloned());
             let Some(capsule) = function.specialization_capsule() else {
                 return reference;
             };

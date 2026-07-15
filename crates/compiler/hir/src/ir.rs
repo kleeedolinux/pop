@@ -196,6 +196,7 @@ impl HirBubble {
         self.public_symbols.sort_unstable();
         self.public_symbols.dedup();
         self.foreign_functions = functions;
+        self.recompute_call_effects();
         Ok(self)
     }
 
@@ -223,7 +224,51 @@ impl HirBubble {
             previous = Some(reference.identity);
         }
         self.function_references = references;
+        self.recompute_call_effects();
         Ok(self)
+    }
+
+    fn recompute_call_effects(&mut self) {
+        let foreign_effects: std::collections::BTreeMap<_, _> = self
+            .foreign_functions
+            .iter()
+            .map(|function| (function.symbol(), function.effects()))
+            .collect();
+        let reference_effects: std::collections::BTreeMap<_, _> = self
+            .function_references
+            .iter()
+            .map(|reference| (reference.identity(), reference.effects()))
+            .collect();
+        loop {
+            let function_effects: std::collections::BTreeMap<_, _> = self
+                .functions
+                .iter()
+                .map(|function| (function.symbol(), function.effects()))
+                .chain(
+                    foreign_effects
+                        .iter()
+                        .map(|(symbol, effects)| (*symbol, *effects)),
+                )
+                .collect();
+            let mut changed = false;
+            for function in &mut self.functions {
+                let direct = hir_direct_call_instances(function)
+                    .into_iter()
+                    .filter_map(|(callee, _)| function_effects.get(&callee))
+                    .fold(function.effects, |effects, callee| effects.union(*callee));
+                let complete = hir_referenced_call_instances(function)
+                    .into_iter()
+                    .filter_map(|(callee, _)| reference_effects.get(&callee))
+                    .fold(direct, |effects, callee| effects.union(*callee));
+                if function.effects != complete {
+                    function.effects = complete;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     #[must_use]
@@ -340,6 +385,8 @@ pub struct HirFunctionReference {
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: pop_types::EffectSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) foreign_declaration: Option<pop_types::ForeignFunctionDeclaration>,
     pub(crate) specialization_capsule: Option<HirSpecializationCapsule>,
 }
 
@@ -362,8 +409,18 @@ impl HirFunctionReference {
             parameters,
             results,
             effects,
+            foreign_declaration: None,
             specialization_capsule: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_foreign_declaration(
+        mut self,
+        declaration: Option<pop_types::ForeignFunctionDeclaration>,
+    ) -> Self {
+        self.foreign_declaration = declaration;
+        self
     }
 
     #[must_use]
@@ -405,6 +462,11 @@ impl HirFunctionReference {
     #[must_use]
     pub const fn effects(&self) -> pop_types::EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn foreign_declaration(&self) -> Option<&pop_types::ForeignFunctionDeclaration> {
+        self.foreign_declaration.as_ref()
     }
 
     #[must_use]

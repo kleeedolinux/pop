@@ -147,20 +147,17 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
 
 fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunction, MirParseError> {
     let parts: Vec<_> = line.split_whitespace().collect();
-    let [
-        "foreign",
-        symbol,
-        function,
-        parameters,
-        results,
-        external_symbol,
-        abi,
-        links,
-        effects,
-    ] = parts.as_slice()
-    else {
+    if !matches!(parts.len(), 9 | 10) || parts[0] != "foreign" {
         return Err(error(number, "malformed foreign function"));
-    };
+    }
+    let symbol = parts[1];
+    let function = parts[2];
+    let parameters = parts[3];
+    let results = parts[4];
+    let external_symbol = parts[5];
+    let abi = parts[6];
+    let links = parts[7];
+    let effects = parts[8];
     let symbol = SymbolId::from_raw(parse_prefixed(symbol, 's', number)?);
     let function = FunctionId::from_raw(parse_prefixed(function, 'f', number)?);
     let external_symbol = external_symbol
@@ -199,6 +196,20 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         !effects.contains(MirEffect::Blocks),
         SourceSpan::new(FileId::from_raw(0), TextRange::empty(TextSize::from_u32(0))),
     );
+    let reference_identity = parts
+        .get(9)
+        .map(|reference| {
+            let identity = reference
+                .strip_prefix("reference(b")
+                .and_then(|identity| identity.strip_suffix(')'))
+                .and_then(|identity| identity.split_once(":s"))
+                .ok_or_else(|| error(number, "foreign reference identity"))?;
+            Ok::<_, MirParseError>(SymbolIdentity::new(
+                BubbleId::from_raw(parse_u32(identity.0, number)?),
+                SymbolId::from_raw(parse_u32(identity.1, number)?),
+            ))
+        })
+        .transpose()?;
     Ok(MirForeignFunction {
         function,
         symbol,
@@ -206,6 +217,7 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         results: parse_wrapped_types(results, "results(", number)?,
         effects,
         declaration,
+        reference_identity,
     })
 }
 

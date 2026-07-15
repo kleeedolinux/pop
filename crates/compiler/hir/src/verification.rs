@@ -665,6 +665,21 @@ impl HirSchema {
             for type_id in reference.parameters().iter().chain(reference.results()) {
                 verify_schema_type(arena, *type_id, empty_span(), errors);
             }
+            if let Some(declaration) = reference.foreign_declaration() {
+                let valid = !reference.is_async()
+                    && reference.type_parameters().is_empty()
+                    && declaration.symbol() == reference.identity().symbol()
+                    && declaration.has_valid_effects()
+                    && declaration.effects() == reference.effects()
+                    && !declaration.external_symbol().is_empty()
+                    && !declaration.external_symbol().chars().any(char::is_control);
+                if !valid {
+                    errors.push(HirVerificationError::InvalidForeignDeclaration {
+                        function: reference.identity().symbol(),
+                        span: declaration.span(),
+                    });
+                }
+            }
             schema.function_references.insert(
                 reference.identity(),
                 HirCallableSignature {

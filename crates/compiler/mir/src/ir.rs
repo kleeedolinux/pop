@@ -255,6 +255,7 @@ pub struct MirForeignFunction {
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: MirEffectSummary,
     pub(crate) declaration: pop_types::ForeignFunctionDeclaration,
+    pub(crate) reference_identity: Option<SymbolIdentity>,
 }
 
 impl MirForeignFunction {
@@ -286,6 +287,13 @@ impl MirForeignFunction {
     #[must_use]
     pub const fn declaration(&self) -> &pop_types::ForeignFunctionDeclaration {
         &self.declaration
+    }
+
+    /// Returns the producer identity when this foreign declaration originated
+    /// in direct-dependency reference metadata.
+    #[must_use]
+    pub const fn reference_identity(&self) -> Option<SymbolIdentity> {
+        self.reference_identity
     }
 }
 

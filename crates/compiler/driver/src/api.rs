@@ -232,6 +232,8 @@ pub struct ReferenceFunction {
     pub(crate) parameters: Vec<ReferenceFunctionParameter>,
     pub(crate) results: Vec<ReferenceType>,
     pub(crate) effects: pop_types::EffectSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) foreign_declaration: Option<ForeignFunctionDeclaration>,
     pub(crate) span: SourceSpan,
     pub(crate) specialization_capsule: Option<ReferenceSpecializationCapsule>,
 }
@@ -280,6 +282,11 @@ impl ReferenceFunction {
     #[must_use]
     pub const fn effects(&self) -> pop_types::EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn foreign_declaration(&self) -> Option<&ForeignFunctionDeclaration> {
+        self.foreign_declaration.as_ref()
     }
 
     #[must_use]

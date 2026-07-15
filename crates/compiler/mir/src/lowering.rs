@@ -117,9 +117,20 @@ fn lower_hir_bubble_for_target_internal(
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     let all_declarations = specialization_declarations(hir);
     let all_methods = specialization_methods(hir);
+    let reference_effects: BTreeMap<_, _> = hir
+        .function_references()
+        .iter()
+        .map(|reference| {
+            (
+                reference.identity(),
+                lower_effect_summary(reference.effects()),
+            )
+        })
+        .collect();
     let function_references: Vec<_> = hir
         .function_references()
         .iter()
+        .filter(|reference| reference.foreign_declaration().is_none())
         .map(|reference| MirFunctionReference {
             identity: reference.identity(),
             is_async: reference.is_async(),
@@ -127,10 +138,6 @@ fn lower_hir_bubble_for_target_internal(
             results: reference.results().to_vec(),
             effects: lower_effect_summary(reference.effects()),
         })
-        .collect();
-    let reference_effects: BTreeMap<_, _> = function_references
-        .iter()
-        .map(|reference| (reference.identity, reference.effects))
         .collect();
     let declarations: Vec<_> = all_declarations
         .iter()
@@ -146,7 +153,7 @@ fn lower_hir_bubble_for_target_internal(
         })
         .filter_map(lower_declaration)
         .collect();
-    let foreign_functions: Vec<_> = hir
+    let mut foreign_functions: Vec<_> = hir
         .foreign_functions()
         .iter()
         .map(|function| MirForeignFunction {
@@ -160,8 +167,72 @@ fn lower_hir_bubble_for_target_internal(
             results: function.results().to_vec(),
             effects: lower_effect_summary(function.effects()),
             declaration: function.declaration().clone(),
+            reference_identity: None,
         })
         .collect();
+    let mut next_foreign_symbol = hir
+        .functions()
+        .iter()
+        .map(|function| function.symbol().raw())
+        .chain(
+            hir.foreign_functions()
+                .iter()
+                .map(|function| function.symbol().raw()),
+        )
+        .chain(
+            hir.declarations()
+                .iter()
+                .map(|declaration| declaration.symbol().raw()),
+        )
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut next_foreign_function = hir
+        .functions()
+        .iter()
+        .map(|function| function.function().raw())
+        .chain(
+            hir.foreign_functions()
+                .iter()
+                .map(|function| function.function().raw()),
+        )
+        .chain(
+            hir.methods()
+                .iter()
+                .map(|method| method.function().function().raw()),
+        )
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut referenced_foreign_symbols = BTreeMap::new();
+    for reference in hir.function_references() {
+        let Some(source) = reference.foreign_declaration() else {
+            continue;
+        };
+        let symbol = SymbolId::from_raw(next_foreign_symbol);
+        next_foreign_symbol = next_foreign_symbol.saturating_add(1);
+        let function = FunctionId::from_raw(next_foreign_function);
+        next_foreign_function = next_foreign_function.saturating_add(1);
+        let declaration = pop_types::ForeignFunctionDeclaration::new(
+            symbol,
+            source.external_symbol(),
+            source.abi(),
+            source.link_aliases().to_vec(),
+            source.is_nonblocking(),
+            source.span(),
+        );
+        referenced_foreign_symbols.insert(reference.identity(), symbol);
+        foreign_functions.push(MirForeignFunction {
+            function,
+            symbol,
+            parameters: reference.parameters().to_vec(),
+            results: reference.results().to_vec(),
+            effects: lower_effect_summary(reference.effects()),
+            declaration,
+            reference_identity: Some(reference.identity()),
+        });
+    }
+    foreign_functions.sort_by_key(MirForeignFunction::symbol);
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
     let (ffi_layouts, provisional_ffi_layouts) =
         source_ffi_layout_catalog(hir, arena, target, fingerprint)?;
@@ -279,7 +350,7 @@ fn lower_hir_bubble_for_target_internal(
         }
         mir.ffi_layouts = MirFfiLayoutCatalog::empty(target);
     }
-    rewrite_foreign_calls(&mut mir);
+    rewrite_foreign_calls(&mut mir, &referenced_foreign_symbols);
     recompute_effects(&mut mir);
     while insert_gc_safe_points(&mut mir, arena) {
         // Backedge safe points make their containing function a GC safe point.
@@ -513,7 +584,10 @@ const fn target_ffi_integer_kind(kind: FfiCIntegerKind) -> CAbiScalarKind {
     }
 }
 
-fn rewrite_foreign_calls(bubble: &mut MirBubble) {
+fn rewrite_foreign_calls(
+    bubble: &mut MirBubble,
+    referenced_foreign_symbols: &BTreeMap<SymbolIdentity, SymbolId>,
+) {
     let foreign = bubble
         .foreign_functions
         .iter()
@@ -537,25 +611,34 @@ fn rewrite_foreign_calls(bubble: &mut MirBubble) {
         )
         .flat_map(|block| &mut block.instructions)
     {
-        let MirInstructionKind::CallDirect {
-            function,
-            arguments,
-            declared_effects,
-            unwind,
-        } = instruction.kind.clone()
-        else {
-            continue;
-        };
-        if foreign.contains(&function) {
-            instruction.kind = MirInstructionKind::CallForeign {
+        let (function, arguments, declared_effects, unwind) = match instruction.kind.clone() {
+            MirInstructionKind::CallDirect {
                 function,
                 arguments,
-                safe_point: SafePointId::new(0),
-                roots: Vec::new(),
                 declared_effects,
                 unwind,
-            };
-        }
+            } if foreign.contains(&function) => (function, arguments, declared_effects, unwind),
+            MirInstructionKind::CallReferenced {
+                function,
+                arguments,
+                declared_effects,
+                unwind,
+            } if referenced_foreign_symbols.contains_key(&function) => (
+                referenced_foreign_symbols[&function],
+                arguments,
+                declared_effects,
+                unwind,
+            ),
+            _ => continue,
+        };
+        instruction.kind = MirInstructionKind::CallForeign {
+            function,
+            arguments,
+            safe_point: SafePointId::new(0),
+            roots: Vec::new(),
+            declared_effects,
+            unwind,
+        };
     }
 }
 

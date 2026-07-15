@@ -302,7 +302,16 @@ pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFu
     }
     output.push_str(") effects[");
     dump_effects(output, function.effects());
-    output.push_str("]\n");
+    output.push(']');
+    if let Some(identity) = function.reference_identity() {
+        let _ = write!(
+            output,
+            " reference(b{}:s{})",
+            identity.bubble().raw(),
+            identity.symbol().raw()
+        );
+    }
+    output.push('\n');
 }
 
 pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFunctionReference) {
