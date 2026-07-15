@@ -1,9 +1,9 @@
 use crate::{
     ArrayAllocationRequest, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
-    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignCallMode, ForeignTransitionId,
-    GarbageCollectorContract, ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest,
-    PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure, SchedulerId,
-    TableAllocationRequest, Trap, WriteBarrier,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, ForeignCallMode,
+    ForeignTransitionId, GarbageCollectorContract, ManagedReference, ManagedThreadBindingId,
+    ObjectAllocationRequest, PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure,
+    SchedulerId, TableAllocationRequest, Trap, WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +197,55 @@ pub trait RuntimeAdapter {
     /// Returns an invariant failure for invalid storage or an active borrow.
     fn ffi_buffer_close(&mut self, buffer: ManagedReference) -> Result<(), RuntimeFailure> {
         let _ = buffer;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Reads exact ABI bytes through a verified foreign pointer.
+    ///
+    /// Adapters expose only unmanaged storage whose provenance they can prove.
+    /// The default rejects arbitrary process addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for unavailable, stale, or out-of-bounds
+    /// storage.
+    fn ffi_unsafe_read(
+        &mut self,
+        address: ForeignAddress,
+        output: &mut [u8],
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (address, output);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Writes exact ABI bytes through a verified mutable foreign pointer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure for unavailable, stale, read-only, or
+    /// out-of-bounds storage.
+    fn ffi_unsafe_write(
+        &mut self,
+        address: ForeignAddress,
+        bytes: &[u8],
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (address, bytes);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Copies exact ABI bytes with `memmove` overlap semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure unless both complete ranges have proven
+    /// live unmanaged provenance.
+    fn ffi_unsafe_copy(
+        &mut self,
+        source: ForeignAddress,
+        destination: ForeignAddress,
+        byte_count: u64,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (source, destination, byte_count);
         Err(RuntimeFailure::runtime_invariant())
     }
 

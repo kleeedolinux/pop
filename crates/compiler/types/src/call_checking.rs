@@ -17,9 +17,19 @@ use crate::body_checking::{
 use crate::typed_body::*;
 use crate::{NumericConversionKind, PrimitiveType, SemanticType, StringFormatKind};
 
+#[derive(Clone, Copy)]
 enum FfiBufferElementKind {
     Scalar,
     LayoutRecord(pop_foundation::SymbolId),
+}
+
+impl FfiBufferElementKind {
+    const fn layout_record(self) -> Option<pop_foundation::SymbolId> {
+        match self {
+            Self::Scalar => None,
+            Self::LayoutRecord(record) => Some(record),
+        }
+    }
 }
 
 enum FfiPointerOperationKind {
@@ -162,6 +172,24 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             {
                 return self
                     .check_ffi_pointer_invocation(path, arguments, None, span)
+                    .map(CheckedInvocation::Value);
+            }
+            if is_ffi_unsafe_operation(path)
+                && self.resolver.has_ffi_dependency()
+                && self
+                    .resolver
+                    .database()
+                    .resolve(
+                        self.module,
+                        &path.join("."),
+                        SymbolSpace::Value,
+                        callee.span(),
+                    )
+                    .symbol()
+                    .is_none()
+            {
+                return self
+                    .check_ffi_unsafe_invocation(path, arguments, None, span)
                     .map(CheckedInvocation::Value);
             }
             if path.as_slice() == ["String"] {
@@ -743,6 +771,186 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }) if *definition == expected && arguments.len() == 1 => Some(arguments[0]),
             _ => None,
         }
+    }
+
+    pub(crate) fn check_ffi_unsafe_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        explicit_element: Option<(TypeId, Option<pop_foundation::SymbolId>)>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let [_, _, operation] = path else {
+            return None;
+        };
+        let expected_arity = match operation.as_str() {
+            "load" | "address" | "pointerFromAddress" => 1,
+            "store" | "advance" | "advanceReadOnly" => 2,
+            "copy" => 3,
+            _ => return None,
+        };
+        if arguments.len() != expected_arity {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                path.join("."),
+                expected_arity,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let size = self.ffi_builtin_type("Ffi.C.Size", Vec::new())?;
+        let pointer_difference = self.ffi_builtin_type("Ffi.C.PointerDifference", Vec::new())?;
+        if operation == "pointerFromAddress" {
+            let (element, record) = explicit_element?;
+            let Some(layout) = self.ffi_element_layout(element, record) else {
+                self.diagnostics.push(type_diagnostics::type_mismatch(
+                    span,
+                    "FFI ABI storage type",
+                    self.type_name(element),
+                    span,
+                ));
+                return None;
+            };
+            let layout_record = layout.layout_record();
+            let address = self.check_ffi_exact_expression(&arguments[0], size, span)?;
+            let type_id = self.ffi_builtin_type("Ffi.OptionalPointer", vec![element])?;
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::FfiUnsafePointerFromAddress {
+                    address: Box::new(address),
+                    element,
+                    layout_record,
+                },
+                type_id,
+                span,
+            });
+        }
+
+        let first = self.check_expression(&arguments[0])?;
+        let expected_pointer = match operation.as_str() {
+            "store" | "advance" => crate::FFI_POINTER_TYPE_ID,
+            "load" | "advanceReadOnly" | "address" | "copy" => crate::FFI_READ_ONLY_POINTER_TYPE_ID,
+            _ => return None,
+        };
+        let Some(element) = self.ffi_exact_builtin_payload(first.type_id(), expected_pointer)
+        else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                first.span(),
+                if expected_pointer == crate::FFI_POINTER_TYPE_ID {
+                    "Ffi.Pointer<T>"
+                } else {
+                    "Ffi.ReadOnlyPointer<T>"
+                },
+                self.type_name(first.type_id()),
+                span,
+            ));
+            return None;
+        };
+        let Some(layout) = self.ffi_element_layout(element, None) else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                first.span(),
+                "FFI ABI storage type",
+                self.type_name(element),
+                span,
+            ));
+            return None;
+        };
+        let layout_record = layout.layout_record();
+        let kind = match operation.as_str() {
+            "load" => TypedExpressionKind::FfiUnsafeLoad {
+                pointer: Box::new(first),
+                element,
+                layout_record,
+            },
+            "store" => TypedExpressionKind::FfiUnsafeStore {
+                pointer: Box::new(first),
+                value: Box::new(self.check_ffi_exact_expression(&arguments[1], element, span)?),
+                element,
+                layout_record,
+            },
+            "advance" | "advanceReadOnly" => TypedExpressionKind::FfiUnsafeAdvance {
+                pointer: Box::new(first),
+                elements: Box::new(self.check_ffi_exact_expression(
+                    &arguments[1],
+                    pointer_difference,
+                    span,
+                )?),
+                element,
+                layout_record,
+                read_only: operation == "advanceReadOnly",
+            },
+            "copy" => {
+                let destination = self.check_expression(&arguments[1])?;
+                if self.ffi_exact_builtin_payload(destination.type_id(), crate::FFI_POINTER_TYPE_ID)
+                    != Some(element)
+                {
+                    self.diagnostics.push(type_diagnostics::type_mismatch(
+                        destination.span(),
+                        format!("Ffi.Pointer<{}>", self.type_name(element)),
+                        self.type_name(destination.type_id()),
+                        span,
+                    ));
+                    return None;
+                }
+                TypedExpressionKind::FfiUnsafeCopy {
+                    source: Box::new(first),
+                    destination: Box::new(destination),
+                    count: Box::new(self.check_ffi_exact_expression(&arguments[2], size, span)?),
+                    element,
+                    layout_record,
+                }
+            }
+            "address" => TypedExpressionKind::FfiUnsafeAddress {
+                pointer: Box::new(first),
+                element,
+                layout_record,
+            },
+            _ => return None,
+        };
+        let type_id = match operation.as_str() {
+            "load" => element,
+            "store" | "copy" => self.resolver.arena().source_type("nil")?,
+            "advance" => self.ffi_builtin_type("Ffi.Pointer", vec![element])?,
+            "advanceReadOnly" => self.ffi_builtin_type("Ffi.ReadOnlyPointer", vec![element])?,
+            "address" => size,
+            _ => return None,
+        };
+        Some(TypedExpression {
+            kind,
+            type_id,
+            span,
+        })
+    }
+
+    fn ffi_element_layout(
+        &self,
+        element: TypeId,
+        record: Option<pop_foundation::SymbolId>,
+    ) -> Option<FfiBufferElementKind> {
+        let record = record.or_else(|| {
+            self.resolver
+                .record_definition_for_type(element)
+                .map(|definition| definition.symbol())
+        });
+        self.ffi_buffer_element(element, record)
+    }
+
+    fn check_ffi_exact_expression(
+        &mut self,
+        expression: &ExpressionSyntax,
+        expected: TypeId,
+        call_span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let typed = self.check_expression(expression)?;
+        if typed.type_id() == expected {
+            return Some(typed);
+        }
+        self.diagnostics.push(type_diagnostics::type_mismatch(
+            typed.span(),
+            self.type_name(expected),
+            self.type_name(typed.type_id()),
+            call_span,
+        ));
+        None
     }
 
     fn ffi_buffer_element(
@@ -2544,6 +2752,15 @@ fn is_ffi_pointer_operation(path: &[String]) -> bool {
                     "fromPointer" | "isPresent" | "require"
                 ) | ("Pointer", "readOnly")
             ))
+}
+
+fn is_ffi_unsafe_operation(path: &[String]) -> bool {
+    matches!(path,
+        [ffi, unsafe_namespace, operation]
+            if ffi == "Ffi"
+                && unsafe_namespace == "Unsafe"
+                && matches!(operation.as_str(),
+                    "load" | "store" | "advance" | "advanceReadOnly" | "copy" | "address"))
 }
 
 impl BodyChecker<'_, '_> {

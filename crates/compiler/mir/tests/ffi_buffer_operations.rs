@@ -6,7 +6,10 @@ use pop_mir::{
 };
 use pop_runtime_interface::FfiAbiLayoutId;
 use pop_target::TargetSpec;
-use pop_types::{FFI_BUFFER_TYPE_ID, SemanticType, TypeArena};
+use pop_types::{
+    FFI_BUFFER_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID,
+    FFI_READ_ONLY_POINTER_TYPE_ID, SemanticType, TypeArena,
+};
 
 fn value(raw: u32) -> ValueId {
     ValueId::from_raw(raw)
@@ -229,4 +232,96 @@ fn canonical_buffer_operations_keep_layout_and_borrow_identities_explicit() {
             ..
         } if found == region
     ));
+}
+
+#[test]
+fn unsafe_memory_operations_round_trip_and_reject_type_drift() {
+    let mut types = TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let size = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(221),
+            arguments: Vec::new(),
+        })
+        .expect("Ffi.C.Size");
+    let difference = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(222),
+            arguments: Vec::new(),
+        })
+        .expect("Ffi.C.PointerDifference");
+    let pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_POINTER_TYPE_ID,
+            arguments: vec![integer],
+        })
+        .expect("pointer");
+    let read_only_pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_READ_ONLY_POINTER_TYPE_ID,
+            arguments: vec![integer],
+        })
+        .expect("read-only pointer");
+    let optional_pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_OPTIONAL_POINTER_TYPE_ID,
+            arguments: vec![integer],
+        })
+        .expect("optional pointer");
+    let catalog = MirFfiLayoutCatalog::new(
+        &native_target(),
+        vec![MirFfiLayout::new(
+            layout(7),
+            integer,
+            8,
+            8,
+            MirFfiValueClass::Integer,
+        )],
+        &types,
+        artifact_sha256_hex,
+    )
+    .expect("catalog");
+    let layout_id = catalog.entries()[0].id().raw();
+    let text = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{pointer}, t{read_only_pointer}, t{difference}, t{size}, t{integer}) -> (t{integer}) effects[UnsafeMemory,MayTrap]\n  b0(v0:t{pointer}, v1:t{read_only_pointer}, v2:t{difference}, v3:t{size}, v4:t{integer}):\n    do v5 ffiUnsafeStore v0 v4 layout#{layout_id}\n    v6:t{integer} = ffiUnsafeLoad v1 layout#{layout_id}\n    v7:t{pointer} = ffiUnsafeAdvance v0 v2 layout#{layout_id} readOnly false\n    do v8 ffiUnsafeCopy v1 v0 v3 layout#{layout_id}\n    v9:t{size} = ffiUnsafeAddress v1 layout#{layout_id}\n    v10:t{optional_pointer} = ffiUnsafePointerFromAddress v9 layout#{layout_id}\n    return (v6)\n",
+        pointer = pointer.raw(),
+        read_only_pointer = read_only_pointer.raw(),
+        difference = difference.raw(),
+        size = size.raw(),
+        integer = integer.raw(),
+        optional_pointer = optional_pointer.raw(),
+    );
+    let bubble = parse_mir_dump(&text)
+        .expect("unsafe-memory MIR")
+        .with_ffi_layouts(catalog.clone());
+    assert_eq!(verify_mir_bubble(&bubble, &types), Ok(()));
+    let dump = bubble.dump();
+    assert_eq!(
+        parse_mir_dump(&dump)
+            .expect("unsafe-memory round trip")
+            .with_ffi_layouts(catalog.clone()),
+        bubble
+    );
+
+    for invalid_text in [
+        text.replace("ffiUnsafeLoad v1", "ffiUnsafeLoad v0"),
+        text.replace("ffiUnsafeStore v0", "ffiUnsafeStore v1"),
+        text.replace("ffiUnsafeCopy v1 v0 v3", "ffiUnsafeCopy v1 v0 v2"),
+        text.replace("readOnly false", "readOnly true"),
+        text.replace(
+            "do v5 ffiUnsafeStore",
+            &format!("v5:t{} = ffiUnsafeStore", integer.raw()),
+        ),
+    ] {
+        let invalid = parse_mir_dump(&invalid_text)
+            .expect("structurally valid corrupt unsafe-memory MIR")
+            .with_ffi_layouts(catalog.clone());
+        assert!(
+            verify_mir_bubble(&invalid, &types).is_err(),
+            "invalid unsafe-memory MIR was accepted:\n{invalid_text}"
+        );
+    }
+    assert!(
+        verify_mir_bubble(&parse_mir_dump(&text).expect("missing catalog MIR"), &types).is_err()
+    );
 }

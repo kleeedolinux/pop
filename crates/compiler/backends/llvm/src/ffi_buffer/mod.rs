@@ -9,7 +9,7 @@ use crate::api::LlvmLoweringError;
 use crate::instruction_lowering::lower_mapped_allocation;
 use crate::lowering::native_runtime_symbol;
 
-mod marshalling;
+pub(crate) mod marshalling;
 
 pub(crate) fn lower(
     instruction: &MirInstruction,

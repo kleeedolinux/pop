@@ -34,6 +34,10 @@ pub(crate) fn lower_instruction(
     {
         return Ok(lowered);
     }
+    if let Some(lowered) = crate::ffi_unsafe::lower(instruction, types, ffi_layouts, field_layout)?
+    {
+        return Ok(lowered);
+    }
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
     let line = match instruction.kind() {
@@ -1019,6 +1023,14 @@ pub(crate) fn lower_instruction(
         | MirInstructionKind::FfiBufferBorrow { .. }
         | MirInstructionKind::FfiBufferEndBorrow { .. }
         | MirInstructionKind::FfiBufferClose { .. } => unreachable!("lowered above"),
+        MirInstructionKind::FfiUnsafeLoad { .. }
+        | MirInstructionKind::FfiUnsafeStore { .. }
+        | MirInstructionKind::FfiUnsafeAdvance { .. }
+        | MirInstructionKind::FfiUnsafeCopy { .. }
+        | MirInstructionKind::FfiUnsafeAddress { .. }
+        | MirInstructionKind::FfiUnsafePointerFromAddress { .. } => {
+            unreachable!("lowered above")
+        }
     };
     Ok(line)
 }

@@ -1518,6 +1518,35 @@ pub enum MirInstructionKind {
         success: ResultCaseId,
         failure: ResultCaseId,
     },
+    FfiUnsafeLoad {
+        pointer: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafeStore {
+        pointer: ValueId,
+        value: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafeAdvance {
+        pointer: ValueId,
+        elements: ValueId,
+        layout: FfiAbiLayoutId,
+        read_only: bool,
+    },
+    FfiUnsafeCopy {
+        source: ValueId,
+        destination: ValueId,
+        count: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafeAddress {
+        pointer: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafePointerFromAddress {
+        address: ValueId,
+        layout: FfiAbiLayoutId,
+    },
     Pin {
         value: ValueId,
     },
@@ -1856,6 +1885,9 @@ pub enum MirVerificationError {
         instruction: ValueId,
     },
     InvalidFfiPointerOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiUnsafeOperation {
         instruction: ValueId,
     },
     InvalidFfiBufferBorrowRegion {

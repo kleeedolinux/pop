@@ -2391,6 +2391,48 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         HirExpressionKind::FfiPointerNone { element, .. } => {
             *element = instances.type_id(*element);
         }
+        HirExpressionKind::FfiUnsafeLoad {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafeAddress {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(pointer, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            ..
+        }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(pointer, instances);
+            remap_aggregate_expression(value, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(source, instances);
+            remap_aggregate_expression(destination, instances);
+            remap_aggregate_expression(count, instances);
+            *element = instances.type_id(*element);
+        }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
             remap_aggregate_expression(buffer, instances);
             remap_aggregate_expression(index, instances);
@@ -2896,6 +2938,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::FfiPointerReadOnly { pointer: base }
         | HirExpressionKind::FfiPointerIsPresent { pointer: base }
         | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
+        | HirExpressionKind::FfiUnsafeLoad { pointer: base, .. }
+        | HirExpressionKind::FfiUnsafeAddress { pointer: base, .. }
+        | HirExpressionKind::FfiUnsafePointerFromAddress { address: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -2922,6 +2967,25 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             collect_expression_calls(buffer, calls);
             collect_expression_calls(index, calls);
             collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            collect_expression_calls(pointer, calls);
+            collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            collect_expression_calls(source, calls);
+            collect_expression_calls(destination, calls);
+            collect_expression_calls(count, calls);
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
@@ -3446,6 +3510,48 @@ fn specialize_expression(
             specialize_type(element, substitutions, arena)?;
         }
         HirExpressionKind::FfiPointerNone { element, .. } => {
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiUnsafeLoad {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafeAddress {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer,
+            element,
+            ..
+        } => {
+            specialize_expression(pointer, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            ..
+        }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            element,
+            ..
+        } => {
+            specialize_expression(pointer, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            ..
+        } => {
+            specialize_expression(source, substitutions, instances, arena)?;
+            specialize_expression(destination, substitutions, instances, arena)?;
+            specialize_expression(count, substitutions, instances, arena)?;
             specialize_type(element, substitutions, arena)?;
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
@@ -4427,6 +4533,41 @@ pub enum HirExpressionKind {
         result: BuiltinTypeId,
         success: ResultCaseId,
         failure: ResultCaseId,
+    },
+    FfiUnsafeLoad {
+        pointer: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeStore {
+        pointer: Box<HirExpression>,
+        value: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAdvance {
+        pointer: Box<HirExpression>,
+        elements: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiUnsafeCopy {
+        source: Box<HirExpression>,
+        destination: Box<HirExpression>,
+        count: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAddress {
+        pointer: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafePointerFromAddress {
+        address: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
     },
     Call {
         dispatch: HirCallDispatch,

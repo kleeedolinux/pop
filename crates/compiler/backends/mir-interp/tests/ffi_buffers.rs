@@ -3,10 +3,13 @@ use pop_driver::artifact_sha256_hex;
 use pop_foundation::{BuiltinTypeId, SymbolId};
 use pop_mir::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass, parse_mir_dump};
 use pop_runtime_interface::{
-    FfiAbiLayoutId, FfiBufferOpenFailure, FfiBufferOpenRequest, RuntimeAdapter,
+    FfiAbiLayoutId, FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, RuntimeAdapter,
 };
 use pop_target::TargetSpec;
-use pop_types::{FFI_BUFFER_TYPE_ID, IntegerKind, IntegerValue, SemanticType, TypeArena};
+use pop_types::{
+    FFI_BUFFER_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID,
+    FFI_READ_ONLY_POINTER_TYPE_ID, IntegerKind, IntegerValue, SemanticType, TypeArena,
+};
 
 fn layout(raw: u64) -> FfiAbiLayoutId {
     FfiAbiLayoutId::new(raw).expect("nonzero layout")
@@ -84,6 +87,44 @@ fn zero_length_and_allocation_failure_remain_distinct() {
     );
     assert!(FfiBufferOpenRequest::new(u64::MAX, 2, 2, layout(3)).is_err());
     assert!(FfiBufferOpenRequest::new(1, 1, 3, layout(3)).is_err());
+}
+
+#[test]
+fn reference_unsafe_memory_requires_active_borrow_and_preserves_overlap() {
+    let mut runtime = ReferenceRuntimeAdapter::default();
+    let request = FfiBufferOpenRequest::new(4, 1, 1, layout(7)).expect("valid layout");
+    let buffer = runtime.ffi_buffer_open(&request).expect("buffer");
+    let borrow = runtime
+        .ffi_buffer_borrow(buffer, layout(7))
+        .expect("borrow");
+    let base = borrow.address().expect("nonempty buffer address");
+    runtime
+        .ffi_unsafe_write(base, &[1, 2, 3, 4])
+        .expect("borrowed write");
+    runtime
+        .ffi_unsafe_copy(
+            base,
+            ForeignAddress::new(base.raw() + 1).expect("overlapping destination"),
+            3,
+        )
+        .expect("overlapping copy");
+    let mut bytes = [0; 4];
+    runtime
+        .ffi_unsafe_read(base, &mut bytes)
+        .expect("borrowed read");
+    assert_eq!(bytes, [1, 1, 2, 3]);
+    assert!(
+        runtime
+            .ffi_unsafe_read(
+                ForeignAddress::new(base.raw() + 4).expect("one-past address"),
+                &mut [0],
+            )
+            .is_err()
+    );
+    runtime
+        .ffi_buffer_end_borrow(buffer, borrow.id())
+        .expect("end borrow");
+    assert!(runtime.ffi_unsafe_read(base, &mut bytes).is_err());
 }
 
 #[test]
@@ -180,4 +221,104 @@ fn interpreter_executes_typed_buffer_storage_and_lexical_borrow_operations() {
         )
         .expect("allocation failure remains a typed Result branch");
     assert_eq!(allocation_failure, output);
+}
+
+#[test]
+fn interpreter_executes_checked_unsafe_memory_operations() {
+    let mut types = TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let size = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(221),
+            arguments: Vec::new(),
+        })
+        .expect("Ffi.C.Size");
+    let difference = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(222),
+            arguments: Vec::new(),
+        })
+        .expect("Ffi.C.PointerDifference");
+    let pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_POINTER_TYPE_ID,
+            arguments: vec![integer],
+        })
+        .expect("pointer");
+    let read_only_pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_READ_ONLY_POINTER_TYPE_ID,
+            arguments: vec![integer],
+        })
+        .expect("read-only pointer");
+    let optional_pointer = types
+        .intern(SemanticType::Builtin {
+            definition: FFI_OPTIONAL_POINTER_TYPE_ID,
+            arguments: vec![integer],
+        })
+        .expect("optional pointer");
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target");
+    let catalog = MirFfiLayoutCatalog::new(
+        &target,
+        vec![MirFfiLayout::new(
+            layout(7),
+            integer,
+            8,
+            8,
+            MirFfiValueClass::Integer,
+        )],
+        &types,
+        artifact_sha256_hex,
+    )
+    .expect("catalog");
+    let layout_id = catalog.entries()[0].id().raw();
+    let text = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0(t{pointer}, t{read_only_pointer}, t{pointer}, t{read_only_pointer}, t{difference}, t{size}, t{integer}) -> (t{integer}, t{pointer}, t{size}, t{optional_pointer}) effects[UnsafeMemory,MayTrap]\n  b0(v0:t{pointer}, v1:t{read_only_pointer}, v2:t{pointer}, v3:t{read_only_pointer}, v4:t{difference}, v5:t{size}, v6:t{integer}):\n    do v7 ffiUnsafeStore v0 v6 layout#{layout_id}\n    do v8 ffiUnsafeCopy v1 v2 v5 layout#{layout_id}\n    v9:t{integer} = ffiUnsafeLoad v3 layout#{layout_id}\n    v10:t{pointer} = ffiUnsafeAdvance v0 v4 layout#{layout_id} readOnly false\n    v11:t{size} = ffiUnsafeAddress v1 layout#{layout_id}\n    v12:t{optional_pointer} = ffiUnsafePointerFromAddress v11 layout#{layout_id}\n    return (v9, v10, v11, v12)\n",
+        pointer = pointer.raw(),
+        read_only_pointer = read_only_pointer.raw(),
+        difference = difference.raw(),
+        size = size.raw(),
+        integer = integer.raw(),
+        optional_pointer = optional_pointer.raw(),
+    );
+    let mir = parse_mir_dump(&text)
+        .expect("unsafe-memory MIR")
+        .with_ffi_layouts(catalog);
+    let mut runtime = ReferenceRuntimeAdapter::default();
+    let buffer = runtime
+        .ffi_buffer_open(&FfiBufferOpenRequest::new(3, 8, 8, layout(layout_id)).unwrap())
+        .expect("buffer");
+    let borrow = runtime
+        .ffi_buffer_borrow(buffer, layout(layout_id))
+        .expect("borrow");
+    let source = borrow.address().expect("source address");
+    let destination = ForeignAddress::new(source.raw() + 8).expect("destination address");
+    let interpreter =
+        MirInterpreter::with_runtime(&mir, &types, runtime).expect("verified unsafe-memory MIR");
+    let output = interpreter
+        .call(
+            SymbolId::from_raw(0),
+            &[
+                MirValue::FfiPointer(source),
+                MirValue::FfiPointer(source),
+                MirValue::FfiPointer(destination),
+                MirValue::FfiPointer(destination),
+                MirValue::Integer(IntegerValue::parse_decimal("1", IntegerKind::Int64).unwrap()),
+                MirValue::Integer(IntegerValue::parse_decimal("1", IntegerKind::UInt64).unwrap()),
+                MirValue::Integer(IntegerValue::parse_decimal("41", IntegerKind::Int64).unwrap()),
+            ],
+        )
+        .expect("unsafe-memory execution");
+    assert_eq!(
+        output,
+        vec![
+            MirValue::Integer(IntegerValue::parse_decimal("41", IntegerKind::Int64).unwrap()),
+            MirValue::FfiPointer(destination),
+            MirValue::Integer(
+                IntegerValue::parse_decimal(&source.raw().to_string(), IntegerKind::UInt64)
+                    .unwrap()
+            ),
+            MirValue::FfiPointer(source),
+        ]
+    );
 }

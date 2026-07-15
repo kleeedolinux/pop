@@ -593,6 +593,112 @@ fn checked_ffi_pointer_require_rejects_wrong_direction_and_arity() {
 }
 
 #[test]
+fn ffi_unsafe_memory_calls_lower_to_closed_typed_operations() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/unsafeMemory.pop",
+            "namespace Memory\n\
+             public function load(pointer: Ffi.ReadOnlyPointer<Int>): Int\n\
+                 return Ffi.Unsafe.load(pointer)\n\
+             end\n\
+             public function store(pointer: Ffi.Pointer<Int>, value: Int)\n\
+                 Ffi.Unsafe.store(pointer, value)\n\
+             end\n\
+             public function advance(pointer: Ffi.Pointer<Int>, elements: Ffi.C.PointerDifference): Ffi.Pointer<Int>\n\
+                 return Ffi.Unsafe.advance(pointer, elements)\n\
+             end\n\
+             public function advanceReadOnly(pointer: Ffi.ReadOnlyPointer<Int>, elements: Ffi.C.PointerDifference): Ffi.ReadOnlyPointer<Int>\n\
+                 return Ffi.Unsafe.advanceReadOnly(pointer, elements)\n\
+             end\n\
+             public function copy(source: Ffi.ReadOnlyPointer<Int>, destination: Ffi.Pointer<Int>, count: Ffi.C.Size)\n\
+                 Ffi.Unsafe.copy(source, destination, count)\n\
+             end\n\
+             public function address(pointer: Ffi.ReadOnlyPointer<Int>): Ffi.C.Size\n\
+                 return Ffi.Unsafe.address(pointer)\n\
+             end\n\
+             public function fromAddress(address: Ffi.C.Size): Ffi.OptionalPointer<Int>\n\
+                 return Ffi.Unsafe.pointerFromAddress<<Int>>(address)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    assert_eq!(
+        pop_mir::lower_hir_bubble(result.hir().expect("unsafe memory HIR"), result.types())
+            .expect_err("unsafe ABI layouts require canonical fingerprints"),
+        vec![pop_mir::MirVerificationError::MissingFfiLayoutFingerprint]
+    );
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("unsafe memory HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("unsafe memory MIR");
+    let dump = mir.dump();
+    for operation in [
+        "ffiUnsafeLoad",
+        "ffiUnsafeStore",
+        "ffiUnsafeAdvance",
+        "ffiUnsafeCopy",
+        "ffiUnsafeAddress",
+        "ffiUnsafePointerFromAddress",
+    ] {
+        assert!(dump.contains(operation), "missing {operation}\n{dump}");
+    }
+    assert!(dump.contains("effects[MayTrap,UnsafeMemory]"), "{dump}");
+    assert!(dump.contains("effects[UnsafeMemory]"), "{dump}");
+}
+
+#[test]
+fn ffi_unsafe_memory_calls_reject_safe_namespace_and_type_drift() {
+    let ffi = BubbleId::from_raw(20);
+    for body in [
+        "public function invalid(pointer: Ffi.Pointer<Int>)\n    Ffi.Unsafe.load(pointer)\nend\n",
+        "public function invalid(pointer: Ffi.ReadOnlyPointer<Int>, value: Int)\n    Ffi.Unsafe.store(pointer, value)\nend\n",
+        "public function invalid(pointer: Ffi.Pointer<Int>, elements: Int)\n    Ffi.Unsafe.advance(pointer, elements)\nend\n",
+        "public function invalid(source: Ffi.ReadOnlyPointer<Int>, destination: Ffi.Pointer<Byte>, count: Ffi.C.Size)\n    Ffi.Unsafe.copy(source, destination, count)\nend\n",
+        "public function invalid(address: Ffi.C.Size)\n    Ffi.Unsafe.pointerFromAddress<<Array<Int>>>(address)\nend\n",
+    ] {
+        let module = FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(
+                FileId::from_raw(0),
+                "src/invalidUnsafeMemory.pop",
+                format!("namespace Memory\n{body}"),
+            )
+            .expect("source"),
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{body}");
+        assert!(!result.diagnostics().is_empty(), "{body}");
+    }
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_pointer_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(

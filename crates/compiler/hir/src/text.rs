@@ -1220,6 +1220,87 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, pointer, arena);
             output.push(')');
         }
+        HirExpressionKind::FfiUnsafeLoad {
+            pointer,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "load",
+            *element,
+            *layout_record,
+            [pointer.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "store",
+            *element,
+            *layout_record,
+            [pointer.as_ref(), value.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            element,
+            layout_record,
+            read_only,
+        } => dump_ffi_unsafe_operation(
+            output,
+            if *read_only {
+                "advanceReadOnly"
+            } else {
+                "advance"
+            },
+            *element,
+            *layout_record,
+            [pointer.as_ref(), elements.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "copy",
+            *element,
+            *layout_record,
+            [source.as_ref(), destination.as_ref(), count.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeAddress {
+            pointer,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "address",
+            *element,
+            *layout_record,
+            [pointer.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafePointerFromAddress {
+            address,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "pointerFromAddress",
+            *element,
+            *layout_record,
+            [address.as_ref()],
+            arena,
+        ),
         HirExpressionKind::Call {
             dispatch,
             type_arguments,
@@ -1246,6 +1327,32 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));
+}
+
+fn dump_ffi_unsafe_operation<'a>(
+    output: &mut String,
+    operation: &str,
+    element: TypeId,
+    layout_record: Option<SymbolId>,
+    arguments: impl IntoIterator<Item = &'a HirExpression>,
+    arena: &TypeArena,
+) {
+    let _ = write!(
+        output,
+        "ffi.unsafe.{operation}<<{}",
+        type_text(element, arena)
+    );
+    if let Some(record) = layout_record {
+        let _ = write!(output, " layoutRecord s{}", record.raw());
+    }
+    output.push_str(">>(");
+    for (index, argument) in arguments.into_iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        dump_expression(output, argument, arena);
+    }
+    output.push(')');
 }
 
 fn dump_float_value(output: &mut String, value: FloatValue) {

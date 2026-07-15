@@ -1,3 +1,4 @@
+use pop_foundation::TypeId;
 use pop_mir::{MirBubble, MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass};
 use pop_runtime_interface::ForeignAddress;
 use pop_target::{CAbiScalarKind, CAbiSignedness, TargetSpec};
@@ -16,6 +17,24 @@ pub(crate) fn integer_u64(value: &MirValue) -> Result<u64, ExecutionError> {
         .unsigned()
         .or_else(|| value.signed().and_then(|value| u64::try_from(value).ok()))
         .ok_or(ExecutionError::TypeMismatch)
+}
+
+pub(crate) fn integer_i64(value: &MirValue) -> Result<i64, ExecutionError> {
+    let MirValue::Integer(value) = value else {
+        return Err(ExecutionError::TypeMismatch);
+    };
+    value.signed().ok_or(ExecutionError::TypeMismatch)
+}
+
+pub(crate) fn integer_from_u64(
+    value: u64,
+    type_id: TypeId,
+    catalog: &MirFfiLayoutCatalog,
+    types: &TypeArena,
+) -> Result<IntegerValue, ExecutionError> {
+    let kind = integer_kind_for_type(type_id, catalog, types)?;
+    IntegerValue::parse_decimal(&value.to_string(), kind)
+        .map_err(|_| ExecutionError::InvalidControlFlow)
 }
 
 pub(crate) fn marshal(
@@ -192,7 +211,15 @@ fn integer_kind(
     catalog: &MirFfiLayoutCatalog,
     types: &TypeArena,
 ) -> Result<IntegerKind, ExecutionError> {
-    match types.get(layout.element()) {
+    integer_kind_for_type(layout.element(), catalog, types)
+}
+
+fn integer_kind_for_type(
+    type_id: TypeId,
+    catalog: &MirFfiLayoutCatalog,
+    types: &TypeArena,
+) -> Result<IntegerKind, ExecutionError> {
+    match types.get(type_id) {
         Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Ok(*kind),
         Some(SemanticType::Builtin { definition, .. }) => {
             let target = TargetSpec::for_triple(catalog.target())

@@ -1171,6 +1171,70 @@ fn lower_expression(
             success: *success,
             failure: *failure,
         },
+        TypedExpressionKind::FfiUnsafeLoad {
+            pointer,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeLoad {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeStore {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            value: Box::new(lower_expression(value, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            element,
+            layout_record,
+            read_only,
+        } => HirExpressionKind::FfiUnsafeAdvance {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            elements: Box::new(lower_expression(elements, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+            read_only: *read_only,
+        },
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeCopy {
+            source: Box::new(lower_expression(source, interface_slots)),
+            destination: Box::new(lower_expression(destination, interface_slots)),
+            count: Box::new(lower_expression(count, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafeAddress {
+            pointer,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeAddress {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: Box::new(lower_expression(address, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1734,7 +1798,31 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
         | TypedExpressionKind::FfiPointerRequire {
             pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
         } => first_unknown_interface_expression(operand, slots),
+        TypedExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => first_unknown_interface_expression(pointer, slots)
+            .or_else(|| first_unknown_interface_expression(value, slots)),
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => first_unknown_interface_expression(source, slots)
+            .or_else(|| first_unknown_interface_expression(destination, slots))
+            .or_else(|| first_unknown_interface_expression(count, slots)),
         TypedExpressionKind::FfiBufferRead { buffer, index } => {
             first_unknown_interface_expression(buffer, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
@@ -2078,7 +2166,31 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
         | TypedExpressionKind::FfiPointerRequire {
             pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
         } => first_compile_time_only_expression(operand),
+        TypedExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => first_compile_time_only_expression(pointer)
+            .or_else(|| first_compile_time_only_expression(value)),
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => first_compile_time_only_expression(source)
+            .or_else(|| first_compile_time_only_expression(destination))
+            .or_else(|| first_compile_time_only_expression(count)),
         TypedExpressionKind::FfiBufferRead { buffer, index } => {
             first_compile_time_only_expression(buffer)
                 .or_else(|| first_compile_time_only_expression(index))

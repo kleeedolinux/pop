@@ -12,7 +12,7 @@ use crate::instruction_lowering::{
 };
 use crate::lowering::native_runtime_symbol;
 
-pub(super) fn marshal(
+pub(crate) fn marshal(
     value: &str,
     layout: &MirFfiLayout,
     catalog: &MirFfiLayoutCatalog,
@@ -73,7 +73,7 @@ pub(super) fn marshal(
     }
 }
 
-pub(super) fn unmarshal(
+pub(crate) fn unmarshal(
     result: &str,
     layout: &MirFfiLayout,
     catalog: &MirFfiLayoutCatalog,

@@ -74,6 +74,23 @@ fn is_ffi_buffer_element(arena: &TypeArena, type_id: TypeId, ffi_c_layout: bool)
     }
 }
 
+fn valid_ffi_element_metadata(
+    arena: &TypeArena,
+    schema: Option<&HirSchema>,
+    element: TypeId,
+    layout_record: Option<SymbolId>,
+) -> bool {
+    is_ffi_buffer_element(arena, element, layout_record.is_some())
+        && layout_record.is_none_or(|record| {
+            schema.is_some_and(|schema| {
+                schema
+                    .records
+                    .get(&record)
+                    .is_some_and(|record| record.type_id == element && record.ffi_c_layout)
+            })
+        })
+}
+
 fn is_managed_reference_type(arena: &TypeArena, type_id: TypeId) -> bool {
     match arena.get(type_id) {
         Some(SemanticType::Builtin { definition, .. }) => {
@@ -185,6 +202,9 @@ pub enum HirVerificationError {
         span: SourceSpan,
     },
     InvalidFfiPointerOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiUnsafeOperation {
         span: SourceSpan,
     },
     ExpressionTypeMismatch {
@@ -3049,6 +3069,148 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiUnsafeLoad {
+                pointer,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(pointer, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && expression.type_id() == *element
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeStore {
+                pointer,
+                value,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(pointer, visible);
+                self.verify_expression(value, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && value.type_id() == *element
+                    && self.arena.get(expression.type_id())
+                        == Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeAdvance {
+                pointer,
+                elements,
+                element,
+                layout_record,
+                read_only,
+            } => {
+                self.verify_expression(pointer, visible);
+                self.verify_expression(elements, visible);
+                let constructor = if *read_only {
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID
+                } else {
+                    pop_types::FFI_POINTER_TYPE_ID
+                };
+                let valid = ffi_exact_pointer_payload(self.arena, pointer.type_id(), constructor)
+                    == Some(*element)
+                    && ffi_exact_pointer_payload(self.arena, expression.type_id(), constructor)
+                        == Some(*element)
+                    && self.is_builtin_type(elements.type_id(), "Ffi.C.PointerDifference", &[])
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeCopy {
+                source,
+                destination,
+                count,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(source, visible);
+                self.verify_expression(destination, visible);
+                self.verify_expression(count, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    source.type_id(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && ffi_exact_pointer_payload(
+                        self.arena,
+                        destination.type_id(),
+                        pop_types::FFI_POINTER_TYPE_ID,
+                    ) == Some(*element)
+                    && self.is_builtin_type(count.type_id(), "Ffi.C.Size", &[])
+                    && self.arena.get(expression.type_id())
+                        == Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeAddress {
+                pointer,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(pointer, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && self.is_builtin_type(expression.type_id(), "Ffi.C.Size", &[])
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafePointerFromAddress {
+                address,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(address, visible);
+                let valid = self.is_builtin_type(address.type_id(), "Ffi.C.Size", &[])
+                    && ffi_exact_pointer_payload(
+                        self.arena,
+                        expression.type_id(),
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ) == Some(*element)
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
             HirExpressionKind::TaskGroup { cancel, body } => {
                 self.verify_expression(cancel, visible);
                 self.verify_expression(body, visible);
@@ -3164,6 +3326,15 @@ impl Verifier<'_> {
             HirExpressionKind::String(_)
             | HirExpressionKind::Boolean(_)
             | HirExpressionKind::Nil => self.verify_primitive_literal(expression),
+        }
+    }
+
+    fn verify_ffi_unsafe(&mut self, expression: &HirExpression, valid: bool) {
+        if !valid {
+            self.errors
+                .push(HirVerificationError::InvalidFfiUnsafeOperation {
+                    span: expression.span(),
+                });
         }
     }
 
@@ -5440,6 +5611,30 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::FfiPointerIsPresent { pointer }
         | HirExpressionKind::FfiPointerRequire { pointer, .. } => {
             collect_cell_captures(pointer, written)
+        }
+        HirExpressionKind::FfiUnsafeLoad { pointer, .. }
+        | HirExpressionKind::FfiUnsafeAddress { pointer, .. }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer, ..
+        } => collect_cell_captures(pointer, written),
+        HirExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            collect_cell_captures(pointer, written);
+            collect_cell_captures(value, written);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            collect_cell_captures(source, written);
+            collect_cell_captures(destination, written);
+            collect_cell_captures(count, written);
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
             collect_cell_captures(buffer, written);

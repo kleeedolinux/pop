@@ -853,6 +853,73 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
                 failure.raw()
             );
         }
+        MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeLoad v{} layout#{}",
+                pointer.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeStore v{} v{} layout#{}",
+                pointer.raw(),
+                value.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            layout,
+            read_only,
+        } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeAdvance v{} v{} layout#{} readOnly {}",
+                pointer.raw(),
+                elements.raw(),
+                layout.raw(),
+                read_only
+            );
+        }
+        MirInstructionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeCopy v{} v{} v{} layout#{}",
+                source.raw(),
+                destination.raw(),
+                count.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeAddress { pointer, layout } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeAddress v{} layout#{}",
+                pointer.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafePointerFromAddress { address, layout } => {
+            let _ = write!(
+                output,
+                "ffiUnsafePointerFromAddress v{} layout#{}",
+                address.raw(),
+                layout.raw()
+            );
+        }
         MirInstructionKind::Pin { value } => {
             let _ = write!(output, "pin v{}", value.raw());
         }

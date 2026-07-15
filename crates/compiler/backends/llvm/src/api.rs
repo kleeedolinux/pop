@@ -238,6 +238,7 @@ pub enum LlvmLoweringError {
         value: ValueId,
         location: String,
     },
+    InvalidFfiLayout(pop_runtime_interface::FfiAbiLayoutId),
     InvalidType(TypeId),
     InvalidFieldLayout(FieldId),
     InvalidEntryPoint(SymbolId),
@@ -268,6 +269,9 @@ impl fmt::Display for LlvmLoweringError {
                 "LLVM ABI 2 lowering retained stale managed value v{} at {location}",
                 value.raw()
             ),
+            Self::InvalidFfiLayout(layout) => {
+                write!(formatter, "invalid MIR FFI layout #{}", layout.raw())
+            }
             Self::InvalidType(type_id) => write!(formatter, "invalid MIR type t{}", type_id.raw()),
             Self::InvalidFieldLayout(field) => {
                 write!(formatter, "no LLVM field layout for field f{}", field.raw())

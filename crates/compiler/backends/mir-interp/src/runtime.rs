@@ -114,6 +114,24 @@ fn ffi_element_range(
     Ok(start..end)
 }
 
+fn ffi_address_range(
+    state: &ReferenceFfiBuffer,
+    address: ForeignAddress,
+    byte_count: usize,
+) -> Option<std::ops::Range<usize>> {
+    if state.closed || state.borrow.is_none() {
+        return None;
+    }
+    let base = state.address?.raw();
+    let start = address.raw().checked_sub(base).and_then(|offset| {
+        usize::try_from(offset)
+            .ok()
+            .filter(|offset| *offset <= state.storage.len())
+    })?;
+    let end = start.checked_add(byte_count)?;
+    (end <= state.storage.len()).then_some(start..end)
+}
+
 impl ReferenceRuntimeAdapter {
     #[must_use]
     pub fn events(&self) -> &[ReferenceRuntimeEvent] {
@@ -315,6 +333,55 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
             state.closed = true;
         }
         Ok(())
+    }
+
+    fn ffi_unsafe_read(
+        &mut self,
+        address: ForeignAddress,
+        output: &mut [u8],
+    ) -> Result<(), RuntimeFailure> {
+        let (state, range) = self
+            .ffi_buffers
+            .values()
+            .find_map(|state| {
+                ffi_address_range(state, address, output.len()).map(|range| (state, range))
+            })
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        output.copy_from_slice(&state.storage[range]);
+        Ok(())
+    }
+
+    fn ffi_unsafe_write(
+        &mut self,
+        address: ForeignAddress,
+        bytes: &[u8],
+    ) -> Result<(), RuntimeFailure> {
+        let (state, range) = self
+            .ffi_buffers
+            .values_mut()
+            .find_map(|state| {
+                ffi_address_range(state, address, bytes.len()).map(|range| (state, range))
+            })
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        state.storage[range].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn ffi_unsafe_copy(
+        &mut self,
+        source: ForeignAddress,
+        destination: ForeignAddress,
+        byte_count: u64,
+    ) -> Result<(), RuntimeFailure> {
+        let byte_count =
+            usize::try_from(byte_count).map_err(|_| RuntimeFailure::runtime_invariant())?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(byte_count)
+            .map_err(|_| RuntimeFailure::runtime_invariant())?;
+        bytes.resize(byte_count, 0);
+        self.ffi_unsafe_read(source, &mut bytes)?;
+        self.ffi_unsafe_write(destination, &bytes)
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {

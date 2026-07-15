@@ -388,6 +388,7 @@ pub fn lower_mir_to_llvm_ir(
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
         "declare i1 @llvm.expect.i1(i1, i1)".to_owned(),
+        "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)".to_owned(),
         "declare noalias ptr @malloc(i64) nounwind".to_owned(),
         "declare void @free(ptr) nounwind".to_owned(),
     ];

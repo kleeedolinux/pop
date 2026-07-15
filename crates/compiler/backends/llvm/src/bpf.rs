@@ -504,6 +504,12 @@ fn validate_instruction(
         | MirInstructionKind::FfiPointerReadOnly { .. }
         | MirInstructionKind::FfiPointerIsPresent { .. }
         | MirInstructionKind::FfiPointerRequire { .. }
+        | MirInstructionKind::FfiUnsafeLoad { .. }
+        | MirInstructionKind::FfiUnsafeStore { .. }
+        | MirInstructionKind::FfiUnsafeAdvance { .. }
+        | MirInstructionKind::FfiUnsafeCopy { .. }
+        | MirInstructionKind::FfiUnsafeAddress { .. }
+        | MirInstructionKind::FfiUnsafePointerFromAddress { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. }
         | MirInstructionKind::WriteBarrier { .. }

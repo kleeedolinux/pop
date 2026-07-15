@@ -537,6 +537,14 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::FfiPointerRequire { .. } => {
             UnsupportedCompileTimeConstruct::ResultlessCall
         }
+        TypedExpressionKind::FfiUnsafeLoad { .. }
+        | TypedExpressionKind::FfiUnsafeStore { .. }
+        | TypedExpressionKind::FfiUnsafeAdvance { .. }
+        | TypedExpressionKind::FfiUnsafeCopy { .. }
+        | TypedExpressionKind::FfiUnsafeAddress { .. }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress { .. } => {
+            UnsupportedCompileTimeConstruct::ResultlessCall
+        }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }

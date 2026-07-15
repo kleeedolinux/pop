@@ -4,7 +4,7 @@
 //! consumes resolved stable IDs only and delegates every runtime operation through
 //! the backend-neutral PLRI adapter.
 use crate::evaluation::*;
-use crate::ffi_buffer::{integer_u64, marshal, unmarshal};
+use crate::ffi_buffer::{integer_from_u64, integer_i64, integer_u64, marshal, unmarshal};
 use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
 use pop_foundation::{BorrowRegionId, NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
@@ -15,10 +15,11 @@ use pop_mir::{
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
     CancellationTokenId, FfiBufferBorrowId, FfiBufferOpenFailure, FfiBufferOpenRequest,
-    ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle,
-    RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, TableAllocationRequest,
-    TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle, TaskOwner,
-    TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason, WriteBarrier,
+    ForeignAddress, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle,
+    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
+    TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle,
+    TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason,
+    WriteBarrier,
 };
 use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
@@ -40,6 +41,13 @@ fn managed_type(arena: &TypeArena, type_id: TypeId) -> bool {
                 | SemanticType::ErrorUnion { .. }
         )
     )
+}
+
+fn ffi_pointer(value: &MirValue) -> Result<ForeignAddress, ExecutionError> {
+    let MirValue::FfiPointer(address) = value else {
+        return Err(ExecutionError::TypeMismatch);
+    };
+    Ok(*address)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1886,6 +1894,63 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 }
                 borrow.address().map_or(MirValue::Nil, MirValue::FfiPointer)
             }
+            MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.verify_ffi_alignment(address, entry.alignment())?;
+                let mut bytes = vec![
+                    0;
+                    usize::try_from(entry.size())
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?
+                ];
+                self.runtime
+                    .ffi_unsafe_read(address, &mut bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                unmarshal(&bytes, entry, self.mir.ffi_layouts(), self.arena, self.mir)?
+            }
+            MirInstructionKind::FfiUnsafeAdvance {
+                pointer,
+                elements,
+                layout,
+                ..
+            } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                let elements = integer_i64(&value(values, *elements)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let offset = i128::from(elements)
+                    .checked_mul(i128::from(entry.size()))
+                    .ok_or_else(|| self.integer_overflow())?;
+                let raw = i128::from(address.raw())
+                    .checked_add(offset)
+                    .and_then(|raw| u64::try_from(raw).ok())
+                    .and_then(ForeignAddress::new)
+                    .ok_or_else(|| self.integer_overflow())?;
+                self.runtime
+                    .ffi_unsafe_read(raw, &mut [])
+                    .map_err(|_| self.runtime_invariant())?;
+                MirValue::FfiPointer(raw)
+            }
+            MirInstructionKind::FfiUnsafeAddress { pointer, .. } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                MirValue::Integer(integer_from_u64(
+                    address.raw(),
+                    instruction.result_type(),
+                    self.mir.ffi_layouts(),
+                    self.arena,
+                )?)
+            }
+            MirInstructionKind::FfiUnsafePointerFromAddress { address, .. } => {
+                let raw = integer_u64(&value(values, *address)?.visible)?;
+                ForeignAddress::new(raw).map_or(MirValue::Nil, MirValue::FfiPointer)
+            }
             MirInstructionKind::IntegerConstant(_)
             | MirInstructionKind::FloatConstant(_)
             | MirInstructionKind::CheckedIntegerAdd { .. }
@@ -1943,6 +2008,8 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::FfiBufferWrite { .. }
             | MirInstructionKind::FfiBufferEndBorrow { .. }
             | MirInstructionKind::FfiBufferClose { .. }
+            | MirInstructionKind::FfiUnsafeStore { .. }
+            | MirInstructionKind::FfiUnsafeCopy { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. } => {
@@ -1957,6 +2024,25 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             self.runtime
                 .raise_trap(Trap::new(TrapKind::ImpossibleState)),
         )
+    }
+
+    fn integer_overflow(&mut self) -> ExecutionError {
+        ExecutionError::Runtime(
+            self.runtime
+                .raise_trap(Trap::new(TrapKind::IntegerOverflow)),
+        )
+    }
+
+    fn verify_ffi_alignment(
+        &mut self,
+        address: ForeignAddress,
+        alignment: u64,
+    ) -> Result<(), ExecutionError> {
+        if alignment != 0 && address.raw().is_multiple_of(alignment) {
+            Ok(())
+        } else {
+            Err(self.runtime_invariant())
+        }
     }
 
     fn evaluate_effect_instruction(
@@ -2169,6 +2255,52 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .ok_or(ExecutionError::TypeMismatch)?;
                 self.runtime
                     .ffi_buffer_close(reference)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiUnsafeStore {
+                pointer,
+                value: stored,
+                layout,
+            } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.verify_ffi_alignment(address, entry.alignment())?;
+                let bytes = marshal(
+                    &value(values, *stored)?.visible,
+                    entry,
+                    self.mir.ffi_layouts(),
+                )?;
+                self.runtime
+                    .ffi_unsafe_write(address, &bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiUnsafeCopy {
+                source,
+                destination,
+                count,
+                layout,
+            } => {
+                let source = ffi_pointer(&value(values, *source)?.visible)?;
+                let destination = ffi_pointer(&value(values, *destination)?.visible)?;
+                let count = integer_u64(&value(values, *count)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.verify_ffi_alignment(source, entry.alignment())?;
+                self.verify_ffi_alignment(destination, entry.alignment())?;
+                let byte_count = count
+                    .checked_mul(entry.size())
+                    .ok_or_else(|| self.integer_overflow())?;
+                self.runtime
+                    .ffi_unsafe_copy(source, destination, byte_count)
                     .map_err(|_| self.runtime_invariant())?;
                 return Ok(());
             }

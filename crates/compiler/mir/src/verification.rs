@@ -2003,6 +2003,8 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiBufferWrite { .. }
             | MirInstructionKind::FfiBufferEndBorrow { .. }
             | MirInstructionKind::FfiBufferClose { .. }
+            | MirInstructionKind::FfiUnsafeStore { .. }
+            | MirInstructionKind::FfiUnsafeCopy { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. }
@@ -2037,6 +2039,19 @@ fn verify_instruction_types(
     );
     if requires_pointer_value && !instruction.has_result() {
         errors.push(MirVerificationError::InvalidFfiPointerOperation {
+            instruction: instruction.result(),
+        });
+        return;
+    }
+    let requires_unsafe_value = matches!(
+        instruction.kind(),
+        MirInstructionKind::FfiUnsafeLoad { .. }
+            | MirInstructionKind::FfiUnsafeAdvance { .. }
+            | MirInstructionKind::FfiUnsafeAddress { .. }
+            | MirInstructionKind::FfiUnsafePointerFromAddress { .. }
+    );
+    if requires_unsafe_value && !instruction.has_result() {
+        errors.push(MirVerificationError::InvalidFfiUnsafeOperation {
             instruction: instruction.result(),
         });
         return;
@@ -2291,6 +2306,104 @@ fn verify_instruction_types(
                 valid_result && success.raw() == 0 && failure.raw() == 1,
                 errors,
             );
+        }
+        MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(
+                        arena,
+                        pointer_type,
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(element)
+                }) && instruction.result_type() == element
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            layout,
+        } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(arena, pointer_type, pop_types::FFI_POINTER_TYPE_ID)
+                        == Some(element)
+                }) && values.get(value) == Some(&element)
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            layout,
+            read_only,
+        } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let constructor = if *read_only {
+                pop_types::FFI_READ_ONLY_POINTER_TYPE_ID
+            } else {
+                pop_types::FFI_POINTER_TYPE_ID
+            };
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(arena, pointer_type, constructor) == Some(element)
+                }) && ffi_pointer_payload(arena, instruction.result_type(), constructor)
+                    == Some(element)
+                    && value_has_type(values, *elements, ffi_pointer_difference_type(arena))
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            layout,
+        } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(source).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(
+                        arena,
+                        pointer_type,
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(element)
+                }) && values
+                    .get(destination)
+                    .copied()
+                    .is_some_and(|pointer_type| {
+                        ffi_pointer_payload(arena, pointer_type, pop_types::FFI_POINTER_TYPE_ID)
+                            == Some(element)
+                    })
+                    && value_has_type(values, *count, ffi_size_type(arena))
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeAddress { pointer, layout } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(
+                        arena,
+                        pointer_type,
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(element)
+                }) && Some(instruction.result_type()) == ffi_size_type(arena)
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafePointerFromAddress { address, layout } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                value_has_type(values, *address, ffi_size_type(arena))
+                    && ffi_pointer_payload(
+                        arena,
+                        instruction.result_type(),
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ) == Some(element)
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
         }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
@@ -2902,6 +3015,25 @@ fn ffi_size_type(arena: &TypeArena) -> Option<TypeId> {
         definition: BuiltinTypeId::from_raw(221),
         arguments: Vec::new(),
     })
+}
+
+fn ffi_pointer_difference_type(arena: &TypeArena) -> Option<TypeId> {
+    arena.find(&SemanticType::Builtin {
+        definition: BuiltinTypeId::from_raw(222),
+        arguments: Vec::new(),
+    })
+}
+
+fn verify_ffi_unsafe_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiUnsafeOperation {
+            instruction: instruction.result(),
+        });
+    }
 }
 
 fn is_exact_ffi_builtin(
@@ -4732,6 +4864,16 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             .chain(arguments.iter().copied())
             .collect(),
         MirInstructionKind::CheckedIntegerAdd { left, right, .. }
+        | MirInstructionKind::FfiUnsafeStore {
+            pointer: left,
+            value: right,
+            ..
+        }
+        | MirInstructionKind::FfiUnsafeAdvance {
+            pointer: left,
+            elements: right,
+            ..
+        }
         | MirInstructionKind::CheckedIntegerSubtract { left, right, .. }
         | MirInstructionKind::CheckedIntegerMultiply { left, right, .. }
         | MirInstructionKind::CheckedIntegerDivide { left, right, .. }
@@ -4753,6 +4895,12 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareFloatGreater { left, right, .. }
         | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. }
         | MirInstructionKind::StringConcat { left, right } => vec![*left, *right],
+        MirInstructionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => vec![*source, *destination, *count],
         MirInstructionKind::BooleanNot { operand }
         | MirInstructionKind::OptionalIsPresent { optional: operand }
         | MirInstructionKind::OptionalGet { optional: operand }
@@ -4761,6 +4909,15 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::FfiPointerIsPresent { pointer: operand }
         | MirInstructionKind::FfiPointerRequire {
             pointer: operand, ..
+        }
+        | MirInstructionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | MirInstructionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | MirInstructionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
         }
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. }

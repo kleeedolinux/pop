@@ -4,6 +4,7 @@
 //! roots, barriers, and safe points explicit. It consumes typed HIR and does
 //! not perform source lookup or introduce backend-specific instructions.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
@@ -162,7 +163,8 @@ fn lower_hir_bubble_for_target_internal(
         })
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
-    let ffi_layouts = source_ffi_layout_catalog(hir, arena, target, fingerprint)?;
+    let (ffi_layouts, provisional_ffi_layouts) =
+        source_ffi_layout_catalog(hir, arena, target, fingerprint)?;
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let empty_function_effects = BTreeMap::new();
     let empty_method_effects = BTreeMap::new();
@@ -271,6 +273,12 @@ fn lower_hir_bubble_for_target_internal(
         function_references,
         ffi_layouts,
     };
+    if provisional_ffi_layouts {
+        if mir_uses_ffi_unsafe_memory(&mir) {
+            return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
+        }
+        mir.ffi_layouts = MirFfiLayoutCatalog::empty(target);
+    }
     rewrite_foreign_calls(&mut mir);
     recompute_effects(&mut mir);
     while insert_gc_safe_points(&mut mir, arena) {
@@ -290,25 +298,41 @@ fn source_ffi_layout_catalog(
     arena: &TypeArena,
     target: &TargetSpec,
     fingerprint: OptionalFfiLayoutFingerprint<'_>,
-) -> Result<MirFfiLayoutCatalog, Vec<MirVerificationError>> {
-    let elements = (0..arena.len())
-        .filter_map(|raw| arena.get(TypeId::from_raw(u32::try_from(raw).ok()?)))
-        .filter_map(|semantic| match semantic {
+) -> Result<(MirFfiLayoutCatalog, bool), Vec<MirVerificationError>> {
+    let mut buffer_elements = BTreeSet::new();
+    let mut pointer_elements = BTreeSet::new();
+    for semantic in
+        (0..arena.len()).filter_map(|raw| arena.get(TypeId::from_raw(u32::try_from(raw).ok()?)))
+    {
+        match semantic {
             SemanticType::Builtin {
                 definition,
                 arguments,
             } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
-                Some(arguments[0])
+                buffer_elements.insert(arguments[0]);
             }
-            _ => None,
-        })
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if pop_types::is_ffi_pointer_type_constructor(*definition)
+                && arguments.len() == 1 =>
+            {
+                pointer_elements.insert(arguments[0]);
+            }
+            _ => {}
+        }
+    }
+    if !buffer_elements.is_empty() && fingerprint.is_none() {
+        return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
+    }
+    let provisional = fingerprint.is_none() && !pointer_elements.is_empty();
+    let elements = buffer_elements
+        .into_iter()
+        .chain(pointer_elements)
         .collect::<BTreeSet<_>>();
     if elements.is_empty() {
-        return Ok(MirFfiLayoutCatalog::empty(target));
+        return Ok((MirFfiLayoutCatalog::empty(target), false));
     }
-    let Some(fingerprint) = fingerprint else {
-        return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
-    };
     let trusted_records = hir
         .declarations()
         .iter()
@@ -334,8 +358,41 @@ fn source_ffi_layout_catalog(
         )
         .ok_or_else(|| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
     }
-    MirFfiLayoutCatalog::new(target, entries, arena, fingerprint)
-        .map_err(|_| vec![MirVerificationError::InvalidFfiLayoutCatalog])
+    let catalog = if let Some(fingerprint) = fingerprint {
+        MirFfiLayoutCatalog::new(target, entries, arena, fingerprint)
+    } else {
+        let next = Cell::new(1_u64);
+        MirFfiLayoutCatalog::new(target, entries, arena, |_| {
+            let identity = next.get();
+            next.set(identity.saturating_add(1));
+            format!("{identity:016x}{:048x}", 0)
+        })
+    }
+    .map_err(|_| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+    Ok((catalog, provisional))
+}
+
+fn mir_uses_ffi_unsafe_memory(mir: &MirBubble) -> bool {
+    let functions = mir
+        .functions
+        .iter()
+        .map(MirFunction::blocks)
+        .chain(mir.methods.iter().map(|method| method.function.blocks()))
+        .chain(mir.nested_functions.iter().map(MirNestedFunction::blocks));
+    functions
+        .flatten()
+        .flat_map(MirBlock::instructions)
+        .any(|instruction| {
+            matches!(
+                instruction.kind(),
+                MirInstructionKind::FfiUnsafeLoad { .. }
+                    | MirInstructionKind::FfiUnsafeStore { .. }
+                    | MirInstructionKind::FfiUnsafeAdvance { .. }
+                    | MirInstructionKind::FfiUnsafeCopy { .. }
+                    | MirInstructionKind::FfiUnsafeAddress { .. }
+                    | MirInstructionKind::FfiUnsafePointerFromAddress { .. }
+            )
+        })
 }
 
 fn ensure_source_ffi_layout(
@@ -1570,6 +1627,30 @@ fn visit_expression_closures(
         | HirExpressionKind::FfiPointerIsPresent { pointer: value }
         | HirExpressionKind::FfiPointerRequire { pointer: value, .. } => {
             visit_expression_closures(value, parameters, locals);
+        }
+        HirExpressionKind::FfiUnsafeLoad { pointer, .. }
+        | HirExpressionKind::FfiUnsafeAddress { pointer, .. }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer, ..
+        } => visit_expression_closures(pointer, parameters, locals),
+        HirExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            visit_expression_closures(pointer, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            visit_expression_closures(source, parameters, locals);
+            visit_expression_closures(destination, parameters, locals);
+            visit_expression_closures(count, parameters, locals);
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
             visit_expression_closures(buffer, parameters, locals);
@@ -3625,6 +3706,89 @@ impl<'hir> FunctionBuilder<'hir> {
                 success: *success,
                 failure: *failure,
             },
+            HirExpressionKind::FfiUnsafeLoad {
+                pointer, element, ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafeLoad {
+                    pointer: self.lower_expression(pointer),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiUnsafeStore {
+                pointer,
+                value,
+                element,
+                ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                let pointer = self.lower_expression(pointer);
+                let value = self.lower_expression(value);
+                self.emit_effect(
+                    MirInstructionKind::FfiUnsafeStore {
+                        pointer,
+                        value,
+                        layout,
+                    },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiUnsafeAdvance {
+                pointer,
+                elements,
+                element,
+                read_only,
+                ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafeAdvance {
+                    pointer: self.lower_expression(pointer),
+                    elements: self.lower_expression(elements),
+                    layout,
+                    read_only: *read_only,
+                }
+            }
+            HirExpressionKind::FfiUnsafeCopy {
+                source,
+                destination,
+                count,
+                element,
+                ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                let source = self.lower_expression(source);
+                let destination = self.lower_expression(destination);
+                let count = self.lower_expression(count);
+                self.emit_effect(
+                    MirInstructionKind::FfiUnsafeCopy {
+                        source,
+                        destination,
+                        count,
+                        layout,
+                    },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiUnsafeAddress {
+                pointer, element, ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafeAddress {
+                    pointer: self.lower_expression(pointer),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiUnsafePointerFromAddress {
+                address, element, ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafePointerFromAddress {
+                    address: self.lower_expression(address),
+                    layout,
+                }
+            }
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
@@ -5213,6 +5377,16 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::FfiBufferBorrow { .. }
         | MirInstructionKind::FfiBufferEndBorrow { .. } => {
             MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::FfiUnsafeLoad { .. }
+        | MirInstructionKind::FfiUnsafeStore { .. }
+        | MirInstructionKind::FfiUnsafeAdvance { .. }
+        | MirInstructionKind::FfiUnsafeCopy { .. } => {
+            MirEffectSummary::from_effects([MirEffect::UnsafeMemory, MirEffect::MayTrap])
+        }
+        MirInstructionKind::FfiUnsafeAddress { .. }
+        | MirInstructionKind::FfiUnsafePointerFromAddress { .. } => {
+            MirEffectSummary::empty().with(MirEffect::UnsafeMemory)
         }
         MirInstructionKind::WriteBarrier { .. } => {
             MirEffectSummary::empty().with(MirEffect::WritesManagedReference)

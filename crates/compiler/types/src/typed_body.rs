@@ -599,6 +599,41 @@ pub enum TypedExpressionKind {
         success: ResultCaseId,
         failure: ResultCaseId,
     },
+    FfiUnsafeLoad {
+        pointer: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeStore {
+        pointer: Box<TypedExpression>,
+        value: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAdvance {
+        pointer: Box<TypedExpression>,
+        elements: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiUnsafeCopy {
+        source: Box<TypedExpression>,
+        destination: Box<TypedExpression>,
+        count: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAddress {
+        pointer: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafePointerFromAddress {
+        address: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
     OptionalNarrow {
         optional: Box<TypedExpression>,
     },

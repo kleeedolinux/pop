@@ -901,6 +901,8 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::FfiBufferWrite { .. }
                 | MirInstructionKind::FfiBufferEndBorrow { .. }
                 | MirInstructionKind::FfiBufferClose { .. }
+                | MirInstructionKind::FfiUnsafeStore { .. }
+                | MirInstructionKind::FfiUnsafeCopy { .. }
                 | MirInstructionKind::Pin { .. }
                 | MirInstructionKind::Unpin { .. }
                 | MirInstructionKind::WriteBarrier { .. }
@@ -1524,6 +1526,73 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             result: parse_builtin_type_id(result, line)?,
             success: ResultCaseId::from_raw(parse_hash(success, "resultCase#", line)?),
             failure: ResultCaseId::from_raw(parse_hash(failure, "resultCase#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiUnsafeLoad ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [pointer, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI unsafe load"));
+        };
+        return Ok(MirInstructionKind::FfiUnsafeLoad {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiUnsafeStore ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [pointer, value, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI unsafe store"));
+        };
+        return Ok(MirInstructionKind::FfiUnsafeStore {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiUnsafeAdvance ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [pointer, elements, layout, "readOnly", read_only] = parts.as_slice() else {
+            return Err(error(line, "FFI unsafe advance"));
+        };
+        return Ok(MirInstructionKind::FfiUnsafeAdvance {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+            elements: ValueId::from_raw(parse_prefixed(elements, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+            read_only: read_only
+                .parse()
+                .map_err(|_| error(line, "FFI unsafe advance mutability"))?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiUnsafeCopy ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [source, destination, count, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI unsafe copy"));
+        };
+        return Ok(MirInstructionKind::FfiUnsafeCopy {
+            source: ValueId::from_raw(parse_prefixed(source, 'v', line)?),
+            destination: ValueId::from_raw(parse_prefixed(destination, 'v', line)?),
+            count: ValueId::from_raw(parse_prefixed(count, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiUnsafeAddress ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [pointer, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI unsafe address"));
+        };
+        return Ok(MirInstructionKind::FfiUnsafeAddress {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiUnsafePointerFromAddress ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [address, layout] = parts.as_slice() else {
+            return Err(error(line, "FFI unsafe pointer from address"));
+        };
+        return Ok(MirInstructionKind::FfiUnsafePointerFromAddress {
+            address: ValueId::from_raw(parse_prefixed(address, 'v', line)?),
+            layout: parse_ffi_layout(layout, line)?,
         });
     }
     if let Some(value) = text.strip_prefix("pin ") {
