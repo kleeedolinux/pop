@@ -48,6 +48,7 @@ POP4004	Error	CompileTime	-	compileTime.functionNotEligible	-	Identifier	false	d
 POP4005	Error	CompileTime	-	compileTime.forbiddenEffect	-	Identifier,Identifier	false	diagnostics/POP4005	compile-time	-	1	-
 POP4006	Error	CompileTime	-	compileTime.cycle	-	Identifier	false	diagnostics/POP4006	compile-time	-	1	-
 POP4007	Error	CompileTime	-	compileTime.resourceLimit	-	Identifier,Unsigned	false	diagnostics/POP4007	compile-time	-	1	-
+POP5000	Error	RuntimeSafety	-	ffi.invalidForeignContract	-	Identifier	false	diagnostics/POP5000	ffi	-	1	-
 POP6400	Warning	Style	1	documentation.unsafeXml	-	-	true	diagnostics/POP6400	documentation	-	1	-
 POP6401	Warning	Style	1	documentation.malformedXml	-	-	true	diagnostics/POP6401	documentation	-	1	-
 POP6402	Warning	Style	1	documentation.invalidErrorTag	-	Identifier	true	diagnostics/POP6402	documentation	-	1	-

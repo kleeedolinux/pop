@@ -5,10 +5,11 @@
 //! modules so downstream phases can depend on a stable typed contract.
 
 use pop_foundation::{
-    AttributeId, BindingId, BuiltinTypeId, CaptureId, ClassId, Diagnostic, EnumCaseId, ErrorCaseId,
-    ErrorId, FieldId, InterfaceId, InterfaceMethodId, IterationProtocolMethodId, LocalId, MethodId,
-    ModuleId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId,
-    SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, BorrowRegionId, BuiltinTypeId, CaptureId, ClassId, Diagnostic,
+    EnumCaseId, ErrorCaseId, ErrorId, FieldId, InterfaceId, InterfaceMethodId,
+    IterationProtocolMethodId, LocalId, MethodId, ModuleId, NestedFunctionId, NominalInterfaceId,
+    ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId,
+    ValueParameterId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -549,6 +550,104 @@ pub enum TypedExpressionKind {
     TaskStart {
         group: Box<TypedExpression>,
         task: Box<TypedExpression>,
+    },
+    FfiHandleOpen {
+        value: Box<TypedExpression>,
+    },
+    FfiHandleGet {
+        handle: Box<TypedExpression>,
+    },
+    FfiHandleClose {
+        handle: Box<TypedExpression>,
+    },
+    FfiBufferOpen {
+        length: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiBufferLength {
+        buffer: Box<TypedExpression>,
+    },
+    FfiBufferRead {
+        buffer: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+    },
+    FfiBufferWrite {
+        buffer: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+        value: Box<TypedExpression>,
+    },
+    FfiBufferClose {
+        buffer: Box<TypedExpression>,
+    },
+    FfiBufferWithPointer {
+        buffer: Box<TypedExpression>,
+        body: TypedClosure,
+        body_type: TypeId,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        region: BorrowRegionId,
+    },
+    FfiBytesWithPin {
+        bytes: Box<TypedExpression>,
+        body: TypedClosure,
+        body_type: TypeId,
+        region: BorrowRegionId,
+    },
+    FfiPointerNone {
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiPointerToOptional {
+        pointer: Box<TypedExpression>,
+    },
+    FfiPointerReadOnly {
+        pointer: Box<TypedExpression>,
+    },
+    FfiPointerIsPresent {
+        pointer: Box<TypedExpression>,
+    },
+    FfiPointerRequire {
+        pointer: Box<TypedExpression>,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    FfiUnsafeLoad {
+        pointer: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeStore {
+        pointer: Box<TypedExpression>,
+        value: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAdvance {
+        pointer: Box<TypedExpression>,
+        elements: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiUnsafeCopy {
+        source: Box<TypedExpression>,
+        destination: Box<TypedExpression>,
+        count: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAddress {
+        pointer: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafePointerFromAddress {
+        address: Box<TypedExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
     },
     OptionalNarrow {
         optional: Box<TypedExpression>,

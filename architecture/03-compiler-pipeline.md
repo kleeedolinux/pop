@@ -106,13 +106,17 @@ Representative HIR passes include:
 - materializing implicit numeric and subtype conversions;
 - resolving class construction and method dispatch;
 - closure capture analysis;
+- allocation-site identity plus closed argument/result retention summaries for
+  proof-directed static reclamation;
 - retaining typed result propagation and registered lexical cleanup until MIR
   can emit dominated payload extraction and explicit last-in, first-out exit
   chains;
 - async/coroutine transformation planning;
 - exhaustiveness validation;
 - monomorphization planning or generic dictionary selection;
-- validating UDA targets and normalizing metadata-retention requests.
+- validating UDA targets and normalizing metadata-retention requests;
+- validating ADR 0081 foreign declarations against exact trusted attributes,
+  ABI types/layouts, namespace link aliases, and closed effects.
 
 ## MIR lowering
 
@@ -129,6 +133,12 @@ runtime MIR. If explicitly retained metadata is requested, the compiler emits a
 narrow serializable projection and generated typed adapters—not its internal
 reflection objects.
 
+Statically bound foreign declarations are the exception to ordinary UDA
+erasure: their trusted ADR 0081 consequence becomes a typed foreign identity
+and exact ABI/effect contract in HIR/MIR. The original attribute value does not
+become runtime reflection. Calls lower to explicit foreign transitions with
+root publication, safe-point, cleanup, and unwind facts.
+
 MIR should use SSA form or block arguments. If mutable locals are convenient
 during construction, a mandatory canonicalization pass converts them before
 optimization and backend handoff.
@@ -141,10 +151,19 @@ Portable optimizations run on MIR:
 - dead-code and dead-block elimination;
 - devirtualization using valid closed-world facts;
 - escape analysis and allocation elision;
+- path-sensitive lifetime-frontier analysis, activation-owned storage, and
+  compiler-inferred scoped-region planning under ADR 0085;
 - bounds-check elimination;
 - inlining under a backend-neutral cost model;
 - specialization of generics and interface calls;
 - scalar replacement of aggregates.
+
+Construction MIR first verifies ordinary managed-capable allocation semantics.
+The storage-planning pass then derives `Elided`, `StaticSlot`, `ScopedRegion`,
+or managed plans from complete alias, call-retention, cleanup, unwind,
+cancellation, and suspension facts. Optimized MIR retains a closed proof and is
+verified again. Missing facts or deterministic analysis-budget exhaustion keep
+the allocation managed; a backend never repeats the analysis with weaker rules.
 
 Target-specific instruction selection and machine cost tuning belong below the
 backend interface. LLVM may repeat some optimizations; MIR optimizations still
@@ -157,6 +176,7 @@ A backend receives:
 - a verified canonical `MirBubble`;
 - target capabilities and data-layout facts through an abstract target query;
 - runtime ABI version and feature set;
+- the canonical target-specific native link plan and ABI fingerprints;
 - build mode and debug/optimization settings.
 
 It returns an artifact plus structured diagnostics. It cannot mutate compiler

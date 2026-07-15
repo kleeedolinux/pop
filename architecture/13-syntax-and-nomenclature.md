@@ -203,6 +203,23 @@ end
 `namespace` and `using` are header declarations and do not need a matching
 `end`. Records and functions use normal Luau block structure.
 
+Namespace documentation and namespace-targeted attributes may precede the
+header. ADR 0081 uses this existing UDA position for native link aliases while
+keeping foreign declarations as ordinary bodyless functions:
+
+```luau
+@Ffi.Link("Pcre")
+namespace Example.Pcre.Unsafe
+
+@Ffi.Foreign("pcre2_config_8")
+internal function configure(what: Int32, output: Ffi.Pointer<Byte>): Int32
+end
+```
+
+There is no `lib` block, `extern` declaration dialect, or runtime library
+object. The exact trusted attribute supplies the foreign meaning without making
+ordinary empty function bodies foreign accidentally.
+
 The `with` expression creates an updated record while preserving field names and
 types. It is the preferred shape for simple data transformation; a class is not
 needed merely to attach one operation to a value.
@@ -284,6 +301,9 @@ declaration          := functionDeclaration | recordDeclaration
                       | classDeclaration | interfaceDeclaration
                       | attributeDeclaration | constDeclaration
 ```
+
+An exact trusted FFI attribute may require its attached function declaration to
+be bodyless, but it does not add another declaration grammar production.
 
 Documentation and attributes precede that prefix. Visibility is stored on the
 declared symbol; it is not a separate list maintained elsewhere.

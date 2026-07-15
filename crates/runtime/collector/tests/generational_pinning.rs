@@ -90,3 +90,31 @@ fn failed_pin_transitions_do_not_change_pinning_telemetry() {
     );
     assert_eq!(runtime.pinning_telemetry(), before);
 }
+
+#[test]
+#[allow(unsafe_code)]
+fn immutable_byte_payload_address_survives_forced_nursery_collection() {
+    let mut runtime = GenerationalRuntime::new();
+    let bytes = runtime
+        .allocate_immutable_bytes(&[4, 3, 2, 1])
+        .expect("nursery immutable bytes");
+    let borrow = runtime.ffi_bytes_borrow(bytes).expect("payload borrow");
+    let address = borrow.address().expect("nonempty payload");
+    assert_eq!(
+        runtime.placement(bytes).expect("pinned placement").domain(),
+        HeapDomain::Pinned
+    );
+
+    runtime.request_minor_collection();
+    runtime
+        .safe_point(&mut no_stack_roots(2))
+        .expect("forced nursery collection");
+    // SAFETY: The exact byte borrow pins the owner and its immutable payload.
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(address.raw() as *const u8, 4) },
+        [4, 3, 2, 1]
+    );
+    runtime
+        .ffi_bytes_end_borrow(bytes, borrow.id())
+        .expect("end payload borrow");
+}

@@ -8,11 +8,14 @@
 
 use pop_foundation::{BlockId, BubbleId, FieldId, SymbolId, TypeId, ValueId};
 use pop_mir::{
-    MirBubble, MirEffect, MirEffectSummary, MirInstructionKind, MirTerminator, verify_mir_bubble,
+    MirBubble, MirEffect, MirEffectSummary, MirForeignFunction, MirInstructionKind, MirTerminator,
+    verify_mir_bubble,
 };
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
-use pop_target::TargetSpec;
-use pop_types::{IntegerKind, PrimitiveType, SemanticType, TypeArena};
+use pop_target::{CAbiScalarKind, CAbiSignedness, TargetCapability, TargetSpec};
+use pop_types::{
+    ForeignAbi, IntegerKind, PrimitiveType, SemanticType, TypeArena, embedded_bootstrap_schema,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -21,6 +24,13 @@ use crate::async_lowering::{lower_async_function, lower_async_nested};
 use crate::instruction_lowering::{
     llvm_results, llvm_type, lower_instruction, lower_runtime_slot_load, lower_terminator,
 };
+
+#[derive(Clone, Copy)]
+pub(crate) enum CaptureEnvironment<'a> {
+    None,
+    Managed(&'a str, &'a BTreeSet<u32>),
+    Scoped(&'a [pop_mir::MirCapture]),
+}
 use crate::module_lowering::{
     analyze_memory_none_functions, checked_integer_declarations, collect_field_layout,
     collect_record_field_types, collect_record_fields, collect_self_capture_slots,
@@ -50,6 +60,12 @@ pub fn lower_mir_to_llvm_ir(
     target: &TargetSpec,
     options: LlvmLoweringOptions,
 ) -> Result<LlvmModule, LlvmLoweringError> {
+    if bubble.ffi_layouts().target() != target.triple() {
+        return Err(LlvmLoweringError::FfiLayoutTargetMismatch {
+            catalog: bubble.ffi_layouts().target().to_owned(),
+            target: target.triple().to_owned(),
+        });
+    }
     let native_abi = match options.runtime_profile {
         pop_backend_api::RuntimeProfile::BootstrapStableHandles => {
             pop_runtime_native_abi::NATIVE_ABI_1_VERSION
@@ -69,6 +85,17 @@ pub fn lower_mir_to_llvm_ir(
     crate::api::validate_llvm_runtime_profile(options.runtime_profile, target, native_abi)
         .map_err(LlvmLoweringError::RuntimeProfile)?;
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
+    let c_unwind = bubble
+        .foreign_functions()
+        .iter()
+        .find(|function| function.declaration().abi() == ForeignAbi::CUnwind);
+    if let Some(function) = c_unwind
+        && !target.supports(TargetCapability::Exceptions)
+    {
+        return Err(LlvmLoweringError::UnsupportedForeignFunction(
+            function.symbol(),
+        ));
+    }
     let field_layout = collect_field_layout(bubble);
     let record_fields = collect_record_fields(bubble);
     let record_field_types = collect_record_field_types(bubble);
@@ -82,6 +109,7 @@ pub fn lower_mir_to_llvm_ir(
                 bubble.bubble(),
                 function,
                 types,
+                bubble.ffi_layouts(),
                 options,
                 &field_layout,
                 &record_fields,
@@ -93,6 +121,7 @@ pub fn lower_mir_to_llvm_ir(
                 bubble.bubble(),
                 function,
                 types,
+                bubble.ffi_layouts(),
                 options,
                 memory_none_functions.contains(&function.symbol()),
                 &field_layout,
@@ -107,6 +136,7 @@ pub fn lower_mir_to_llvm_ir(
             bubble.bubble(),
             method.function(),
             types,
+            bubble.ffi_layouts(),
             options,
             false,
             &field_layout,
@@ -117,6 +147,30 @@ pub fn lower_mir_to_llvm_ir(
         lowered.name = method_name(bubble.bubble(), method.method());
         functions.push(lowered);
     }
+    let scoped_nested = bubble
+        .functions()
+        .iter()
+        .flat_map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .flat_map(|method| method.function().blocks()),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .flat_map(pop_mir::MirNestedFunction::blocks),
+        )
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::CallScopedBorrow {
+                owner, function, ..
+            } => Some((*owner, *function)),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     for nested in bubble.nested_functions() {
         if nested.is_async() {
             let self_slots = self_capture_slots
@@ -127,6 +181,7 @@ pub fn lower_mir_to_llvm_ir(
                 bubble.bubble(),
                 nested,
                 types,
+                bubble.ffi_layouts(),
                 options,
                 &field_layout,
                 &record_fields,
@@ -140,6 +195,11 @@ pub fn lower_mir_to_llvm_ir(
             .get(&(nested.owner(), nested.function()))
             .cloned()
             .unwrap_or_default();
+        let environment = if scoped_nested.contains(&(nested.owner(), nested.function())) {
+            CaptureEnvironment::Scoped(nested.captures())
+        } else {
+            CaptureEnvironment::Managed("%environment", &self_slots)
+        };
         functions.push(lower_function_parts(
             bubble.bubble(),
             nested_name(bubble.bubble(), nested.owner(), nested.function()),
@@ -148,14 +208,22 @@ pub fn lower_mir_to_llvm_ir(
             nested.effects(),
             false,
             nested.blocks(),
-            Some(("%environment", &self_slots)),
+            environment,
             types,
+            bubble.ffi_layouts(),
             options,
             &field_layout,
             &record_fields,
             &record_field_types,
             &string_literals,
         )?);
+    }
+    let mut foreign_declarations = Vec::new();
+    for foreign in bubble.foreign_functions() {
+        let (function, declaration) =
+            lower_foreign_function(bubble.bubble(), foreign, types, target)?;
+        functions.push(function);
+        foreign_declarations.push(declaration);
     }
     functions.push(direct_scalar_array_fill_function(bubble.bubble()));
     functions.extend(lower_interface_dispatchers(bubble, types)?);
@@ -204,8 +272,48 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::RetainRoot)
         ),
         format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::ResolveRoot)
+        ),
+        format!(
             "declare i8 @{}(i64)",
             native_runtime_symbol(RuntimeOperation::ReleaseRoot)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64, i64, ptr)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferOpen)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, ptr)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferLength)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferRead)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferWrite)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, ptr, ptr, ptr)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferBorrow)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferEndBorrow)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::FfiBufferClose)
+        ),
+        format!(
+            "declare i64 @{}(i64, ptr, ptr)",
+            native_runtime_symbol(RuntimeOperation::FfiBytesBorrow)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::FfiBytesEndBorrow)
         ),
         format!(
             "declare i64 @{}(i64)",
@@ -214,6 +322,22 @@ pub fn lower_mir_to_llvm_ir(
         format!(
             "declare i8 @{}(i64)",
             native_runtime_symbol(RuntimeOperation::Unpin)
+        ),
+        format!(
+            "declare i64 @{}(i32)",
+            native_runtime_symbol(RuntimeOperation::AttachManagedThread)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::DetachManagedThread)
+        ),
+        format!(
+            "declare i64 @{}(i32, ptr, i64, i8)",
+            native_runtime_symbol(RuntimeOperation::EnterForeign)
+        ),
+        format!(
+            "declare i8 @{}(i64, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::LeaveForeign)
         ),
         format!(
             "declare void @{}(i64)",
@@ -319,9 +443,14 @@ pub fn lower_mir_to_llvm_ir(
         "declare i8 @pop_rt_string_equal(i64, i64)".to_owned(),
         "declare i64 @pop_rt_process_arguments(i32, ptr)".to_owned(),
         "declare i1 @llvm.expect.i1(i1, i1)".to_owned(),
+        "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)".to_owned(),
         "declare noalias ptr @malloc(i64) nounwind".to_owned(),
         "declare void @free(ptr) nounwind".to_owned(),
     ];
+    if c_unwind.is_some() {
+        declarations.push("declare i32 @__gcc_personality_v0(...)".to_owned());
+    }
+    declarations.extend(foreign_declarations);
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
     if matches!(
@@ -464,39 +593,309 @@ pub(crate) fn lower_entry_point(
     } else {
         String::new()
     };
-    let abi_trap = (!abi_guard.is_empty()).then(|| {
-        format!(
-            "\ntrap:\n  call void @{}()\n  unreachable",
-            native_runtime_symbol(RuntimeOperation::Trap)
-        )
-    });
+    let attach = format!(
+        "  %pop_managed_binding = call i64 @{}(i32 1)\n  %pop_binding_valid = icmp ne i64 %pop_managed_binding, 0\n  br i1 %pop_binding_valid, label %binding_valid, label %trap\nbinding_valid:\n",
+        native_runtime_symbol(RuntimeOperation::AttachManagedThread)
+    );
+    let detach = format!(
+        "  %pop_detached = call i8 @{}(i64 %pop_managed_binding)\n  %pop_detach_valid = icmp eq i8 %pop_detached, 1\n  br i1 %pop_detach_valid, label %return, label %trap",
+        native_runtime_symbol(RuntimeOperation::DetachManagedThread)
+    );
+    let trap = format!(
+        "trap:\n  call void @{}()\n  unreachable",
+        native_runtime_symbol(RuntimeOperation::Trap)
+    );
     if takes_arguments {
         let invocation = if returns_status {
             format!(
-                "  %pop_exit_value = call i64 @{entry}(i64 %pop_arguments)\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code"
+                "  %pop_exit_value = call i64 @{entry}(i64 %pop_arguments)\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n{detach}\nreturn:\n  ret i32 %pop_exit_code"
             )
         } else {
-            format!("  call void @{entry}(i64 %pop_arguments)\n  ret i32 0")
+            format!("  call void @{entry}(i64 %pop_arguments)\n{detach}\nreturn:\n  ret i32 0")
         };
         return Ok(format!(
-            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ntrap:\n  call void @pop_rt_trap()\n  unreachable\ninvoke:\n{invocation}\n}}"
+            "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}{attach}  %pop_arguments = call i64 @pop_rt_process_arguments(i32 %pop_argc, ptr %pop_argv)\n  %pop_arguments_valid = icmp ne i64 %pop_arguments, 0\n  br i1 %pop_arguments_valid, label %invoke, label %trap\ninvoke:\n{invocation}\n{trap}\n}}"
         ));
     }
     let invocation = if returns_status {
         format!(
-            "  %pop_exit_value = call i64 @{entry}()\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n  ret i32 %pop_exit_code"
+            "  %pop_exit_value = call i64 @{entry}()\n  %pop_exit_code = trunc i64 %pop_exit_value to i32\n{detach}\nreturn:\n  ret i32 %pop_exit_code"
         )
     } else {
-        format!("  call void @{entry}()\n  ret i32 0")
+        format!("  call void @{entry}()\n{detach}\nreturn:\n  ret i32 0")
     };
     Ok(format!(
-        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}{invocation}{}\n}}",
-        abi_trap.unwrap_or_default()
+        "define i32 @main(i32 %pop_argc, ptr %pop_argv) {{\nentry:\n{abi_guard}{attach}{invocation}\n{trap}\n}}"
     ))
 }
 
 pub(crate) fn function_name(bubble: BubbleId, symbol: SymbolId) -> String {
     format!("pop_b{}_s{}", bubble.raw(), symbol.raw())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForeignConversion {
+    Direct,
+    SignedInteger,
+    UnsignedInteger,
+    Pointer,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ForeignPhysicalType {
+    llvm: String,
+    conversion: ForeignConversion,
+}
+
+fn lower_foreign_function(
+    bubble: BubbleId,
+    function: &MirForeignFunction,
+    types: &TypeArena,
+    target: &TargetSpec,
+) -> Result<(PrivateFunction, String), LlvmLoweringError> {
+    if function.results().len() > 1
+        || function.declaration().abi() == ForeignAbi::System
+            && target.operating_system() == pop_target::OperatingSystem::None
+    {
+        return Err(LlvmLoweringError::UnsupportedForeignFunction(
+            function.symbol(),
+        ));
+    }
+    let physical_parameters = function
+        .parameters()
+        .iter()
+        .map(|type_id| foreign_physical_type(*type_id, types, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    let physical_result = function
+        .results()
+        .first()
+        .map(|type_id| foreign_physical_type(*type_id, types, target))
+        .transpose()?;
+    let internal_parameters = function
+        .parameters()
+        .iter()
+        .enumerate()
+        .map(|(index, type_id)| Ok(format!("{} %v{index}", llvm_type(*type_id, types)?)))
+        .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
+    let mut instructions = Vec::new();
+    let mut external_arguments = Vec::new();
+    for (index, physical) in physical_parameters.iter().enumerate() {
+        let internal = llvm_type(function.parameters()[index], types)?;
+        let value = lower_foreign_argument(index, &internal, physical, &mut instructions);
+        external_arguments.push(format!("{} {value}", physical.llvm));
+    }
+    let external = llvm_global_name(function.declaration().external_symbol());
+    let result = function.results().first().map_or_else(
+        || Ok("void".to_owned()),
+        |type_id| llvm_type(*type_id, types),
+    )?;
+    let terminator = if let Some(physical) = &physical_result {
+        let internal = result.clone();
+        let external_result =
+            if physical.conversion == ForeignConversion::Direct && physical.llvm == internal {
+                "%pop_result"
+            } else {
+                "%foreign_result"
+            };
+        instructions.push(format!(
+            "{external_result} = call {} {external}({})",
+            physical.llvm,
+            external_arguments.join(", ")
+        ));
+        lower_foreign_result(&internal, physical, external_result, &mut instructions);
+        format!("ret {internal} %pop_result")
+    } else {
+        instructions.push(format!(
+            "call void {external}({})",
+            external_arguments.join(", ")
+        ));
+        "ret void".to_owned()
+    };
+    let declaration = format!(
+        "declare {} {external}({})",
+        physical_result
+            .as_ref()
+            .map_or("void", |physical| physical.llvm.as_str()),
+        physical_parameters
+            .iter()
+            .map(|physical| physical.llvm.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok((
+        PrivateFunction {
+            name: function_name(bubble, function.symbol()),
+            parameters: internal_parameters,
+            result,
+            blocks: vec![PrivateBlock {
+                label: "entry".to_owned(),
+                instructions,
+                terminator,
+            }],
+            attributes: Vec::new(),
+        },
+        declaration,
+    ))
+}
+
+fn lower_foreign_argument(
+    index: usize,
+    internal: &str,
+    physical: &ForeignPhysicalType,
+    instructions: &mut Vec<String>,
+) -> String {
+    let source = format!("%v{index}");
+    match physical.conversion {
+        ForeignConversion::Pointer => {
+            let converted = format!("%ffi_arg{index}");
+            instructions.push(format!("{converted} = inttoptr {internal} {source} to ptr"));
+            converted
+        }
+        ForeignConversion::SignedInteger | ForeignConversion::UnsignedInteger
+            if internal != physical.llvm =>
+        {
+            let converted = format!("%ffi_arg{index}");
+            instructions.push(format!(
+                "{converted} = trunc {internal} {source} to {}",
+                physical.llvm
+            ));
+            converted
+        }
+        _ => source,
+    }
+}
+
+fn lower_foreign_result(
+    internal: &str,
+    physical: &ForeignPhysicalType,
+    external_result: &str,
+    instructions: &mut Vec<String>,
+) {
+    if external_result == "%pop_result" {
+        return;
+    }
+    let conversion = match physical.conversion {
+        ForeignConversion::Pointer => {
+            format!("%pop_result = ptrtoint ptr {external_result} to {internal}")
+        }
+        ForeignConversion::SignedInteger => format!(
+            "%pop_result = sext {} {external_result} to {internal}",
+            physical.llvm
+        ),
+        ForeignConversion::UnsignedInteger => format!(
+            "%pop_result = zext {} {external_result} to {internal}",
+            physical.llvm
+        ),
+        ForeignConversion::Direct => format!(
+            "%pop_result = bitcast {} {external_result} to {internal}",
+            physical.llvm
+        ),
+    };
+    instructions.push(conversion);
+}
+
+fn foreign_physical_type(
+    type_id: TypeId,
+    types: &TypeArena,
+    target: &TargetSpec,
+) -> Result<ForeignPhysicalType, LlvmLoweringError> {
+    match types.get(type_id) {
+        Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Ok(ForeignPhysicalType {
+            llvm: format!("i{}", kind.bit_width()),
+            conversion: ForeignConversion::Direct,
+        }),
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => Ok(ForeignPhysicalType {
+            llvm: "float".to_owned(),
+            conversion: ForeignConversion::Direct,
+        }),
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => Ok(ForeignPhysicalType {
+            llvm: "double".to_owned(),
+            conversion: ForeignConversion::Direct,
+        }),
+        Some(SemanticType::Builtin { definition, .. }) => {
+            let schema =
+                embedded_bootstrap_schema().map_err(|_| LlvmLoweringError::InvalidType(type_id))?;
+            let name = schema
+                .type_by_id(*definition)
+                .map(|entry| entry.source_name())
+                .ok_or(LlvmLoweringError::InvalidType(type_id))?;
+            foreign_builtin_physical_type(name, target)
+                .ok_or(LlvmLoweringError::InvalidType(type_id))
+        }
+        _ => Err(LlvmLoweringError::InvalidType(type_id)),
+    }
+}
+
+fn foreign_builtin_physical_type(name: &str, target: &TargetSpec) -> Option<ForeignPhysicalType> {
+    match name {
+        "Ffi.Handle" => {
+            return Some(ForeignPhysicalType {
+                llvm: "i64".to_owned(),
+                conversion: ForeignConversion::Direct,
+            });
+        }
+        "Ffi.Pointer"
+        | "Ffi.OptionalPointer"
+        | "Ffi.ReadOnlyPointer"
+        | "Ffi.OptionalReadOnlyPointer"
+        | "Ffi.Function"
+        | "Ffi.OptionalFunction" => {
+            return Some(ForeignPhysicalType {
+                llvm: "ptr".to_owned(),
+                conversion: ForeignConversion::Pointer,
+            });
+        }
+        _ => {}
+    }
+    let kind = match name {
+        "Ffi.C.Char" => CAbiScalarKind::Char,
+        "Ffi.C.SignedChar" => CAbiScalarKind::SignedChar,
+        "Ffi.C.UnsignedChar" => CAbiScalarKind::UnsignedChar,
+        "Ffi.C.Short" => CAbiScalarKind::Short,
+        "Ffi.C.UnsignedShort" => CAbiScalarKind::UnsignedShort,
+        "Ffi.C.Int" => CAbiScalarKind::Int,
+        "Ffi.C.UnsignedInt" => CAbiScalarKind::UnsignedInt,
+        "Ffi.C.Long" => CAbiScalarKind::Long,
+        "Ffi.C.UnsignedLong" => CAbiScalarKind::UnsignedLong,
+        "Ffi.C.LongLong" => CAbiScalarKind::LongLong,
+        "Ffi.C.UnsignedLongLong" => CAbiScalarKind::UnsignedLongLong,
+        "Ffi.C.Size" => CAbiScalarKind::Size,
+        "Ffi.C.PointerDifference" => CAbiScalarKind::PointerDifference,
+        _ => return None,
+    };
+    let layout = target.c_abi_scalar_layout(kind)?;
+    Some(ForeignPhysicalType {
+        llvm: format!("i{}", layout.size() * 8),
+        conversion: match layout.signedness() {
+            CAbiSignedness::Signed => ForeignConversion::SignedInteger,
+            CAbiSignedness::Unsigned => ForeignConversion::UnsignedInteger,
+        },
+    })
+}
+
+fn llvm_global_name(name: &str) -> String {
+    let mut characters = name.chars();
+    let simple = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || matches!(first, '_' | '$' | '.'))
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '.' | '-')
+        });
+    if simple {
+        format!("@{name}")
+    } else {
+        let escaped = name
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'.' | b'-') {
+                    char::from(byte).to_string()
+                } else {
+                    format!("\\{byte:02X}")
+                }
+            })
+            .collect::<String>();
+        format!("@\"{escaped}\"")
+    }
 }
 
 pub(crate) fn method_name(bubble: BubbleId, method: pop_foundation::MethodId) -> String {
@@ -623,6 +1022,7 @@ pub(crate) fn lower_function(
     bubble: BubbleId,
     function: &pop_mir::MirFunction,
     types: &TypeArena,
+    ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     memory_none: bool,
     field_layout: &BTreeMap<FieldId, u32>,
@@ -638,8 +1038,9 @@ pub(crate) fn lower_function(
         function.effects(),
         memory_none,
         function.blocks(),
-        None,
+        CaptureEnvironment::None,
         types,
+        ffi_layouts,
         options,
         field_layout,
         record_fields,
@@ -911,8 +1312,9 @@ pub(crate) fn lower_function_parts(
     effects: MirEffectSummary,
     memory_none: bool,
     function_blocks: &[pop_mir::MirBlock],
-    environment: Option<(&str, &BTreeSet<u32>)>,
+    environment: CaptureEnvironment<'_>,
     types: &TypeArena,
+    ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
@@ -1033,6 +1435,7 @@ pub(crate) fn lower_function_parts(
                 instruction,
                 &value_types,
                 types,
+                ffi_layouts,
                 field_layout,
                 record_fields,
                 record_field_types,
@@ -1056,6 +1459,19 @@ pub(crate) fn lower_function_parts(
                     if writable_root_values.contains(root) {
                         instructions.push(format!(
                             "store i64 %v{}_after_v{}, ptr %v{}_gc_root",
+                            root.raw(),
+                            instruction.result().raw(),
+                            root.raw()
+                        ));
+                    }
+                }
+            } else if writable_roots
+                && let MirInstructionKind::CallForeign { roots, .. } = instruction.kind()
+            {
+                for root in roots {
+                    if writable_root_values.contains(root) {
+                        instructions.push(format!(
+                            "store i64 %v{}_after_foreign_v{}, ptr %v{}_gc_root",
                             root.raw(),
                             instruction.result().raw(),
                             root.raw()
@@ -1106,9 +1522,17 @@ pub(crate) fn lower_function_parts(
             ),
         });
     }
-    let mut parameters = environment
-        .map(|(name, _)| vec![format!("i64 {name}")])
-        .unwrap_or_default();
+    let mut parameters = match environment {
+        CaptureEnvironment::None => Vec::new(),
+        CaptureEnvironment::Managed(name, _) => vec![format!("i64 {name}")],
+        CaptureEnvironment::Scoped(captures) => captures
+            .iter()
+            .map(|capture| {
+                llvm_type(capture.type_id(), types)
+                    .map(|ty| format!("{ty} %capture{}", capture.slot()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     parameters.extend(
         parameter_types
             .iter()
@@ -1116,12 +1540,23 @@ pub(crate) fn lower_function_parts(
             .map(|(index, type_id)| llvm_type(*type_id, types).map(|ty| format!("{ty} %v{index}")))
             .collect::<Result<Vec<_>, LlvmLoweringError>>()?,
     );
+    let has_c_unwind_call = function_blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .any(|instruction| {
+            matches!(instruction.kind(), MirInstructionKind::CallForeign { .. })
+                && instruction.effects().contains(MirEffect::MayUnwind)
+        });
+    let mut attributes = llvm_function_attributes(effects, memory_none);
+    if has_c_unwind_call {
+        attributes.push("personality ptr @__gcc_personality_v0");
+    }
     Ok(PrivateFunction {
         name,
         parameters,
         result: llvm_results(result_types, types)?,
         blocks,
-        attributes: llvm_function_attributes(effects, memory_none),
+        attributes,
     })
 }
 

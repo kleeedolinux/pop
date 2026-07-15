@@ -273,6 +273,47 @@ pub(crate) fn dump_function(output: &mut String, function: &MirFunction) {
     dump_blocks(output, &function.blocks);
 }
 
+pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFunction) {
+    let declaration = function.declaration();
+    let _ = write!(
+        output,
+        "foreign s{} f{} params(",
+        function.symbol().raw(),
+        function.function().raw()
+    );
+    dump_type_ids(output, function.parameters());
+    output.push_str(") results(");
+    dump_type_ids(output, function.results());
+    let _ = write!(
+        output,
+        ") symbol({}) abi({:?}) links(",
+        declaration.external_symbol(),
+        declaration.abi()
+    );
+    if declaration.link_aliases().is_empty() {
+        output.push('-');
+    } else {
+        for (index, alias) in declaration.link_aliases().iter().enumerate() {
+            if index != 0 {
+                output.push(';');
+            }
+            output.push_str(alias);
+        }
+    }
+    output.push_str(") effects[");
+    dump_effects(output, function.effects());
+    output.push(']');
+    if let Some(identity) = function.reference_identity() {
+        let _ = write!(
+            output,
+            " reference(b{}:s{})",
+            identity.bubble().raw(),
+            identity.symbol().raw()
+        );
+    }
+    output.push('\n');
+}
+
 pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFunctionReference) {
     if reference.is_async {
         output.push_str("async ");
@@ -702,6 +743,216 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::ReleaseRoot { handle } => {
             let _ = write!(output, "releaseRoot v{}", handle.raw());
         }
+        MirInstructionKind::FfiHandleOpen { value } => {
+            let _ = write!(output, "ffiHandleOpen v{}", value.raw());
+        }
+        MirInstructionKind::FfiHandleGet { handle } => {
+            let _ = write!(output, "ffiHandleGet v{}", handle.raw());
+        }
+        MirInstructionKind::FfiHandleClose { handle } => {
+            let _ = write!(output, "ffiHandleClose v{}", handle.raw());
+        }
+        MirInstructionKind::FfiBufferOpen {
+            length,
+            element,
+            layout,
+            element_size,
+            alignment,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferOpen v{} element t{} layout#{} size {} align {} result bt{} success resultCase#{} failure resultCase#{}",
+                length.raw(),
+                element.raw(),
+                layout.raw(),
+                element_size,
+                alignment,
+                result.raw(),
+                success.raw(),
+                failure.raw(),
+            );
+        }
+        MirInstructionKind::FfiBufferLength { buffer, layout } => {
+            let _ = write!(
+                output,
+                "ffiBufferLength v{} layout#{}",
+                buffer.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferRead {
+            buffer,
+            index,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferRead v{} v{} layout#{}",
+                buffer.raw(),
+                index.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferWrite v{} v{} v{} layout#{}",
+                buffer.raw(),
+                index.raw(),
+                value.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferBorrow {
+            buffer,
+            expected_length,
+            layout,
+            region,
+        } => {
+            let _ = write!(
+                output,
+                "ffiBufferBorrow v{} v{} layout#{} region#{}",
+                buffer.raw(),
+                expected_length.raw(),
+                layout.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+            let _ = write!(
+                output,
+                "ffiBufferEndBorrow v{} region#{}",
+                buffer.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBufferClose { buffer } => {
+            let _ = write!(output, "ffiBufferClose v{}", buffer.raw());
+        }
+        MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+            let _ = write!(
+                output,
+                "ffiBytesBorrow v{} region#{}",
+                bytes.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBytesBorrowLength { bytes, region } => {
+            let _ = write!(
+                output,
+                "ffiBytesBorrowLength v{} region#{}",
+                bytes.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+            let _ = write!(
+                output,
+                "ffiBytesEndBorrow v{} region#{}",
+                bytes.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiPointerNone => output.push_str("ffiPointerNone"),
+        MirInstructionKind::FfiPointerToOptional { pointer } => {
+            let _ = write!(output, "ffiPointerToOptional v{}", pointer.raw());
+        }
+        MirInstructionKind::FfiPointerReadOnly { pointer } => {
+            let _ = write!(output, "ffiPointerReadOnly v{}", pointer.raw());
+        }
+        MirInstructionKind::FfiPointerIsPresent { pointer } => {
+            let _ = write!(output, "ffiPointerIsPresent v{}", pointer.raw());
+        }
+        MirInstructionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffiPointerRequire v{} result bt{} success resultCase#{} failure resultCase#{}",
+                pointer.raw(),
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeLoad v{} layout#{}",
+                pointer.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeStore v{} v{} layout#{}",
+                pointer.raw(),
+                value.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            layout,
+            read_only,
+        } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeAdvance v{} v{} layout#{} readOnly {}",
+                pointer.raw(),
+                elements.raw(),
+                layout.raw(),
+                read_only
+            );
+        }
+        MirInstructionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            layout,
+        } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeCopy v{} v{} v{} layout#{}",
+                source.raw(),
+                destination.raw(),
+                count.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafeAddress { pointer, layout } => {
+            let _ = write!(
+                output,
+                "ffiUnsafeAddress v{} layout#{}",
+                pointer.raw(),
+                layout.raw()
+            );
+        }
+        MirInstructionKind::FfiUnsafePointerFromAddress { address, layout } => {
+            let _ = write!(
+                output,
+                "ffiUnsafePointerFromAddress v{} layout#{}",
+                address.raw(),
+                layout.raw()
+            );
+        }
         MirInstructionKind::Pin { value } => {
             let _ = write!(output, "pin v{}", value.raw());
         }
@@ -939,6 +1190,20 @@ fn dump_callable_or_schema_instruction(
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }
+        MirInstructionKind::CallForeign {
+            function,
+            arguments,
+            safe_point,
+            roots,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(output, "callForeign s{} ", function.raw());
+            dump_value_list(output, arguments);
+            let _ = write!(output, " safePoint sp{} roots ", safe_point.raw());
+            dump_value_list(output, roots);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
         MirInstructionKind::CallReferenced {
             function,
             arguments,
@@ -1005,6 +1270,55 @@ fn dump_callable_or_schema_instruction(
             unwind,
         } => {
             let _ = write!(output, "callIndirect v{} ", callee.raw());
+            dump_value_list(output, arguments);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
+        MirInstructionKind::CallScopedBorrow {
+            owner,
+            function,
+            captures,
+            arguments,
+            region,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(
+                output,
+                "callScopedBorrow s{} nf{} region#{} captures[",
+                owner.raw(),
+                function.raw(),
+                region.raw()
+            );
+            for (index, capture) in captures.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                let mode = match capture.mode() {
+                    MirCaptureMode::Value => "value",
+                    MirCaptureMode::Cell => "cell",
+                };
+                if capture.self_reference() {
+                    let _ = write!(
+                        output,
+                        "cap{}:bind{}@{}=self:t{}:{mode}",
+                        capture.capture().raw(),
+                        capture.binding().raw(),
+                        capture.slot(),
+                        capture.type_id().raw()
+                    );
+                } else {
+                    let _ = write!(
+                        output,
+                        "cap{}:bind{}@{}=v{}:t{}:{mode}",
+                        capture.capture().raw(),
+                        capture.binding().raw(),
+                        capture.slot(),
+                        capture.value().raw(),
+                        capture.type_id().raw()
+                    );
+                }
+            }
+            output.push_str("] ");
             dump_value_list(output, arguments);
             dump_call_contract(output, *declared_effects, *unwind);
         }

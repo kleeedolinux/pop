@@ -28,6 +28,8 @@ Backends advertise capabilities such as:
 - SIMD;
 - precise stack maps and relocating young-GC support;
 - shared-library or module loading;
+- supported foreign ABIs, native object formats, callback transitions, and
+  unwind boundaries;
 - debug information formats.
 
 A missing capability results in an earlier portable lowering, a runtime fallback,
@@ -51,6 +53,13 @@ The LLVM backend performs:
 5. verifying generated LLVM IR;
 6. running an LLVM optimization pipeline;
 7. emitting object code, assembly, or optional textual/bitcode IR.
+
+Optimized canonical MIR already contains ADR 0085 storage plans and verified
+lifetime/region frontiers. LLVM may choose registers, frame slots, checked
+activation-owned side storage, or region layouts, but it cannot independently
+decide that a managed allocation is non-escaping or free it on fewer exits. The
+existing non-escaping scalar-array special case is a transition implementation:
+its analysis must move to portable MIR before it becomes the general contract.
 
 The Rust implementation uses Inkwell only inside the LLVM backend. Verified
 canonical MIR first becomes backend-private IR; Inkwell then constructs or
@@ -83,6 +92,21 @@ and is not read by semantic compiler stages.
 
 Compile-time execution never runs through LLVM. This keeps editor analysis,
 cross-compilation, cache behavior, and the future VM deterministic and aligned.
+
+For ADR 0081 calls, LLVM declares one external symbol from the resolved foreign
+identity, applies the selected target C/system calling convention and verified
+ABI layouts, spills the exact live managed roots, and surrounds the call with
+one canonical `EnterForeign`/`LeaveForeign` pair. The returned transition
+identity and root-slot shape remain coupled across every normal and unwind edge;
+LLVM reloads every writable root slot after leave before later managed use.
+`Ffi.Nonblocking` selects only the closed bounded mode and never removes the
+transition. Missing target unwind support rejects `CUnwind` before emission.
+The native `main` adapter balances `AttachManagedThread`/
+`DetachManagedThread` around argument decoding and Pop invocation; it cannot
+enter managed code or allocate an argument array while unbound.
+The driver—not LLVM semantic lowering—consumes the typed `NativeLinkPlan` to
+link system/framework/object/archive/shared/import-library inputs. LLVM never
+parses raw linker flags or reconstructs ownership, callback, or movement facts.
 
 LLVM keeps ABI 1 stable-handle lowering and separately advertises
 `RelocatingManagedReferences` for ABI 2. Its writable-root lowering spills exact
@@ -182,6 +206,11 @@ register/frame slots from the mutable PLRI root publication before executing the
 next bytecode. It advertises relocation only after verification and forced-minor
 tests prove this postcondition.
 
+The VM also consumes the same `Elided`, `StaticSlot`, and `ScopedRegion` plans.
+It may realize activation storage in typed register/frame arrays, but must end
+and bulk-close it at the exact MIR frontiers and preserve outward relocating
+roots.
+
 The VM is an architectural acceptance test: if implementing it would require
 recovering class, closure, error, or lifetime semantics from LLVM-shaped MIR,
 the MIR boundary is wrong.
@@ -209,6 +238,8 @@ All backends run the same observable-language test suite. Tests should cover:
 - union narrowing, checked casts, and failure behavior;
 - typed UDA semantic consequences and metadata-retention boundaries;
 - collection semantics;
+- proof-directed storage plans, lifetime frontiers, scoped-region roots, and
+  managed fallback;
 - errors, cleanup, and stack traces;
 - coroutines/tasks;
 - FFI boundary behavior where supported;

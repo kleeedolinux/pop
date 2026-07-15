@@ -1,0 +1,6 @@
+schemaVersion	1
+attributeId	sourceName	ownerBubble	argumentCount	target	semanticRole	prelude
+100	Ffi.Link	Pop.Ffi	1	Namespace	FfiLink	false
+101	Ffi.Foreign	Pop.Ffi	2	Function	FfiForeign	false
+102	Ffi.Nonblocking	Pop.Ffi	0	Function	FfiNonblocking	false
+103	Ffi.C.Layout	Pop.Ffi	0	Record	FfiCLayout	false

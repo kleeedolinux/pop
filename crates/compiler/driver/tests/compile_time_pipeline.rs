@@ -56,6 +56,34 @@ fn evaluated_namespace_constants_are_runtime_expressions() {
 }
 
 #[test]
+fn namespace_attributes_are_resolved_as_typed_module_owned_metadata() {
+    let result = analyze(
+        "@Marker(\"native\")\n\
+         namespace Example\n\
+         @AttributeUsage(targets = { AttributeTarget.Namespace }, repeatable = false)\n\
+         public attribute Marker(value: String)\n\
+         public function value(): Int\n\
+             return 42\n\
+         end\n",
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let [namespace] = result.namespace_attributes() else {
+        panic!("one Module namespace attachment");
+    };
+    assert_eq!(namespace.module(), ModuleId::from_raw(0));
+    assert_eq!(namespace.attributes().len(), 1);
+    assert!(matches!(
+        namespace.attributes()[0].arguments()[0].value(),
+        AttributeConstant::String(value) if value == "native"
+    ));
+}
+
+#[test]
 fn trusted_compile_time_functions_feed_udas_and_defaults_but_not_runtime_mir() {
     let result = analyze(EXPLICIT);
     assert!(

@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{BubbleId, FieldId, SymbolId, TypeId, ValueId};
 use pop_mir::{
-    MirCancellationMode, MirCleanupExitReason, MirEffectSummary, MirInstructionKind,
-    MirSuspendOperation, MirTerminator, MirUnwindAction,
+    MirCancellationMode, MirCleanupExitReason, MirEffectSummary, MirFfiLayoutCatalog,
+    MirInstructionKind, MirSuspendOperation, MirTerminator, MirUnwindAction,
 };
 use pop_runtime_interface::RuntimeOperation;
 use pop_types::TypeArena;
@@ -16,9 +16,10 @@ use crate::instruction_lowering::{
     optional_inner_type,
 };
 use crate::lowering::{
-    DirectScalarArrays, PrivateBlock, PrivateFunction, async_function_create_name,
-    async_function_poll_name, async_nested_create_name, async_nested_poll_name,
-    initialize_array_outputs, native_runtime_symbol, replace_llvm_value_token,
+    CaptureEnvironment, DirectScalarArrays, PrivateBlock, PrivateFunction,
+    async_function_create_name, async_function_poll_name, async_nested_create_name,
+    async_nested_poll_name, initialize_array_outputs, native_runtime_symbol,
+    replace_llvm_value_token,
 };
 
 #[derive(Clone, Copy)]
@@ -119,6 +120,7 @@ pub(crate) fn lower_async_function(
     bubble: BubbleId,
     function: &pop_mir::MirFunction,
     types: &TypeArena,
+    ffi_layouts: &MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
@@ -134,6 +136,7 @@ pub(crate) fn lower_async_function(
         function.blocks(),
         None,
         types,
+        ffi_layouts,
         options,
         field_layout,
         record_fields,
@@ -147,6 +150,7 @@ pub(crate) fn lower_async_nested(
     bubble: BubbleId,
     function: &pop_mir::MirNestedFunction,
     types: &TypeArena,
+    ffi_layouts: &MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
@@ -163,6 +167,7 @@ pub(crate) fn lower_async_nested(
         function.blocks(),
         Some(("%environment", self_capture_slots)),
         types,
+        ffi_layouts,
         options,
         field_layout,
         record_fields,
@@ -181,6 +186,7 @@ fn lower_async_parts(
     blocks: &[pop_mir::MirBlock],
     environment: Option<(&str, &BTreeSet<u32>)>,
     types: &TypeArena,
+    ffi_layouts: &MirFfiLayoutCatalog,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
@@ -257,11 +263,14 @@ fn lower_async_parts(
                 instruction,
                 &value_types,
                 types,
+                ffi_layouts,
                 field_layout,
                 record_fields,
                 record_field_types,
                 string_literals,
-                environment,
+                environment.map_or(CaptureEnvironment::None, |(name, slots)| {
+                    CaptureEnvironment::Managed(name, slots)
+                }),
                 &BTreeSet::new(),
                 &direct_scalar_arrays,
                 options,

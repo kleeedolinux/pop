@@ -37,7 +37,9 @@ struct RecordingRuntime {
     safe_points: usize,
     barriers: usize,
     retained: usize,
+    resolved: usize,
     released: usize,
+    return_zero_handle: bool,
 }
 
 impl RuntimeAdapter for RecordingRuntime {
@@ -71,7 +73,15 @@ impl RuntimeAdapter for RecordingRuntime {
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
         self.retained += 1;
+        if self.return_zero_handle {
+            return Ok(RootHandle::new(0));
+        }
         self.inner.retain_root(reference)
+    }
+
+    fn resolve_root(&mut self, root: RootHandle) -> Result<ManagedReference, RuntimeFailure> {
+        self.resolved += 1;
+        self.inner.resolve_root(root)
     }
 
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
@@ -329,6 +339,68 @@ fn explicit_root_actions_use_runtime_root_handles() {
     let runtime = interpreter.runtime();
     assert_eq!(runtime.retained, 1);
     assert_eq!(runtime.released, 1);
+}
+
+#[test]
+fn typed_ffi_handles_round_trip_managed_values_through_the_runtime() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let handle = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_HANDLE_TYPE_ID,
+            arguments: vec![array],
+        })
+        .expect("array handle");
+    let text = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{array}) effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{handle} = ffiHandleOpen v1\n    v3:t{array} = ffiHandleGet v2\n    do v4 ffiHandleClose v2\n    return (v3)\n",
+        array = array.raw(),
+        handle = handle.raw(),
+    );
+    let mir = parse_mir_dump(&text).expect("typed FFI handle MIR");
+    let interpreter = MirInterpreter::with_runtime(&mir, &types, RecordingRuntime::default())
+        .expect("verified typed handles");
+    assert_eq!(
+        interpreter.call(mir.functions()[0].symbol(), &[]),
+        Ok(vec![MirValue::Array(Vec::new())])
+    );
+    let runtime = interpreter.runtime();
+    assert_eq!(runtime.retained, 1);
+    assert_eq!(runtime.resolved, 1);
+    assert_eq!(runtime.released, 1);
+}
+
+#[test]
+fn typed_ffi_handle_open_rejects_the_reserved_zero_runtime_token() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let handle = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_HANDLE_TYPE_ID,
+            arguments: vec![array],
+        })
+        .expect("array handle");
+    let text = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{handle}) effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{handle} = ffiHandleOpen v1\n    return (v2)\n",
+        array = array.raw(),
+        handle = handle.raw(),
+    );
+    let mir = parse_mir_dump(&text).expect("zero-handle MIR");
+    let runtime = RecordingRuntime {
+        return_zero_handle: true,
+        ..RecordingRuntime::default()
+    };
+    let interpreter =
+        MirInterpreter::with_runtime(&mir, &types, runtime).expect("verified handles");
+    assert!(matches!(
+        interpreter.call(mir.functions()[0].symbol(), &[]),
+        Err(ExecutionError::Runtime(_))
+    ));
 }
 
 struct RelocatingTestRuntime {

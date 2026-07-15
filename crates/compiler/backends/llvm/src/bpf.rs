@@ -489,6 +489,30 @@ fn validate_instruction(
         | MirInstructionKind::GcSafePoint { .. }
         | MirInstructionKind::RetainRoot { .. }
         | MirInstructionKind::ReleaseRoot { .. }
+        | MirInstructionKind::FfiHandleOpen { .. }
+        | MirInstructionKind::FfiHandleGet { .. }
+        | MirInstructionKind::FfiHandleClose { .. }
+        | MirInstructionKind::FfiBufferOpen { .. }
+        | MirInstructionKind::FfiBufferLength { .. }
+        | MirInstructionKind::FfiBufferRead { .. }
+        | MirInstructionKind::FfiBufferWrite { .. }
+        | MirInstructionKind::FfiBufferBorrow { .. }
+        | MirInstructionKind::FfiBufferEndBorrow { .. }
+        | MirInstructionKind::FfiBufferClose { .. }
+        | MirInstructionKind::FfiBytesBorrow { .. }
+        | MirInstructionKind::FfiBytesBorrowLength { .. }
+        | MirInstructionKind::FfiBytesEndBorrow { .. }
+        | MirInstructionKind::FfiPointerNone
+        | MirInstructionKind::FfiPointerToOptional { .. }
+        | MirInstructionKind::FfiPointerReadOnly { .. }
+        | MirInstructionKind::FfiPointerIsPresent { .. }
+        | MirInstructionKind::FfiPointerRequire { .. }
+        | MirInstructionKind::FfiUnsafeLoad { .. }
+        | MirInstructionKind::FfiUnsafeStore { .. }
+        | MirInstructionKind::FfiUnsafeAdvance { .. }
+        | MirInstructionKind::FfiUnsafeCopy { .. }
+        | MirInstructionKind::FfiUnsafeAddress { .. }
+        | MirInstructionKind::FfiUnsafePointerFromAddress { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. }
         | MirInstructionKind::WriteBarrier { .. }
@@ -503,6 +527,7 @@ fn validate_instruction(
             BpfUnsupportedReason::BackendImplementation
         }
         MirInstructionKind::CallIndirect { .. }
+        | MirInstructionKind::CallScopedBorrow { .. }
         | MirInstructionKind::CallInterface { .. }
         | MirInstructionKind::CallReferenced { .. }
         | MirInstructionKind::CallDirectMethod { .. } => BpfUnsupportedReason::Call,

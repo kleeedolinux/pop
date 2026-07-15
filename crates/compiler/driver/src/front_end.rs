@@ -15,8 +15,8 @@ use pop_foundation::{
     BubbleId, Diagnostic, DiagnosticSeverity, MethodId, ModuleId, SourceSpan, SymbolId,
 };
 use pop_hir::{
-    HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirFunction,
-    HirFunctionContext, HirKnownCallables, HirMethod,
+    HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirForeignFunction,
+    HirFunction, HirFunctionContext, HirKnownCallables, HirMethod, build_hir_foreign_function,
     build_hir_function_with_known_callables_and_attributes, build_hir_method,
     specialize_hir_method,
 };
@@ -34,7 +34,10 @@ use pop_types::{
 };
 
 use crate::api::*;
-use crate::attributes::{classify_function_attributes, resolve_source_attributes};
+use crate::attributes::{
+    classify_function_attributes, resolve_ffi_attributes, resolve_ffi_layout_attributes,
+    resolve_source_attributes,
+};
 use crate::compile_time::{
     build_compile_time_context, check_compile_time_function_bodies,
     compile_time_attribute_constant, evaluate_declaration_defaults, evaluate_source_constants,
@@ -72,6 +75,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let indexed = build_declaration_index(&module_inputs);
     let mut diagnostics = indexed.diagnostics().to_vec();
     validate_source_attribute_targets(&parsed, &mut diagnostics);
+    let mut namespace_attribute_work = define_namespace_attributes(&parsed, &mut diagnostics);
     let referenced_declarations = input
         .reference_metadata
         .iter()
@@ -114,6 +118,9 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     validate_standard_native_exports(&bootstrap, pop_standard::NATIVE_EXPORTS)
         .expect("repository-validated native Standard adapters");
     let mut resolver = SignatureResolver::new(&database, bootstrap.clone());
+    if input.ffi_dependency.is_some() {
+        resolver = resolver.with_ffi_dependency();
+    }
     define_type_aliases(&parsed, &database, &mut resolver, &mut diagnostics);
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,
@@ -131,6 +138,23 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &database,
         &bootstrap,
         &mut resolver,
+        &mut diagnostics,
+    );
+    resolve_ffi_layout_attributes(
+        &mut declaration_attributes,
+        &database,
+        &bootstrap,
+        input.ffi_dependency.is_some(),
+        &mut resolver,
+        &mut diagnostics,
+    );
+    resolve_ffi_attributes(
+        &mut namespace_attribute_work,
+        &mut functions,
+        &database,
+        &bootstrap,
+        input.ffi_dependency.is_some(),
+        &resolver,
         &mut diagnostics,
     );
     let mut signatures = reference_signatures(&input.reference_metadata, &database, &mut resolver);
@@ -169,6 +193,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut diagnostics,
     );
     let attribute_queries = resolve_source_attributes(
+        &mut namespace_attribute_work,
         &mut declaration_attributes,
         &mut functions,
         AttributeResolutionContext {
@@ -201,7 +226,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             })
         })
         .collect();
-    let (hir_functions, hir_methods, hir_build_errors) = build_runtime_hir(
+    let (hir_functions, hir_foreign_functions, hir_methods, hir_build_errors) = build_runtime_hir(
         input.bubble,
         &mut functions,
         &methods,
@@ -233,6 +258,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             hir_functions,
             hir_methods,
         )
+        .and_then(|bubble| bubble.with_foreign_functions(hir_foreign_functions))
         .and_then(|bubble| {
             bubble.with_function_references(hir_function_references(
                 &input.reference_metadata,
@@ -262,6 +288,17 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         hir_build_errors,
         types: resolver.into_arena(),
         attribute_queries,
+        namespace_attributes: namespace_attribute_work
+            .into_iter()
+            .map(|work| NamespaceAttributes {
+                module: work.module,
+                attributes: work.attributes,
+            })
+            .collect(),
+        foreign_declarations: functions
+            .iter()
+            .filter_map(|function| function.foreign.clone())
+            .collect(),
         compile_time_evaluations,
         constants,
         diagnostics,
@@ -573,7 +610,8 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
             let supported = children.get(index).is_some_and(|node| {
                 matches!(
                     node.kind(),
-                    NodeKind::AttributeDeclaration
+                    NodeKind::NamespaceDeclaration
+                        | NodeKind::AttributeDeclaration
                         | NodeKind::ConstDeclaration
                         | NodeKind::RecordDeclaration
                         | NodeKind::UnionDeclaration
@@ -594,6 +632,38 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
             }
         }
     }
+}
+
+fn define_namespace_attributes(
+    modules: &[ParsedModule],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<NamespaceAttributeWork> {
+    let mut work = Vec::new();
+    for module in modules {
+        let mut attribute_uses = Vec::new();
+        for node in module.syntax.root().children() {
+            if node.kind() == NodeKind::AttributeUse {
+                match parse_attribute_use(&module.source, &module.syntax, node) {
+                    Ok(syntax) => attribute_uses.push(syntax),
+                    Err(error) => {
+                        diagnostics.push(syntax_error(error.span(), error.expectation()));
+                    }
+                }
+                continue;
+            }
+            if node.kind() == NodeKind::NamespaceDeclaration && !attribute_uses.is_empty() {
+                work.push(NamespaceAttributeWork {
+                    module: module.module,
+                    attribute_uses,
+                    attributes: Vec::new(),
+                    ffi_link_aliases: Vec::new(),
+                });
+            }
+            break;
+        }
+    }
+    work.sort_by_key(|work| work.module);
+    work
 }
 
 fn define_constants(
@@ -661,6 +731,7 @@ fn build_runtime_hir(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (
     Vec<HirFunction>,
+    Vec<HirForeignFunction>,
     Vec<HirMethod>,
     Vec<pop_hir::HirBuildError>,
 ) {
@@ -671,9 +742,28 @@ fn build_runtime_hir(
         .collect();
     let interfaces: Vec<_> = resolver.interface_definitions().cloned().collect();
     let mut hir_build_errors = Vec::new();
+    let mut hir_foreign_functions = Vec::new();
+    for function in functions
+        .iter()
+        .filter(|function| function.foreign.is_some())
+    {
+        let foreign = function
+            .foreign
+            .as_ref()
+            .expect("filtered foreign function");
+        match build_hir_foreign_function(
+            HirFunctionContext::new(function.module, bubble, function.visibility),
+            &function.signature,
+            foreign,
+            &function.attributes,
+        ) {
+            Ok(function) => hir_foreign_functions.push(function),
+            Err(errors) => hir_build_errors.extend(errors),
+        }
+    }
     let mut typed_functions = Vec::new();
     for (index, function) in functions.iter().enumerate() {
-        if function.is_compile_time {
+        if function.is_compile_time || function.foreign.is_some() {
             continue;
         }
         let typed = BodyChecker::new(function.module, resolver, signatures)
@@ -815,7 +905,12 @@ fn build_runtime_hir(
         }
     }
     hir_methods.sort_by_key(HirMethod::method);
-    (hir_functions, hir_methods, hir_build_errors)
+    (
+        hir_functions,
+        hir_foreign_functions,
+        hir_methods,
+        hir_build_errors,
+    )
 }
 
 fn define_declarations(
@@ -1537,6 +1632,7 @@ fn resolve_function(
         is_compile_time,
         attribute_uses,
         attributes: Vec::new(),
+        foreign: None,
     })
 }
 

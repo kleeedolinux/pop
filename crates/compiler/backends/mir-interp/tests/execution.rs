@@ -1,10 +1,13 @@
 use pop_backend_mir_interp::{ExecutionError, MirInterpreter, MirValue};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{
-    BubbleId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, SymbolId, UnionCaseId,
+    BubbleId, BuiltinTypeId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, ResultCaseId,
+    SymbolId, UnionCaseId,
 };
 use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
-use pop_runtime_interface::{PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason};
+use pop_runtime_interface::{
+    ForeignAddress, PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason,
+};
 use pop_source::SourceFile;
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
@@ -186,6 +189,120 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .call(choose, &[int(5), int(3)])
             .expect("else branch"),
         vec![int(3)]
+    );
+}
+
+#[test]
+fn safe_ffi_pointer_presence_executes_without_dynamic_conversion() {
+    let ffi = BubbleId::from_raw(20);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/pointers.pop",
+        "namespace Pointers\n\
+         public function inspect(pointer: Ffi.Pointer<Int>): Boolean\n\
+             local optional = Ffi.OptionalPointer.fromPointer(pointer)\n\
+             local readOnly = Ffi.Pointer.readOnly(pointer)\n\
+             local optionalReadOnly = Ffi.OptionalReadOnlyPointer.fromPointer(readOnly)\n\
+             local absent = Ffi.OptionalReadOnlyPointer.none<<Int>>()\n\
+             return Ffi.OptionalPointer.isPresent(optional) and Ffi.OptionalReadOnlyPointer.isPresent(optionalReadOnly) and not Ffi.OptionalReadOnlyPointer.isPresent(absent)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let inspect = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "inspect")
+        .expect("inspect")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let interpreter = MirInterpreter::new(&mir, front_end.types()).expect("verified MIR");
+
+    assert_eq!(
+        interpreter
+            .call(
+                inspect,
+                &[MirValue::FfiPointer(
+                    ForeignAddress::new(0x1234).expect("non-null foreign address"),
+                )],
+            )
+            .expect("pointer inspection"),
+        vec![MirValue::Boolean(true)]
+    );
+}
+
+#[test]
+fn checked_ffi_pointer_require_returns_exact_present_and_absent_results() {
+    let ffi = BubbleId::from_raw(20);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/requirePointer.pop",
+        "namespace Pointers\n\
+         public function requirePointer(pointer: Ffi.OptionalPointer<Int>): Result<Ffi.Pointer<Int>, Ffi.NullPointerError>\n\
+             return Ffi.OptionalPointer.require(pointer)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let require = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "requirePointer")
+        .expect("requirePointer")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let interpreter = MirInterpreter::new(&mir, front_end.types()).expect("verified MIR");
+    let address = ForeignAddress::new(0x1234).expect("non-null foreign address");
+
+    assert_eq!(
+        interpreter
+            .call(require, &[MirValue::FfiPointer(address)])
+            .expect("present pointer"),
+        vec![MirValue::Result {
+            definition: BuiltinTypeId::from_raw(100),
+            case: ResultCaseId::from_raw(0),
+            arguments: vec![MirValue::FfiPointer(address)],
+        }]
+    );
+    assert_eq!(
+        interpreter
+            .call(require, &[MirValue::Nil])
+            .expect("absent pointer"),
+        vec![MirValue::Result {
+            definition: BuiltinTypeId::from_raw(100),
+            case: ResultCaseId::from_raw(1),
+            arguments: vec![MirValue::FfiNullPointerError],
+        }]
     );
 }
 
@@ -1163,6 +1280,34 @@ fn cleanup_resume_preserves_the_original_unwind_reason() {
         Err(ExecutionError::Runtime(RuntimeFailure::Unwind(UnwindReason::Panic(payload))))
             if payload.kind() == PanicKind::RuntimeInvariant
     ));
+}
+
+#[test]
+fn interpreter_rejects_foreign_calls_without_an_exact_typed_adapter() {
+    let types = pop_types::TypeArena::new();
+    let int32 = types.source_type("Int32").expect("Int32");
+    let mir = parse_mir_dump(&format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "foreign s0 f0 params() results(t{int32}) symbol(native_poll) abi(C) links(-) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "function s1 f1() -> (t{int32}) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "  b0():\n",
+            "    do v0 gcSafePoint sp0 roots ()\n",
+            "    v1:t{int32} = callForeign s0 () safePoint sp0 roots () effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks] unwind propagate\n",
+            "    return (v1)\n",
+        ),
+        int32 = int32.raw(),
+    ))
+    .expect("foreign MIR");
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified foreign MIR");
+
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::UnsupportedForeignFunction(
+            SymbolId::from_raw(0)
+        ))
+    );
 }
 
 #[test]

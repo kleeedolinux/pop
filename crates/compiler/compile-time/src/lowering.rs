@@ -522,6 +522,31 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::TaskCancel { .. }
         | TypedExpressionKind::TaskGroup { .. }
         | TypedExpressionKind::TaskStart { .. } => UnsupportedCompileTimeConstruct::Suspension,
+        TypedExpressionKind::FfiHandleOpen { .. }
+        | TypedExpressionKind::FfiHandleGet { .. }
+        | TypedExpressionKind::FfiHandleClose { .. }
+        | TypedExpressionKind::FfiBufferOpen { .. }
+        | TypedExpressionKind::FfiBufferLength { .. }
+        | TypedExpressionKind::FfiBufferRead { .. }
+        | TypedExpressionKind::FfiBufferWrite { .. }
+        | TypedExpressionKind::FfiBufferClose { .. }
+        | TypedExpressionKind::FfiBufferWithPointer { .. }
+        | TypedExpressionKind::FfiBytesWithPin { .. }
+        | TypedExpressionKind::FfiPointerNone { .. }
+        | TypedExpressionKind::FfiPointerToOptional { .. }
+        | TypedExpressionKind::FfiPointerReadOnly { .. }
+        | TypedExpressionKind::FfiPointerIsPresent { .. }
+        | TypedExpressionKind::FfiPointerRequire { .. } => {
+            UnsupportedCompileTimeConstruct::ResultlessCall
+        }
+        TypedExpressionKind::FfiUnsafeLoad { .. }
+        | TypedExpressionKind::FfiUnsafeStore { .. }
+        | TypedExpressionKind::FfiUnsafeAdvance { .. }
+        | TypedExpressionKind::FfiUnsafeCopy { .. }
+        | TypedExpressionKind::FfiUnsafeAddress { .. }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress { .. } => {
+            UnsupportedCompileTimeConstruct::ResultlessCall
+        }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }

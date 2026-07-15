@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_compile_time::CompileTimeValue;
 use pop_diagnostics::compile_time as compile_time_diagnostics;
 use pop_foundation::{Diagnostic, FunctionId, ModuleId, SymbolId, TypeId};
-use pop_resolve::{ResolutionDatabase, SymbolSpace};
+use pop_resolve::{ResolutionDatabase, SymbolSpace, Visibility};
 use pop_syntax::{AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind};
 use pop_types::{
     AttributeAttachmentError, AttributeConstant, AttributeQueryIndex, AttributeTarget,
-    AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole, ResolvedAttribute,
-    ResolvedFunctionSignature, SignatureResolver, TypeArena,
+    AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole, ForeignAbi,
+    ForeignFunctionDeclaration, ResolvedAttribute, ResolvedFunctionSignature, SignatureResolver,
+    TypeArena,
 };
 
 use crate::api::FrontEndCompileTimeEvaluation;
@@ -24,7 +25,369 @@ use crate::compile_time::{
 };
 use crate::work::{
     AttributeResolutionContext, CompileTimeContext, DeclarationAttributeWork, FunctionWork,
+    NamespaceAttributeWork,
 };
+
+pub(crate) fn resolve_ffi_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
+    functions: &mut [FunctionWork],
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+    has_ffi_dependency: bool,
+    resolver: &SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !has_ffi_dependency {
+        return;
+    }
+    for namespace in namespaces.iter_mut() {
+        let mut ordinary = Vec::new();
+        let mut aliases = BTreeSet::new();
+        for attribute in std::mem::take(&mut namespace.attribute_uses) {
+            match ffi_attribute_role(database, bootstrap, namespace.module, &attribute) {
+                Some(CompilerAttributeRole::FfiLink) => {
+                    if let Some(alias) = parse_link_alias(&attribute) {
+                        if !aliases.insert(alias.clone()) {
+                            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                                attribute.span(),
+                                "duplicate Ffi.Link alias",
+                            ));
+                        }
+                    } else {
+                        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                            attribute.span(),
+                            "Ffi.Link requires one PascalCase alias string",
+                        ));
+                    }
+                }
+                Some(_) => diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "FFI attribute has the wrong attachment target",
+                )),
+                None => ordinary.push(attribute),
+            }
+        }
+        namespace.attribute_uses = ordinary;
+        namespace.ffi_link_aliases = aliases.into_iter().collect();
+    }
+    let aliases_by_module: BTreeMap<_, _> = namespaces
+        .iter()
+        .map(|namespace| (namespace.module, namespace.ffi_link_aliases.clone()))
+        .collect();
+    for function in functions {
+        resolve_foreign_function(
+            function,
+            aliases_by_module
+                .get(&function.module)
+                .cloned()
+                .unwrap_or_default(),
+            database,
+            bootstrap,
+            resolver,
+            diagnostics,
+        );
+    }
+}
+
+pub(crate) fn resolve_ffi_layout_attributes(
+    declarations: &mut [DeclarationAttributeWork],
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+    has_ffi_dependency: bool,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !has_ffi_dependency {
+        return;
+    }
+    let mut layouts = Vec::new();
+    for declaration in declarations {
+        let mut ordinary = Vec::new();
+        for attribute in std::mem::take(&mut declaration.attribute_uses) {
+            let name = attribute.path().join(".");
+            let shadowed = source_attribute_shadows_trusted_identity(
+                database,
+                declaration.module,
+                &name,
+                attribute.span(),
+            );
+            let role = (!shadowed)
+                .then(|| bootstrap.compiler_attribute_by_source_name(&name))
+                .flatten()
+                .filter(|entry| entry.owner_bubble() == "Pop.Ffi")
+                .map(|entry| entry.role());
+            match role {
+                Some(CompilerAttributeRole::FfiCLayout)
+                    if declaration.target == AttributeTarget::Record
+                        && attribute.arguments().is_empty() =>
+                {
+                    if resolver.mark_ffi_c_layout(declaration.symbol) {
+                        layouts.push((declaration.symbol, attribute.span()));
+                    } else {
+                        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                            attribute.span(),
+                            "Ffi.C.Layout requires one resolved record declaration",
+                        ));
+                    }
+                }
+                Some(CompilerAttributeRole::FfiCLayout) => {
+                    diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                        attribute.span(),
+                        "Ffi.C.Layout requires an argument-free record attachment",
+                    ));
+                }
+                Some(_) => diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "FFI attribute has the wrong attachment target",
+                )),
+                None => ordinary.push(attribute),
+            }
+        }
+        declaration.attribute_uses = ordinary;
+    }
+    for (symbol, span) in layouts {
+        if !resolver.ffi_c_layout_is_valid(symbol) {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                span,
+                "Ffi.C.Layout fields must use only accepted ABI storage types",
+            ));
+        }
+    }
+}
+
+fn resolve_foreign_function(
+    function: &mut FunctionWork,
+    link_aliases: Vec<String>,
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+    resolver: &SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut ordinary = Vec::new();
+    let mut foreign = None;
+    let mut nonblocking = None;
+    let mut malformed = false;
+    for attribute in std::mem::take(&mut function.attribute_uses) {
+        match ffi_attribute_role(database, bootstrap, function.module, &attribute) {
+            Some(CompilerAttributeRole::FfiForeign) if foreign.is_none() => {
+                foreign = Some(attribute);
+            }
+            Some(CompilerAttributeRole::FfiNonblocking) if nonblocking.is_none() => {
+                nonblocking = Some(attribute);
+            }
+            Some(CompilerAttributeRole::FfiForeign | CompilerAttributeRole::FfiNonblocking) => {
+                malformed = true;
+                diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "duplicate foreign function attribute",
+                ));
+            }
+            Some(_) => {
+                malformed = true;
+                diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "FFI attribute has the wrong attachment target",
+                ));
+            }
+            None => ordinary.push(attribute),
+        }
+    }
+    function.attribute_uses = ordinary;
+    let Some(foreign_syntax) = foreign else {
+        if let Some(nonblocking) = nonblocking {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                nonblocking.span(),
+                "Ffi.Nonblocking requires Ffi.Foreign",
+            ));
+        }
+        return;
+    };
+    let initial_error_count = diagnostics.len();
+    let parsed = parse_foreign_contract(&foreign_syntax).or_else(|| {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            foreign_syntax.span(),
+            "Ffi.Foreign requires a symbol and a closed ABI",
+        ));
+        None
+    });
+    if nonblocking
+        .as_ref()
+        .is_some_and(|attribute| !attribute.arguments().is_empty())
+    {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            nonblocking
+                .as_ref()
+                .map_or(foreign_syntax.span(), |value| value.span()),
+            "Ffi.Nonblocking takes no arguments",
+        ));
+    }
+    if !function.body.statements().is_empty() {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign functions cannot have a Pop body",
+        ));
+    }
+    if function.signature.is_async() {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign functions cannot be async",
+        ));
+    }
+    if !function.signature.type_parameters().is_empty() {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign functions cannot be generic",
+        ));
+    }
+    if function.visibility == Visibility::Public
+        && database
+            .index()
+            .module(function.module)
+            .is_none_or(|module| module.namespace().rsplit('.').next() != Some("Unsafe"))
+    {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "public foreign functions require a final Unsafe namespace",
+        ));
+    }
+    let abi_types_valid = function.signature.parameters().iter().all(|parameter| {
+        parameter
+            .parameter_type()
+            .type_id()
+            .is_some_and(|type_id| resolver.ffi_foreign_abi_type_is_valid(type_id))
+    }) && function.signature.results().iter().all(|result| {
+        result
+            .type_id()
+            .is_some_and(|type_id| resolver.ffi_foreign_abi_type_is_valid(type_id))
+    });
+    if !abi_types_valid {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            function.span,
+            "foreign signature contains a type without a direct ABI representation",
+        ));
+    }
+    if malformed || diagnostics.len() != initial_error_count {
+        return;
+    }
+    let Some((external_symbol, abi)) = parsed else {
+        return;
+    };
+    let declaration = ForeignFunctionDeclaration::new(
+        function.signature.symbol(),
+        external_symbol,
+        abi,
+        link_aliases,
+        nonblocking.is_some(),
+        foreign_syntax.span(),
+    );
+    function.signature = function
+        .signature
+        .clone()
+        .with_effects(declaration.effects());
+    function.foreign = Some(declaration);
+}
+
+fn ffi_attribute_role(
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+    module: ModuleId,
+    attribute: &AttributeUseSyntax,
+) -> Option<CompilerAttributeRole> {
+    let name = attribute.path().join(".");
+    let entry = bootstrap.compiler_attribute_by_source_name(&name)?;
+    let shadowed =
+        source_attribute_shadows_trusted_identity(database, module, &name, attribute.span());
+    (entry.owner_bubble() == "Pop.Ffi" && !shadowed).then(|| entry.role())
+}
+
+fn source_attribute_shadows_trusted_identity(
+    database: &ResolutionDatabase,
+    module: ModuleId,
+    name: &str,
+    span: pop_foundation::SourceSpan,
+) -> bool {
+    if database
+        .resolve(module, name, SymbolSpace::Type, span)
+        .symbol()
+        .is_some()
+        || !database
+            .index()
+            .declaration_by_qualified_name(name, SymbolSpace::Type)
+            .is_empty()
+    {
+        return true;
+    }
+    let Some((root, tail)) = name.split_once('.') else {
+        return false;
+    };
+    database.index().module(module).is_some_and(|context| {
+        context.usings().iter().any(|using| {
+            using.alias() == Some(root)
+                && !database
+                    .index()
+                    .declaration_by_qualified_name(
+                        &format!("{}.{}", using.namespace(), tail),
+                        SymbolSpace::Type,
+                    )
+                    .is_empty()
+        })
+    })
+}
+
+fn parse_link_alias(attribute: &AttributeUseSyntax) -> Option<String> {
+    let [argument] = attribute.arguments() else {
+        return None;
+    };
+    if argument.name().is_some() {
+        return None;
+    }
+    let ExpressionSyntaxKind::String(alias) = argument.value().kind() else {
+        return None;
+    };
+    valid_pascal_identifier(alias).then(|| alias.clone())
+}
+
+fn valid_pascal_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_uppercase())
+        && characters.all(|character| character.is_ascii_alphanumeric())
+}
+
+fn parse_foreign_contract(attribute: &AttributeUseSyntax) -> Option<(String, ForeignAbi)> {
+    let arguments = attribute.arguments();
+    if !(1..=2).contains(&arguments.len()) || arguments[0].name().is_some() {
+        return None;
+    }
+    let ExpressionSyntaxKind::String(symbol) = arguments[0].value().kind() else {
+        return None;
+    };
+    if symbol.is_empty()
+        || !symbol.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '$' | '@' | '?')
+        })
+    {
+        return None;
+    }
+    let abi = if let Some(argument) = arguments.get(1) {
+        if argument.name() != Some("abi") {
+            return None;
+        }
+        let ExpressionSyntaxKind::String(abi) = argument.value().kind() else {
+            return None;
+        };
+        match abi.as_str() {
+            "C" => ForeignAbi::C,
+            "System" => ForeignAbi::System,
+            "CUnwind" => ForeignAbi::CUnwind,
+            _ => return None,
+        }
+    } else {
+        ForeignAbi::C
+    };
+    Some((symbol.clone(), abi))
+}
 
 pub(crate) fn classify_function_attributes(
     database: &ResolutionDatabase,
@@ -309,6 +672,7 @@ fn resolve_attribute_validator(
 }
 
 pub(crate) fn resolve_source_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
     declarations: &mut [DeclarationAttributeWork],
     functions: &mut [FunctionWork],
     context: AttributeResolutionContext<'_>,
@@ -334,6 +698,13 @@ pub(crate) fn resolve_source_attributes(
         compile_time_evaluations,
         diagnostics,
     );
+    resolve_namespace_attributes(
+        namespaces,
+        context,
+        resolver,
+        compile_time_evaluations,
+        diagnostics,
+    );
     resolve_function_attributes(
         functions,
         context.database,
@@ -344,6 +715,39 @@ pub(crate) fn resolve_source_attributes(
         diagnostics,
     );
     build_attribute_query_index(declarations, functions, resolver)
+}
+
+fn resolve_namespace_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
+    context: AttributeResolutionContext<'_>,
+    resolver: &mut SignatureResolver<'_>,
+    compile_time_evaluations: &mut Vec<FrontEndCompileTimeEvaluation>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for namespace in namespaces {
+        let resolved_attributes = resolve_attribute_uses(
+            namespace.module,
+            AttributeTarget::Namespace,
+            &namespace.attribute_uses,
+            context.database,
+            context.signatures,
+            context.compile_time,
+            resolver,
+            compile_time_evaluations,
+            diagnostics,
+        );
+        let validated = resolver
+            .validate_attribute_attachments(AttributeTarget::Namespace, resolved_attributes);
+        diagnostics.extend(
+            validated
+                .errors()
+                .iter()
+                .map(attribute_attachment_diagnostic),
+        );
+        if let Some(attachments) = validated.attachment_set() {
+            namespace.attributes = attachments.attachments().to_vec();
+        }
+    }
 }
 
 fn resolve_function_attributes(

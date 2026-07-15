@@ -104,3 +104,50 @@ fn native_allocation_churn_keeps_reclamation_and_page_growth_bounded() {
     assert!(runtime.object_count() < 4_096);
     assert!(memory.committed_bytes() <= 12 * 1024 * 1024);
 }
+
+#[test]
+#[allow(unsafe_code)]
+fn immutable_bytes_borrow_exposes_only_one_stable_payload_region() {
+    let mut runtime = StableGenerationalRuntime::new();
+    let empty = runtime
+        .allocate_immutable_bytes(&[])
+        .expect("empty immutable bytes");
+    let empty_borrow = runtime.ffi_bytes_borrow(empty).expect("empty borrow");
+    assert_eq!(empty_borrow.address(), None);
+    assert_eq!(empty_borrow.length(), 0);
+    runtime
+        .ffi_bytes_end_borrow(empty, empty_borrow.id())
+        .expect("end empty borrow");
+
+    let bytes = runtime
+        .allocate_immutable_bytes(&[1, 2, 3, 4])
+        .expect("immutable bytes");
+    let other = runtime
+        .allocate_immutable_bytes(&[9])
+        .expect("other immutable bytes");
+    let borrow = runtime.ffi_bytes_borrow(bytes).expect("payload borrow");
+    assert_eq!(borrow.length(), 4);
+    let address = borrow.address().expect("nonempty payload address");
+    // SAFETY: The active borrow owns an immutable payload of the reported
+    // length until the exact matching end operation below.
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(address.raw() as *const u8, 4) },
+        [1, 2, 3, 4]
+    );
+    assert!(runtime.ffi_bytes_borrow(bytes).is_err());
+    assert!(runtime.ffi_bytes_end_borrow(other, borrow.id()).is_err());
+
+    runtime.request_collection();
+    runtime
+        .safe_point(&mut empty_roots(4))
+        .expect("collection while payload is pinned");
+    // SAFETY: Collection cannot move or reclaim the active borrowed payload.
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(address.raw() as *const u8, 4) },
+        [1, 2, 3, 4]
+    );
+    runtime
+        .ffi_bytes_end_borrow(bytes, borrow.id())
+        .expect("end exact payload borrow");
+    assert!(runtime.ffi_bytes_end_borrow(bytes, borrow.id()).is_err());
+}

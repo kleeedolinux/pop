@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
@@ -15,7 +15,7 @@ use pop_syntax::{
 use crate::field_defaults::resolve_field_default;
 use crate::required_constants::field_default_matches_type;
 use crate::{
-    BootstrapSchema, BootstrapTypeRole, FieldDefault, PendingConstantExpression,
+    BootstrapSchema, BootstrapTypeRole, FieldDefault, PendingConstantExpression, PrimitiveType,
     RequiredConstantError, RequiredConstantTarget, SemanticType, TypeArena,
 };
 
@@ -195,6 +195,12 @@ impl ResolvedFunctionSignature {
         self
     }
 
+    #[must_use]
+    pub const fn with_effects(mut self, effects: crate::EffectSummary) -> Self {
+        self.effects = effects;
+        self
+    }
+
     /// Rehydrates one already-verified public reference signature in the
     /// consumer's isolated type arena.
     #[must_use]
@@ -275,6 +281,7 @@ pub struct RecordDefinition {
     symbol: SymbolId,
     type_id: TypeId,
     fields: Vec<RecordFieldDefinition>,
+    ffi_c_layout: bool,
     span: SourceSpan,
 }
 
@@ -292,6 +299,11 @@ impl RecordDefinition {
     #[must_use]
     pub fn fields(&self) -> &[RecordFieldDefinition] {
         &self.fields
+    }
+
+    #[must_use]
+    pub const fn has_ffi_c_layout(&self) -> bool {
+        self.ffi_c_layout
     }
 
     #[must_use]
@@ -650,6 +662,7 @@ impl ResolvedSignatureResult {
 pub struct SignatureResolver<'index> {
     database: &'index ResolutionDatabase,
     schema: BootstrapSchema,
+    has_ffi_dependency: bool,
     pub(crate) arena: TypeArena,
     next_parameter: u32,
     pub(crate) next_field: u32,
@@ -712,6 +725,7 @@ impl<'index> SignatureResolver<'index> {
         Self {
             database,
             schema,
+            has_ffi_dependency: false,
             arena: TypeArena::new(),
             next_parameter: 0,
             next_field: 0,
@@ -759,6 +773,19 @@ impl<'index> SignatureResolver<'index> {
             interfaces_by_type: BTreeMap::new(),
             attribute_definitions: BTreeMap::new(),
         }
+    }
+
+    /// Enables compiler-owned `Pop.Ffi` types after the caller verifies an
+    /// explicit dependency on the reserved `Pop.Ffi` Bubble identity.
+    #[must_use]
+    pub const fn with_ffi_dependency(mut self) -> Self {
+        self.has_ffi_dependency = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn has_ffi_dependency(&self) -> bool {
+        self.has_ffi_dependency
     }
 
     #[must_use]
@@ -1128,6 +1155,7 @@ impl<'index> SignatureResolver<'index> {
             symbol,
             type_id,
             fields,
+            ffi_c_layout: template.ffi_c_layout,
             span: template.span,
         };
         self.record_instances.insert(key, symbol);
@@ -1503,6 +1531,7 @@ impl<'index> SignatureResolver<'index> {
                     symbol,
                     type_id,
                     fields,
+                    ffi_c_layout: false,
                     span: syntax.span(),
                 }
             })
@@ -1520,6 +1549,147 @@ impl<'index> SignatureResolver<'index> {
             definition,
             diagnostics,
         }
+    }
+
+    /// Marks one record template and every existing concrete instance as a
+    /// trusted C-layout record.
+    pub fn mark_ffi_c_layout(&mut self, symbol: SymbolId) -> bool {
+        if !self.record_definitions.contains_key(&symbol) {
+            return false;
+        }
+        if let Some(definition) = self.record_definitions.get_mut(&symbol) {
+            definition.ffi_c_layout = true;
+        }
+        let instances = self
+            .record_instances
+            .iter()
+            .filter_map(|((source, _), instance)| (*source == symbol).then_some(*instance))
+            .collect::<Vec<_>>();
+        for instance in instances {
+            if let Some(definition) = self.record_definitions.get_mut(&instance) {
+                definition.ffi_c_layout = true;
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn ffi_c_layout_is_valid(&self, symbol: SymbolId) -> bool {
+        self.ffi_c_layout_is_valid_inner(symbol, &mut BTreeSet::new())
+    }
+
+    /// Returns whether one exact type belongs to the accepted direct foreign
+    /// ABI mapping. The proof recursively validates pointer elements,
+    /// callback packs, handle payload representation, and trusted layout
+    /// records; wrappers never make an invalid nested type ABI-compatible.
+    #[must_use]
+    pub fn ffi_foreign_abi_type_is_valid(&self, type_id: TypeId) -> bool {
+        self.ffi_foreign_abi_type_is_valid_inner(type_id, &mut BTreeSet::new())
+    }
+
+    fn ffi_foreign_abi_type_is_valid_inner(
+        &self,
+        type_id: TypeId,
+        visiting: &mut BTreeSet<SymbolId>,
+    ) -> bool {
+        match self.arena.get(type_id) {
+            Some(SemanticType::Primitive(
+                PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+            )) => true,
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if crate::is_ffi_integer_abi_builtin_type(*definition) => arguments.is_empty(),
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if crate::is_ffi_pointer_type_constructor(*definition) => {
+                let [element] = arguments.as_slice() else {
+                    return false;
+                };
+                matches!(self.arena.get(*element), Some(SemanticType::Opaque(_)))
+                    || self.ffi_foreign_abi_type_is_valid_inner(*element, visiting)
+            }
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if crate::is_ffi_function_type_constructor(*definition) => {
+                let [signature] = arguments.as_slice() else {
+                    return false;
+                };
+                let Some(SemanticType::Function {
+                    is_async,
+                    parameters,
+                    results,
+                    ..
+                }) = self.arena.get(*signature)
+                else {
+                    return false;
+                };
+                !is_async
+                    && parameters
+                        .iter()
+                        .chain(results)
+                        .all(|type_id| self.ffi_foreign_abi_type_is_valid_inner(*type_id, visiting))
+            }
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == crate::FFI_HANDLE_TYPE_ID => {
+                let [payload] = arguments.as_slice() else {
+                    return false;
+                };
+                self.ffi_handle_payload_is_valid(*payload)
+            }
+            Some(SemanticType::Record(_)) => self
+                .records_by_type
+                .get(&type_id)
+                .is_some_and(|record| self.ffi_c_layout_is_valid_inner(*record, visiting)),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn ffi_handle_payload_is_valid(&self, payload: TypeId) -> bool {
+        matches!(
+            self.arena.get(payload),
+            Some(
+                SemanticType::Primitive(PrimitiveType::String)
+                    | SemanticType::Tuple(_)
+                    | SemanticType::Array(_)
+                    | SemanticType::Table { .. }
+                    | SemanticType::Class { .. }
+                    | SemanticType::Interface { .. }
+                    | SemanticType::Function { .. }
+                    | SemanticType::ErrorUnion { .. }
+            )
+        ) || matches!(
+            self.arena.get(payload),
+            Some(SemanticType::Builtin { definition, .. })
+                if !crate::is_ffi_abi_builtin_type(*definition)
+                    && *definition != crate::FFI_NULL_POINTER_ERROR_TYPE_ID
+                    && *definition != crate::FFI_ALLOCATION_ERROR_TYPE_ID
+        )
+    }
+
+    fn ffi_c_layout_is_valid_inner(
+        &self,
+        symbol: SymbolId,
+        visiting: &mut BTreeSet<SymbolId>,
+    ) -> bool {
+        let Some(definition) = self.record_definitions.get(&symbol) else {
+            return false;
+        };
+        if !definition.ffi_c_layout || definition.fields.is_empty() || !visiting.insert(symbol) {
+            return false;
+        }
+        let valid = definition.fields.iter().all(|field| {
+            !field.has_default()
+                && field.pending_default().is_none()
+                && self.ffi_foreign_abi_type_is_valid_inner(field.field_type, visiting)
+        });
+        visiting.remove(&symbol);
+        valid
     }
 
     /// Installs one already-evaluated record field default into a deferred schema.
@@ -2029,10 +2199,16 @@ impl<'index> SignatureResolver<'index> {
         if let Some(entry) = simple
             .and_then(|name| self.schema.type_by_source_name(name))
             .copied()
+            .filter(|entry| self.bootstrap_type_is_available(*entry))
         {
             return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
         }
-        if let Some(entry) = self.schema.type_by_source_name(&path.join(".")).copied() {
+        if let Some(entry) = self
+            .schema
+            .type_by_source_name(&path.join("."))
+            .copied()
+            .filter(|entry| self.bootstrap_type_is_available(*entry))
+        {
             return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
         }
         let name = path.join(".");
@@ -2265,6 +2441,10 @@ impl<'index> SignatureResolver<'index> {
             type_id,
             syntax.span(),
         ))
+    }
+
+    fn bootstrap_type_is_available(&self, entry: crate::BootstrapTypeEntry) -> bool {
+        entry.owner_bubble() != "Pop.Ffi" || self.has_ffi_dependency
     }
 
     fn resolve_builtin(

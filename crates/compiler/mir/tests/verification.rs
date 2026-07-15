@@ -26,12 +26,69 @@ fn diamond_mir(types: &TypeArena) -> String {
     )
 }
 
+fn foreign_call_mir(types: &TypeArena) -> String {
+    let int32 = types.source_type("Int32").expect("Int32");
+    format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "foreign s0 f0 params() results(t{int32}) symbol(native_poll) abi(C) links(-) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "function s1 f1() -> (t{int32}) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "  b0():\n",
+            "    do v0 gcSafePoint sp0 roots ()\n",
+            "    v1:t{int32} = callForeign s0 () safePoint sp0 roots () effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks] unwind propagate\n",
+            "    return (v1)\n",
+        ),
+        int32 = int32.raw(),
+    )
+}
+
 #[test]
 fn verifier_accepts_typed_diamond_edges_and_join_arguments() {
     let types = TypeArena::new();
     let mir = parse_mir_dump(&diamond_mir(&types)).expect("diamond MIR");
 
     assert!(verify_mir_bubble(&mir, &types).is_ok());
+}
+
+#[test]
+fn verifier_rejects_forged_foreign_call_identity_and_root_publication() {
+    let types = TypeArena::new();
+    let valid = foreign_call_mir(&types);
+    let direct = parse_mir_dump(&valid.replace(
+        "callForeign s0 () safePoint sp0 roots ()",
+        "callDirect s0 ()",
+    ))
+    .expect("direct call to foreign identity parses");
+    let wrong_identity = parse_mir_dump(&valid.replace("callForeign s0", "callForeign s1"))
+        .expect("foreign call to Pop identity parses");
+    let wrong_roots = parse_mir_dump(&valid.replace(
+        "callForeign s0 () safePoint sp0 roots () effects",
+        "callForeign s0 () safePoint sp1 roots () effects",
+    ))
+    .expect("mismatched foreign publication parses");
+
+    assert!(matches!(
+        verify_mir_bubble(&direct, &types),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidForeignCall { function, .. } if function.raw() == 0
+        ))
+    ));
+    assert!(matches!(
+        verify_mir_bubble(&wrong_identity, &types),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidForeignCall { function, .. } if function.raw() == 1
+        ))
+    ));
+    assert!(matches!(
+        verify_mir_bubble(&wrong_roots, &types),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidForeignRoots { .. }
+        ))
+    ));
 }
 
 #[test]

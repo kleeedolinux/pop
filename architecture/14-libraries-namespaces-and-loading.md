@@ -177,6 +177,8 @@ verification occurs before executable content is mapped.
 - public namespace index;
 - Module initialization entry points and ordering edges;
 - runtime/target capabilities and native foreign-library dependencies;
+- canonical native link requirements, provider/version facts, local-input
+  hashes, and ABI fingerprints from ADR 0081;
 - optional signing information;
 - whether this is a reference-only artifact;
 - documentation hash/schema when present.
@@ -305,7 +307,9 @@ runtime initialization.
 - Generic portable bodies are versioned with HIR/MIR schemas.
 - Manifests and all artifact files are hash verified.
 - Load paths come from `bubble.lock`, not environment probing.
-- Native foreign dependencies require explicit policy metadata.
+- Native foreign dependencies use the typed, target-specific, hash-verified
+  `NativeLinkPlan` from ADR 0081. Artifacts and locks contain no ambient host
+  paths, raw linker flags, shell commands, or runtime symbol lookups.
 - Compile-time code can read permitted reference metadata but cannot execute
   dependency native code.
 - Cache keys include Package/Bubble identities, content, API, target, edition,

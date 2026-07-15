@@ -35,6 +35,9 @@ pub(crate) fn dump_declaration(
                 declaration.name,
                 type_text(record.type_id, arena)
             );
+            if record.ffi_c_layout {
+                output.push_str(" ffiCLayout");
+            }
         }
         HirDeclarationKind::Union(union) => {
             let _ = write!(
@@ -225,6 +228,53 @@ pub(crate) fn dump_function(output: &mut String, function: &HirFunction, arena: 
     }
     output.push_str(")\n");
     dump_statements(output, &function.body, arena, 1);
+}
+
+pub(crate) fn dump_foreign_function(
+    output: &mut String,
+    function: &HirForeignFunction,
+    arena: &TypeArena,
+) {
+    let declaration = function.declaration();
+    let _ = write!(
+        output,
+        "foreign s{} f{} {} m{} b{} {}(",
+        function.symbol().raw(),
+        function.function().raw(),
+        visibility_text(function.visibility()),
+        function.module().raw(),
+        function.bubble().raw(),
+        function.name()
+    );
+    for (index, parameter) in function.parameters().iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        let _ = write!(
+            output,
+            "p{}:{}:{}",
+            parameter.parameter().raw(),
+            parameter.name(),
+            type_text(parameter.type_id(), arena)
+        );
+    }
+    output.push_str(") -> (");
+    for (index, result) in function.results().iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&type_text(*result, arena));
+    }
+    let _ = write!(
+        output,
+        ") symbol=\"{}\" abi={:?}",
+        declaration.external_symbol(),
+        declaration.abi()
+    );
+    for alias in declaration.link_aliases() {
+        let _ = write!(output, " link={alias}");
+    }
+    output.push('\n');
 }
 
 pub(crate) fn dump_method(output: &mut String, method: &HirMethod, arena: &TypeArena) {
@@ -1064,6 +1114,203 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, task, arena);
             output.push(')');
         }
+        HirExpressionKind::FfiHandleOpen { value } => {
+            output.push_str("ffi.handle.open(");
+            dump_expression(output, value, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiHandleGet { handle } => {
+            output.push_str("ffi.handle.get(");
+            dump_expression(output, handle, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiHandleClose { handle } => {
+            output.push_str("ffi.handle.close(");
+            dump_expression(output, handle, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferOpen {
+            length,
+            element,
+            layout_record,
+        } => {
+            output.push_str("ffi.buffer.open<<");
+            output.push_str(&type_text(*element, arena));
+            if let Some(record) = layout_record {
+                let _ = write!(output, " layoutRecord s{}", record.raw());
+            }
+            output.push_str(">>(");
+            dump_expression(output, length, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferLength { buffer } => {
+            output.push_str("ffi.buffer.length(");
+            dump_expression(output, buffer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            output.push_str("ffi.buffer.read(");
+            dump_expression(output, buffer, arena);
+            output.push_str(", ");
+            dump_expression(output, index, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            output.push_str("ffi.buffer.write(");
+            dump_expression(output, buffer, arena);
+            output.push_str(", ");
+            dump_expression(output, index, arena);
+            output.push_str(", ");
+            dump_expression(output, value, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferClose { buffer } => {
+            output.push_str("ffi.buffer.close(");
+            dump_expression(output, buffer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            output.push_str("ffi.buffer.withPointer(");
+            dump_expression(output, buffer, arena);
+            let _ = write!(output, ", scoped nested#{})", body.function.raw());
+        }
+        HirExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            output.push_str("ffi.withPin(");
+            dump_expression(output, bytes, arena);
+            let _ = write!(output, ", scoped nested#{})", body.function.raw());
+        }
+        HirExpressionKind::FfiPointerNone {
+            element,
+            layout_record,
+            read_only,
+        } => {
+            output.push_str(if *read_only {
+                "ffi.pointer.none.readOnly<<"
+            } else {
+                "ffi.pointer.none<<"
+            });
+            output.push_str(&type_text(*element, arena));
+            if let Some(record) = layout_record {
+                let _ = write!(output, " layoutRecord s{}", record.raw());
+            }
+            output.push_str(">>()");
+        }
+        HirExpressionKind::FfiPointerToOptional { pointer } => {
+            output.push_str("ffi.pointer.toOptional(");
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiPointerReadOnly { pointer } => {
+            output.push_str("ffi.pointer.readOnly(");
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiPointerIsPresent { pointer } => {
+            output.push_str("ffi.pointer.isPresent(");
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffi.pointer.require result bt{} success resultCase#{} failure resultCase#{}(",
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiUnsafeLoad {
+            pointer,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "load",
+            *element,
+            *layout_record,
+            [pointer.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "store",
+            *element,
+            *layout_record,
+            [pointer.as_ref(), value.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            element,
+            layout_record,
+            read_only,
+        } => dump_ffi_unsafe_operation(
+            output,
+            if *read_only {
+                "advanceReadOnly"
+            } else {
+                "advance"
+            },
+            *element,
+            *layout_record,
+            [pointer.as_ref(), elements.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "copy",
+            *element,
+            *layout_record,
+            [source.as_ref(), destination.as_ref(), count.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafeAddress {
+            pointer,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "address",
+            *element,
+            *layout_record,
+            [pointer.as_ref()],
+            arena,
+        ),
+        HirExpressionKind::FfiUnsafePointerFromAddress {
+            address,
+            element,
+            layout_record,
+        } => dump_ffi_unsafe_operation(
+            output,
+            "pointerFromAddress",
+            *element,
+            *layout_record,
+            [address.as_ref()],
+            arena,
+        ),
         HirExpressionKind::Call {
             dispatch,
             type_arguments,
@@ -1090,6 +1337,32 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));
+}
+
+fn dump_ffi_unsafe_operation<'a>(
+    output: &mut String,
+    operation: &str,
+    element: TypeId,
+    layout_record: Option<SymbolId>,
+    arguments: impl IntoIterator<Item = &'a HirExpression>,
+    arena: &TypeArena,
+) {
+    let _ = write!(
+        output,
+        "ffi.unsafe.{operation}<<{}",
+        type_text(element, arena)
+    );
+    if let Some(record) = layout_record {
+        let _ = write!(output, " layoutRecord s{}", record.raw());
+    }
+    output.push_str(">>(");
+    for (index, argument) in arguments.into_iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        dump_expression(output, argument, arena);
+    }
+    output.push(')');
 }
 
 fn dump_float_value(output: &mut String, value: FloatValue) {

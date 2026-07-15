@@ -226,6 +226,10 @@ impl fmt::Display for LlvmModule {
 pub enum LlvmLoweringError {
     MirVerification(Vec<pop_mir::MirVerificationError>),
     RuntimeProfile(RuntimeProfileError),
+    FfiLayoutTargetMismatch {
+        catalog: String,
+        target: String,
+    },
     UnsupportedInstruction {
         function: FunctionId,
         value: ValueId,
@@ -234,10 +238,12 @@ pub enum LlvmLoweringError {
         value: ValueId,
         location: String,
     },
+    InvalidFfiLayout(pop_runtime_interface::FfiAbiLayoutId),
     InvalidType(TypeId),
     InvalidFieldLayout(FieldId),
     InvalidEntryPoint(SymbolId),
     UnsupportedEntryPointSignature(SymbolId),
+    UnsupportedForeignFunction(SymbolId),
     UnsupportedAsync,
 }
 
@@ -248,6 +254,10 @@ impl fmt::Display for LlvmLoweringError {
                 write!(formatter, "MIR verification failed: {errors:?}")
             }
             Self::RuntimeProfile(error) => write!(formatter, "runtime profile rejected: {error}"),
+            Self::FfiLayoutTargetMismatch { catalog, target } => write!(
+                formatter,
+                "MIR FFI layout target {catalog} does not match LLVM target {target}"
+            ),
             Self::UnsupportedInstruction { function, value } => write!(
                 formatter,
                 "LLVM backend does not support MIR instruction f{} v{}",
@@ -259,6 +269,9 @@ impl fmt::Display for LlvmLoweringError {
                 "LLVM ABI 2 lowering retained stale managed value v{} at {location}",
                 value.raw()
             ),
+            Self::InvalidFfiLayout(layout) => {
+                write!(formatter, "invalid MIR FFI layout #{}", layout.raw())
+            }
             Self::InvalidType(type_id) => write!(formatter, "invalid MIR type t{}", type_id.raw()),
             Self::InvalidFieldLayout(field) => {
                 write!(formatter, "no LLVM field layout for field f{}", field.raw())
@@ -273,6 +286,11 @@ impl fmt::Display for LlvmLoweringError {
             Self::UnsupportedEntryPointSignature(symbol) => write!(
                 formatter,
                 "entry point s{} must accept () or (Array<String>) and return () or Int",
+                symbol.raw()
+            ),
+            Self::UnsupportedForeignFunction(symbol) => write!(
+                formatter,
+                "LLVM backend does not support foreign function s{} on this target",
                 symbol.raw()
             ),
             Self::UnsupportedAsync => write!(

@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use pop_driver::load_poplib;
+use pop_projects::sha256_hex;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -41,6 +42,36 @@ fn run_pop(arguments: &[&str], source: Option<&str>) -> Output {
 
 fn output_text(output: &[u8]) -> String {
     String::from_utf8(output.to_vec()).expect("pop output is UTF-8")
+}
+
+fn build_native_answer_archive(package: &Path) -> String {
+    std::fs::create_dir_all(package.join("native")).expect("create FFI native inputs");
+    std::fs::write(
+        package.join("native/answer.c"),
+        "#include <stdint.h>\nint32_t native_answer(void) { return 42; }\n",
+    )
+    .expect("write native fixture");
+    let compile = Command::new("clang")
+        .args(["-c", "answer.c", "-o", "answer.o"])
+        .current_dir(package.join("native"))
+        .output()
+        .expect("clang compiles native fixture");
+    assert!(
+        compile.status.success(),
+        "native fixture compilation failed: {}",
+        output_text(&compile.stderr)
+    );
+    let archive = Command::new("ar")
+        .args(["rcs", "libanswer.a", "answer.o"])
+        .current_dir(package.join("native"))
+        .output()
+        .expect("ar creates native fixture archive");
+    assert!(
+        archive.status.success(),
+        "native fixture archive failed: {}",
+        output_text(&archive.stderr)
+    );
+    sha256_hex(&std::fs::read(package.join("native/libanswer.a")).expect("read native archive"))
 }
 
 fn temporary_package(name: &str, library: &str, binary: &str) -> PathBuf {
@@ -638,6 +669,270 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
     assert_eq!(dependency.bubble(), "Studio.Data");
 
     std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn package_check_enables_ffi_types_for_an_explicit_pop_ffi_dependency() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .to_path_buf();
+    let package = repository
+        .join("target")
+        .join(format!("pop-ffi-dependency-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create FFI consumer Package");
+    std::fs::write(
+        package.join("bubble.toml"),
+        "[package]\n\
+         name = \"Native.Consumer\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [dependencies]\n\
+         PopFfi = { path = \"../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }\n",
+    )
+    .expect("write FFI consumer manifest");
+    std::fs::write(
+        package.join("src/lib.pop"),
+        "namespace Native.Consumer\n\
+         public function close(pointer: Ffi.Pointer<Ffi.C.Int>)\n\
+         end\n",
+    )
+    .expect("write FFI consumer source");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop check resolves explicit Pop.Ffi dependency");
+
+    assert!(
+        check.status.success(),
+        "FFI dependency check failed: {}",
+        output_text(&check.stderr)
+    );
+    std::fs::remove_dir_all(package).expect("remove temporary FFI consumer Package");
+}
+
+#[test]
+fn package_build_links_a_hashed_native_archive_and_records_its_plan() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .to_path_buf();
+    let package = repository
+        .join("target")
+        .join(format!("pop-ffi-native-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create FFI Package source");
+    let archive_hash = build_native_answer_archive(&package);
+    std::fs::write(
+        package.join("bubble.toml"),
+        format!(
+            "[package]\nname = \"Native.Answer\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\nPopFfi = {{ path = \"../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }}\n[nativeLibraries]\nAnswer = {{ kind = \"archive\", path = \"native/libanswer.a\", sha256 = \"{archive_hash}\" }}\n"
+        ),
+    )
+    .expect("write FFI Package manifest");
+    std::fs::write(
+        package.join("src/lib.pop"),
+        "namespace Native.Answer\n\
+         public function libraryMarker(): Int\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("write FFI library Bubble");
+    std::fs::write(
+        package.join("src/main.pop"),
+        "@Ffi.Link(\"Answer\")\n\
+         namespace Native.Answer.Unsafe\n\
+         @Ffi.Foreign(\"native_answer\")\n\
+         internal function answer(): Int32\n\
+         end\n\
+         function main(): Int\n\
+             return Int(answer())\n\
+         end\n",
+    )
+    .expect("write FFI binary Bubble");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop builds statically bound native Package");
+    assert!(
+        build.status.success(),
+        "FFI Package build failed: {}",
+        output_text(&build.stderr)
+    );
+    assert_eq!(
+        Command::new(package.join("target/debug/Native.Answer"))
+            .status()
+            .expect("FFI executable runs")
+            .code(),
+        Some(42)
+    );
+    let artifact = load_poplib(&package.join("target/debug/deps/Native.Answer.poplib"))
+        .expect("FFI library artifact verifies");
+    assert_eq!(artifact.native_link_plans().len(), 1);
+    assert_eq!(
+        artifact.native_link_plans()[0].libraries()[0].alias(),
+        "Answer"
+    );
+    assert_eq!(artifact.resolved_native_providers().len(), 1);
+    assert_eq!(artifact.resolved_native_providers()[0].alias(), "Answer");
+    assert_eq!(
+        artifact.resolved_native_providers()[0].identity(),
+        "native/libanswer.a"
+    );
+    assert_eq!(
+        artifact.resolved_native_providers()[0].sha256(),
+        Some(archive_hash.as_str())
+    );
+    std::fs::write(package.join("native/libanswer.a"), b"tampered archive")
+        .expect("tamper native archive");
+    let rejected = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop checks the native input hash");
+    assert!(
+        !rejected.status.success(),
+        "pop check accepted a hash-mismatched native input"
+    );
+
+    std::fs::remove_dir_all(package).expect("remove FFI Package fixture");
+}
+
+#[test]
+fn package_build_merges_a_transitive_native_link_plan() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .to_path_buf();
+    let workspace = repository
+        .join("target")
+        .join(format!("pop-ffi-transitive-{}", std::process::id()));
+    let dependency = workspace.join("nativeDependency");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(dependency.join("src")).expect("create native dependency");
+    std::fs::create_dir_all(application.join("src")).expect("create native application");
+    let archive_hash = build_native_answer_archive(&dependency);
+    std::fs::write(
+        dependency.join("bubble.toml"),
+        format!(
+            "[package]\nname = \"Native.Dependency\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\nPopFfi = {{ path = \"../../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }}\n[nativeLibraries]\nAnswer = {{ kind = \"archive\", path = \"native/libanswer.a\", sha256 = \"{archive_hash}\" }}\n"
+        ),
+    )
+    .expect("write native dependency manifest");
+    std::fs::write(
+        dependency.join("src/unsafe.pop"),
+        "@Ffi.Link(\"Answer\")\n\
+         namespace Native.Dependency.Unsafe\n\
+         @Ffi.Foreign(\"native_answer\")\n\
+         internal function answer(): Int32\n\
+         end\n",
+    )
+    .expect("write low-level native binding");
+    std::fs::write(
+        dependency.join("src/lib.pop"),
+        "namespace Native.Dependency\n\
+         public function safeAnswer(): Int\n\
+             return Int(Native.Dependency.Unsafe.answer())\n\
+         end\n",
+    )
+    .expect("write safe native wrapper");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\nname = \"Native.Application\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\nNativeDependency = { path = \"../nativeDependency\", version = \"0.1.0\", bubble = \"Native.Dependency\" }\n",
+    )
+    .expect("write native application manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Native.Application\n\
+         function main(): Int\n\
+             return Native.Dependency.safeAnswer()\n\
+         end\n",
+    )
+    .expect("write native application");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(application.join("bubble.toml"))
+        .output()
+        .expect("pop builds transitive native dependency");
+    assert!(
+        build.status.success(),
+        "transitive FFI build failed: {}",
+        output_text(&build.stderr)
+    );
+    assert_eq!(
+        Command::new(application.join("target/debug/Native.Application"))
+            .status()
+            .expect("transitive FFI executable runs")
+            .code(),
+        Some(42)
+    );
+    let artifact = load_poplib(&application.join("target/debug/deps/Native.Dependency.poplib"))
+        .expect("native dependency artifact verifies");
+    assert_eq!(artifact.native_link_plans().len(), 1);
+    assert_eq!(
+        artifact.native_link_plans()[0].libraries()[0].alias(),
+        "Answer"
+    );
+    assert_eq!(artifact.resolved_native_providers().len(), 1);
+    assert_eq!(artifact.resolved_native_providers()[0].alias(), "Answer");
+
+    std::fs::remove_dir_all(workspace).expect("remove transitive FFI fixture");
+}
+
+#[test]
+fn package_build_binds_libc_without_an_explicit_native_library() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .to_path_buf();
+    let package = repository
+        .join("target")
+        .join(format!("pop-ffi-libc-{}", std::process::id()));
+    std::fs::create_dir_all(package.join("src")).expect("create libc FFI Package");
+    std::fs::write(
+        package.join("bubble.toml"),
+        "[package]\nname = \"Native.Libc\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\nPopFfi = { path = \"../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }\n",
+    )
+    .expect("write libc FFI manifest");
+    std::fs::write(
+        package.join("src/main.pop"),
+        "namespace Native.Libc.Unsafe\n\
+         @Ffi.Foreign(\"abs\")\n\
+         internal function nativeAbsolute(value: Int32): Int32\n\
+         end\n\
+         function main(): Int\n\
+             return Int(nativeAbsolute(-42))\n\
+         end\n",
+    )
+    .expect("write libc FFI source");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop builds default libc binding");
+    assert!(
+        build.status.success(),
+        "libc FFI build failed: {}",
+        output_text(&build.stderr)
+    );
+    assert_eq!(
+        Command::new(package.join("target/debug/Native.Libc"))
+            .status()
+            .expect("libc FFI executable runs")
+            .code(),
+        Some(42)
+    );
+
+    std::fs::remove_dir_all(package).expect("remove libc FFI fixture");
 }
 
 #[test]

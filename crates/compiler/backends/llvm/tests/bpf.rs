@@ -5,7 +5,7 @@ use pop_backend_llvm::{
 };
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{lower_hir_bubble, optimize_mir};
+use pop_mir::{lower_hir_bubble_for_target, optimize_mir};
 use pop_source::SourceFile;
 use pop_target::TargetSpec;
 
@@ -36,8 +36,10 @@ fn lower_with_optimization(
         "{}",
         front_end.diagnostic_snapshot()
     );
+    let target = bpfel();
     let mir =
-        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+        lower_hir_bubble_for_target(front_end.hir().expect("HIR"), front_end.types(), &target)
+            .expect("verified MIR");
     let mir = if optimize {
         optimize_mir(mir, front_end.types()).expect("optimized MIR")
     } else {
@@ -59,6 +61,7 @@ fn validates_and_lowers_minimal_xdp_pass_to_bpf_llvm_ir() {
          end\n",
     );
     let entry = mir.functions()[0].symbol();
+    assert_eq!(mir.ffi_layouts().target(), "bpfel-unknown-none");
     let options = BpfLoweringOptions::xdp(entry);
     BpfValidationPass
         .validate(&mir, &types, &bpfel(), options)

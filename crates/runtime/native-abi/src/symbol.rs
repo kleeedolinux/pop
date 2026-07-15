@@ -3,7 +3,7 @@ use pop_runtime_interface::RuntimeOperation;
 /// ABI 1.11 lookup adapter that separates presence from a scalar payload.
 pub const TABLE_GET_CHECKED_SYMBOL: &str = "pop_rt_table_get_checked";
 
-/// Returns the native C symbol for an operation implemented by ABI 1.11.
+/// Returns the native C symbol for an operation implemented by ABI 1.17.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.
@@ -36,10 +36,24 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::FieldSet => Some("pop_rt_field_set"),
         RuntimeOperation::StringConcat => Some("pop_rt_string_concat"),
         RuntimeOperation::StringFormat => Some("pop_rt_string_format"),
+        RuntimeOperation::FfiBufferOpen => Some("pop_rt_ffi_buffer_open"),
+        RuntimeOperation::FfiBufferLength => Some("pop_rt_ffi_buffer_length"),
+        RuntimeOperation::FfiBufferRead => Some("pop_rt_ffi_buffer_read"),
+        RuntimeOperation::FfiBufferWrite => Some("pop_rt_ffi_buffer_write"),
+        RuntimeOperation::FfiBufferBorrow => Some("pop_rt_ffi_buffer_borrow"),
+        RuntimeOperation::FfiBufferEndBorrow => Some("pop_rt_ffi_buffer_end_borrow"),
+        RuntimeOperation::FfiBufferClose => Some("pop_rt_ffi_buffer_close"),
+        RuntimeOperation::FfiBytesBorrow => Some("pop_rt_ffi_bytes_borrow"),
+        RuntimeOperation::FfiBytesEndBorrow => Some("pop_rt_ffi_bytes_end_borrow"),
         RuntimeOperation::RetainRoot => Some("pop_rt_retain_root"),
+        RuntimeOperation::ResolveRoot => Some("pop_rt_resolve_root"),
         RuntimeOperation::ReleaseRoot => Some("pop_rt_release_root"),
         RuntimeOperation::Pin => Some("pop_rt_pin"),
         RuntimeOperation::Unpin => Some("pop_rt_unpin"),
+        RuntimeOperation::AttachManagedThread => Some("pop_rt_attach_managed_thread"),
+        RuntimeOperation::DetachManagedThread => Some("pop_rt_detach_managed_thread"),
+        RuntimeOperation::EnterForeign => Some("pop_rt_enter_foreign"),
+        RuntimeOperation::LeaveForeign => Some("pop_rt_leave_foreign"),
         RuntimeOperation::GcSafePoint => Some("pop_rt_gc_safe_point"),
         RuntimeOperation::SatbWriteBarrier => Some("pop_rt_satb_write_barrier"),
         RuntimeOperation::Trap => Some("pop_rt_trap"),

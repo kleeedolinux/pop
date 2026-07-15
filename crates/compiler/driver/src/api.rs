@@ -13,7 +13,9 @@ use pop_foundation::{
 use pop_hir::{HirBubble, HirDeclaration, HirFunction, HirMethod};
 use pop_library_bridge::{FoundationBubble, NativeEffect, NativeExport, PopAbiType};
 use pop_source::SourceFile;
-use pop_types::{AttributeQueryIndex, BootstrapSchema, PrimitiveType, TypeArena};
+use pop_types::{
+    AttributeQueryIndex, BootstrapSchema, ForeignFunctionDeclaration, PrimitiveType, TypeArena,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::front_end::diagnostic_snapshot;
@@ -46,6 +48,7 @@ pub struct FrontEndBubbleInput {
     pub(crate) bubble: BubbleId,
     pub(crate) namespace: NamespaceId,
     pub(crate) dependencies: Vec<BubbleId>,
+    pub(crate) ffi_dependency: Option<BubbleId>,
     pub(crate) modules: Vec<FrontEndModule>,
     pub(crate) implicit_main_module: Option<ModuleId>,
     pub(crate) reference_metadata: Vec<ReferenceMetadata>,
@@ -66,10 +69,27 @@ impl FrontEndBubbleInput {
             bubble,
             namespace,
             dependencies,
+            ffi_dependency: None,
             modules,
             implicit_main_module: None,
             reference_metadata: Vec::new(),
         }
+    }
+
+    /// Supplies the exact `Pop.Ffi` Bubble selected by verified Package
+    /// resolution. The Bubble must be a direct dependency of this input.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the supplied Bubble is not a direct dependency.
+    #[must_use]
+    pub fn with_ffi_dependency(mut self, bubble: BubbleId) -> Self {
+        assert!(
+            self.dependencies.contains(&bubble),
+            "Pop.Ffi must be a direct Bubble dependency"
+        );
+        self.ffi_dependency = Some(bubble);
+        self
     }
 
     /// Allows the binary-root `function main(...)` shorthand for one Module.
@@ -96,11 +116,31 @@ pub struct FrontEndResult {
     pub(crate) hir_build_errors: Vec<pop_hir::HirBuildError>,
     pub(crate) types: TypeArena,
     pub(crate) attribute_queries: AttributeQueryIndex,
+    pub(crate) namespace_attributes: Vec<NamespaceAttributes>,
+    pub(crate) foreign_declarations: Vec<ForeignFunctionDeclaration>,
     pub(crate) compile_time_evaluations: Vec<FrontEndCompileTimeEvaluation>,
     pub(crate) constants: Vec<FrontEndConstant>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) reference_metadata: Result<ReferenceMetadata, ReferenceMetadataError>,
     pub(crate) checked_documentation: Vec<CheckedDocumentation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamespaceAttributes {
+    pub(crate) module: ModuleId,
+    pub(crate) attributes: Vec<pop_types::ResolvedAttribute>,
+}
+
+impl NamespaceAttributes {
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub fn attributes(&self) -> &[pop_types::ResolvedAttribute] {
+        &self.attributes
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +232,8 @@ pub struct ReferenceFunction {
     pub(crate) parameters: Vec<ReferenceFunctionParameter>,
     pub(crate) results: Vec<ReferenceType>,
     pub(crate) effects: pop_types::EffectSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) foreign_declaration: Option<ForeignFunctionDeclaration>,
     pub(crate) span: SourceSpan,
     pub(crate) specialization_capsule: Option<ReferenceSpecializationCapsule>,
 }
@@ -240,6 +282,11 @@ impl ReferenceFunction {
     #[must_use]
     pub const fn effects(&self) -> pop_types::EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn foreign_declaration(&self) -> Option<&ForeignFunctionDeclaration> {
+        self.foreign_declaration.as_ref()
     }
 
     #[must_use]
@@ -546,6 +593,16 @@ impl FrontEndResult {
     #[must_use]
     pub const fn attribute_queries(&self) -> &AttributeQueryIndex {
         &self.attribute_queries
+    }
+
+    #[must_use]
+    pub fn namespace_attributes(&self) -> &[NamespaceAttributes] {
+        &self.namespace_attributes
+    }
+
+    #[must_use]
+    pub fn foreign_declarations(&self) -> &[ForeignFunctionDeclaration] {
+        &self.foreign_declarations
     }
 
     #[must_use]

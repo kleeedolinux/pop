@@ -5,7 +5,7 @@
 //! is a canonical MIR instruction or a source-language semantic rule.
 
 use pop_foundation::{BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
-use pop_mir::{MirInstructionKind, MirTerminator};
+use pop_mir::{MirFfiLayoutCatalog, MirInstructionKind, MirTerminator};
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 use pop_types::{FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena};
@@ -19,15 +19,28 @@ pub(crate) fn lower_instruction(
     instruction: &pop_mir::MirInstruction,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    ffi_layouts: &MirFfiLayoutCatalog,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
-    environment: Option<(&str, &BTreeSet<u32>)>,
+    environment: CaptureEnvironment<'_>,
     proven_non_overflow_adds: &BTreeSet<ValueId>,
     direct_scalar_arrays: &DirectScalarArrays,
     options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
+    if let Some(lowered) = crate::ffi_bytes::lower(instruction) {
+        return Ok(lowered);
+    }
+    if let Some(lowered) =
+        crate::ffi_buffer::lower(instruction, value_types, types, ffi_layouts, field_layout)?
+    {
+        return Ok(lowered);
+    }
+    if let Some(lowered) = crate::ffi_unsafe::lower(instruction, types, ffi_layouts, field_layout)?
+    {
+        return Ok(lowered);
+    }
     let result = format!("%v{}", instruction.result().raw());
     let result_type = instruction.optional_result_type();
     let line = match instruction.kind() {
@@ -78,6 +91,31 @@ pub(crate) fn lower_instruction(
                 optional.raw()
             )
         }
+        MirInstructionKind::FfiPointerNone => {
+            let ty = llvm_type(instruction.result_type(), types)?;
+            format!("{result} = select i1 true, {ty} zeroinitializer, {ty} zeroinitializer")
+        }
+        MirInstructionKind::FfiPointerToOptional { pointer }
+        | MirInstructionKind::FfiPointerReadOnly { pointer } => {
+            let ty = llvm_value_type(value_types, *pointer, types)?;
+            format!(
+                "{result} = select i1 true, {ty} %v{}, {ty} zeroinitializer",
+                pointer.raw()
+            )
+        }
+        MirInstructionKind::FfiPointerIsPresent { pointer } => {
+            let ty = llvm_value_type(value_types, *pointer, types)?;
+            format!(
+                "{result} = icmp ne {ty} %v{}, zeroinitializer",
+                pointer.raw()
+            )
+        }
+        MirInstructionKind::FfiPointerRequire {
+            pointer,
+            success,
+            failure,
+            ..
+        } => lower_ffi_pointer_require(&result, *pointer, *success, *failure),
         MirInstructionKind::ResultMake {
             case, arguments, ..
         } => lower_union_make(
@@ -415,6 +453,30 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
         )?,
+        MirInstructionKind::CallForeign {
+            function: callee,
+            arguments,
+            safe_point,
+            roots,
+            unwind,
+            ..
+        } => lower_foreign_call(
+            bubble,
+            instruction.result(),
+            result_type,
+            *callee,
+            arguments,
+            safe_point.raw(),
+            roots,
+            instruction.effects(),
+            *unwind,
+            value_types,
+            types,
+            matches!(
+                options.runtime_profile,
+                pop_backend_api::RuntimeProfile::ProductionGenerational
+            ),
+        )?,
         MirInstructionKind::CallReferenced {
             function: callee,
             arguments,
@@ -475,6 +537,33 @@ pub(crate) fn lower_instruction(
             native_runtime_symbol(RuntimeOperation::ReleaseRoot),
             handle.raw()
         ),
+        MirInstructionKind::FfiHandleOpen { value } => {
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_handle = call i64 @{}(i64 %v{})\n{result}_valid = icmp ne i64 {result}_handle, 0\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:\n  {result} = add i64 {result}_handle, 0",
+                native_runtime_symbol(RuntimeOperation::RetainRoot),
+                value.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
+        MirInstructionKind::FfiHandleGet { handle } => {
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_managed = call i64 @{}(i64 %v{})\n{result}_valid = icmp ne i64 {result}_managed, 0\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:\n  {result} = add i64 {result}_managed, 0",
+                native_runtime_symbol(RuntimeOperation::ResolveRoot),
+                handle.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
+        MirInstructionKind::FfiHandleClose { handle } => {
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_closed = call i8 @{}(i64 %v{})\n{result}_valid = icmp eq i8 {result}_closed, 1\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:",
+                native_runtime_symbol(RuntimeOperation::ReleaseRoot),
+                handle.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
         MirInstructionKind::Pin { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
             native_runtime_symbol(RuntimeOperation::Pin),
@@ -670,6 +759,38 @@ pub(crate) fn lower_instruction(
                 value_types,
                 types,
             )?
+        }
+        MirInstructionKind::CallScopedBorrow {
+            owner,
+            function,
+            captures,
+            arguments,
+            ..
+        } => {
+            let mut args = captures
+                .iter()
+                .map(|capture| {
+                    llvm_value_type(value_types, capture.value(), types)
+                        .map(|ty| format!("{ty} %v{}", capture.value().raw()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            args.extend(
+                arguments
+                    .iter()
+                    .map(|value| {
+                        llvm_value_type(value_types, *value, types)
+                            .map(|ty| format!("{ty} %v{}", value.raw()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let assignment = result_type.map_or_else(String::new, |_| format!("{result} = "));
+            let return_type =
+                result_type.map_or_else(|| Ok("void".to_owned()), |id| llvm_type(id, types))?;
+            format!(
+                "{assignment}call {return_type} @{}({})",
+                nested_name(bubble, *owner, *function),
+                args.join(", ")
+            )
         }
         MirInstructionKind::TupleMake(elements) => {
             lower_tuple_make(&result, elements, value_types, types)?
@@ -893,45 +1014,87 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::CaptureCellStore { cell, value } => {
             lower_capture_store(&format!("%v{}", cell.raw()), *value, value_types, types)?
         }
-        MirInstructionKind::CaptureLoad { slot, mode, .. } => lower_capture_load(
-            instruction.result(),
-            instruction.result_type(),
-            environment
-                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+        MirInstructionKind::CaptureLoad { slot, mode, .. } => match environment {
+            CaptureEnvironment::Managed(name, self_slots) => lower_capture_load(
+                instruction.result(),
+                instruction.result_type(),
+                name,
+                *slot,
+                *mode,
+                self_slots.contains(slot),
+                types,
+            )?,
+            CaptureEnvironment::Scoped(_) if *mode == pop_mir::MirCaptureMode::Value => {
+                let ty = llvm_type(instruction.result_type(), types)?;
+                format!("{result} = select i1 true, {ty} %capture{slot}, {ty} zeroinitializer")
+            }
+            CaptureEnvironment::Scoped(_) => lower_runtime_slot_load_from(
+                instruction.result(),
+                instruction.result_type(),
+                &format!("%capture{slot}"),
+                1,
+                types,
+            )?
+            .join("\n"),
+            CaptureEnvironment::None => {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
-                })?
-                .0,
-            *slot,
-            *mode,
-            environment.is_some_and(|(_, self_slots)| self_slots.contains(slot)),
-            types,
-        )?,
-        MirInstructionKind::CaptureCellReference { slot, .. } => lower_runtime_slot_load_from(
-            instruction.result(),
-            instruction.result_type(),
-            environment
-                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                });
+            }
+        },
+        MirInstructionKind::CaptureCellReference { slot, .. } => match environment {
+            CaptureEnvironment::Managed(name, _) => lower_runtime_slot_load_from(
+                instruction.result(),
+                instruction.result_type(),
+                name,
+                *slot as usize + 2,
+                types,
+            )?
+            .join("\n"),
+            CaptureEnvironment::Scoped(_) => {
+                let ty = llvm_type(instruction.result_type(), types)?;
+                format!("{result} = select i1 true, {ty} %capture{slot}, {ty} zeroinitializer")
+            }
+            CaptureEnvironment::None => {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
-                })?
-                .0,
-            *slot as usize + 2,
-            types,
-        )?
-        .join("\n"),
-        MirInstructionKind::CaptureStore { slot, value, .. } => lower_nested_capture_store(
-            environment
-                .ok_or(LlvmLoweringError::UnsupportedInstruction {
+                });
+            }
+        },
+        MirInstructionKind::CaptureStore { slot, value, .. } => match environment {
+            CaptureEnvironment::Managed(name, _) => {
+                lower_nested_capture_store(name, *slot, *value, value_types, types)?
+            }
+            CaptureEnvironment::Scoped(_) => {
+                lower_capture_store(&format!("%capture{slot}"), *value, value_types, types)?
+            }
+            CaptureEnvironment::None => {
+                return Err(LlvmLoweringError::UnsupportedInstruction {
                     function: FunctionId::from_raw(u32::MAX),
                     value: instruction.result(),
-                })?
-                .0,
-            *slot,
-            *value,
-            value_types,
-            types,
-        )?,
+                });
+            }
+        },
+        MirInstructionKind::FfiBufferOpen { .. }
+        | MirInstructionKind::FfiBufferLength { .. }
+        | MirInstructionKind::FfiBufferRead { .. }
+        | MirInstructionKind::FfiBufferWrite { .. }
+        | MirInstructionKind::FfiBufferBorrow { .. }
+        | MirInstructionKind::FfiBufferEndBorrow { .. }
+        | MirInstructionKind::FfiBufferClose { .. } => unreachable!("lowered above"),
+        MirInstructionKind::FfiBytesBorrow { .. }
+        | MirInstructionKind::FfiBytesBorrowLength { .. }
+        | MirInstructionKind::FfiBytesEndBorrow { .. } => unreachable!("lowered above"),
+        MirInstructionKind::FfiUnsafeLoad { .. }
+        | MirInstructionKind::FfiUnsafeStore { .. }
+        | MirInstructionKind::FfiUnsafeAdvance { .. }
+        | MirInstructionKind::FfiUnsafeCopy { .. }
+        | MirInstructionKind::FfiUnsafeAddress { .. }
+        | MirInstructionKind::FfiUnsafePointerFromAddress { .. } => {
+            unreachable!("lowered above")
+        }
     };
     Ok(line)
 }
@@ -1667,6 +1830,165 @@ pub(crate) fn call_line(
         "{assignment}call {return_type} {callee}({})",
         args.join(", ")
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_foreign_call(
+    bubble: BubbleId,
+    result_id: ValueId,
+    result_type: Option<TypeId>,
+    callee: SymbolId,
+    arguments: &[ValueId],
+    safe_point: u32,
+    roots: &[ValueId],
+    effects: pop_mir::MirEffectSummary,
+    unwind: pop_mir::MirUnwindAction,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    writable_roots: bool,
+) -> Result<String, LlvmLoweringError> {
+    let result = format!("%v{}", result_id.raw());
+    let label = format!("v{}_foreign", result_id.raw());
+    let root_array = format!("{result}_foreign_roots");
+    let root_pointer = if roots.is_empty() {
+        "null".to_owned()
+    } else {
+        format!("{root_array}_pointer")
+    };
+    let mut lines = Vec::new();
+    if !roots.is_empty() {
+        lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
+        for (index, root) in roots.iter().enumerate() {
+            let slot = format!("{root_array}_{index}");
+            lines.extend([
+                format!(
+                    "{slot} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                    roots.len()
+                ),
+                format!("store i64 %v{}, ptr {slot}", root.raw()),
+            ]);
+        }
+        lines.push(format!(
+            "{root_pointer} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 0",
+            roots.len()
+        ));
+    }
+    let mode = u8::from(!effects.contains(pop_mir::MirEffect::Blocks));
+    lines.extend([
+        format!(
+            "{result}_foreign_transition = call i64 @{}(i32 {safe_point}, ptr {root_pointer}, i64 {}, i8 {mode})",
+            native_runtime_symbol(RuntimeOperation::EnterForeign),
+            roots.len()
+        ),
+        format!(
+            "{result}_foreign_entered = icmp ne i64 {result}_foreign_transition, 0"
+        ),
+        format!(
+            "br i1 {result}_foreign_entered, label %{label}_call, label %{label}_trap"
+        ),
+        format!("{label}_call:"),
+    ]);
+    if effects.contains(pop_mir::MirEffect::MayUnwind) {
+        let call = call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(bubble, callee)),
+            arguments,
+            values,
+            types,
+        )?;
+        let invoke = call.replacen("call ", "invoke ", 1);
+        lines.extend([
+            format!("{invoke} to label %{label}_returned unwind label %{label}_unwind"),
+            format!("{label}_returned:"),
+        ]);
+    } else {
+        lines.push(call_line(
+            &result,
+            result_type,
+            &format!("@{}", function_name(bubble, callee)),
+            arguments,
+            values,
+            types,
+        )?);
+    }
+    lines.extend([
+        format!(
+            "{result}_foreign_left = call i8 @{}(i64 {result}_foreign_transition, ptr {root_pointer}, i64 {})",
+            native_runtime_symbol(RuntimeOperation::LeaveForeign),
+            roots.len()
+        ),
+        format!("{result}_foreign_leave_valid = icmp eq i8 {result}_foreign_left, 1"),
+        format!(
+            "br i1 {result}_foreign_leave_valid, label %{label}_ready, label %{label}_trap"
+        ),
+        format!("{label}_trap:"),
+        format!("  call void @{}()", native_runtime_symbol(RuntimeOperation::Trap)),
+        "  unreachable".to_owned(),
+    ]);
+    if effects.contains(pop_mir::MirEffect::MayUnwind) {
+        lines.extend([
+            format!("{label}_unwind:"),
+            format!("{result}_foreign_landing = landingpad {{ ptr, i32 }} cleanup"),
+            format!(
+                "{result}_foreign_unwind_left = call i8 @{}(i64 {result}_foreign_transition, ptr {root_pointer}, i64 {})",
+                native_runtime_symbol(RuntimeOperation::LeaveForeign),
+                roots.len()
+            ),
+            format!(
+                "{result}_foreign_unwind_leave_valid = icmp eq i8 {result}_foreign_unwind_left, 1"
+            ),
+            format!(
+                "br i1 {result}_foreign_unwind_leave_valid, label %{label}_unwind_ready, label %{label}_trap"
+            ),
+            format!("{label}_unwind_ready:"),
+        ]);
+        if writable_roots {
+            for (index, root) in roots.iter().enumerate() {
+                let slot = format!("{root_array}_{index}_unwind_reload");
+                let reloaded =
+                    format!("%v{}_after_foreign_unwind_v{}", root.raw(), result_id.raw());
+                lines.extend([
+                    format!(
+                        "{slot} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                        roots.len()
+                    ),
+                    format!("{reloaded} = load i64, ptr {slot}"),
+                    format!("store i64 {reloaded}, ptr %v{}_gc_root", root.raw()),
+                ]);
+            }
+        }
+        match unwind {
+            pop_mir::MirUnwindAction::Cleanup(target) => {
+                lines.push(format!("br label %b{}", target.raw()));
+            }
+            pop_mir::MirUnwindAction::Propagate => lines.extend([
+                format!(
+                    "call void @{}()",
+                    native_runtime_symbol(RuntimeOperation::ContinueUnwind)
+                ),
+                "unreachable".to_owned(),
+            ]),
+        }
+    }
+    lines.push(format!("{label}_ready:"));
+    if writable_roots {
+        for (index, root) in roots.iter().enumerate() {
+            let slot = format!("{root_array}_{index}_reload");
+            lines.extend([
+                format!(
+                    "{slot} = getelementptr [{} x i64], ptr {root_array}, i64 0, i64 {index}",
+                    roots.len()
+                ),
+                format!(
+                    "%v{}_after_foreign_v{} = load i64, ptr {slot}",
+                    root.raw(),
+                    result_id.raw()
+                ),
+            ]);
+        }
+    }
+    Ok(lines.join("\n"))
 }
 
 pub(crate) fn lower_array_create(
@@ -2659,17 +2981,7 @@ pub(crate) fn lower_gc_safe_point(
 }
 
 pub(crate) fn is_managed_type(type_id: TypeId, types: &TypeArena) -> bool {
-    !matches!(
-        types.get(type_id),
-        Some(SemanticType::Primitive(
-            PrimitiveType::Nil
-                | PrimitiveType::Boolean
-                | PrimitiveType::Integer(_)
-                | PrimitiveType::Float32
-                | PrimitiveType::Float64
-                | PrimitiveType::Never
-        ))
-    )
+    pop_mir::is_managed_reference_type_id(type_id, Some(types))
 }
 
 pub(crate) fn lower_tuple_make(
@@ -2838,6 +3150,39 @@ pub(crate) fn lower_union_make(
         ));
     }
     Ok(lines.join("\n"))
+}
+
+fn lower_ffi_pointer_require(
+    result: &str,
+    pointer: ValueId,
+    success: pop_foundation::ResultCaseId,
+    failure: pop_foundation::ResultCaseId,
+) -> String {
+    let present = format!("{result}_present");
+    let case = format!("{result}_case");
+    let payload = format!("{result}_payload");
+    let mut lines = vec![
+        format!("{present} = icmp ne i64 %v{}, 0", pointer.raw()),
+        format!(
+            "{case} = select i1 {present}, i64 {}, i64 {}",
+            success.raw(),
+            failure.raw()
+        ),
+        format!(
+            "{payload} = select i1 {present}, i64 %v{}, i64 0",
+            pointer.raw()
+        ),
+    ];
+    lines.extend(lower_mapped_allocation(result, 2, &[]));
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {case})",
+        native_runtime_symbol(RuntimeOperation::FieldSet)
+    ));
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 2, i64 {payload})",
+        native_runtime_symbol(RuntimeOperation::FieldSet)
+    ));
+    lines.join("\n")
 }
 
 pub(crate) fn direct_function_tag(symbol: SymbolId) -> u64 {

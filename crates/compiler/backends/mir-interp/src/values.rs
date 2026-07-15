@@ -8,7 +8,7 @@ use pop_foundation::{
     BuiltinTypeId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, IterationCaseId,
     ResultCaseId, SymbolId, UnionCaseId,
 };
-use pop_runtime_interface::{ManagedReference, RuntimeFailure};
+use pop_runtime_interface::{ForeignAddress, ManagedReference, RuntimeFailure};
 use pop_types::{FloatValue, IntegerValue};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -34,6 +34,13 @@ pub enum MirValue {
     CancellationSource(SymbolId),
     CancellationToken(SymbolId),
     TaskGroup(SymbolId),
+    FfiHandle(u64),
+    FfiBuffer(ManagedReference),
+    Bytes(ManagedReference),
+    FfiPointer(ForeignAddress),
+    FfiFunction(u64),
+    FfiNullPointerError,
+    FfiAllocationError,
     Enum {
         definition: SymbolId,
         case: EnumCaseId,
@@ -102,6 +109,7 @@ impl RuntimeValue {
     pub(crate) fn visible(visible: MirValue) -> Self {
         let reference = match &visible {
             MirValue::Class(class) => Some(class.reference),
+            MirValue::FfiBuffer(reference) | MirValue::Bytes(reference) => Some(*reference),
             _ => None,
         };
         Self { visible, reference }

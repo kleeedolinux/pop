@@ -56,6 +56,7 @@ compile-time evaluator, or portable optimizer.
 29. [Public library implementation plan](./22.6-standard-library-implementation-plan.md)
 30. [Concurrency, actors, and distribution](./23-concurrency-actors-and-distribution.md)
 31. [Scheduler runtime implementation](./23.1-scheduler-runtime-implementation.md)
+32. [Static memory management](./24-static-memory-management.md)
 
 The examples define the canonical syntax direction. The full grammar will grow
 with implementation, but `.pop`, the `pop` command, naming rules, namespace/
@@ -99,6 +100,9 @@ transplanted into a Luau-shaped file.
 - `bubble.lock` and `.poplib` control files use bounded canonical JSON; artifact
   integrity uses normalized SHA-256 file inventories under ADR 0055.
 - Pop GC uses precise roots, a moving nursery, and concurrent mature marking.
+- Proof-directed static reclamation keeps scalars and proven non-escaping
+  arrays/aggregates out of Pop GC through verified backend-neutral lifetime and
+  region plans; incomplete proof always falls back to precise tracing.
 - Collecting safe points update typed `RootSlot` publications in place; object
   identity survives relocation while stale physical reference tokens do not.
 - Source-visible built-in types and attributes use `PascalCase`, including
@@ -141,6 +145,22 @@ transplanted into a Luau-shaped file.
 - Reintroducing Lua's dynamic/table-centered architecture is a release-blocking
   **Lua regression**, not a compatibility feature.
 - A future VM can consume MIR without reconstructing source-level meaning.
+- Native FFI declarations remain ordinary statically typed functions; typed
+  hashed link plans, exact ABI layouts/effects, scoped pins/handles/callbacks,
+  and generated reviewable adapters replace raw flags, shell execution,
+  runtime symbol lookup, or reflection.
+- Foreign pointers expose unmanaged ABI storage or one compiler-verified
+  lexical payload borrow, never a Pop object address. Immutable `Bytes` uses a
+  read-only pin; general native storage uses explicitly closed
+  `Ffi.Buffer<T>`; retained managed values use generation-checked handles.
+- Canonical FFI layout descriptors use full SHA-256 fingerprints and compact
+  nonzero `FfiAbiLayoutId` execution keys derived from their first eight
+  big-endian bytes. Full artifact facts detect collisions and mismatches before
+  a backend or runtime can use foreign storage.
+- Scoped FFI borrow bodies are immediate synchronous closures represented by a
+  verified `BorrowRegionId` call, never unrestricted function values. Native
+  ABI 1.17 borrows only the immutable `Bytes` payload through a runtime-owned
+  token; no backend calculates a managed-object payload offset.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 

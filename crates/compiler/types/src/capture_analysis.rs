@@ -231,6 +231,7 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
         | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => {}
         TypedExpressionKind::Closure(closure) => {
             for capture in &mut closure.captures {
@@ -325,8 +326,68 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::Unary { operand, .. }
         | TypedExpressionKind::Await { task: operand }
         | TypedExpressionKind::TaskCancelToken { source: operand }
-        | TypedExpressionKind::TaskCancel { source: operand } => {
+        | TypedExpressionKind::TaskCancel { source: operand }
+        | TypedExpressionKind::FfiHandleOpen { value: operand }
+        | TypedExpressionKind::FfiHandleGet { handle: operand }
+        | TypedExpressionKind::FfiHandleClose { handle: operand }
+        | TypedExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | TypedExpressionKind::FfiBufferLength { buffer: operand }
+        | TypedExpressionKind::FfiBufferClose { buffer: operand }
+        | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
+        | TypedExpressionKind::FfiPointerRequire {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
+        } => {
             finalize_expression_captures(operand, written);
+        }
+        TypedExpressionKind::FfiBufferWithPointer {
+            buffer: owner,
+            body,
+            ..
+        }
+        | TypedExpressionKind::FfiBytesWithPin {
+            bytes: owner, body, ..
+        } => {
+            finalize_expression_captures(owner, written);
+            for capture in &mut body.captures {
+                if written.contains(&capture.binding) {
+                    capture.mode = CaptureMode::Cell;
+                }
+            }
+            for statement in &mut body.body.statements {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            finalize_expression_captures(pointer, written);
+            finalize_expression_captures(value, written);
+        }
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            finalize_expression_captures(source, written);
+            finalize_expression_captures(destination, written);
+            finalize_expression_captures(count, written);
         }
         TypedExpressionKind::TaskGroup { cancel, body } => {
             finalize_expression_captures(cancel, written);
@@ -356,6 +417,19 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::StringConcat { left, right } => {
             finalize_expression_captures(left, written);
             finalize_expression_captures(right, written);
+        }
+        TypedExpressionKind::FfiBufferRead { buffer, index } => {
+            finalize_expression_captures(buffer, written);
+            finalize_expression_captures(index, written);
+        }
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            finalize_expression_captures(buffer, written);
+            finalize_expression_captures(index, written);
+            finalize_expression_captures(value, written);
         }
         TypedExpressionKind::Conditional {
             condition,

@@ -20,8 +20,102 @@ use pop_types::{
 
 use crate::ir::*;
 
+fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_HANDLE_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn ffi_buffer_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn ffi_exact_pointer_payload(
+    arena: &TypeArena,
+    type_id: TypeId,
+    expected: BuiltinTypeId,
+) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == expected && arguments.len() == 1 => Some(arguments[0]),
+        _ => None,
+    }
+}
+
+fn is_ffi_buffer_element(arena: &TypeArena, type_id: TypeId, ffi_c_layout: bool) -> bool {
+    match arena.get(type_id) {
+        Some(SemanticType::Primitive(
+            PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+        )) => true,
+        Some(SemanticType::Builtin { definition, .. }) => {
+            pop_types::is_ffi_integer_abi_builtin_type(*definition)
+                || pop_types::is_ffi_pointer_type_constructor(*definition)
+                || pop_types::is_ffi_function_type_constructor(*definition)
+                || *definition == pop_types::FFI_HANDLE_TYPE_ID
+        }
+        Some(SemanticType::Record(_)) => ffi_c_layout,
+        _ => false,
+    }
+}
+
+fn valid_ffi_element_metadata(
+    arena: &TypeArena,
+    schema: Option<&HirSchema>,
+    element: TypeId,
+    layout_record: Option<SymbolId>,
+) -> bool {
+    is_ffi_buffer_element(arena, element, layout_record.is_some())
+        && layout_record.is_none_or(|record| {
+            schema.is_some_and(|schema| {
+                schema
+                    .records
+                    .get(&record)
+                    .is_some_and(|record| record.type_id == element && record.ffi_c_layout)
+            })
+        })
+}
+
+fn is_managed_reference_type(arena: &TypeArena, type_id: TypeId) -> bool {
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin { definition, .. }) => {
+            !pop_types::is_ffi_abi_builtin_type(*definition)
+        }
+        Some(
+            SemanticType::Primitive(PrimitiveType::String)
+            | SemanticType::Tuple(_)
+            | SemanticType::Array(_)
+            | SemanticType::Table { .. }
+            | SemanticType::Class { .. }
+            | SemanticType::Interface { .. }
+            | SemanticType::Function { .. }
+            | SemanticType::ErrorUnion { .. },
+        ) => true,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirVerificationError {
+    InvalidForeignDeclaration {
+        function: SymbolId,
+        span: SourceSpan,
+    },
     InvalidGenericBounds {
         function: SymbolId,
         span: SourceSpan,
@@ -99,6 +193,21 @@ pub enum HirVerificationError {
         span: SourceSpan,
     },
     InvalidTaskOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiHandleOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiBufferOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiBytesBorrow {
+        span: SourceSpan,
+    },
+    InvalidFfiPointerOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiUnsafeOperation {
         span: SourceSpan,
     },
     ExpressionTypeMismatch {
@@ -398,12 +507,27 @@ impl HirCallableSignature {
             results: function.results().to_vec(),
         }
     }
+
+    fn from_foreign(function: &HirForeignFunction) -> Self {
+        Self {
+            is_async: false,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            parameters: function
+                .parameters()
+                .iter()
+                .map(HirParameter::type_id)
+                .collect(),
+            results: function.results().to_vec(),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct HirAggregateSchema {
     type_id: TypeId,
     fields: BTreeMap<FieldId, TypeId>,
+    ffi_c_layout: bool,
 }
 
 #[derive(Clone)]
@@ -506,9 +630,55 @@ impl HirSchema {
                 HirCallableSignature::from_function(function),
             );
         }
+        for function in bubble.foreign_functions() {
+            if !symbols.insert(function.symbol()) {
+                errors.push(HirVerificationError::DuplicateSymbol(function.symbol()));
+            }
+            let declaration = function.declaration();
+            let valid_identity = declaration.symbol() == function.symbol()
+                && !declaration.external_symbol().is_empty()
+                && !declaration.external_symbol().chars().any(char::is_control)
+                && declaration.has_valid_effects();
+            if !valid_identity {
+                errors.push(HirVerificationError::InvalidForeignDeclaration {
+                    function: function.symbol(),
+                    span: declaration.span(),
+                });
+            }
+            for parameter in function.parameters() {
+                verify_schema_type(arena, parameter.type_id(), parameter.span(), errors);
+            }
+            for result in function.results() {
+                verify_schema_type(arena, *result, declaration.span(), errors);
+            }
+            for attribute in function.attributes() {
+                for argument in attribute.arguments() {
+                    verify_schema_type(arena, argument.value_type(), argument.origin(), errors);
+                }
+            }
+            schema.functions.insert(
+                function.symbol(),
+                HirCallableSignature::from_foreign(function),
+            );
+        }
         for reference in bubble.function_references() {
             for type_id in reference.parameters().iter().chain(reference.results()) {
                 verify_schema_type(arena, *type_id, empty_span(), errors);
+            }
+            if let Some(declaration) = reference.foreign_declaration() {
+                let valid = !reference.is_async()
+                    && reference.type_parameters().is_empty()
+                    && declaration.symbol() == reference.identity().symbol()
+                    && declaration.has_valid_effects()
+                    && declaration.effects() == reference.effects()
+                    && !declaration.external_symbol().is_empty()
+                    && !declaration.external_symbol().chars().any(char::is_control);
+                if !valid {
+                    errors.push(HirVerificationError::InvalidForeignDeclaration {
+                        function: reference.identity().symbol(),
+                        span: declaration.span(),
+                    });
+                }
             }
             schema.function_references.insert(
                 reference.identity(),
@@ -556,6 +726,7 @@ impl HirSchema {
                     HirAggregateSchema {
                         type_id: record.type_id,
                         fields,
+                        ffi_c_layout: record.ffi_c_layout,
                     },
                 );
             }
@@ -1320,6 +1491,20 @@ struct Verifier<'arena> {
 }
 
 impl Verifier<'_> {
+    fn builtin_type_arguments(&self, type_id: TypeId, name: &str) -> Option<&[TypeId]> {
+        let definition = embedded_bootstrap_schema()
+            .ok()?
+            .type_by_source_name(name)?
+            .id();
+        match self.arena.get(type_id)? {
+            SemanticType::Builtin {
+                definition: found,
+                arguments,
+            } if *found == definition => Some(arguments),
+            _ => None,
+        }
+    }
+
     fn is_builtin_type(&self, type_id: TypeId, name: &str, arguments: &[TypeId]) -> bool {
         embedded_bootstrap_schema()
             .ok()
@@ -2615,6 +2800,501 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiHandleOpen { value } => {
+                self.verify_expression(value, visible);
+                if !is_managed_reference_type(self.arena, value.type_id())
+                    || ffi_handle_payload(self.arena, expression.type_id()) != Some(value.type_id())
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiHandleOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiHandleGet { handle } => {
+                self.verify_expression(handle, visible);
+                if ffi_handle_payload(self.arena, handle.type_id()) != Some(expression.type_id())
+                    || !is_managed_reference_type(self.arena, expression.type_id())
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiHandleOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiHandleClose { handle } => {
+                self.verify_expression(handle, visible);
+                if ffi_handle_payload(self.arena, handle.type_id())
+                    .is_none_or(|payload| !is_managed_reference_type(self.arena, payload))
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiHandleOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBufferOpen {
+                length,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(length, visible);
+                self.verify_type(*element, expression.span());
+                let valid_result = self
+                    .builtin_type_arguments(expression.type_id(), "Result")
+                    .is_some_and(|arguments| {
+                        matches!(arguments, [buffer, error]
+                        if ffi_buffer_payload(self.arena, *buffer) == Some(*element)
+                            && self.is_builtin_type(
+                                *error,
+                                "Ffi.AllocationError",
+                                &[],
+                            ))
+                    });
+                if !self.is_builtin_type(length.type_id(), "Ffi.C.Size", &[])
+                    || !is_ffi_buffer_element(self.arena, *element, layout_record.is_some())
+                    || layout_record.is_some_and(|record| {
+                        self.schema.is_some_and(|schema| {
+                            schema.records.get(&record).is_none_or(|record| {
+                                record.type_id != *element || !record.ffi_c_layout
+                            })
+                        })
+                    })
+                    || !valid_result
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBufferLength { buffer } => {
+                self.verify_expression(buffer, visible);
+                if ffi_buffer_payload(self.arena, buffer.type_id()).is_none()
+                    || !self.is_builtin_type(expression.type_id(), "Ffi.C.Size", &[])
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBufferRead { buffer, index } => {
+                self.verify_expression(buffer, visible);
+                self.verify_expression(index, visible);
+                if ffi_buffer_payload(self.arena, buffer.type_id()) != Some(expression.type_id())
+                    || !self.is_builtin_type(index.type_id(), "Ffi.C.Size", &[])
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBufferWrite {
+                buffer,
+                index,
+                value,
+            } => {
+                self.verify_expression(buffer, visible);
+                self.verify_expression(index, visible);
+                self.verify_expression(value, visible);
+                if ffi_buffer_payload(self.arena, buffer.type_id()) != Some(value.type_id())
+                    || !self.is_builtin_type(index.type_id(), "Ffi.C.Size", &[])
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBufferClose { buffer } => {
+                self.verify_expression(buffer, visible);
+                if ffi_buffer_payload(self.arena, buffer.type_id()).is_none()
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBufferWithPointer {
+                buffer,
+                body,
+                body_type,
+                element,
+                layout_record,
+                region: _,
+            } => {
+                self.verify_expression(buffer, visible);
+                let closure_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *body_type,
+                    span: body.span,
+                };
+                self.verify_closure(body, &closure_expression, visible);
+                let valid_parameters = matches!(body.parameters.as_slice(), [pointer, length]
+                    if ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id,
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ) == Some(*element)
+                    && self.is_builtin_type(length.type_id, "Ffi.C.Size", &[]));
+                if ffi_buffer_payload(self.arena, buffer.type_id()) != Some(*element)
+                    || body.is_async
+                    || !valid_parameters
+                    || body.results.as_slice() != [expression.type_id()]
+                    || !is_ffi_buffer_element(self.arena, *element, layout_record.is_some())
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBufferOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiBytesWithPin {
+                bytes,
+                body,
+                body_type,
+                region: _,
+            } => {
+                self.verify_expression(bytes, visible);
+                let closure_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *body_type,
+                    span: body.span,
+                };
+                self.verify_closure(body, &closure_expression, visible);
+                let byte = self.arena.source_type("Byte");
+                let valid_parameters = matches!((byte, body.parameters.as_slice()), (Some(byte), [pointer, length])
+                    if ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id,
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(byte)
+                    && self.is_builtin_type(length.type_id, "Ffi.C.Size", &[]));
+                if !self.is_builtin_type(bytes.type_id(), "Bytes", &[])
+                    || body.is_async
+                    || !valid_parameters
+                    || body.results.as_slice() != [expression.type_id()]
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiBytesBorrow {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerNone {
+                element,
+                layout_record,
+                read_only,
+            } => {
+                self.verify_type(*element, expression.span());
+                let expected = if *read_only {
+                    pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID
+                } else {
+                    pop_types::FFI_OPTIONAL_POINTER_TYPE_ID
+                };
+                if ffi_exact_pointer_payload(self.arena, expression.type_id(), expected)
+                    != Some(*element)
+                    || !is_ffi_buffer_element(self.arena, *element, layout_record.is_some())
+                    || layout_record.is_some_and(|record| {
+                        self.schema.is_some_and(|schema| {
+                            schema.records.get(&record).is_none_or(|record| {
+                                record.type_id != *element || !record.ffi_c_layout
+                            })
+                        })
+                    })
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerToOptional { pointer } => {
+                self.verify_expression(pointer, visible);
+                let constructors = match self.arena.get(pointer.type_id()) {
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if *definition == pop_types::FFI_POINTER_TYPE_ID && arguments.len() == 1 => {
+                        Some((
+                            pop_types::FFI_POINTER_TYPE_ID,
+                            pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                        ))
+                    }
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if *definition == pop_types::FFI_READ_ONLY_POINTER_TYPE_ID
+                        && arguments.len() == 1 =>
+                    {
+                        Some((
+                            pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                            pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                        ))
+                    }
+                    _ => None,
+                };
+                let valid = constructors.is_some_and(|(source, result)| {
+                    let element = ffi_exact_pointer_payload(self.arena, pointer.type_id(), source);
+                    element.is_some()
+                        && ffi_exact_pointer_payload(self.arena, expression.type_id(), result)
+                            == element
+                });
+                if !valid {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerReadOnly { pointer } => {
+                self.verify_expression(pointer, visible);
+                let element = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_POINTER_TYPE_ID,
+                );
+                if element.is_none()
+                    || ffi_exact_pointer_payload(
+                        self.arena,
+                        expression.type_id(),
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) != element
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerIsPresent { pointer } => {
+                self.verify_expression(pointer, visible);
+                let valid_source = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                )
+                .or_else(|| {
+                    ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id(),
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    )
+                })
+                .is_some();
+                if !valid_source
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(PrimitiveType::Boolean))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerRequire {
+                pointer,
+                result,
+                success,
+                failure,
+            } => {
+                self.verify_expression(pointer, visible);
+                let expected_success = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                )
+                .map(|element| (pop_types::FFI_POINTER_TYPE_ID, element))
+                .or_else(|| {
+                    ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id(),
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    )
+                    .map(|element| (pop_types::FFI_READ_ONLY_POINTER_TYPE_ID, element))
+                });
+                let valid_result = self
+                    .builtin_type_arguments(expression.type_id(), "Result")
+                    .is_some_and(|arguments| {
+                        matches!(arguments, [pointer_result, error]
+                        if expected_success.is_some_and(|(definition, element)| {
+                            ffi_exact_pointer_payload(
+                                self.arena,
+                                *pointer_result,
+                                definition,
+                            ) == Some(element)
+                        }) && self.is_builtin_type(
+                            *error,
+                            "Ffi.NullPointerError",
+                            &[],
+                        ))
+                    });
+                if self
+                    .builtin_type_arguments(expression.type_id(), "Result")
+                    .and_then(|_| embedded_bootstrap_schema().ok())
+                    .and_then(|schema| schema.type_by_source_name("Result").map(|entry| entry.id()))
+                    .is_none_or(|definition| definition != *result)
+                    || success.raw() != 0
+                    || failure.raw() != 1
+                    || !valid_result
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiUnsafeLoad {
+                pointer,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(pointer, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && expression.type_id() == *element
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeStore {
+                pointer,
+                value,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(pointer, visible);
+                self.verify_expression(value, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && value.type_id() == *element
+                    && self.arena.get(expression.type_id())
+                        == Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeAdvance {
+                pointer,
+                elements,
+                element,
+                layout_record,
+                read_only,
+            } => {
+                self.verify_expression(pointer, visible);
+                self.verify_expression(elements, visible);
+                let constructor = if *read_only {
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID
+                } else {
+                    pop_types::FFI_POINTER_TYPE_ID
+                };
+                let valid = ffi_exact_pointer_payload(self.arena, pointer.type_id(), constructor)
+                    == Some(*element)
+                    && ffi_exact_pointer_payload(self.arena, expression.type_id(), constructor)
+                        == Some(*element)
+                    && self.is_builtin_type(elements.type_id(), "Ffi.C.PointerDifference", &[])
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeCopy {
+                source,
+                destination,
+                count,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(source, visible);
+                self.verify_expression(destination, visible);
+                self.verify_expression(count, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    source.type_id(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && ffi_exact_pointer_payload(
+                        self.arena,
+                        destination.type_id(),
+                        pop_types::FFI_POINTER_TYPE_ID,
+                    ) == Some(*element)
+                    && self.is_builtin_type(count.type_id(), "Ffi.C.Size", &[])
+                    && self.arena.get(expression.type_id())
+                        == Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafeAddress {
+                pointer,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(pointer, visible);
+                let valid = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == Some(*element)
+                    && self.is_builtin_type(expression.type_id(), "Ffi.C.Size", &[])
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
+            HirExpressionKind::FfiUnsafePointerFromAddress {
+                address,
+                element,
+                layout_record,
+            } => {
+                self.verify_expression(address, visible);
+                let valid = self.is_builtin_type(address.type_id(), "Ffi.C.Size", &[])
+                    && ffi_exact_pointer_payload(
+                        self.arena,
+                        expression.type_id(),
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ) == Some(*element)
+                    && valid_ffi_element_metadata(
+                        self.arena,
+                        self.schema,
+                        *element,
+                        *layout_record,
+                    );
+                self.verify_ffi_unsafe(expression, valid);
+            }
             HirExpressionKind::TaskGroup { cancel, body } => {
                 self.verify_expression(cancel, visible);
                 self.verify_expression(body, visible);
@@ -2730,6 +3410,15 @@ impl Verifier<'_> {
             HirExpressionKind::String(_)
             | HirExpressionKind::Boolean(_)
             | HirExpressionKind::Nil => self.verify_primitive_literal(expression),
+        }
+    }
+
+    fn verify_ffi_unsafe(&mut self, expression: &HirExpression, valid: bool) {
+        if !valid {
+            self.errors
+                .push(HirVerificationError::InvalidFfiUnsafeOperation {
+                    span: expression.span(),
+                });
         }
     }
 
@@ -4906,6 +5595,22 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
                 }
             }
         }
+        HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            collect_cell_captures(buffer, written);
+            for capture in &body.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
+        HirExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            collect_cell_captures(bytes, written);
+            for capture in &body.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
         HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
         HirExpressionKind::TupleGet { tuple, .. } => collect_cell_captures(tuple, written),
         HirExpressionKind::ArrayGet { array, index }
@@ -4991,6 +5696,59 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::TaskCancel { source: operand } => {
             collect_cell_captures(operand, written)
         }
+        HirExpressionKind::FfiHandleOpen { value: operand }
+        | HirExpressionKind::FfiHandleGet { handle: operand }
+        | HirExpressionKind::FfiHandleClose { handle: operand }
+        | HirExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | HirExpressionKind::FfiBufferLength { buffer: operand }
+        | HirExpressionKind::FfiBufferClose { buffer: operand } => {
+            collect_cell_captures(operand, written)
+        }
+        HirExpressionKind::FfiPointerToOptional { pointer }
+        | HirExpressionKind::FfiPointerReadOnly { pointer }
+        | HirExpressionKind::FfiPointerIsPresent { pointer }
+        | HirExpressionKind::FfiPointerRequire { pointer, .. } => {
+            collect_cell_captures(pointer, written)
+        }
+        HirExpressionKind::FfiUnsafeLoad { pointer, .. }
+        | HirExpressionKind::FfiUnsafeAddress { pointer, .. }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer, ..
+        } => collect_cell_captures(pointer, written),
+        HirExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            collect_cell_captures(pointer, written);
+            collect_cell_captures(value, written);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            collect_cell_captures(source, written);
+            collect_cell_captures(destination, written);
+            collect_cell_captures(count, written);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            collect_cell_captures(buffer, written);
+            collect_cell_captures(index, written);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            collect_cell_captures(buffer, written);
+            collect_cell_captures(index, written);
+            collect_cell_captures(value, written);
+        }
         HirExpressionKind::TaskGroup { cancel, body } => {
             collect_cell_captures(cancel, written);
             collect_cell_captures(body, written);
@@ -5046,6 +5804,7 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
         | HirExpressionKind::TaskCancellationSource
+        | HirExpressionKind::FfiPointerNone { .. }
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }

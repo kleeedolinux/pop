@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageManifest {
@@ -12,6 +17,8 @@ pub struct PackageManifest {
     dependencies: Vec<DependencyRequirement>,
     development_dependencies: Vec<DependencyRequirement>,
     platform_dependencies: Vec<PlatformDependencies>,
+    native_libraries: Vec<NativeLibrary>,
+    platform_native_libraries: Vec<PlatformNativeLibraries>,
 }
 
 impl PackageManifest {
@@ -44,6 +51,342 @@ impl PackageManifest {
     pub fn platform_dependencies(&self) -> &[PlatformDependencies] {
         &self.platform_dependencies
     }
+
+    #[must_use]
+    pub fn native_libraries(&self) -> &[NativeLibrary] {
+        &self.native_libraries
+    }
+
+    #[must_use]
+    pub fn platform_native_libraries(&self) -> &[PlatformNativeLibraries] {
+        &self.platform_native_libraries
+    }
+
+    /// Builds the canonical ADR 0081 native-link plan for one exact platform
+    /// target.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid target or an alias supplied by both the common and
+    /// selected platform sections.
+    pub fn native_link_plan(&self, platform_target: &str) -> Result<NativeLinkPlan, ManifestError> {
+        if !valid_platform_target(platform_target) {
+            return Err(ManifestError::InvalidNativeLibraryTarget);
+        }
+        let mut libraries = self.native_libraries.clone();
+        if let Some(platform) = self
+            .platform_native_libraries
+            .iter()
+            .find(|platform| platform.platform_target == platform_target)
+        {
+            libraries.extend(platform.libraries.iter().cloned());
+        }
+        libraries.sort_by(|left, right| left.alias.cmp(&right.alias));
+        if libraries
+            .windows(2)
+            .any(|pair| pair[0].alias == pair[1].alias)
+        {
+            return Err(ManifestError::DuplicateNativeLibrary);
+        }
+        Ok(NativeLinkPlan {
+            platform_target: platform_target.to_owned(),
+            libraries,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeLibraryKind {
+    System,
+    Framework,
+    Object,
+    Archive,
+    Shared,
+    ImportLibrary,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeLibraryDiscovery {
+    PackageConfiguration,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeLibrary {
+    alias: String,
+    kind: NativeLibraryKind,
+    name: Option<String>,
+    path: Option<String>,
+    sha256: Option<String>,
+    discovery: Option<NativeLibraryDiscovery>,
+    version_requirement: Option<String>,
+}
+
+impl NativeLibrary {
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> NativeLibraryKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    #[must_use]
+    pub fn sha256(&self) -> Option<&str> {
+        self.sha256.as_deref()
+    }
+
+    #[must_use]
+    pub const fn discovery(&self) -> Option<NativeLibraryDiscovery> {
+        self.discovery
+    }
+
+    #[must_use]
+    pub fn version_requirement(&self) -> Option<&str> {
+        self.version_requirement.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformNativeLibraries {
+    platform_target: String,
+    libraries: Vec<NativeLibrary>,
+}
+
+impl PlatformNativeLibraries {
+    #[must_use]
+    pub fn platform_target(&self) -> &str {
+        &self.platform_target
+    }
+
+    #[must_use]
+    pub fn libraries(&self) -> &[NativeLibrary] {
+        &self.libraries
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeLinkPlan {
+    platform_target: String,
+    libraries: Vec<NativeLibrary>,
+}
+
+impl NativeLinkPlan {
+    #[must_use]
+    pub fn platform_target(&self) -> &str {
+        &self.platform_target
+    }
+
+    #[must_use]
+    pub fn libraries(&self) -> &[NativeLibrary] {
+        &self.libraries
+    }
+
+    /// Validates the canonical serialized plan shape.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid targets, unsorted aliases, or provider fields that do
+    /// not match their closed input kind.
+    pub fn validate(&self) -> Result<(), NativeLinkPlanError> {
+        if !valid_platform_target(&self.platform_target)
+            || self
+                .libraries
+                .windows(2)
+                .any(|pair| pair[0].alias >= pair[1].alias)
+            || self.libraries.iter().any(|library| {
+                !valid_pascal(&library.alias)
+                    || match library.kind {
+                        NativeLibraryKind::System => {
+                            library.name.as_deref().is_none_or(|name| {
+                                !valid_native_name(name)
+                                    || library.version_requirement.as_deref().is_some_and(|value| {
+                                        library.discovery
+                                            != Some(NativeLibraryDiscovery::PackageConfiguration)
+                                            || !valid_native_version_requirement(value)
+                                    })
+                            }) || library.path.is_some()
+                                || library.sha256.is_some()
+                        }
+                        NativeLibraryKind::Framework => {
+                            library
+                                .name
+                                .as_deref()
+                                .is_none_or(|name| !valid_native_name(name))
+                                || library.path.is_some()
+                                || library.sha256.is_some()
+                                || library.discovery.is_some()
+                                || library.version_requirement.is_some()
+                        }
+                        NativeLibraryKind::Object
+                        | NativeLibraryKind::Archive
+                        | NativeLibraryKind::Shared
+                        | NativeLibraryKind::ImportLibrary => {
+                            library.name.is_some()
+                                || library
+                                    .path
+                                    .as_deref()
+                                    .is_none_or(|path| !valid_native_path(path))
+                                || library
+                                    .sha256
+                                    .as_deref()
+                                    .is_none_or(|hash| !valid_sha256(hash))
+                                || library.discovery.is_some()
+                                || library.version_requirement.is_some()
+                        }
+                    }
+            })
+        {
+            return Err(NativeLinkPlanError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Merges exact target plans into one sorted link plan.
+    ///
+    /// # Errors
+    ///
+    /// Rejects target disagreement or one alias naming incompatible providers.
+    pub fn merge(plans: &[Self]) -> Result<Self, NativeLinkPlanError> {
+        let Some(first) = plans.first() else {
+            return Err(NativeLinkPlanError::EmptyPlanSet);
+        };
+        if plans
+            .iter()
+            .any(|plan| plan.platform_target != first.platform_target)
+        {
+            return Err(NativeLinkPlanError::TargetMismatch);
+        }
+        let mut by_alias = BTreeMap::new();
+        for library in plans.iter().flat_map(|plan| &plan.libraries) {
+            match by_alias.get(&library.alias) {
+                Some(existing) if existing != library => {
+                    return Err(NativeLinkPlanError::ConflictingAlias);
+                }
+                Some(_) => {}
+                None => {
+                    by_alias.insert(library.alias.clone(), library.clone());
+                }
+            }
+        }
+        Ok(Self {
+            platform_target: first.platform_target.clone(),
+            libraries: by_alias.into_values().collect(),
+        })
+    }
+
+    /// Verifies every package-relative native input before linker invocation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing, non-regular, symlinked, escaped, or hash-mismatched
+    /// inputs. System and framework providers have no local file to verify.
+    pub fn verify_local_inputs(&self, package_root: &Path) -> Result<(), NativeLinkPlanError> {
+        self.validate()?;
+        let root_metadata =
+            fs::symlink_metadata(package_root).map_err(|_| NativeLinkPlanError::MissingInput)?;
+        if root_metadata.file_type().is_symlink() {
+            return Err(NativeLinkPlanError::SymlinkInput);
+        }
+        if !root_metadata.is_dir() {
+            return Err(NativeLinkPlanError::NonRegularInput);
+        }
+        for library in &self.libraries {
+            let Some(relative) = library.path() else {
+                continue;
+            };
+            let path = verified_regular_path(package_root, relative)?;
+            let expected = library.sha256().ok_or(NativeLinkPlanError::InvalidInput)?;
+            if file_sha256(&path)? != expected {
+                return Err(NativeLinkPlanError::HashMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeLinkPlanError {
+    EmptyPlanSet,
+    TargetMismatch,
+    ConflictingAlias,
+    InvalidInput,
+    MissingInput,
+    NonRegularInput,
+    SymlinkInput,
+    HashMismatch,
+    Io,
+}
+
+impl fmt::Display for NativeLinkPlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid native link plan: {self:?}")
+    }
+}
+
+impl Error for NativeLinkPlanError {}
+
+fn verified_regular_path(
+    root: &Path,
+    relative: &str,
+) -> Result<std::path::PathBuf, NativeLinkPlanError> {
+    let mut path = root.to_path_buf();
+    let mut components = Path::new(relative).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            return Err(NativeLinkPlanError::InvalidInput);
+        };
+        path.push(component);
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| NativeLinkPlanError::MissingInput)?;
+        if metadata.file_type().is_symlink() {
+            return Err(NativeLinkPlanError::SymlinkInput);
+        }
+        if components.peek().is_some() && !metadata.is_dir() {
+            return Err(NativeLinkPlanError::NonRegularInput);
+        }
+        if components.peek().is_none() && !metadata.is_file() {
+            return Err(NativeLinkPlanError::NonRegularInput);
+        }
+    }
+    Ok(path)
+}
+
+fn file_sha256(path: &Path) -> Result<String, NativeLinkPlanError> {
+    let mut file = fs::File::open(path).map_err(|_| NativeLinkPlanError::Io)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| NativeLinkPlanError::Io)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,6 +552,12 @@ pub enum ManifestError {
     DuplicateTarget,
     DuplicateSourcePath,
     InvalidDependency,
+    InvalidNativeLibrary,
+    InvalidNativeLibraryName,
+    InvalidNativeLibraryPath,
+    InvalidNativeLibraryHash,
+    InvalidNativeLibraryTarget,
+    DuplicateNativeLibrary,
     MissingGitRevision,
     MissingWorkspaceSection,
     MissingWorkspaceMembers,
@@ -232,49 +581,71 @@ impl Error for ManifestError {}
 /// Rejects missing required keys, duplicate/unknown sections, non-string
 /// values, and noncanonical identities.
 pub fn parse_package_manifest(text: &str) -> Result<PackageManifest, ManifestError> {
-    let mut section = "";
-    let mut package = BTreeMap::new();
-    let mut dependencies = BTreeMap::new();
-    let mut development_dependencies = BTreeMap::new();
-    let mut platform_dependencies: BTreeMap<String, BTreeMap<String, DependencyRequirement>> =
-        BTreeMap::new();
-    let mut platform_section = None;
-    let mut saw_package = false;
+    let mut parser = PackageManifestParser::default();
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         if line.starts_with('[') {
-            platform_section = None;
-            section = match line {
-                "[package]" => {
-                    saw_package = true;
-                    "package"
-                }
-                "[dependencies]" => "dependencies",
-                "[developmentDependencies]" => "developmentDependencies",
-                "[workspace]"
-                | "[workspace.package]"
-                | "[workspace.dependencies]"
-                | "[workspace.diagnostics]" => "workspace",
-                _ => {
-                    if let Some(platform_target) = parse_platform_dependency_section(line) {
-                        platform_section = Some(platform_target);
-                        "platformDependencies"
-                    } else {
-                        return Err(ManifestError::UnsupportedSection);
-                    }
-                }
-            };
+            parser.select_section(line)?;
             continue;
         }
+        parser.insert_line(line)?;
+    }
+    parser.finish()
+}
+
+#[derive(Default)]
+struct PackageManifestParser {
+    section: &'static str,
+    platform_section: Option<String>,
+    saw_package: bool,
+    package: BTreeMap<String, String>,
+    dependencies: BTreeMap<String, DependencyRequirement>,
+    development_dependencies: BTreeMap<String, DependencyRequirement>,
+    platform_dependencies: BTreeMap<String, BTreeMap<String, DependencyRequirement>>,
+    native_libraries: BTreeMap<String, NativeLibrary>,
+    platform_native_libraries: BTreeMap<String, BTreeMap<String, NativeLibrary>>,
+}
+
+impl PackageManifestParser {
+    fn select_section(&mut self, line: &str) -> Result<(), ManifestError> {
+        self.platform_section = None;
+        self.section = match line {
+            "[package]" => {
+                self.saw_package = true;
+                "package"
+            }
+            "[dependencies]" => "dependencies",
+            "[developmentDependencies]" => "developmentDependencies",
+            "[nativeLibraries]" => "nativeLibraries",
+            "[workspace]"
+            | "[workspace.package]"
+            | "[workspace.dependencies]"
+            | "[workspace.diagnostics]" => "workspace",
+            _ => {
+                if let Some(platform_target) = parse_platform_dependency_section(line) {
+                    self.platform_section = Some(platform_target);
+                    "platformDependencies"
+                } else if let Some(platform_target) = parse_platform_native_library_section(line) {
+                    self.platform_section = Some(platform_target);
+                    "platformNativeLibraries"
+                } else {
+                    return Err(ManifestError::UnsupportedSection);
+                }
+            }
+        };
+        Ok(())
+    }
+
+    fn insert_line(&mut self, line: &str) -> Result<(), ManifestError> {
         let (key, raw_value) = line.split_once('=').ok_or(ManifestError::InvalidLine)?;
         let key = key.trim();
-        match section {
+        match self.section {
             "package" => {
                 let value = parse_string(raw_value.trim())?;
-                if package.insert(key.to_owned(), value).is_some() {
+                if self.package.insert(key.to_owned(), value).is_some() {
                     return Err(ManifestError::DuplicateKey);
                 }
             }
@@ -283,7 +654,11 @@ pub fn parse_package_manifest(text: &str) -> Result<PackageManifest, ManifestErr
                     return Err(ManifestError::InvalidDependencyAlias);
                 }
                 let dependency = parse_dependency(key, raw_value.trim())?;
-                if dependencies.insert(key.to_owned(), dependency).is_some() {
+                if self
+                    .dependencies
+                    .insert(key.to_owned(), dependency)
+                    .is_some()
+                {
                     return Err(ManifestError::DuplicateKey);
                 }
             }
@@ -292,7 +667,8 @@ pub fn parse_package_manifest(text: &str) -> Result<PackageManifest, ManifestErr
                     return Err(ManifestError::InvalidDependencyAlias);
                 }
                 let dependency = parse_dependency(key, raw_value.trim())?;
-                if development_dependencies
+                if self
+                    .development_dependencies
                     .insert(key.to_owned(), dependency)
                     .is_some()
                 {
@@ -304,10 +680,12 @@ pub fn parse_package_manifest(text: &str) -> Result<PackageManifest, ManifestErr
                     return Err(ManifestError::InvalidDependencyAlias);
                 }
                 let dependency = parse_dependency(key, raw_value.trim())?;
-                let target = platform_section
+                let target = self
+                    .platform_section
                     .as_ref()
                     .ok_or(ManifestError::InvalidTargetName)?;
-                if platform_dependencies
+                if self
+                    .platform_dependencies
                     .entry(target.clone())
                     .or_default()
                     .insert(key.to_owned(), dependency)
@@ -316,17 +694,49 @@ pub fn parse_package_manifest(text: &str) -> Result<PackageManifest, ManifestErr
                     return Err(ManifestError::DuplicateKey);
                 }
             }
+            "nativeLibraries" => {
+                let library = parse_native_library(key, raw_value.trim())?;
+                if self
+                    .native_libraries
+                    .insert(key.to_owned(), library)
+                    .is_some()
+                {
+                    return Err(ManifestError::DuplicateNativeLibrary);
+                }
+            }
+            "platformNativeLibraries" => {
+                let library = parse_native_library(key, raw_value.trim())?;
+                let target = self
+                    .platform_section
+                    .as_ref()
+                    .ok_or(ManifestError::InvalidNativeLibraryTarget)?;
+                if self
+                    .platform_native_libraries
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(key.to_owned(), library)
+                    .is_some()
+                {
+                    return Err(ManifestError::DuplicateNativeLibrary);
+                }
+            }
             "workspace" => {}
             _ => return Err(ManifestError::MissingPackageSection),
         }
+        Ok(())
     }
-    finish_package_manifest(
-        saw_package,
-        package,
-        dependencies,
-        development_dependencies,
-        platform_dependencies,
-    )
+
+    fn finish(self) -> Result<PackageManifest, ManifestError> {
+        finish_package_manifest(
+            self.saw_package,
+            self.package,
+            self.dependencies,
+            self.development_dependencies,
+            self.platform_dependencies,
+            self.native_libraries,
+            self.platform_native_libraries,
+        )
+    }
 }
 
 fn finish_package_manifest(
@@ -335,6 +745,8 @@ fn finish_package_manifest(
     dependencies: BTreeMap<String, DependencyRequirement>,
     development_dependencies: BTreeMap<String, DependencyRequirement>,
     platform_dependencies: BTreeMap<String, BTreeMap<String, DependencyRequirement>>,
+    native_libraries: BTreeMap<String, NativeLibrary>,
+    platform_native_libraries: BTreeMap<String, BTreeMap<String, NativeLibrary>>,
 ) -> Result<PackageManifest, ManifestError> {
     if !saw_package {
         return Err(ManifestError::MissingPackageSection);
@@ -369,6 +781,14 @@ fn finish_package_manifest(
             dependencies: dependencies.into_values().collect(),
         })
         .collect();
+    let native_libraries = native_libraries.into_values().collect();
+    let platform_native_libraries = platform_native_libraries
+        .into_iter()
+        .map(|(platform_target, libraries)| PlatformNativeLibraries {
+            platform_target,
+            libraries: libraries.into_values().collect(),
+        })
+        .collect();
     Ok(PackageManifest {
         name,
         version,
@@ -376,6 +796,8 @@ fn finish_package_manifest(
         dependencies,
         development_dependencies,
         platform_dependencies,
+        native_libraries,
+        platform_native_libraries,
     })
 }
 
@@ -388,6 +810,151 @@ fn parse_platform_dependency_section(line: &str) -> Option<String> {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         }))
     .then(|| platform_target.to_owned())
+}
+
+fn parse_platform_native_library_section(line: &str) -> Option<String> {
+    let platform_target = line
+        .strip_prefix("[platform.\"")?
+        .strip_suffix("\".nativeLibraries]")?;
+    valid_platform_target(platform_target).then(|| platform_target.to_owned())
+}
+
+fn valid_platform_target(platform_target: &str) -> bool {
+    !platform_target.is_empty()
+        && platform_target.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+fn parse_native_library(alias: &str, value: &str) -> Result<NativeLibrary, ManifestError> {
+    if !valid_pascal(alias) {
+        return Err(ManifestError::InvalidNativeLibrary);
+    }
+    let mut fields = parse_inline_table(value).map_err(|_| ManifestError::InvalidNativeLibrary)?;
+    let kind = fields
+        .remove("kind")
+        .ok_or(ManifestError::InvalidNativeLibrary)
+        .and_then(|value| parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibrary))?;
+    let kind = match kind.as_str() {
+        "system" => NativeLibraryKind::System,
+        "framework" => NativeLibraryKind::Framework,
+        "object" => NativeLibraryKind::Object,
+        "archive" => NativeLibraryKind::Archive,
+        "shared" => NativeLibraryKind::Shared,
+        "importLibrary" => NativeLibraryKind::ImportLibrary,
+        _ => return Err(ManifestError::InvalidNativeLibrary),
+    };
+
+    let mut library = NativeLibrary {
+        alias: alias.to_owned(),
+        kind,
+        name: None,
+        path: None,
+        sha256: None,
+        discovery: None,
+        version_requirement: None,
+    };
+    match kind {
+        NativeLibraryKind::System => {
+            library.name = Some(take_native_name(&mut fields)?);
+            if let Some(value) = fields.remove("discovery") {
+                let value =
+                    parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibrary)?;
+                if value != "packageConfiguration" {
+                    return Err(ManifestError::InvalidNativeLibrary);
+                }
+                library.discovery = Some(NativeLibraryDiscovery::PackageConfiguration);
+            }
+            if let Some(value) = fields.remove("version") {
+                let value =
+                    parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibrary)?;
+                if library.discovery.is_none() || !valid_native_version_requirement(&value) {
+                    return Err(ManifestError::InvalidNativeLibrary);
+                }
+                library.version_requirement = Some(value);
+            }
+        }
+        NativeLibraryKind::Framework => {
+            library.name = Some(take_native_name(&mut fields)?);
+        }
+        NativeLibraryKind::Object
+        | NativeLibraryKind::Archive
+        | NativeLibraryKind::Shared
+        | NativeLibraryKind::ImportLibrary => {
+            let path = fields
+                .remove("path")
+                .ok_or(ManifestError::InvalidNativeLibraryPath)
+                .and_then(|value| {
+                    parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibraryPath)
+                })?;
+            if !valid_native_path(&path) {
+                return Err(ManifestError::InvalidNativeLibraryPath);
+            }
+            let sha256 = fields
+                .remove("sha256")
+                .ok_or(ManifestError::InvalidNativeLibraryHash)
+                .and_then(|value| {
+                    parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibraryHash)
+                })?;
+            if !valid_sha256(&sha256) {
+                return Err(ManifestError::InvalidNativeLibraryHash);
+            }
+            library.path = Some(path);
+            library.sha256 = Some(sha256);
+        }
+    }
+    if !fields.is_empty() {
+        return Err(ManifestError::InvalidNativeLibrary);
+    }
+    Ok(library)
+}
+
+fn take_native_name(fields: &mut BTreeMap<String, String>) -> Result<String, ManifestError> {
+    let name = fields
+        .remove("name")
+        .ok_or(ManifestError::InvalidNativeLibraryName)
+        .and_then(|value| {
+            parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibraryName)
+        })?;
+    if !valid_native_name(&name) {
+        return Err(ManifestError::InvalidNativeLibraryName);
+    }
+    Ok(name)
+}
+
+fn valid_native_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '@'])
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
+        })
+}
+
+fn valid_native_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with(['/', '@', '-'])
+        && !path.contains('\\')
+        && path.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !component.chars().any(char::is_control)
+        })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_native_version_requirement(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_digit()
+                || matches!(character, '.' | '<' | '>' | '=' | ',' | '-' | '+')
+        })
 }
 
 fn parse_dependency(alias: &str, value: &str) -> Result<DependencyRequirement, ManifestError> {
@@ -496,10 +1063,12 @@ pub fn parse_workspace_manifest(text: &str) -> Result<WorkspaceManifest, Manifes
                 "[package]"
                 | "[dependencies]"
                 | "[developmentDependencies]"
+                | "[nativeLibraries]"
                 | "[workspace.package]"
                 | "[workspace.dependencies]"
                 | "[workspace.diagnostics]" => section = "ignored",
                 _ if parse_platform_dependency_section(line).is_some() => section = "ignored",
+                _ if parse_platform_native_library_section(line).is_some() => section = "ignored",
                 _ => return Err(ManifestError::UnsupportedSection),
             }
             continue;

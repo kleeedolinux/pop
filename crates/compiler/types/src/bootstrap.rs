@@ -16,6 +16,9 @@ const STANDARD_COMPILER_ATTRIBUTES: &str =
     include_str!("../../../../libraries/standard/bootstrap/compiler-attributes.tsv");
 const STANDARD_FUNCTIONS: &str =
     include_str!("../../../../libraries/standard/bootstrap/functions.tsv");
+const FFI_TYPES: &str = include_str!("../../../extensions/ffi/bootstrap/types.tsv");
+const FFI_COMPILER_ATTRIBUTES: &str =
+    include_str!("../../../extensions/ffi/bootstrap/compiler-attributes.tsv");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapStandardFunctionEntry {
@@ -92,12 +95,29 @@ pub enum CompilerAttributeRole {
     CompileTime,
     AttributeUsage,
     AttributeValidator,
+    FfiLink,
+    FfiForeign,
+    FfiNonblocking,
+    FfiCLayout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CompilerAttributeTarget {
     Function,
     Attribute,
+    Namespace,
+    Record,
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedCompilerAttribute {
+    role: CompilerAttributeRole,
+    id: u32,
+    source_name: &'static str,
+    owner_bubble: &'static str,
+    argument_count: u16,
+    target: CompilerAttributeTarget,
+    prelude: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,6 +331,89 @@ impl BootstrapTypeEntry {
     }
 }
 
+/// Returns whether an exact bootstrap identity belongs to the closed Pop.Ffi
+/// ABI vocabulary. These values have scalar native representations and are
+/// never managed-reference tokens.
+#[must_use]
+pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 200..=206 | 210..=222)
+}
+
+/// Returns whether an identity is one of the closed C integer ABI scalars.
+#[must_use]
+pub const fn is_ffi_integer_abi_builtin_type(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 210..=222)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FfiCIntegerKind {
+    Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Size,
+    PointerDifference,
+}
+
+/// Returns the closed C integer kind for its stable bootstrap identity.
+#[must_use]
+pub const fn ffi_c_integer_kind(id: BuiltinTypeId) -> Option<FfiCIntegerKind> {
+    Some(match id.raw() {
+        210 => FfiCIntegerKind::Char,
+        211 => FfiCIntegerKind::SignedChar,
+        212 => FfiCIntegerKind::UnsignedChar,
+        213 => FfiCIntegerKind::Short,
+        214 => FfiCIntegerKind::UnsignedShort,
+        215 => FfiCIntegerKind::Int,
+        216 => FfiCIntegerKind::UnsignedInt,
+        217 => FfiCIntegerKind::Long,
+        218 => FfiCIntegerKind::UnsignedLong,
+        219 => FfiCIntegerKind::LongLong,
+        220 => FfiCIntegerKind::UnsignedLongLong,
+        221 => FfiCIntegerKind::Size,
+        222 => FfiCIntegerKind::PointerDifference,
+        _ => return None,
+    })
+}
+
+/// Returns whether an identity is a mutable or read-only FFI pointer
+/// constructor, including its optional form.
+#[must_use]
+pub const fn is_ffi_pointer_type_constructor(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 200 | 201 | 205 | 206)
+}
+
+/// Returns whether an identity is an FFI function-pointer constructor,
+/// including its optional form.
+#[must_use]
+pub const fn is_ffi_function_type_constructor(id: BuiltinTypeId) -> bool {
+    matches!(id.raw(), 202 | 203)
+}
+
+/// Stable bootstrap identity of the exact `Ffi.Handle<T>` type constructor.
+pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
+/// Stable bootstrap identity of the exact `Ffi.Pointer<T>` type constructor.
+pub const FFI_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(200);
+/// Stable bootstrap identity of the exact `Ffi.OptionalPointer<T>` type constructor.
+pub const FFI_OPTIONAL_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(201);
+/// Stable bootstrap identity of the exact `Ffi.ReadOnlyPointer<T>` type constructor.
+pub const FFI_READ_ONLY_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(205);
+/// Stable bootstrap identity of the exact `Ffi.OptionalReadOnlyPointer<T>` type constructor.
+pub const FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(206);
+/// Stable bootstrap identity of the exact `Ffi.Buffer<T>` type constructor.
+pub const FFI_BUFFER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(207);
+/// Stable bootstrap identity of `Ffi.NullPointerError`.
+pub const FFI_NULL_POINTER_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(208);
+/// Stable bootstrap identity of `Ffi.AllocationError`.
+pub const FFI_ALLOCATION_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(209);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTypeRole {
     Array,
@@ -348,6 +451,11 @@ impl BootstrapSchema {
     #[must_use]
     pub fn type_by_source_name(&self, name: &str) -> Option<&BootstrapTypeEntry> {
         self.types.iter().find(|entry| entry.source_name == name)
+    }
+
+    #[must_use]
+    pub fn type_by_id(&self, id: BuiltinTypeId) -> Option<&BootstrapTypeEntry> {
+        self.types.iter().find(|entry| entry.id == id)
     }
 
     #[must_use]
@@ -476,14 +584,22 @@ pub fn embedded_bootstrap_schema() -> Result<BootstrapSchema, BootstrapSchemaErr
     let (intrinsic_version, intrinsics) = parse_intrinsics()?;
     let (internal_type_version, mut types) = parse_types("internal type", INTERNAL_TYPES)?;
     let (standard_type_version, standard_types) = parse_types("standard type", STANDARD_TYPES)?;
-    let (compiler_attribute_version, compiler_attributes) = parse_compiler_attributes()?;
+    let (ffi_type_version, ffi_types) = parse_types("FFI type", FFI_TYPES)?;
+    let (standard_compiler_attribute_version, mut compiler_attributes) =
+        parse_compiler_attributes("standard compiler attribute", STANDARD_COMPILER_ATTRIBUTES)?;
+    let (ffi_compiler_attribute_version, ffi_compiler_attributes) =
+        parse_compiler_attributes("FFI compiler attribute", FFI_COMPILER_ATTRIBUTES)?;
     let (standard_function_version, standard_functions) = parse_standard_functions()?;
     types.extend(standard_types);
+    types.extend(ffi_types);
+    compiler_attributes.extend(ffi_compiler_attributes);
     if [
         intrinsic_version,
         internal_type_version,
         standard_type_version,
-        compiler_attribute_version,
+        ffi_type_version,
+        standard_compiler_attribute_version,
+        ffi_compiler_attribute_version,
         standard_function_version,
     ]
     .into_iter()
@@ -614,16 +730,18 @@ fn parse_types(
     Ok((version, entries))
 }
 
-fn parse_compiler_attributes()
--> Result<(u32, Vec<BootstrapCompilerAttributeEntry>), BootstrapSchemaError> {
-    let mut lines = STANDARD_COMPILER_ATTRIBUTES.lines();
-    let version = parse_version("standard compiler attribute", lines.next())?;
+fn parse_compiler_attributes(
+    document: &'static str,
+    text: &'static str,
+) -> Result<(u32, Vec<BootstrapCompilerAttributeEntry>), BootstrapSchemaError> {
+    let mut lines = text.lines();
+    let version = parse_version(document, lines.next())?;
     if lines.next()
         != Some(
             "attributeId\tsourceName\townerBubble\targumentCount\ttarget\tsemanticRole\tprelude",
         )
     {
-        return Err(error("standard compiler attribute", 2, "unexpected header"));
+        return Err(error(document, 2, "unexpected header"));
     }
     let mut entries = Vec::new();
     for (index, line) in lines.enumerate() {
@@ -632,58 +750,41 @@ fn parse_compiler_attributes()
         }
         let fields: Vec<_> = line.split('\t').collect();
         if fields.len() != 7 {
-            return Err(error(
-                "standard compiler attribute",
-                index + 3,
-                "expected seven fields",
-            ));
+            return Err(error(document, index + 3, "expected seven fields"));
         }
-        let id = fields[0].parse().map(CompilerAttributeId).map_err(|_| {
-            error(
-                "standard compiler attribute",
-                index + 3,
-                "invalid attribute ID",
-            )
-        })?;
-        let argument_count = fields[3].parse().map_err(|_| {
-            error(
-                "standard compiler attribute",
-                index + 3,
-                "invalid argument count",
-            )
-        })?;
+        let id = fields[0]
+            .parse()
+            .map(CompilerAttributeId)
+            .map_err(|_| error(document, index + 3, "invalid attribute ID"))?;
+        let argument_count = fields[3]
+            .parse()
+            .map_err(|_| error(document, index + 3, "invalid argument count"))?;
         let target = match fields[4] {
             "Function" => CompilerAttributeTarget::Function,
             "Attribute" => CompilerAttributeTarget::Attribute,
+            "Namespace" => CompilerAttributeTarget::Namespace,
+            "Record" => CompilerAttributeTarget::Record,
             _ => {
-                return Err(error(
-                    "standard compiler attribute",
-                    index + 3,
-                    "invalid attachment target",
-                ));
+                return Err(error(document, index + 3, "invalid attachment target"));
             }
         };
         let role = match fields[5] {
             "CompileTime" => CompilerAttributeRole::CompileTime,
             "AttributeUsage" => CompilerAttributeRole::AttributeUsage,
             "AttributeValidator" => CompilerAttributeRole::AttributeValidator,
+            "FfiLink" => CompilerAttributeRole::FfiLink,
+            "FfiForeign" => CompilerAttributeRole::FfiForeign,
+            "FfiNonblocking" => CompilerAttributeRole::FfiNonblocking,
+            "FfiCLayout" => CompilerAttributeRole::FfiCLayout,
             _ => {
-                return Err(error(
-                    "standard compiler attribute",
-                    index + 3,
-                    "invalid semantic role",
-                ));
+                return Err(error(document, index + 3, "invalid semantic role"));
             }
         };
         let prelude = match fields[6] {
             "true" => true,
             "false" => false,
             _ => {
-                return Err(error(
-                    "standard compiler attribute",
-                    index + 3,
-                    "invalid prelude flag",
-                ));
+                return Err(error(document, index + 3, "invalid prelude flag"));
             }
         };
         entries.push(BootstrapCompilerAttributeEntry {
@@ -817,10 +918,60 @@ fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaE
         return Err(error("type", 2, "duplicate source type name"));
     }
     if entries.iter().any(|entry| {
-        !matches!(entry.owner_bubble, "Pop.Internal" | "Pop.Standard")
-            || entry.source_name.is_empty()
+        !matches!(
+            entry.owner_bubble,
+            "Pop.Internal" | "Pop.Standard" | "Pop.Ffi"
+        ) || entry.source_name.is_empty()
     }) {
         return Err(error("type", 2, "invalid foundational type contract"));
+    }
+    let ffi_contracts = [
+        (200, "Ffi.Pointer", 1),
+        (201, "Ffi.OptionalPointer", 1),
+        (202, "Ffi.Function", 1),
+        (203, "Ffi.OptionalFunction", 1),
+        (204, "Ffi.Handle", 1),
+        (205, "Ffi.ReadOnlyPointer", 1),
+        (206, "Ffi.OptionalReadOnlyPointer", 1),
+        (207, "Ffi.Buffer", 1),
+        (208, "Ffi.NullPointerError", 0),
+        (209, "Ffi.AllocationError", 0),
+        (210, "Ffi.C.Char", 0),
+        (211, "Ffi.C.SignedChar", 0),
+        (212, "Ffi.C.UnsignedChar", 0),
+        (213, "Ffi.C.Short", 0),
+        (214, "Ffi.C.UnsignedShort", 0),
+        (215, "Ffi.C.Int", 0),
+        (216, "Ffi.C.UnsignedInt", 0),
+        (217, "Ffi.C.Long", 0),
+        (218, "Ffi.C.UnsignedLong", 0),
+        (219, "Ffi.C.LongLong", 0),
+        (220, "Ffi.C.UnsignedLongLong", 0),
+        (221, "Ffi.C.Size", 0),
+        (222, "Ffi.C.PointerDifference", 0),
+    ];
+    if entries
+        .iter()
+        .filter(|entry| entry.owner_bubble == "Pop.Ffi")
+        .count()
+        != ffi_contracts.len()
+    {
+        return Err(error("FFI type", 2, "unexpected FFI type set"));
+    }
+    for (id, source_name, arity) in ffi_contracts {
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.owner_bubble == "Pop.Ffi" && entry.source_name == source_name)
+        else {
+            return Err(error("FFI type", 2, "missing required FFI type"));
+        };
+        if entry.id.raw() != id
+            || entry.arity != arity
+            || entry.role != BootstrapTypeRole::Nominal
+            || entry.prelude
+        {
+            return Err(error("FFI type", 2, "invalid trusted FFI type contract"));
+        }
     }
     Ok(())
 }
@@ -828,11 +979,18 @@ fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaE
 fn validate_compiler_attributes(
     entries: &[BootstrapCompilerAttributeEntry],
 ) -> Result<(), BootstrapSchemaError> {
+    if entries.len() != 7 {
+        return Err(error(
+            "compiler attribute",
+            2,
+            "unexpected compiler attribute set",
+        ));
+    }
     let mut ids: Vec<_> = entries.iter().map(|entry| entry.id).collect();
     ids.sort_unstable();
     if ids.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(error(
-            "standard compiler attribute",
+            "compiler attribute",
             2,
             "duplicate compiler attribute ID",
         ));
@@ -841,7 +999,7 @@ fn validate_compiler_attributes(
     names.sort_unstable();
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(error(
-            "standard compiler attribute",
+            "compiler attribute",
             2,
             "duplicate compiler attribute name",
         ));
@@ -850,34 +1008,94 @@ fn validate_compiler_attributes(
     roles.sort_unstable();
     if roles.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(error(
-            "standard compiler attribute",
+            "compiler attribute",
             2,
             "duplicate compiler attribute role",
         ));
     }
     validate_compiler_attribute_contract(
         entries,
-        CompilerAttributeRole::CompileTime,
-        0,
-        "CompileTime",
-        0,
-        CompilerAttributeTarget::Function,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::CompileTime,
+            id: 0,
+            source_name: "CompileTime",
+            owner_bubble: "Pop.Standard",
+            argument_count: 0,
+            target: CompilerAttributeTarget::Function,
+            prelude: true,
+        },
     )?;
     validate_compiler_attribute_contract(
         entries,
-        CompilerAttributeRole::AttributeUsage,
-        1,
-        "AttributeUsage",
-        2,
-        CompilerAttributeTarget::Attribute,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::AttributeUsage,
+            id: 1,
+            source_name: "AttributeUsage",
+            owner_bubble: "Pop.Standard",
+            argument_count: 2,
+            target: CompilerAttributeTarget::Attribute,
+            prelude: true,
+        },
     )?;
     validate_compiler_attribute_contract(
         entries,
-        CompilerAttributeRole::AttributeValidator,
-        2,
-        "AttributeValidator",
-        1,
-        CompilerAttributeTarget::Attribute,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::AttributeValidator,
+            id: 2,
+            source_name: "AttributeValidator",
+            owner_bubble: "Pop.Standard",
+            argument_count: 1,
+            target: CompilerAttributeTarget::Attribute,
+            prelude: true,
+        },
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::FfiLink,
+            id: 100,
+            source_name: "Ffi.Link",
+            owner_bubble: "Pop.Ffi",
+            argument_count: 1,
+            target: CompilerAttributeTarget::Namespace,
+            prelude: false,
+        },
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::FfiForeign,
+            id: 101,
+            source_name: "Ffi.Foreign",
+            owner_bubble: "Pop.Ffi",
+            argument_count: 2,
+            target: CompilerAttributeTarget::Function,
+            prelude: false,
+        },
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::FfiNonblocking,
+            id: 102,
+            source_name: "Ffi.Nonblocking",
+            owner_bubble: "Pop.Ffi",
+            argument_count: 0,
+            target: CompilerAttributeTarget::Function,
+            prelude: false,
+        },
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::FfiCLayout,
+            id: 103,
+            source_name: "Ffi.C.Layout",
+            owner_bubble: "Pop.Ffi",
+            argument_count: 0,
+            target: CompilerAttributeTarget::Record,
+            prelude: false,
+        },
     )?;
     Ok(())
 }
@@ -913,28 +1131,24 @@ fn validate_standard_functions(
 
 fn validate_compiler_attribute_contract(
     entries: &[BootstrapCompilerAttributeEntry],
-    role: CompilerAttributeRole,
-    id: u32,
-    source_name: &'static str,
-    argument_count: u16,
-    target: CompilerAttributeTarget,
+    expected: ExpectedCompilerAttribute,
 ) -> Result<(), BootstrapSchemaError> {
-    let Some(entry) = entries.iter().find(|entry| entry.role == role) else {
+    let Some(entry) = entries.iter().find(|entry| entry.role == expected.role) else {
         return Err(error(
-            "standard compiler attribute",
+            "compiler attribute",
             2,
             "missing required compiler attribute role",
         ));
     };
-    if entry.id.raw() != id
-        || entry.source_name != source_name
-        || entry.owner_bubble != "Pop.Standard"
-        || entry.argument_count != argument_count
-        || entry.target != target
-        || !entry.prelude
+    if entry.id.raw() != expected.id
+        || entry.source_name != expected.source_name
+        || entry.owner_bubble != expected.owner_bubble
+        || entry.argument_count != expected.argument_count
+        || entry.target != expected.target
+        || entry.prelude != expected.prelude
     {
         return Err(error(
-            "standard compiler attribute",
+            "compiler attribute",
             2,
             "invalid trusted compiler attribute contract",
         ));

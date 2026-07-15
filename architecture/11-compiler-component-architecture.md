@@ -191,6 +191,11 @@ split into:
 No source symbol lookup occurs during MIR lowering. All necessary decisions are
 encoded as typed HIR inputs or explicit runtime-interface operations.
 
+ADR 0081 foreign identities, ABI layouts, effects, link aliases, and scoped
+pin/handle/callback facts are such typed inputs. MIR owns portable foreign
+transitions; it never owns a C symbol table, linker argument, object format, or
+host library path.
+
 ## Runtime-interface ownership
 
 PLRI contracts describe abstract allocation, strings, typed collections,
@@ -199,6 +204,11 @@ GC operations, loading, and retained metadata adapters. Runtime contracts do not
 expose compiler arenas or IDs. They also do not expose C symbols, platform entry
 types, global runtime instances, collector storage, or backend implementation
 types.
+
+ADR 0085's scoped-region operations are semantic PLRI memory operations, not an
+exposed compiler arena. Their `RegionId`, exact root map, capacity, and balanced
+close contract cross the boundary; compiler analysis graphs, native addresses,
+and backend stack layouts do not.
 
 ADR 0038 separates implementation ownership below this contract. The portable
 collector implements `RuntimeAdapter` and owns heap/trace/root/pin behavior
@@ -364,6 +374,8 @@ The driver may emit:
 - deterministic C11 source as an experimental backend artifact;
 - LLVM IR/bitcode as optional backend artifacts;
 - native object, library, or executable files;
+- deterministic generated FFI source/ABI metadata and target-specific typed
+  native link plans;
 - future VM bytecode.
 
 Only explicitly versioned formats are cache/load contracts. Debug dumps can

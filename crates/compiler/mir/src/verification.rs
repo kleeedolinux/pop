@@ -7,12 +7,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BlockId, ClassId, ErrorId, FieldId, InterfaceId, MethodId, NominalInterfaceId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    BlockId, BorrowRegionId, BuiltinTypeId, ClassId, ErrorId, FieldId, InterfaceId, MethodId,
+    NestedFunctionId, NominalInterfaceId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
-use pop_runtime_interface::{ArrayElementMap, ObjectMap, ObjectSlot, RootSlot};
+use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot};
 use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena, embedded_bootstrap_schema};
 
+use crate::MirFfiLayoutCatalog;
 use crate::ir::*;
 use crate::lowering::{
     array_element_map, expected_safe_point_roots, expected_suspend_frame_slots,
@@ -30,7 +31,7 @@ pub fn verify_mir_bubble(
     bubble: &MirBubble,
     arena: &TypeArena,
 ) -> Result<(), Vec<MirVerificationError>> {
-    let signatures: BTreeMap<_, _> = bubble
+    let mut signatures: BTreeMap<_, _> = bubble
         .functions
         .iter()
         .map(|function| {
@@ -44,6 +45,45 @@ pub fn verify_mir_bubble(
             )
         })
         .collect();
+    let mut errors = Vec::new();
+    let mut referenced_identities = BTreeSet::new();
+    for function in &bubble.foreign_functions {
+        let declaration = function.declaration();
+        let valid = declaration.symbol() == function.symbol()
+            && declaration.has_valid_effects()
+            && function.effects() == lower_effect_summary(declaration.effects())
+            && function
+                .parameters()
+                .iter()
+                .chain(function.results())
+                .all(|type_id| arena.is_valid_hir_type(*type_id));
+        if !valid {
+            errors.push(MirVerificationError::InvalidForeignFunction(
+                function.symbol(),
+            ));
+        }
+        if let Some(identity) = function.reference_identity() {
+            if !referenced_identities.insert(identity) {
+                errors.push(MirVerificationError::DuplicateReferencedFunction(identity));
+            }
+            if !bubble.dependencies.contains(&identity.bubble()) {
+                errors.push(MirVerificationError::UnknownReferencedFunction(identity));
+            }
+        }
+        if signatures
+            .insert(
+                function.symbol(),
+                (
+                    function.parameters().to_vec(),
+                    function.results().to_vec(),
+                    function.effects(),
+                ),
+            )
+            .is_some()
+        {
+            errors.push(MirVerificationError::DuplicateFunction(function.symbol()));
+        }
+    }
     let method_signatures: BTreeMap<_, _> = bubble
         .methods
         .iter()
@@ -58,13 +98,22 @@ pub fn verify_mir_bubble(
             )
         })
         .collect();
+    let nested_signatures: BTreeMap<_, _> = bubble
+        .nested_functions
+        .iter()
+        .map(|function| ((function.owner(), function.function()), function))
+        .collect();
     let async_functions: BTreeSet<_> = bubble
         .functions
         .iter()
         .filter(|function| function.is_async())
         .map(MirFunction::symbol)
         .collect();
-    let mut errors = Vec::new();
+    let foreign_functions: BTreeSet<_> = bubble
+        .foreign_functions
+        .iter()
+        .map(MirForeignFunction::symbol)
+        .collect();
     let mut reference_signatures = BTreeMap::new();
     for reference in &bubble.function_references {
         let signature = (
@@ -72,10 +121,10 @@ pub fn verify_mir_bubble(
             reference.results.clone(),
             reference.effects,
         );
-        if reference_signatures
+        let duplicate_signature = reference_signatures
             .insert(reference.identity, signature)
-            .is_some()
-        {
+            .is_some();
+        if duplicate_signature || !referenced_identities.insert(reference.identity) {
             errors.push(MirVerificationError::DuplicateReferencedFunction(
                 reference.identity,
             ));
@@ -101,8 +150,11 @@ pub fn verify_mir_bubble(
             &signatures,
             &reference_signatures,
             &method_signatures,
+            &nested_signatures,
             &async_functions,
             &async_references,
+            &foreign_functions,
+            bubble.ffi_layouts(),
             &mut errors,
         );
     }
@@ -114,8 +166,11 @@ pub fn verify_mir_bubble(
             &signatures,
             &reference_signatures,
             &method_signatures,
+            &nested_signatures,
             &async_functions,
             &async_references,
+            &foreign_functions,
+            bubble.ffi_layouts(),
             &mut errors,
         );
     }
@@ -450,8 +505,11 @@ fn verify_function(
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    nested_signatures: &BTreeMap<(SymbolId, NestedFunctionId), &MirNestedFunction>,
     async_functions: &BTreeSet<SymbolId>,
     async_references: &BTreeSet<SymbolIdentity>,
+    foreign_functions: &BTreeSet<SymbolId>,
+    ffi_layouts: &MirFfiLayoutCatalog,
     errors: &mut Vec<MirVerificationError>,
 ) {
     verify_entry_parameters(function, errors);
@@ -544,6 +602,7 @@ fn verify_function(
         dominators: &dominators,
         blocks: &blocks,
     };
+    verify_ffi_borrows(function, &blocks, errors);
     let expected_suspend_frames = expected_suspend_frame_slots(function);
     let mut safe_points = BTreeSet::new();
     let mut coroutine_states = BTreeSet::new();
@@ -613,6 +672,7 @@ fn verify_function(
             }
             let referenced_function = match instruction.kind() {
                 MirInstructionKind::CallDirect { function, .. }
+                | MirInstructionKind::CallForeign { function, .. }
                 | MirInstructionKind::FunctionReference(function) => Some(*function),
                 _ => None,
             };
@@ -620,6 +680,25 @@ fn verify_function(
                 && !signatures.contains_key(&function)
             {
                 errors.push(MirVerificationError::UnknownFunction(function));
+            }
+            match instruction.kind() {
+                MirInstructionKind::CallDirect { function, .. }
+                    if foreign_functions.contains(function) =>
+                {
+                    errors.push(MirVerificationError::InvalidForeignCall {
+                        instruction: instruction.result(),
+                        function: *function,
+                    });
+                }
+                MirInstructionKind::CallForeign { function, .. }
+                    if !foreign_functions.contains(function) =>
+                {
+                    errors.push(MirVerificationError::InvalidForeignCall {
+                        instruction: instruction.result(),
+                        function: *function,
+                    });
+                }
+                _ => {}
             }
             if let MirInstructionKind::CallReferenced { function, .. } = instruction.kind()
                 && !reference_signatures.contains_key(function)
@@ -640,9 +719,11 @@ fn verify_function(
                     functions: signatures,
                     references: reference_signatures,
                     methods: method_signatures,
+                    nested: nested_signatures,
                     async_functions,
                     async_references,
                 },
+                ffi_layouts,
                 errors,
             );
             let expected_effects = expected_instruction_effects(
@@ -727,6 +808,10 @@ fn expected_instruction_effects(
             .get(function)
             .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
+        MirInstructionKind::CallForeign { function, .. } => signatures
+            .get(function)
+            .map(|(_, _, effects)| *effects)
+            .unwrap_or_default(),
         MirInstructionKind::CallReferenced { function, .. } => reference_signatures
             .get(function)
             .map(|(_, _, effects)| *effects)
@@ -736,6 +821,9 @@ fn expected_instruction_effects(
             .map(|(_, _, effects)| *effects)
             .unwrap_or_default(),
         MirInstructionKind::CallIndirect {
+            declared_effects, ..
+        }
+        | MirInstructionKind::CallScopedBorrow {
             declared_effects, ..
         } => *declared_effects,
         kind => local_instruction_effects(kind),
@@ -799,8 +887,10 @@ fn verify_gc_contracts(
                 || matches!(
                     instruction.kind(),
                     MirInstructionKind::CallDirect { .. }
+                        | MirInstructionKind::CallForeign { .. }
                         | MirInstructionKind::CallDirectMethod { .. }
                         | MirInstructionKind::CallIndirect { .. }
+                        | MirInstructionKind::CallScopedBorrow { .. }
                 ) && instruction.effects().contains(MirEffect::GcSafePoint);
             if requires_safe_point
                 && !index.checked_sub(1).is_some_and(|previous| {
@@ -813,6 +903,24 @@ fn verify_gc_contracts(
                 errors.push(MirVerificationError::MissingGcSafePoint {
                     instruction: instruction.result(),
                 });
+            }
+            if let MirInstructionKind::CallForeign {
+                safe_point, roots, ..
+            } = instruction.kind()
+            {
+                let exact_transition = index.checked_sub(1).and_then(|previous| {
+                    match block.instructions()[previous].kind() {
+                        MirInstructionKind::GcSafePoint {
+                            safe_point, roots, ..
+                        } => Some((safe_point, roots)),
+                        _ => None,
+                    }
+                });
+                if exact_transition != Some((safe_point, roots)) {
+                    errors.push(MirVerificationError::InvalidForeignRoots {
+                        instruction: instruction.result(),
+                    });
+                }
             }
             match instruction.kind() {
                 MirInstructionKind::ArrayMake { element_map, .. } => {
@@ -1079,15 +1187,18 @@ fn unpublished_owner_operation(instruction: &MirInstruction, owner: ValueId) -> 
         MirInstructionKind::GcSafePoint { .. } => true,
         MirInstructionKind::RetainRoot { value }
         | MirInstructionKind::Pin { value }
+        | MirInstructionKind::FfiHandleOpen { value }
         | MirInstructionKind::CaptureCellStore { value, .. }
         | MirInstructionKind::CaptureStore { value, .. } => *value != owner,
         MirInstructionKind::CallDirect { .. }
+        | MirInstructionKind::CallForeign { .. }
         | MirInstructionKind::CallReferenced { .. }
         | MirInstructionKind::CallStandard { .. }
         | MirInstructionKind::CallDirectMethod { .. }
         | MirInstructionKind::CallInterface { .. }
         | MirInstructionKind::CallBuiltinInterface { .. }
         | MirInstructionKind::CallIndirect { .. } => false,
+        MirInstructionKind::CallScopedBorrow { .. } => false,
         kind => !instruction_operands(kind).contains(&owner),
     }
 }
@@ -1701,11 +1812,296 @@ pub(crate) fn block_targets(block: &MirBlock) -> Vec<BlockId> {
     targets
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FfiBorrowKind {
+    Buffer,
+    Bytes,
+}
+
+#[derive(Clone, Copy)]
+enum FfiBorrowDefinition {
+    Buffer {
+        owner: ValueId,
+        pointer: ValueId,
+        length: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    Bytes {
+        owner: ValueId,
+        pointer: ValueId,
+    },
+}
+
+impl FfiBorrowDefinition {
+    const fn owner(self) -> ValueId {
+        match self {
+            Self::Buffer { owner, .. } | Self::Bytes { owner, .. } => owner,
+        }
+    }
+
+    const fn pointer(self) -> ValueId {
+        match self {
+            Self::Buffer { pointer, .. } | Self::Bytes { pointer, .. } => pointer,
+        }
+    }
+
+    const fn kind(self) -> FfiBorrowKind {
+        match self {
+            Self::Buffer { .. } => FfiBorrowKind::Buffer,
+            Self::Bytes { .. } => FfiBorrowKind::Bytes,
+        }
+    }
+}
+
+fn verify_ffi_borrows(
+    function: &MirFunction,
+    blocks: &BTreeMap<BlockId, &MirBlock>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let mut buffer_lengths = BTreeMap::new();
+    let mut bytes_lengths = BTreeMap::<BorrowRegionId, Vec<(ValueId, ValueId)>>::new();
+    let mut borrows = BTreeMap::new();
+    let mut ends = BTreeMap::<BorrowRegionId, Vec<(ValueId, FfiBorrowKind)>>::new();
+    let mut borrowed_optionals = BTreeMap::new();
+    let mut scoped_calls = BTreeMap::<BorrowRegionId, Vec<(ValueId, Vec<ValueId>)>>::new();
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            match instruction.kind() {
+                MirInstructionKind::FfiBufferLength { buffer, layout } => {
+                    buffer_lengths.insert(instruction.result(), (*buffer, *layout));
+                }
+                MirInstructionKind::FfiBufferBorrow {
+                    buffer,
+                    expected_length,
+                    layout,
+                    region,
+                } => {
+                    let definition = FfiBorrowDefinition::Buffer {
+                        owner: *buffer,
+                        pointer: instruction.result(),
+                        length: *expected_length,
+                        layout: *layout,
+                    };
+                    if borrows.insert(*region, definition).is_some() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    borrowed_optionals.insert(instruction.result(), *region);
+                }
+                MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+                    let definition = FfiBorrowDefinition::Bytes {
+                        owner: *bytes,
+                        pointer: instruction.result(),
+                    };
+                    if borrows.insert(*region, definition).is_some() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    borrowed_optionals.insert(instruction.result(), *region);
+                }
+                MirInstructionKind::FfiBytesBorrowLength { bytes, region } => {
+                    bytes_lengths
+                        .entry(*region)
+                        .or_default()
+                        .push((*bytes, instruction.result()));
+                }
+                MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+                    ends.entry(*region)
+                        .or_default()
+                        .push((*buffer, FfiBorrowKind::Buffer));
+                }
+                MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+                    ends.entry(*region)
+                        .or_default()
+                        .push((*bytes, FfiBorrowKind::Bytes));
+                }
+                MirInstructionKind::CallScopedBorrow {
+                    region, arguments, ..
+                } => scoped_calls
+                    .entry(*region)
+                    .or_default()
+                    .push((instruction.result(), arguments.clone())),
+                _ => {}
+            }
+        }
+    }
+    for (region, definition) in &borrows {
+        let length = match definition {
+            FfiBorrowDefinition::Buffer {
+                owner,
+                length,
+                layout,
+                ..
+            } if buffer_lengths.get(length) == Some(&(*owner, *layout)) => Some(*length),
+            FfiBorrowDefinition::Bytes { owner, .. } => {
+                bytes_lengths
+                    .get(region)
+                    .and_then(|lengths| match lengths.as_slice() {
+                        [(bytes, length)] if bytes == owner => Some(*length),
+                        _ => None,
+                    })
+            }
+            FfiBorrowDefinition::Buffer { .. } => None,
+        };
+        let valid_ends = ends.get(region).is_some_and(|ends| {
+            !ends.is_empty()
+                && ends
+                    .iter()
+                    .all(|(owner, kind)| *owner == definition.owner() && *kind == definition.kind())
+        });
+        let valid_call = length.is_some_and(|length| {
+            matches!(scoped_calls.get(region).map(Vec::as_slice), Some([(_, arguments)])
+                if arguments.as_slice() == [definition.pointer(), length])
+        });
+        if !valid_ends || !valid_call {
+            push_borrow_region_error(*region, errors);
+        }
+    }
+    for region in ends
+        .keys()
+        .chain(bytes_lengths.keys())
+        .chain(scoped_calls.keys())
+    {
+        if !borrows.contains_key(region) {
+            push_borrow_region_error(*region, errors);
+        }
+    }
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            for operand in instruction_operands(instruction.kind()) {
+                if let Some(region) = borrowed_optionals.get(&operand)
+                    && !matches!(
+                        instruction.kind(),
+                        MirInstructionKind::CallScopedBorrow { .. }
+                    )
+                {
+                    push_borrow_region_error(*region, errors);
+                }
+            }
+        }
+        for operand in terminator_operands(block.terminator()) {
+            if let Some(region) = borrowed_optionals.get(&operand) {
+                push_borrow_region_error(*region, errors);
+            }
+        }
+    }
+
+    let mut incoming = BTreeMap::from([(BlockId::from_raw(0), BTreeMap::new())]);
+    let mut pending = vec![BlockId::from_raw(0)];
+    while let Some(block_id) = pending.pop() {
+        let Some(block) = blocks.get(&block_id) else {
+            continue;
+        };
+        let mut active = incoming.get(&block_id).cloned().unwrap_or_default();
+        for instruction in block.instructions() {
+            match instruction.kind() {
+                MirInstructionKind::FfiBufferBorrow { buffer, region, .. } => {
+                    if !active.is_empty() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    active.insert(*region, (*buffer, FfiBorrowKind::Buffer));
+                }
+                MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+                    if !active.is_empty() {
+                        push_borrow_region_error(*region, errors);
+                    }
+                    active.insert(*region, (*bytes, FfiBorrowKind::Bytes));
+                }
+                MirInstructionKind::FfiBytesBorrowLength { bytes, region }
+                    if !matches!(
+                        active.get(region),
+                        Some((owner, FfiBorrowKind::Bytes)) if owner == bytes
+                    ) =>
+                {
+                    push_borrow_region_error(*region, errors);
+                }
+                MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+                    if active.remove(region) != Some((*buffer, FfiBorrowKind::Buffer)) {
+                        push_borrow_region_error(*region, errors);
+                    }
+                }
+                MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+                    if active.remove(region) != Some((*bytes, FfiBorrowKind::Bytes)) {
+                        push_borrow_region_error(*region, errors);
+                    }
+                }
+                MirInstructionKind::FfiBufferClose { buffer } => {
+                    for region in active.iter().filter_map(|(region, (owner, kind))| {
+                        (*owner == *buffer && *kind == FfiBorrowKind::Buffer).then_some(*region)
+                    }) {
+                        push_borrow_region_error(region, errors);
+                    }
+                }
+                MirInstructionKind::CallScopedBorrow { region, .. }
+                    if !active.contains_key(region) =>
+                {
+                    push_borrow_region_error(*region, errors);
+                }
+                _ => {}
+            }
+            if instruction.effects().contains(MirEffect::MayUnwind)
+                && instruction.unwind_action() == MirUnwindAction::Propagate
+            {
+                push_active_borrow_errors(&active, errors);
+            }
+            if let Some(target) = instruction_unwind_target(instruction) {
+                merge_borrow_state(target, &active, &mut incoming, &mut pending, errors);
+            }
+        }
+        if matches!(block.terminator(), MirTerminator::Suspend { .. }) {
+            push_active_borrow_errors(&active, errors);
+        }
+        let targets = terminator_targets(block.terminator());
+        if targets.is_empty()
+            && !matches!(
+                block.terminator(),
+                MirTerminator::Missing | MirTerminator::Trap(_) | MirTerminator::Unreachable
+            )
+        {
+            push_active_borrow_errors(&active, errors);
+        }
+        for target in targets {
+            merge_borrow_state(target, &active, &mut incoming, &mut pending, errors);
+        }
+    }
+}
+
+fn merge_borrow_state(
+    target: BlockId,
+    state: &BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>,
+    incoming: &mut BTreeMap<BlockId, BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>>,
+    pending: &mut Vec<BlockId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if let Some(existing) = incoming.get(&target) {
+        if existing != state {
+            for region in existing.keys().chain(state.keys()) {
+                push_borrow_region_error(*region, errors);
+            }
+        }
+        return;
+    }
+    incoming.insert(target, state.clone());
+    pending.push(target);
+}
+
+fn push_active_borrow_errors(
+    active: &BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    for region in active.keys() {
+        push_borrow_region_error(*region, errors);
+    }
+}
+
+fn push_borrow_region_error(region: BorrowRegionId, errors: &mut Vec<MirVerificationError>) {
+    errors.push(MirVerificationError::InvalidFfiBufferBorrowRegion { region });
+}
+
 #[derive(Clone, Copy)]
 struct CallableSignatures<'a> {
     functions: &'a BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     references: &'a BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     methods: &'a BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    nested: &'a BTreeMap<(SymbolId, NestedFunctionId), &'a MirNestedFunction>,
     async_functions: &'a BTreeSet<SymbolId>,
     async_references: &'a BTreeSet<SymbolIdentity>,
 }
@@ -1716,6 +2112,7 @@ fn verify_instruction_types(
     schema: &MirSchema<'_>,
     values: &BTreeMap<ValueId, TypeId>,
     signatures: CallableSignatures<'_>,
+    ffi_layouts: &MirFfiLayoutCatalog,
     errors: &mut Vec<MirVerificationError>,
 ) {
     let requires_effect_form = matches!(
@@ -1723,6 +2120,13 @@ fn verify_instruction_types(
         MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
+            | MirInstructionKind::FfiHandleClose { .. }
+            | MirInstructionKind::FfiBufferWrite { .. }
+            | MirInstructionKind::FfiBufferEndBorrow { .. }
+            | MirInstructionKind::FfiBufferClose { .. }
+            | MirInstructionKind::FfiBytesEndBorrow { .. }
+            | MirInstructionKind::FfiUnsafeStore { .. }
+            | MirInstructionKind::FfiUnsafeCopy { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. }
@@ -1731,6 +2135,59 @@ fn verify_instruction_types(
         errors.push(MirVerificationError::InvalidInstructionType {
             instruction: instruction.result(),
             result_type: instruction.result_type(),
+        });
+        return;
+    }
+    let requires_value_form = matches!(
+        instruction.kind(),
+        MirInstructionKind::FfiBufferOpen { .. }
+            | MirInstructionKind::FfiBufferLength { .. }
+            | MirInstructionKind::FfiBufferRead { .. }
+            | MirInstructionKind::FfiBufferBorrow { .. }
+            | MirInstructionKind::FfiBytesBorrow { .. }
+            | MirInstructionKind::FfiBytesBorrowLength { .. }
+    );
+    if requires_value_form && !instruction.has_result() {
+        let error = if matches!(
+            instruction.kind(),
+            MirInstructionKind::FfiBytesBorrow { .. }
+                | MirInstructionKind::FfiBytesBorrowLength { .. }
+        ) {
+            MirVerificationError::InvalidFfiBytesOperation {
+                instruction: instruction.result(),
+            }
+        } else {
+            MirVerificationError::InvalidFfiBufferOperation {
+                instruction: instruction.result(),
+            }
+        };
+        errors.push(error);
+        return;
+    }
+    let requires_pointer_value = matches!(
+        instruction.kind(),
+        MirInstructionKind::FfiPointerNone
+            | MirInstructionKind::FfiPointerToOptional { .. }
+            | MirInstructionKind::FfiPointerReadOnly { .. }
+            | MirInstructionKind::FfiPointerIsPresent { .. }
+            | MirInstructionKind::FfiPointerRequire { .. }
+    );
+    if requires_pointer_value && !instruction.has_result() {
+        errors.push(MirVerificationError::InvalidFfiPointerOperation {
+            instruction: instruction.result(),
+        });
+        return;
+    }
+    let requires_unsafe_value = matches!(
+        instruction.kind(),
+        MirInstructionKind::FfiUnsafeLoad { .. }
+            | MirInstructionKind::FfiUnsafeAdvance { .. }
+            | MirInstructionKind::FfiUnsafeAddress { .. }
+            | MirInstructionKind::FfiUnsafePointerFromAddress { .. }
+    );
+    if requires_unsafe_value && !instruction.has_result() {
+        errors.push(MirVerificationError::InvalidFfiUnsafeOperation {
+            instruction: instruction.result(),
         });
         return;
     }
@@ -1747,6 +2204,374 @@ fn verify_instruction_types(
         return;
     }
     match instruction.kind() {
+        MirInstructionKind::FfiHandleOpen { value } => {
+            let valid = values.get(value).copied().is_some_and(|payload| {
+                is_managed_reference_type_id(payload, Some(arena))
+                    && ffi_handle_payload(arena, instruction.result_type()) == Some(payload)
+            });
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiHandleGet { handle } => {
+            let valid = values
+                .get(handle)
+                .copied()
+                .and_then(|handle_type| ffi_handle_payload(arena, handle_type))
+                .is_some_and(|payload| {
+                    payload == instruction.result_type()
+                        && is_managed_reference_type_id(payload, Some(arena))
+                });
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiHandleClose { handle } => {
+            let valid = values
+                .get(handle)
+                .copied()
+                .and_then(|handle_type| ffi_handle_payload(arena, handle_type))
+                .is_some_and(|payload| is_managed_reference_type_id(payload, Some(arena)));
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiBufferOpen {
+            length,
+            element,
+            layout,
+            element_size,
+            alignment,
+            result,
+            success,
+            failure,
+        } => {
+            let valid_layout = ffi_layouts.get(*layout).is_some_and(|entry| {
+                entry.element() == *element
+                    && entry.size() == *element_size
+                    && entry.alignment() == *alignment
+            });
+            let valid_result = match arena.get(instruction.result_type()) {
+                Some(SemanticType::Builtin {
+                    definition,
+                    arguments,
+                }) if *definition == *result && arguments.len() == 2 => {
+                    ffi_buffer_element(arena, arguments[0]) == Some(*element)
+                        && is_exact_ffi_builtin(
+                            arena,
+                            arguments[1],
+                            pop_types::FFI_ALLOCATION_ERROR_TYPE_ID,
+                            &[],
+                        )
+                }
+                _ => false,
+            };
+            let valid = value_has_type(values, *length, ffi_size_type(arena))
+                && valid_layout
+                && valid_result
+                && success.raw() == 0
+                && failure.raw() == 1;
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferLength { buffer, layout } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                ffi_layouts
+                    .get(*layout)
+                    .is_some_and(|entry| entry.element() == element)
+            }) && Some(instruction.result_type()) == ffi_size_type(arena);
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferRead {
+            buffer,
+            index,
+            layout,
+        } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                instruction.result_type() == element
+                    && ffi_layouts
+                        .get(*layout)
+                        .is_some_and(|entry| entry.element() == element)
+            }) && value_has_type(values, *index, ffi_size_type(arena));
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+            layout,
+        } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                values.get(value) == Some(&element)
+                    && ffi_layouts
+                        .get(*layout)
+                        .is_some_and(|entry| entry.element() == element)
+            }) && value_has_type(values, *index, ffi_size_type(arena));
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferBorrow {
+            buffer,
+            expected_length,
+            layout,
+            ..
+        } => {
+            let element = ffi_buffer_operand_element(arena, values, *buffer);
+            let valid = element.is_some_and(|element| {
+                ffi_optional_pointer_element(arena, instruction.result_type()) == Some(element)
+                    && ffi_layouts
+                        .get(*layout)
+                        .is_some_and(|entry| entry.element() == element)
+            }) && value_has_type(values, *expected_length, ffi_size_type(arena));
+            verify_ffi_buffer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBufferEndBorrow { buffer, .. }
+        | MirInstructionKind::FfiBufferClose { buffer } => {
+            verify_ffi_buffer_operation(
+                instruction,
+                ffi_buffer_operand_element(arena, values, *buffer).is_some(),
+                errors,
+            );
+        }
+        MirInstructionKind::FfiBytesBorrow { bytes, .. } => {
+            let valid = values
+                .get(bytes)
+                .is_some_and(|type_id| is_exact_bootstrap_type(arena, *type_id, "Bytes", &[]))
+                && arena.source_type("Byte").is_some_and(|byte| {
+                    ffi_pointer_payload(
+                        arena,
+                        instruction.result_type(),
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(byte)
+                });
+            verify_ffi_bytes_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiBytesBorrowLength { bytes, .. } => {
+            verify_ffi_bytes_operation(
+                instruction,
+                values
+                    .get(bytes)
+                    .is_some_and(|type_id| is_exact_bootstrap_type(arena, *type_id, "Bytes", &[]))
+                    && Some(instruction.result_type()) == ffi_size_type(arena),
+                errors,
+            );
+        }
+        MirInstructionKind::FfiBytesEndBorrow { bytes, .. } => {
+            verify_ffi_bytes_operation(
+                instruction,
+                values
+                    .get(bytes)
+                    .is_some_and(|type_id| is_exact_bootstrap_type(arena, *type_id, "Bytes", &[])),
+                errors,
+            );
+        }
+        MirInstructionKind::FfiPointerNone => {
+            let valid = ffi_pointer_payload(
+                arena,
+                instruction.result_type(),
+                pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+            )
+            .or_else(|| {
+                ffi_pointer_payload(
+                    arena,
+                    instruction.result_type(),
+                    pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                )
+            })
+            .is_some();
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerToOptional { pointer } => {
+            let valid = values.get(pointer).copied().is_some_and(|source_type| {
+                [
+                    (
+                        pop_types::FFI_POINTER_TYPE_ID,
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ),
+                    (
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    ),
+                ]
+                .into_iter()
+                .any(|(source, result)| {
+                    let element = ffi_pointer_payload(arena, source_type, source);
+                    element.is_some()
+                        && ffi_pointer_payload(arena, instruction.result_type(), result) == element
+                })
+            });
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerReadOnly { pointer } => {
+            let element = values.get(pointer).copied().and_then(|source_type| {
+                ffi_pointer_payload(arena, source_type, pop_types::FFI_POINTER_TYPE_ID)
+            });
+            let valid = element.is_some()
+                && ffi_pointer_payload(
+                    arena,
+                    instruction.result_type(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == element;
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerIsPresent { pointer } => {
+            let valid_source = values.get(pointer).copied().is_some_and(|source_type| {
+                ffi_pointer_payload(arena, source_type, pop_types::FFI_OPTIONAL_POINTER_TYPE_ID)
+                    .or_else(|| {
+                        ffi_pointer_payload(
+                            arena,
+                            source_type,
+                            pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                        )
+                    })
+                    .is_some()
+            });
+            let valid =
+                valid_source && arena.source_type("Boolean") == Some(instruction.result_type());
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => {
+            let expected_success = values.get(pointer).copied().and_then(|source_type| {
+                ffi_pointer_payload(arena, source_type, pop_types::FFI_OPTIONAL_POINTER_TYPE_ID)
+                    .map(|element| (pop_types::FFI_POINTER_TYPE_ID, element))
+                    .or_else(|| {
+                        ffi_pointer_payload(
+                            arena,
+                            source_type,
+                            pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                        )
+                        .map(|element| (pop_types::FFI_READ_ONLY_POINTER_TYPE_ID, element))
+                    })
+            });
+            let valid_result = matches!(arena.get(instruction.result_type()),
+            Some(SemanticType::Builtin { definition, arguments })
+                if *definition == *result
+                    && arguments.len() == 2
+                    && expected_success.is_some_and(|(pointer, element)| {
+                        ffi_pointer_payload(arena, arguments[0], pointer) == Some(element)
+                    })
+                    && is_exact_ffi_builtin(
+                        arena,
+                        arguments[1],
+                        pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID,
+                        &[],
+                    ));
+            verify_ffi_pointer_operation(
+                instruction,
+                valid_result && success.raw() == 0 && failure.raw() == 1,
+                errors,
+            );
+        }
+        MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(
+                        arena,
+                        pointer_type,
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(element)
+                }) && instruction.result_type() == element
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            layout,
+        } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(arena, pointer_type, pop_types::FFI_POINTER_TYPE_ID)
+                        == Some(element)
+                }) && values.get(value) == Some(&element)
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            layout,
+            read_only,
+        } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let constructor = if *read_only {
+                pop_types::FFI_READ_ONLY_POINTER_TYPE_ID
+            } else {
+                pop_types::FFI_POINTER_TYPE_ID
+            };
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(arena, pointer_type, constructor) == Some(element)
+                }) && ffi_pointer_payload(arena, instruction.result_type(), constructor)
+                    == Some(element)
+                    && value_has_type(values, *elements, ffi_pointer_difference_type(arena))
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            layout,
+        } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(source).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(
+                        arena,
+                        pointer_type,
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(element)
+                }) && values
+                    .get(destination)
+                    .copied()
+                    .is_some_and(|pointer_type| {
+                        ffi_pointer_payload(arena, pointer_type, pop_types::FFI_POINTER_TYPE_ID)
+                            == Some(element)
+                    })
+                    && value_has_type(values, *count, ffi_size_type(arena))
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafeAddress { pointer, layout } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                values.get(pointer).copied().is_some_and(|pointer_type| {
+                    ffi_pointer_payload(
+                        arena,
+                        pointer_type,
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) == Some(element)
+                }) && Some(instruction.result_type()) == ffi_size_type(arena)
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiUnsafePointerFromAddress { address, layout } => {
+            let element = ffi_layouts.get(*layout).map(|entry| entry.element());
+            let valid = element.is_some_and(|element| {
+                value_has_type(values, *address, ffi_size_type(arena))
+                    && ffi_pointer_payload(
+                        arena,
+                        instruction.result_type(),
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ) == Some(element)
+            });
+            verify_ffi_unsafe_operation(instruction, valid, errors);
+        }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
                 .get(optional)
@@ -2285,6 +3110,143 @@ fn verify_instruction_types(
             verify_operand_type(instruction.result(), *step, first_type, values, errors);
         }
         _ => {}
+    }
+}
+
+fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_HANDLE_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn ffi_buffer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn ffi_buffer_operand_element(
+    arena: &TypeArena,
+    values: &BTreeMap<ValueId, TypeId>,
+    buffer: ValueId,
+) -> Option<TypeId> {
+    values
+        .get(&buffer)
+        .and_then(|type_id| ffi_buffer_element(arena, *type_id))
+}
+
+fn ffi_pointer_payload(
+    arena: &TypeArena,
+    type_id: TypeId,
+    expected: BuiltinTypeId,
+) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == expected && arguments.len() == 1 => Some(arguments[0]),
+        _ => None,
+    }
+}
+
+fn ffi_optional_pointer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    ffi_pointer_payload(arena, type_id, pop_types::FFI_OPTIONAL_POINTER_TYPE_ID)
+}
+
+fn verify_ffi_pointer_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiPointerOperation {
+            instruction: instruction.result(),
+        });
+    }
+}
+
+fn verify_ffi_bytes_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiBytesOperation {
+            instruction: instruction.result(),
+        });
+    }
+}
+
+fn ffi_size_type(arena: &TypeArena) -> Option<TypeId> {
+    arena.find(&SemanticType::Builtin {
+        definition: BuiltinTypeId::from_raw(221),
+        arguments: Vec::new(),
+    })
+}
+
+fn ffi_pointer_difference_type(arena: &TypeArena) -> Option<TypeId> {
+    arena.find(&SemanticType::Builtin {
+        definition: BuiltinTypeId::from_raw(222),
+        arguments: Vec::new(),
+    })
+}
+
+fn verify_ffi_unsafe_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiUnsafeOperation {
+            instruction: instruction.result(),
+        });
+    }
+}
+
+fn is_exact_ffi_builtin(
+    arena: &TypeArena,
+    type_id: TypeId,
+    definition: BuiltinTypeId,
+    arguments: &[TypeId],
+) -> bool {
+    matches!(
+        arena.get(type_id),
+        Some(SemanticType::Builtin {
+            definition: found,
+            arguments: found_arguments,
+        }) if *found == definition && found_arguments == arguments
+    )
+}
+
+fn value_has_type(
+    values: &BTreeMap<ValueId, TypeId>,
+    value: ValueId,
+    expected: Option<TypeId>,
+) -> bool {
+    expected.is_some_and(|expected| values.get(&value) == Some(&expected))
+}
+
+fn verify_ffi_buffer_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiBufferOperation {
+            instruction: instruction.result(),
+        });
     }
 }
 
@@ -3335,6 +4297,15 @@ fn verify_callable_instruction(
                 verify_call_signature(instruction, arguments, parameters, results, values, errors);
             }
         }
+        MirInstructionKind::CallForeign {
+            function,
+            arguments,
+            ..
+        } => {
+            if let Some((parameters, results, _)) = signatures.functions.get(function) {
+                verify_call_signature(instruction, arguments, parameters, results, values, errors);
+            }
+        }
         MirInstructionKind::CallReferenced {
             function,
             arguments,
@@ -3439,7 +4410,143 @@ fn verify_callable_instruction(
         } => {
             verify_indirect_call(instruction, *callee, arguments, arena, values, errors);
         }
+        MirInstructionKind::CallScopedBorrow {
+            owner,
+            function,
+            captures,
+            arguments,
+            declared_effects,
+            ..
+        } => {
+            let Some(nested) = signatures.nested.get(&(*owner, *function)) else {
+                errors.push(MirVerificationError::InvalidCallSignature {
+                    instruction: instruction.result(),
+                    expected_arguments: 0,
+                    found_arguments: arguments.len(),
+                    expected_results: 0,
+                    found_results: usize::from(instruction.has_result()),
+                });
+                return true;
+            };
+            verify_call_signature(
+                instruction,
+                arguments,
+                nested.parameters(),
+                nested.results(),
+                values,
+                errors,
+            );
+            let captures_valid = !nested.is_async()
+                && *declared_effects == nested.effects()
+                && !declared_effects.contains(MirEffect::Suspends)
+                && scoped_borrow_nested_body_is_valid(nested)
+                && captures.len() == nested.captures().len()
+                && captures
+                    .iter()
+                    .zip(nested.captures())
+                    .all(|(found, expected)| {
+                        !found.self_reference()
+                            && found.capture() == expected.capture()
+                            && found.binding() == expected.binding()
+                            && found.slot() == expected.slot()
+                            && found.type_id() == expected.type_id()
+                            && found.mode() == expected.mode()
+                            && values.get(&found.value()) == Some(&found.type_id())
+                    });
+            if !captures_valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         _ => return false,
+    }
+    true
+}
+
+fn scoped_borrow_nested_body_is_valid(nested: &MirNestedFunction) -> bool {
+    let Some(pointer) = nested
+        .blocks()
+        .first()
+        .and_then(|block| block.arguments().first())
+        .map(|argument| argument.value())
+    else {
+        return false;
+    };
+    let blocks: BTreeMap<_, _> = nested
+        .blocks()
+        .iter()
+        .map(|block| (block.block(), block))
+        .collect();
+    let mut tainted = BTreeSet::from([pointer]);
+    loop {
+        let before = tainted.len();
+        for block in nested.blocks() {
+            for instruction in block.instructions() {
+                if instruction
+                    .operands()
+                    .iter()
+                    .any(|operand| tainted.contains(operand))
+                    && matches!(
+                        instruction.kind(),
+                        MirInstructionKind::FfiPointerRequire { .. }
+                            | MirInstructionKind::OptionalGet { .. }
+                            | MirInstructionKind::ResultGetOk { .. }
+                    )
+                {
+                    tainted.insert(instruction.result());
+                }
+            }
+            if let MirTerminator::Branch { target, arguments } = block.terminator()
+                && let Some(target) = blocks.get(target)
+            {
+                for (argument, parameter) in arguments.iter().zip(target.arguments()) {
+                    if tainted.contains(argument) {
+                        tainted.insert(parameter.value());
+                    }
+                }
+            }
+        }
+        if tainted.len() == before {
+            break;
+        }
+    }
+    for block in nested.blocks() {
+        for instruction in block.instructions() {
+            let reads_borrow = instruction
+                .operands()
+                .iter()
+                .any(|operand| tainted.contains(operand));
+            if !reads_borrow {
+                if matches!(
+                    instruction.kind(),
+                    MirInstructionKind::CallScopedBorrow { .. }
+                ) {
+                    return false;
+                }
+                continue;
+            }
+            match instruction.kind() {
+                MirInstructionKind::FfiPointerIsPresent { .. }
+                | MirInstructionKind::CallForeign { .. } => {}
+                MirInstructionKind::FfiPointerRequire { .. }
+                | MirInstructionKind::OptionalGet { .. }
+                | MirInstructionKind::ResultGetOk { .. } => {}
+                _ => return false,
+            }
+        }
+        match block.terminator() {
+            MirTerminator::Branch { .. } => {}
+            terminator => {
+                if terminator_operands(terminator)
+                    .iter()
+                    .any(|operand| tainted.contains(operand))
+                {
+                    return false;
+                }
+            }
+        }
     }
     true
 }
@@ -4000,6 +5107,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::FfiPointerNone
         | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::CancelSourceCreate
@@ -4038,6 +5146,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::ErrorMake {
             arguments: values, ..
         } => values.clone(),
+        MirInstructionKind::CallForeign {
+            arguments, roots, ..
+        } => arguments.iter().chain(roots).copied().collect(),
         MirInstructionKind::TaskCreate {
             dispatch,
             arguments,
@@ -4067,7 +5178,27 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         } => std::iter::once(*callee)
             .chain(arguments.iter().copied())
             .collect(),
+        MirInstructionKind::CallScopedBorrow {
+            captures,
+            arguments,
+            ..
+        } => captures
+            .iter()
+            .filter(|capture| !capture.self_reference())
+            .map(|capture| capture.value())
+            .chain(arguments.iter().copied())
+            .collect(),
         MirInstructionKind::CheckedIntegerAdd { left, right, .. }
+        | MirInstructionKind::FfiUnsafeStore {
+            pointer: left,
+            value: right,
+            ..
+        }
+        | MirInstructionKind::FfiUnsafeAdvance {
+            pointer: left,
+            elements: right,
+            ..
+        }
         | MirInstructionKind::CheckedIntegerSubtract { left, right, .. }
         | MirInstructionKind::CheckedIntegerMultiply { left, right, .. }
         | MirInstructionKind::CheckedIntegerDivide { left, right, .. }
@@ -4089,9 +5220,30 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CompareFloatGreater { left, right, .. }
         | MirInstructionKind::CompareFloatGreaterOrEqual { left, right, .. }
         | MirInstructionKind::StringConcat { left, right } => vec![*left, *right],
+        MirInstructionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => vec![*source, *destination, *count],
         MirInstructionKind::BooleanNot { operand }
         | MirInstructionKind::OptionalIsPresent { optional: operand }
         | MirInstructionKind::OptionalGet { optional: operand }
+        | MirInstructionKind::FfiPointerToOptional { pointer: operand }
+        | MirInstructionKind::FfiPointerReadOnly { pointer: operand }
+        | MirInstructionKind::FfiPointerIsPresent { pointer: operand }
+        | MirInstructionKind::FfiPointerRequire {
+            pointer: operand, ..
+        }
+        | MirInstructionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | MirInstructionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | MirInstructionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
+        }
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. }
         | MirInstructionKind::ConvertInteger { operand, .. }
@@ -4152,6 +5304,28 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         MirInstructionKind::FieldSet { base, value, .. } => vec![*base, *value],
         MirInstructionKind::RetainRoot { value } => vec![*value],
         MirInstructionKind::ReleaseRoot { handle } => vec![*handle],
+        MirInstructionKind::FfiHandleOpen { value } => vec![*value],
+        MirInstructionKind::FfiHandleGet { handle }
+        | MirInstructionKind::FfiHandleClose { handle } => vec![*handle],
+        MirInstructionKind::FfiBufferOpen { length, .. } => vec![*length],
+        MirInstructionKind::FfiBufferLength { buffer, .. }
+        | MirInstructionKind::FfiBufferEndBorrow { buffer, .. }
+        | MirInstructionKind::FfiBufferClose { buffer } => vec![*buffer],
+        MirInstructionKind::FfiBufferRead { buffer, index, .. } => vec![*buffer, *index],
+        MirInstructionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+            ..
+        } => vec![*buffer, *index, *value],
+        MirInstructionKind::FfiBufferBorrow {
+            buffer,
+            expected_length,
+            ..
+        } => vec![*buffer, *expected_length],
+        MirInstructionKind::FfiBytesBorrow { bytes, .. }
+        | MirInstructionKind::FfiBytesEndBorrow { bytes, .. } => vec![*bytes],
+        MirInstructionKind::FfiBytesBorrowLength { bytes, .. } => vec![*bytes],
         MirInstructionKind::Pin { value } => vec![*value],
         MirInstructionKind::Unpin { handle } => vec![*handle],
         MirInstructionKind::WriteBarrier {

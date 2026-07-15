@@ -21,7 +21,8 @@ Compiler entities use explicit IDs rather than pointers as public identity:
 - `SymbolId`, `TypeId`, `ClassId`, `ErrorId`, `ErrorCaseId`, `AttributeId`, and
   `FunctionId`;
 - `InterfaceId`, `InterfaceMethodId`, and `CaptureId`;
-- `BlockId`, `ValueId`, `SafePointId`, and `StackMapId` in MIR.
+- `BlockId`, `ValueId`, `SafePointId`, `StackMapId`, `AllocationSiteId`,
+  `LifetimeId`, and `RegionId` in MIR.
 
 IDs can be dense within a compilation session. Serialized caches pair them with
 stable definition/content keys rather than persisting raw session-local numbers.
@@ -42,6 +43,11 @@ HirBubble {
 HirDeclaration {
   symbolId, visibility: Public | Internal | Private,
   kind, type, attributes, origin
+}
+
+HirForeignFunction {
+  symbolId, foreignId, abi, externalSymbol, linkAliases,
+  parameters, results, effects, layoutFingerprints, attributes, origin
 }
 
 HirClass {
@@ -135,7 +141,9 @@ Control:       branch, condBranch, switch, return, trap, panic, resumeUnwind,
 Values:        const, tupleMake, tupleGet, recordMake, fieldGet, fieldSet
 Arithmetic:    checkedAdd, wrappingAdd, floatAdd, compare, convert
 Memory:        allocateObject, allocateClosureEnvironment, allocateArray,
-               load, store, captureLoad, captureStore, retainRoot, releaseRoot
+               load, store, captureLoad, captureStore, retainRoot, releaseRoot,
+               lifetimeStart, lifetimeEnd, regionOpen, allocateInRegion,
+               regionClose
 Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
                callInterface, callIndirect
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
@@ -147,13 +155,83 @@ Optionals:     optionalIsPresent, optionalGet
 Results:       resultMake, resultIsOk, resultGetOk, resultGetError
 Errors:        errorMake, errorSwitch
 Cleanup:       cleanup{CleanupScopeId, exitReason}, resumeCurrentUnwind
-Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume
+Runtime:       gcSafePoint{stackMap}, writeBarrier,
+               pin{borrowRegion, payloadKind}, unpin{borrowRegion},
+               ffiHandleOpen{managedType}, ffiHandleGet{managedType},
+               ffiHandleClose{managedType},
+               ffiBufferOpen{elementType, layoutId, resultCases},
+               ffiBufferLength{layoutId}, ffiBufferRead{layoutId},
+               ffiBufferWrite{layoutId},
+               ffiBufferBorrow{layoutId, borrowRegion},
+               ffiBufferEndBorrow{borrowRegion}, ffiBufferClose,
+               ffiBytesBorrow{borrowRegion},
+               ffiBytesBorrowLength{borrowRegion},
+               ffiBytesEndBorrow{borrowRegion}, suspend, resume
+Foreign:       enterForeign, callForeign{foreignId, abi, effects}, leaveForeign
+Scoped:        callScopedBorrow{borrowRegion, nestedFunction, captures}
 Debug:         debugValue, sourceScope
 ```
 
 `checkedDowncast` has a named static target and typed optional/result output. It
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
+
+ADR 0085 gives each managed-capable allocation one `AllocationSiteId`.
+Construction MIR uses ordinary managed-capable allocations and verifies before
+optimization. Portable storage planning may then attach one closed
+`StoragePlan`: `Elided`, `StaticSlot{LifetimeId}`,
+`ScopedRegion{RegionId, LifetimeId}`, `Managed{AllocationClass}`, or the narrow
+verified `Immortal` plan. `lifetimeStart`/`lifetimeEnd` and region operations
+make every control-flow frontier explicit. The first proof kinds are
+`NonEscapingAllocation` and `CommonLifetimeRegion`; the verifier reconstructs
+them rather than trusting a backend or source annotation.
+
+Callable HIR/MIR types and public reference metadata carry closed per-parameter
+and result lifetime summaries: `DoesNotRetain`, conservative `MayRetain`,
+`ReturnsAlias`, `StoresInto`, `Captures`, or `Publishes`. Missing metadata is
+`MayRetain` and forces managed storage; it never creates a dynamic effect or
+runtime retention query.
+
+ADR 0081 foreign operations carry one resolved foreign identity, closed ABI,
+exact parameter/result layouts, link aliases, and effect summary. They never
+carry a runtime library/symbol string lookup. `enterForeign` publishes the
+precise live-root map and starts the transition; every normal/unwind/cleanup
+path balances it with `leaveForeign`. Under ADR 0082, a scoped `Bytes` pin or
+`Ffi.Buffer<T>` borrow carries one typed lexical region, dominates only
+permitted pointer uses, forbids suspension/escape, and is released on every
+exit. Fixed-layout records carry a backend-neutral marshalling plan rather than
+an object-layout reinterpretation. Physical calling conventions, symbols, and
+object formats remain backend details selected from this contract.
+
+ADR 0087 fixes each source borrow body as one immediate synchronous closure.
+MIR names its nested function and captures in `callScopedBorrow`; the verifier
+checks the nested body with the caller's region provenance and balances the
+matching buffer or byte-payload end operation on every exit. `ffiBytesBorrow`
+and `ffiBytesBorrowLength` expose only the optional immutable payload pointer
+and exact length while the runtime token remains backend-private.
+
+ADR 0084 fixes the exact buffer operation shapes. Open constructs the exact
+typed `Result` only after distinguishing allocation, success, and invariant
+outcomes. Borrow publishes only the scoped optional pointer; its opaque native
+generation remains backend-private state indexed by the canonical
+`BorrowRegionId`, and the native returned length must equal the dominating
+`ffiBufferLength` value. Every backend consumes the same validated target
+layout catalog.
+
+ADR 0086 derives each catalog key from the first eight big-endian bytes of the
+full canonical SHA-256 layout fingerprint and rejects zero or unequal full
+fingerprints sharing that compact key. HIR preserves the resolved trusted
+`Ffi.C.Layout` identity; target-selected lowering constructs the catalog before
+MIR verification. Neither HIR/MIR nor a backend substitutes a session-local
+`TypeId`, declaration ordinal, host layout, or spelling-based attribute check.
+
+Public `Ffi.Handle<T>` operations remain typed ordinary MIR values:
+`ffiHandleOpen` maps exact managed `T` to `Ffi.Handle<T>`, `ffiHandleGet` maps
+that exact handle back to `T`, and `ffiHandleClose` consumes the runtime
+generation. They lower to PLRI retain-root, resolve-root, and release-root
+operations with mandatory failure checks. They do not reuse the opaque,
+lexically balanced `retainRoot`/`releaseRoot` temporary tokens used internally
+by compiler-generated runtime transitions.
 
 Optional comparison narrowing, pattern binding, lazy `??`, and postfix `?`
 remain typed HIR concepts until canonical MIR lowers them to explicit branches
@@ -227,6 +305,12 @@ MIR invariants:
   contract;
 - stack maps contain exactly the live managed values at each safe point and
   logical object maps contain exactly the managed fields of allocations;
+- every static lifetime/region start dominates its uses, every applicable exit
+  crosses exactly one matching end/close, and no interior alias, borrow, root,
+  cleanup observation, or managed/shared/foreign edge survives that frontier;
+- managed references held in static slots/regions remain in exact mutable root
+  maps until end/close, while managed storage never points into static/region
+  storage;
 - cold task creation carries the exact logical object map for its captured
   dispatch environment, arguments, and retained completion slot; the map is
   derived from verified static types and never from current runtime values;
@@ -234,6 +318,9 @@ MIR invariants:
   value; backends/VMs install the typed `RootSlot` updates before subsequent
   uses without adding backend relocation instructions to canonical MIR;
 - root scopes dominate their uses and are balanced on normal and unwind exits;
+- every foreign call is dominated by its exact `enterForeign`, is followed on
+  every exit by `leaveForeign`, carries the ADR 0081 mandatory effects/layouts,
+  and cannot retain or suspend with an ADR 0082 pin/buffer borrow;
 - evaluation order matches Pop Lang semantics;
 - all target assumptions come from target queries;
 - every call and member/collection operation has statically known types;

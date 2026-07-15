@@ -7,6 +7,7 @@ use pop_foundation::{DiagnosticCategory, DiagnosticCode, DiagnosticSeverity};
 
 pub mod compile_time;
 pub mod documentation;
+pub mod ffi;
 pub mod lexing;
 pub mod resolution;
 pub mod syntax;
@@ -153,7 +154,9 @@ fn parse_entry(line_number: usize, line: &'static str) -> Result<CatalogEntry, C
         Some("Syntax") => DiagnosticCategory::Syntax,
         Some("Resolution") => DiagnosticCategory::Resolution,
         Some("Type") => DiagnosticCategory::Type,
+        Some("Flow") => DiagnosticCategory::Flow,
         Some("CompileTime") => DiagnosticCategory::CompileTime,
+        Some("RuntimeSafety") => DiagnosticCategory::RuntimeSafety,
         Some("Backend") => DiagnosticCategory::Backend,
         Some("Project") => DiagnosticCategory::Project,
         Some("Tooling") => DiagnosticCategory::Tooling,

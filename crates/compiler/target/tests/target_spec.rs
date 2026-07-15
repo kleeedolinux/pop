@@ -1,5 +1,6 @@
 use pop_target::{
-    Endianness, ObjectFormat, OperatingSystem, PointerWidth, TargetCapability, TargetSpec,
+    CAbiScalarKind, CAbiSignedness, Endianness, ObjectFormat, OperatingSystem, PointerWidth,
+    TargetCapability, TargetSpec,
 };
 
 #[test]
@@ -26,6 +27,32 @@ fn native_target_declares_relocating_nursery_feasibility() {
 
     assert!(target.supports(TargetCapability::PreciseStackMaps));
     assert!(target.supports(TargetCapability::RelocatingNursery));
+    assert!(target.supports(TargetCapability::Exceptions));
+}
+
+#[test]
+fn native_target_owns_the_closed_c_scalar_data_model() {
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target");
+
+    let character = target
+        .c_abi_scalar_layout(CAbiScalarKind::Char)
+        .expect("C ABI");
+    assert_eq!(character.size(), 1);
+    assert_eq!(character.alignment(), 1);
+    assert_eq!(character.signedness(), CAbiSignedness::Signed);
+
+    let long = target
+        .c_abi_scalar_layout(CAbiScalarKind::Long)
+        .expect("C long");
+    assert_eq!((long.size(), long.alignment()), (8, 8));
+    assert_eq!(long.signedness(), CAbiSignedness::Signed);
+
+    let size = target
+        .c_abi_scalar_layout(CAbiScalarKind::Size)
+        .expect("size_t");
+    assert_eq!((size.size(), size.alignment()), (8, 8));
+    assert_eq!(size.signedness(), CAbiSignedness::Unsigned);
+    assert_eq!(target.ffi_pointer_layout(), Some((8, 8)));
 }
 
 #[test]
@@ -38,6 +65,7 @@ fn bpf_target_specs_are_elf_llvm_bpf_targets() {
     assert!(little.supports(TargetCapability::LlvmBpf));
     assert!(!little.supports(TargetCapability::Threads));
     assert!(!little.supports(TargetCapability::SharedLibraries));
+    assert_eq!(little.c_abi_scalar_layout(CAbiScalarKind::Int), None);
 
     let big = TargetSpec::for_triple("bpfeb-unknown-none").expect("bpfeb target");
     assert_eq!(big.endianness(), Endianness::Big);

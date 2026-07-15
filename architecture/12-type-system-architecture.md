@@ -317,6 +317,46 @@ mutation, trap, panic/unwind, suspension, unsafe memory, FFI, ambient I/O, and
 compiler-query capabilities. There is no unknown/dynamic effect. At each call,
 the callee summary must be a subset of the caller summary.
 
+Under ADR 0081, a bodyless function with an exact trusted foreign attribute has
+a closed ABI signature rather than a Pop body. Its types must belong to the
+selected C/system ABI mapping. Every foreign call includes `ForeignFunction`,
+`UnsafeMemory`, and `GcSafePoint`; `Blocks` is present unless the exact reviewed
+`Ffi.Nonblocking` contract removes it, and the closed `"CUnwind"` ABI adds
+`MayUnwind`.
+
+ADR 0082 distinguishes mutable, read-only, optional, and non-optional foreign
+pointer types. The first managed pin accepts only immutable `Bytes`; it returns
+the reviewed payload address rather than a Pop object address. Scoped pin and
+`Ffi.Buffer<T>` borrow pointers carry an internal lexical scope identity and
+cannot be returned, stored, captured, address-converted, retained by a
+declaration, or kept across suspension. Closing or moving a buffer while its
+borrow is active is rejected. These checks never become a runtime pointer type
+test.
+
+`Ffi.Buffer<T>` accepts only types with one compiler-proven ABI storage layout.
+`Ffi.Handle<T>` accepts only managed reference representations and retains the
+exact static `T` while its runtime token remains live. Neither generic falls
+back to an unknown element or payload type. `Ffi.C.Layout` records are
+marshalled field-by-field into separate ABI storage and never make the normal
+record object layout foreign-visible. See
+[ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
+
+ADR 0087 requires each scoped borrow body to be a non-async closure expression
+written directly at the call site. Borrow provenance follows only checked
+nullability extraction and exact non-retaining foreign calls. Returning,
+storing, capturing, address-converting, calling ordinary code with, using
+`Ffi.Unsafe` on, nesting a borrow around, or suspending with that provenance is
+rejected statically. HIR and MIR retain the closure identity and
+`BorrowRegionId`; there is no runtime lifetime test or unrestricted matching
+function-value conversion.
+
+ADR 0086 makes that proof reproducible: the compiler recognizes the exact
+trusted `Ffi.C.Layout` identity on records, constructs canonical target/ABI
+descriptors, and binds their full SHA-256 fingerprints and compact
+`FfiAbiLayoutId` values into HIR/MIR. The source `Ffi.Buffer` intrinsics are
+available only through a verified direct `Pop.Ffi` dependency and only when
+ordinary resolution found no user declaration at the same path.
+
 ## Attribute typing
 
 An UDA constructor is type-checked like a constant constructor call. Attachment

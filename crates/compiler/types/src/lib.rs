@@ -23,7 +23,8 @@
 )]
 
 use pop_foundation::{
-    AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId,
+    AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, SourceSpan, SymbolId,
+    TypeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +60,12 @@ pub use bootstrap::{
     AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
     BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
     BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
-    CompilerAttributeRole, CompilerAttributeTarget, embedded_bootstrap_schema,
+    CompilerAttributeRole, CompilerAttributeTarget, FFI_ALLOCATION_ERROR_TYPE_ID,
+    FFI_BUFFER_TYPE_ID, FFI_HANDLE_TYPE_ID, FFI_NULL_POINTER_ERROR_TYPE_ID,
+    FFI_OPTIONAL_POINTER_TYPE_ID, FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID,
+    FFI_READ_ONLY_POINTER_TYPE_ID, FfiCIntegerKind, embedded_bootstrap_schema, ffi_c_integer_kind,
+    is_ffi_abi_builtin_type, is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
+    is_ffi_pointer_type_constructor,
 };
 pub use classes::{
     ClassDefinition, ClassDefinitionResult, ClassFieldDefinition, ClassMethodDefinition,
@@ -308,6 +314,103 @@ pub enum Effect {
     CompilerQuery,
     GcSafePoint,
     Roots,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ForeignAbi {
+    C,
+    System,
+    CUnwind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ForeignFunctionDeclaration {
+    symbol: SymbolId,
+    external_symbol: String,
+    abi: ForeignAbi,
+    link_aliases: Vec<String>,
+    nonblocking: bool,
+    effects: EffectSummary,
+    span: SourceSpan,
+}
+
+impl ForeignFunctionDeclaration {
+    #[must_use]
+    pub fn new(
+        symbol: SymbolId,
+        external_symbol: impl Into<String>,
+        abi: ForeignAbi,
+        mut link_aliases: Vec<String>,
+        nonblocking: bool,
+        span: SourceSpan,
+    ) -> Self {
+        link_aliases.sort();
+        link_aliases.dedup();
+        let effects = Self::expected_effects(abi, nonblocking);
+        Self {
+            symbol,
+            external_symbol: external_symbol.into(),
+            abi,
+            link_aliases,
+            nonblocking,
+            effects,
+            span,
+        }
+    }
+
+    const fn expected_effects(abi: ForeignAbi, nonblocking: bool) -> EffectSummary {
+        let mut effects = EffectSummary::empty()
+            .with(Effect::ForeignFunction)
+            .with(Effect::UnsafeMemory)
+            .with(Effect::GcSafePoint);
+        if !nonblocking {
+            effects = effects.with(Effect::Blocks);
+        }
+        if let ForeignAbi::CUnwind = abi {
+            effects = effects.with(Effect::MayUnwind);
+        }
+        effects
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub fn external_symbol(&self) -> &str {
+        &self.external_symbol
+    }
+
+    #[must_use]
+    pub const fn abi(&self) -> ForeignAbi {
+        self.abi
+    }
+
+    #[must_use]
+    pub fn link_aliases(&self) -> &[String] {
+        &self.link_aliases
+    }
+
+    #[must_use]
+    pub const fn is_nonblocking(&self) -> bool {
+        self.nonblocking
+    }
+
+    #[must_use]
+    pub fn has_valid_effects(&self) -> bool {
+        self.effects == Self::expected_effects(self.abi, self.nonblocking)
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> EffectSummary {
+        self.effects
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
 }
 
 impl Effect {

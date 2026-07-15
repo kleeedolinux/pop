@@ -23,6 +23,7 @@
     clippy::wildcard_imports
 )]
 
+mod ffi_layout;
 mod ir;
 mod lowering;
 mod optimize;
@@ -30,9 +31,13 @@ mod render;
 mod text;
 mod verification;
 
+pub use ffi_layout::*;
 pub use ir::*;
 pub(crate) use lowering::local_instruction_effects;
-pub use lowering::lower_hir_bubble;
+pub use lowering::{
+    is_managed_reference_type_id, lower_hir_bubble, lower_hir_bubble_for_target,
+    lower_hir_bubble_for_target_with_fingerprint, lower_hir_bubble_with_fingerprint,
+};
 pub use optimize::optimize_mir;
 pub use text::{MirParseError, parse_mir_dump};
 pub use verification::verify_mir_bubble;

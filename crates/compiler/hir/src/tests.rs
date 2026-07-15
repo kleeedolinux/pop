@@ -770,6 +770,7 @@ fn bubble_verifier_checks_declaration_field_and_union_case_schema() {
                 default: None,
                 span,
             }],
+            ffi_c_layout: false,
         }),
         span,
     };

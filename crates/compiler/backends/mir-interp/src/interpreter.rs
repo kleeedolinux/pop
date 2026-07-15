@@ -4,20 +4,22 @@
 //! consumes resolved stable IDs only and delegates every runtime operation through
 //! the backend-neutral PLRI adapter.
 use crate::evaluation::*;
+use crate::ffi_buffer::{integer_from_u64, integer_i64, integer_u64, marshal, unmarshal};
 use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
-use pop_foundation::{NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
+use pop_foundation::{BorrowRegionId, NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
 use pop_mir::{
     MirBubble, MirCancellationMode, MirInstruction, MirInstructionKind, MirSuspendOperation,
     MirTaskDispatch, MirTerminator, MirUnwindAction, MirVerificationError, verify_mir_bubble,
 };
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
-    CancellationTokenId, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
-    TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle,
-    TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason,
-    WriteBarrier,
+    CancellationTokenId, FfiBufferBorrowId, FfiBufferOpenFailure, FfiBufferOpenRequest,
+    FfiBytesBorrowId, ForeignAddress, ManagedReference, ObjectAllocationRequest, ObjectMap,
+    ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
+    RuntimeTypeId, TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId,
+    TaskLifecycle, TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind,
+    UnwindReason, WriteBarrier,
 };
 use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
 use std::cell::{Ref, RefCell};
@@ -39,6 +41,13 @@ fn managed_type(arena: &TypeArena, type_id: TypeId) -> bool {
                 | SemanticType::ErrorUnion { .. }
         )
     )
+}
+
+fn ffi_pointer(value: &MirValue) -> Result<ForeignAddress, ExecutionError> {
+    let MirValue::FfiPointer(address) = value else {
+        return Err(ExecutionError::TypeMismatch);
+    };
+    Ok(*address)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +75,7 @@ impl Default for ExecutionLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     UnknownFunction(SymbolId),
+    UnsupportedForeignFunction(SymbolId),
     UnknownReferencedFunction(SymbolIdentity),
     WrongArity,
     TypeMismatch,
@@ -164,6 +174,9 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             depth: 0,
             runtime: &mut *runtime,
             root_handles: BTreeMap::new(),
+            ffi_handles: BTreeMap::new(),
+            ffi_buffer_borrows: BTreeMap::new(),
+            ffi_bytes_borrows: BTreeMap::new(),
             pin_handles: BTreeMap::new(),
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
@@ -183,11 +196,21 @@ struct Engine<'mir, 'runtime, R> {
     depth: u32,
     runtime: &'runtime mut R,
     root_handles: BTreeMap<ValueId, RootHandle>,
+    ffi_handles: BTreeMap<RootHandle, RuntimeValue>,
+    ffi_buffer_borrows: BTreeMap<BorrowRegionId, FfiBufferBorrowId>,
+    ffi_bytes_borrows: BTreeMap<BorrowRegionId, FfiBytesBorrowState>,
     pin_handles: BTreeMap<ValueId, PinHandle>,
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
     active_captures: Option<Rc<RefCell<Vec<RuntimeValue>>>>,
     active_task: Option<TaskId>,
+}
+
+#[derive(Clone, Copy)]
+struct FfiBytesBorrowState {
+    owner: ManagedReference,
+    borrow: FfiBytesBorrowId,
+    length: u64,
 }
 
 enum PrivateValue {
@@ -1112,6 +1135,41 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
+            MirInstructionKind::FfiPointerNone => MirValue::Nil,
+            MirInstructionKind::FfiPointerToOptional { pointer }
+            | MirInstructionKind::FfiPointerReadOnly { pointer } => {
+                let pointer = value(values, *pointer)?.visible.clone();
+                if !matches!(pointer, MirValue::FfiPointer(_)) {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                pointer
+            }
+            MirInstructionKind::FfiPointerIsPresent { pointer } => {
+                match &value(values, *pointer)?.visible {
+                    MirValue::Nil => MirValue::Boolean(false),
+                    MirValue::FfiPointer(_) => MirValue::Boolean(true),
+                    _ => return Err(ExecutionError::TypeMismatch),
+                }
+            }
+            MirInstructionKind::FfiPointerRequire {
+                pointer,
+                result,
+                success,
+                failure,
+            } => {
+                let (case, arguments) = match &value(values, *pointer)?.visible {
+                    MirValue::FfiPointer(address) => {
+                        (*success, vec![MirValue::FfiPointer(*address)])
+                    }
+                    MirValue::Nil => (*failure, vec![MirValue::FfiNullPointerError]),
+                    _ => return Err(ExecutionError::TypeMismatch),
+                };
+                MirValue::Result {
+                    definition: *result,
+                    case,
+                    arguments,
+                }
+            }
             MirInstructionKind::OptionalIsPresent { optional } => {
                 MirValue::Boolean(!matches!(value(values, *optional)?.visible, MirValue::Nil))
             }
@@ -1715,6 +1773,228 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     &value(values, *right)?.visible,
                 ))
             }
+            MirInstructionKind::FfiHandleOpen { value: managed } => {
+                let managed = value(values, *managed)?.clone();
+                let reference = managed.reference.ok_or(ExecutionError::TypeMismatch)?;
+                let handle = self
+                    .runtime
+                    .retain_root(reference)
+                    .map_err(ExecutionError::Runtime)?;
+                if handle.raw() == 0 {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    ));
+                }
+                self.ffi_handles.insert(handle, managed);
+                MirValue::FfiHandle(handle.raw())
+            }
+            MirInstructionKind::FfiHandleGet { handle } => {
+                let MirValue::FfiHandle(raw) = value(values, *handle)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let handle = RootHandle::new(raw);
+                let reference = self
+                    .runtime
+                    .resolve_root(handle)
+                    .map_err(ExecutionError::Runtime)?;
+                if reference.raw() == 0 {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    ));
+                }
+                let managed = self.ffi_handles.get_mut(&handle).ok_or_else(|| {
+                    ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    )
+                })?;
+                managed.install_relocated_reference(Some(reference))?;
+                return Ok(managed.clone());
+            }
+            MirInstructionKind::FfiBufferOpen {
+                length,
+                element_size,
+                alignment,
+                layout,
+                result,
+                success,
+                failure,
+                ..
+            } => {
+                let length = integer_u64(&value(values, *length)?.visible)?;
+                let request = FfiBufferOpenRequest::new(length, *element_size, *alignment, *layout)
+                    .map_err(|_| self.runtime_invariant())?;
+                match self.runtime.ffi_buffer_open(&request) {
+                    Ok(reference) if reference.raw() != 0 => MirValue::Result {
+                        definition: *result,
+                        case: *success,
+                        arguments: vec![MirValue::FfiBuffer(reference)],
+                    },
+                    Ok(_) | Err(FfiBufferOpenFailure::Invariant(_)) => {
+                        return Err(self.runtime_invariant());
+                    }
+                    Err(FfiBufferOpenFailure::Allocation) => MirValue::Result {
+                        definition: *result,
+                        case: *failure,
+                        arguments: vec![MirValue::FfiAllocationError],
+                    },
+                }
+            }
+            MirInstructionKind::FfiBufferLength { buffer, layout } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let length = self
+                    .runtime
+                    .ffi_buffer_length(reference, *layout)
+                    .map_err(|_| self.runtime_invariant())?;
+                MirValue::Integer(
+                    IntegerValue::parse_decimal(&length.to_string(), IntegerKind::UInt64)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                )
+            }
+            MirInstructionKind::FfiBufferRead {
+                buffer,
+                index,
+                layout,
+            } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let index = integer_u64(&value(values, *index)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let mut bytes = vec![
+                    0;
+                    usize::try_from(entry.size())
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?
+                ];
+                self.runtime
+                    .ffi_buffer_read(reference, *layout, index, &mut bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                unmarshal(&bytes, entry, self.mir.ffi_layouts(), self.arena, self.mir)?
+            }
+            MirInstructionKind::FfiBufferBorrow {
+                buffer,
+                expected_length,
+                layout,
+                region,
+            } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let expected = integer_u64(&value(values, *expected_length)?.visible)?;
+                let borrow = self
+                    .runtime
+                    .ffi_buffer_borrow(reference, *layout)
+                    .map_err(|_| self.runtime_invariant())?;
+                if borrow.length() != expected
+                    || self
+                        .ffi_buffer_borrows
+                        .insert(*region, borrow.id())
+                        .is_some()
+                {
+                    return Err(self.runtime_invariant());
+                }
+                borrow.address().map_or(MirValue::Nil, MirValue::FfiPointer)
+            }
+            MirInstructionKind::FfiBytesBorrow { bytes, region } => {
+                if self.ffi_bytes_borrows.contains_key(region) {
+                    return Err(self.runtime_invariant());
+                }
+                let owner = value(values, *bytes)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let borrow = self
+                    .runtime
+                    .ffi_bytes_borrow(owner)
+                    .map_err(|_| self.runtime_invariant())?;
+                let state = FfiBytesBorrowState {
+                    owner,
+                    borrow: borrow.id(),
+                    length: borrow.length(),
+                };
+                self.ffi_bytes_borrows.insert(*region, state);
+                borrow.address().map_or(MirValue::Nil, MirValue::FfiPointer)
+            }
+            MirInstructionKind::FfiBytesBorrowLength { bytes, region } => {
+                let owner = value(values, *bytes)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let state = self
+                    .ffi_bytes_borrows
+                    .get(region)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if state.owner != owner {
+                    return Err(self.runtime_invariant());
+                }
+                MirValue::Integer(
+                    IntegerValue::parse_decimal(&state.length.to_string(), IntegerKind::UInt64)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?,
+                )
+            }
+            MirInstructionKind::FfiUnsafeLoad { pointer, layout } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.verify_ffi_alignment(address, entry.alignment())?;
+                let mut bytes = vec![
+                    0;
+                    usize::try_from(entry.size())
+                        .map_err(|_| ExecutionError::InvalidControlFlow)?
+                ];
+                self.runtime
+                    .ffi_unsafe_read(address, &mut bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                unmarshal(&bytes, entry, self.mir.ffi_layouts(), self.arena, self.mir)?
+            }
+            MirInstructionKind::FfiUnsafeAdvance {
+                pointer,
+                elements,
+                layout,
+                ..
+            } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                let elements = integer_i64(&value(values, *elements)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let offset = i128::from(elements)
+                    .checked_mul(i128::from(entry.size()))
+                    .ok_or_else(|| self.integer_overflow())?;
+                let raw = i128::from(address.raw())
+                    .checked_add(offset)
+                    .and_then(|raw| u64::try_from(raw).ok())
+                    .and_then(ForeignAddress::new)
+                    .ok_or_else(|| self.integer_overflow())?;
+                self.runtime
+                    .ffi_unsafe_read(raw, &mut [])
+                    .map_err(|_| self.runtime_invariant())?;
+                MirValue::FfiPointer(raw)
+            }
+            MirInstructionKind::FfiUnsafeAddress { pointer, .. } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                MirValue::Integer(integer_from_u64(
+                    address.raw(),
+                    instruction.result_type(),
+                    self.mir.ffi_layouts(),
+                    self.arena,
+                )?)
+            }
+            MirInstructionKind::FfiUnsafePointerFromAddress { address, .. } => {
+                let raw = integer_u64(&value(values, *address)?.visible)?;
+                ForeignAddress::new(raw).map_or(MirValue::Nil, MirValue::FfiPointer)
+            }
             MirInstructionKind::IntegerConstant(_)
             | MirInstructionKind::FloatConstant(_)
             | MirInstructionKind::CheckedIntegerAdd { .. }
@@ -1742,11 +2022,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::CallStandard { .. }
             | MirInstructionKind::CallDirect { .. }
+            | MirInstructionKind::CallForeign { .. }
             | MirInstructionKind::CallReferenced { .. }
             | MirInstructionKind::CallDirectMethod { .. }
             | MirInstructionKind::CallInterface { .. }
             | MirInstructionKind::CallBuiltinInterface { .. }
             | MirInstructionKind::CallIndirect { .. }
+            | MirInstructionKind::CallScopedBorrow { .. }
             | MirInstructionKind::RecordMake { .. }
             | MirInstructionKind::ClassMake { .. }
             | MirInstructionKind::RecordUpdate { .. }
@@ -1767,6 +2049,13 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
+            | MirInstructionKind::FfiHandleClose { .. }
+            | MirInstructionKind::FfiBufferWrite { .. }
+            | MirInstructionKind::FfiBufferEndBorrow { .. }
+            | MirInstructionKind::FfiBytesEndBorrow { .. }
+            | MirInstructionKind::FfiBufferClose { .. }
+            | MirInstructionKind::FfiUnsafeStore { .. }
+            | MirInstructionKind::FfiUnsafeCopy { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. } => {
@@ -1774,6 +2063,32 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
         };
         Ok(RuntimeValue::visible(result))
+    }
+
+    fn runtime_invariant(&mut self) -> ExecutionError {
+        ExecutionError::Runtime(
+            self.runtime
+                .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+        )
+    }
+
+    fn integer_overflow(&mut self) -> ExecutionError {
+        ExecutionError::Runtime(
+            self.runtime
+                .raise_trap(Trap::new(TrapKind::IntegerOverflow)),
+        )
+    }
+
+    fn verify_ffi_alignment(
+        &mut self,
+        address: ForeignAddress,
+        alignment: u64,
+    ) -> Result<(), ExecutionError> {
+        if alignment != 0 && address.raw().is_multiple_of(alignment) {
+            Ok(())
+        } else {
+            Err(self.runtime_invariant())
+        }
     }
 
     fn evaluate_effect_instruction(
@@ -1806,6 +2121,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => self.execute_direct_call(*function, arguments, values)?,
+            MirInstructionKind::CallForeign { function, .. } => {
+                return Err(ExecutionError::UnsupportedForeignFunction(*function));
+            }
             MirInstructionKind::CallReferenced { function, .. } => {
                 return Err(ExecutionError::UnknownReferencedFunction(*function));
             }
@@ -1921,6 +2239,135 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .map_err(ExecutionError::Runtime)?;
                 return Ok(());
             }
+            MirInstructionKind::FfiHandleClose { handle } => {
+                let MirValue::FfiHandle(raw) = value(values, *handle)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let handle = RootHandle::new(raw);
+                self.runtime
+                    .release_root(handle)
+                    .map_err(ExecutionError::Runtime)?;
+                self.ffi_handles.remove(&handle).ok_or_else(|| {
+                    ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    )
+                })?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiBufferWrite {
+                buffer,
+                index,
+                value: stored,
+                layout,
+            } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let index = integer_u64(&value(values, *index)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let bytes = marshal(
+                    &value(values, *stored)?.visible,
+                    entry,
+                    self.mir.ffi_layouts(),
+                )?;
+                self.runtime
+                    .ffi_buffer_write(reference, *layout, index, &bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiBufferEndBorrow { buffer, region } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let borrow = self
+                    .ffi_buffer_borrows
+                    .get(region)
+                    .copied()
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.runtime
+                    .ffi_buffer_end_borrow(reference, borrow)
+                    .map_err(|_| self.runtime_invariant())?;
+                self.ffi_buffer_borrows.remove(region);
+                return Ok(());
+            }
+            MirInstructionKind::FfiBytesEndBorrow { bytes, region } => {
+                let owner = value(values, *bytes)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                let state = self
+                    .ffi_bytes_borrows
+                    .get(region)
+                    .copied()
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if state.owner != owner {
+                    return Err(self.runtime_invariant());
+                }
+                self.runtime
+                    .ffi_bytes_end_borrow(owner, state.borrow)
+                    .map_err(|_| self.runtime_invariant())?;
+                self.ffi_bytes_borrows.remove(region);
+                return Ok(());
+            }
+            MirInstructionKind::FfiBufferClose { buffer } => {
+                let reference = value(values, *buffer)?
+                    .reference
+                    .ok_or(ExecutionError::TypeMismatch)?;
+                self.runtime
+                    .ffi_buffer_close(reference)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiUnsafeStore {
+                pointer,
+                value: stored,
+                layout,
+            } => {
+                let address = ffi_pointer(&value(values, *pointer)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.verify_ffi_alignment(address, entry.alignment())?;
+                let bytes = marshal(
+                    &value(values, *stored)?.visible,
+                    entry,
+                    self.mir.ffi_layouts(),
+                )?;
+                self.runtime
+                    .ffi_unsafe_write(address, &bytes)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiUnsafeCopy {
+                source,
+                destination,
+                count,
+                layout,
+            } => {
+                let source = ffi_pointer(&value(values, *source)?.visible)?;
+                let destination = ffi_pointer(&value(values, *destination)?.visible)?;
+                let count = integer_u64(&value(values, *count)?.visible)?;
+                let entry = self
+                    .mir
+                    .ffi_layouts()
+                    .get(*layout)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                self.verify_ffi_alignment(source, entry.alignment())?;
+                self.verify_ffi_alignment(destination, entry.alignment())?;
+                let byte_count = count
+                    .checked_mul(entry.size())
+                    .ok_or_else(|| self.integer_overflow())?;
+                self.runtime
+                    .ffi_unsafe_copy(source, destination, byte_count)
+                    .map_err(|_| self.runtime_invariant())?;
+                return Ok(());
+            }
             MirInstructionKind::Pin { value: pinned } => {
                 let reference = value(values, *pinned)?
                     .reference
@@ -1994,6 +2441,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => single_result(self.execute_direct_call(*function, arguments, values)?),
+            MirInstructionKind::CallForeign { function, .. } => {
+                return Err(ExecutionError::UnsupportedForeignFunction(*function));
+            }
             MirInstructionKind::CallReferenced { function, .. } => {
                 return Err(ExecutionError::UnknownReferencedFunction(*function));
             }
@@ -2003,6 +2453,15 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             MirInstructionKind::CallIndirect {
                 callee, arguments, ..
             } => single_result(self.execute_indirect_call(*callee, arguments, values)?),
+            MirInstructionKind::CallScopedBorrow {
+                owner,
+                function,
+                captures,
+                arguments,
+                ..
+            } => single_result(
+                self.execute_scoped_borrow_call(*owner, *function, captures, arguments, values)?,
+            ),
             MirInstructionKind::CallInterface {
                 method, arguments, ..
             } => {
@@ -2503,6 +2962,46 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         let callee = value(values, callee)?.clone();
         let arguments = evaluated_arguments(arguments, values)?;
         self.execute_indirect_value(&callee, &arguments)
+    }
+
+    fn execute_scoped_borrow_call(
+        &mut self,
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: &[pop_mir::MirClosureCapture],
+        arguments: &[ValueId],
+        values: &BTreeMap<ValueId, RuntimeValue>,
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        if captures.iter().any(|capture| capture.self_reference()) {
+            return Err(ExecutionError::InvalidControlFlow);
+        }
+        let nested = self
+            .mir
+            .nested_functions()
+            .iter()
+            .find(|candidate| candidate.owner() == owner && candidate.function() == function)
+            .ok_or(ExecutionError::InvalidControlFlow)?;
+        let capture_values = captures
+            .iter()
+            .map(|capture| value(values, capture.value()).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let arguments = evaluated_arguments(arguments, values)?;
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(ExecutionError::CallDepthLimit)?;
+        if self.depth > self.limits.maximum_call_depth {
+            return Err(ExecutionError::CallDepthLimit);
+        }
+        let result = self.execute(
+            nested.parameters(),
+            nested.results(),
+            nested.blocks(),
+            &arguments,
+            Some(Rc::new(RefCell::new(capture_values))),
+        );
+        self.depth -= 1;
+        result
     }
 
     fn execute_indirect_value(

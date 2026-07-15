@@ -160,6 +160,27 @@ the unpolled ownership state atomically. Structured groups retain every owned
 child until join, while unreachable cold/terminal side records are weakly
 pruned after collection without adding source-visible finalization.
 
+ADR 0081 advances native ABI 1 to version 1.13 with balanced foreign-call
+transitions. `EnterForeign` services one mutable precise root publication and
+returns a thread-bound, LIFO, single-use `ForeignTransitionId`; `LeaveForeign`
+restores managed state, writes current roots into the identical publication,
+and consumes that identity. Potentially blocking calls retain their roots in
+runtime-owned strong handles and transition to `HandlesOnly`; exact reviewed
+nonblocking calls use `BoundedForeign`. The native entries are
+`pop_rt_enter_foreign` and `pop_rt_leave_foreign`; their writable arrays are
+new ABI 1.13 arguments and do not alter the immutable ABI 1 safe-point entry.
+ABI 2 preserves the same PLRI operation while additionally proving relocating
+writeback on return and unwind.
+
+The same ADR advances native ABI 1 to version 1.14 with balanced managed-thread
+attachment. `AttachManagedThread` registers an exact scheduler/mutator binding
+in managed state and returns a thread-bound `ManagedThreadBindingId`;
+`DetachManagedThread` requires no active native transition, detaches,
+unregisters, and consumes that identity. The generated native program entry
+attaches logical scheduler 1 before argument decoding or Pop invocation and
+detaches after normal return. Scheduler workers retain their existing
+dispatch-owned binding rather than attaching again.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry
@@ -254,7 +275,15 @@ without forcing those conventions onto internal MIR.
 
 ## Garbage collection contract
 
-Pop GC is a precise concurrent generational collector. The compiler/runtime
+Pop uses proof-directed static reclamation before Pop GC. `Elided` and fixed
+activation-owned storage require no PLRI allocation; compiler-inferred scoped
+regions use bounded typed open/allocate/close operations and exact outward
+managed roots. Every plan and lifetime frontier is fixed in verified optimized
+MIR. PLRI exposes no machine-stack address, compiler arena object, or raw
+`malloc`/`free` spelling. See
+[Static memory management](./24-static-memory-management.md).
+
+Pop GC is the precise concurrent generational fallback. The compiler/runtime
 contract exposes:
 
 - allocation classes;
@@ -269,6 +298,11 @@ maps, safe-point/stack-map descriptors, managed handles, root and pin
 transitions, reference-store barriers, trap kinds, and panic/unwind records. It
 does not expose compiler arenas, LLVM values, C symbol names, or raw managed
 pointers.
+
+Static slots and scoped regions that contain managed references publish exact
+mutable root slots until their verified end/close. Managed objects cannot point
+into that storage. Missing retention/lifetime proof selects an ordinary managed
+allocation rather than an unchecked static path.
 
 Root publications preserve canonical sorted `RootSlot` order. A safe point
 validates all roots and either completes every root/object/handle update or
@@ -354,22 +388,63 @@ module code. See
 
 ## Foreign-function interface
 
-The FFI is an explicit unsafe boundary. It needs a separate type mapping and
-cannot treat Pop Lang objects as stable C structs unless a type opts into a
-compatible representation.
+The stable FFI follows
+[ADR 0081](./decisions/0081-statically-bound-native-ffi.md). It is an explicit
+unsafe, statically bound boundary with a separate closed ABI type mapping.
+Ordinary namespace functions carrying the exact trusted `Ffi.Foreign` identity
+declare external symbols; namespace `Ffi.Link` attachments refer to
+typed `bubble.toml` native-library aliases. No `lib` runtime container,
+untyped linker flags, shell command substitution, runtime symbol lookup, or
+dynamic Pop Lang value exists.
 
-FFI declarations remain statically typed. Untyped external bytes, handles, and
-pointers must be decoded, wrapped, or used through explicit unsafe typed APIs;
-the FFI does not introduce dynamic Pop Lang values.
+Canonical HIR/MIR retains the resolved foreign identity, ABI, exact layout,
+effects, and ownership/rooting facts. Every call performs backend-neutral
+`enterForeign`/`leaveForeign` transitions, publishes precise roots, and is a GC
+safe point. Blocking is the safe default; native unwind and callbacks require
+exact explicit contracts.
 
-FFI declarations should state:
+Raw pointers refer only to unmanaged ABI storage or a compiler-verified lexical
+borrow of an exact storage payload. ADR 0082 closes the first managed pin to
+immutable `Bytes` and returns a read-only payload pointer plus exact length;
+arrays, classes, strings, closures, and ordinary records never expose object
+addresses. `Ffi.Buffer<T>` owns bounds-checked, aligned, zero-initialized
+unmanaged ABI storage with deterministic close. Managed references cross
+longer boundaries as generation-checked `Ffi.Handle<T>` tokens or copies.
+Fixed-layout C records opt in through `Ffi.C.Layout` and are marshalled to
+separate ABI storage; unannotated Pop objects never become C structs. Strings
+use explicit encoding and ownership adapters. Generated bindings are
+deterministic reviewable source plus hashed ABI metadata, and safe public
+wrappers convert those declarations into normal typed Pop APIs. See
+[ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
-- external ABI and symbol;
-- parameter and result layouts;
-- nullability and string encoding;
-- ownership and lifetime rules;
-- blocking, callback, and unwind behavior;
-- whether the collector may move referenced values.
+Native ABI 1.15 adds `pop_rt_resolve_root` for the exact current target of a
+live generation-checked handle. Creation/release retain their existing
+retain-root/release-root entries. Invalid, stale, forged, zero, or closed
+handles fail before a managed reference is returned.
+
+Native ABI 1.16 adds the exact managed-resource operations for
+`Ffi.Buffer<T>`. Open distinguishes allocation failure, success, and invariant
+failure; all other operations use checked status plus unchanged-on-failure
+outputs. Buffer reads and writes use the same one-based indexing contract as
+Pop collections. Buffer state follows collector relocation while borrowed
+addresses refer only to its separately owned ABI storage. See
+[ADR 0083](./decisions/0083-ffi-resource-state-and-native-buffer-abi.md) and
+[ADR 0084](./decisions/0084-canonical-mir-ffi-buffer-operations.md).
+
+Native ABI 1.17 adds `pop_rt_ffi_bytes_borrow` and
+`pop_rt_ffi_bytes_end_borrow`. The runtime atomically pins the exact immutable
+`Bytes` owner and returns only a null-or-nonzero payload address plus exact
+length and a nonzero private token. Failure leaves outputs unchanged. The
+compiler and backends never calculate a payload offset from managed object
+layout. Scoped buffer and byte borrows execute only immediate synchronous
+closures through one verified MIR region call. See
+[ADR 0087](./decisions/0087-scoped-ffi-borrow-bodies-and-bytes-pin-abi.md).
+
+The compact nonzero `FfiAbiLayoutId` used by those operations is the first
+eight big-endian bytes of ADR 0086's full canonical SHA-256 layout fingerprint.
+Artifacts and generated metadata retain and compare the full fingerprint and
+all descriptor facts; zero or a compact collision between unequal full
+fingerprints fails before native execution.
 
 ## Versioning
 

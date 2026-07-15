@@ -461,13 +461,23 @@ ADR 0047.
 
 ## Memory management
 
-The initial runtime uses Pop GC: a precise concurrent generational collector
-with a moving nursery and mostly non-moving mature heap. User finalizers and weak
-references are excluded from version one. Observable reachability, identity,
-resource cleanup, and FFI pin/handle behavior remain language/runtime contracts,
-not exposed heap-layout details.
+The initial runtime uses proof-directed hybrid memory management. Scalars and
+scalar-replaced aggregates require no managed allocation. Arrays, records,
+classes, and closure environments whose complete alias and lifetime frontier is
+compiler-proven may use activation-owned storage or a compiler-inferred scoped
+region. The same source type uses Pop GC when it escapes or runtime reachability
+decides its death. Failing to prove a static plan is not a source error.
 
-MIR represents allocation, roots, barriers, and safe points through abstract
-operations. It never embeds a collector-specific object header.
+Pop GC remains the precise concurrent generational fallback, with a moving
+nursery and mostly non-moving mature heap. User finalizers and weak references
+are excluded from version one. Observable reachability, identity, resource
+cleanup, and FFI pin/handle behavior remain language/runtime contracts, not
+exposed heap-layout details.
 
-See [Garbage collector architecture](./15-garbage-collector-architecture.md).
+MIR represents storage plans, lifetime/region frontiers, allocation, roots,
+barriers, and safe points through abstract verified operations. It never embeds
+a machine-stack address or collector-specific object header. No Rust-shaped
+ownership/lifetime syntax, manual `free`, or implicit destructor is added.
+
+See [Static memory management](./24-static-memory-management.md) and
+[Garbage collector architecture](./15-garbage-collector-architecture.md).

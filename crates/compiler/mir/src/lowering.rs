@@ -4,12 +4,13 @@
 //! roots, barriers, and safe points explicit. It consumes typed HIR and does
 //! not perform source lookup or introduce backend-specific instructions.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BindingId, BlockId, CaptureId, ClassId, CleanupScopeId, CoroutineStateId, FieldId, FileId,
-    FunctionId, LocalId, MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange,
-    TextSize, TypeId, ValueId, ValueParameterId,
+    BindingId, BlockId, BorrowRegionId, CaptureId, ClassId, CleanupScopeId, CoroutineStateId,
+    FieldId, FileId, FunctionId, LocalId, MethodId, ResultCaseId, SourceSpan, SymbolId,
+    SymbolIdentity, TextRange, TextSize, TypeId, ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
@@ -19,11 +20,15 @@ use pop_hir::{
     hir_generic_call_instances, remap_hir_function_dispatches, specialize_hir_function,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap, TrapKind,
+    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot, SafePointId, StackMap, Trap,
+    TrapKind,
 };
+use pop_target::{CAbiScalarKind, TargetSpec};
 use pop_types::{
-    FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType, SemanticType,
-    TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
+    FfiCIntegerKind, FloatKind, IntegerKind, IntegerValue, NumericConversionKind, PrimitiveType,
+    SemanticType, TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
+    ffi_c_integer_kind, is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
+    is_ffi_pointer_type_constructor,
 };
 
 use crate::ir::*;
@@ -31,21 +36,101 @@ use crate::verification::{
     instruction_operands, instruction_unwind_target, terminator_operands, terminator_targets,
     verify_mir_bubble,
 };
+use crate::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutField, MirFfiValueClass};
+
+type OptionalFfiLayoutFingerprint<'a> = Option<&'a dyn Fn(&[u8]) -> String>;
 
 /// Lowers a verified HIR Bubble to canonical MIR and verifies the result.
 ///
 /// # Errors
 ///
 /// Returns deterministic MIR invariant violations.
+///
+/// # Panics
+///
+/// Panics only if the toolchain's required native target is removed from the
+/// accepted target inventory.
 pub fn lower_hir_bubble(
     hir: &HirBubble,
     arena: &TypeArena,
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu")
+        .expect("the accepted native target is part of the target inventory");
+    lower_hir_bubble_for_target_internal(hir, arena, &target, None)
+}
+
+/// Lowers HIR with artifact-owned SHA-256 identities for source-selected FFI
+/// layouts.
+///
+/// # Errors
+///
+/// Returns deterministic MIR or FFI layout invariant violations.
+///
+/// # Panics
+///
+/// Panics only if the toolchain's required native target is removed from the
+/// accepted target inventory.
+pub fn lower_hir_bubble_with_fingerprint(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    fingerprint: impl Fn(&[u8]) -> String,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    let target = TargetSpec::for_triple("x86_64-unknown-linux-gnu")
+        .expect("the accepted native target is part of the target inventory");
+    lower_hir_bubble_for_target_internal(hir, arena, &target, Some(&fingerprint))
+}
+
+/// Lowers a verified HIR Bubble to canonical MIR for one exact target and
+/// verifies the result.
+///
+/// # Errors
+///
+/// Returns deterministic MIR invariant violations.
+pub fn lower_hir_bubble_for_target(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    lower_hir_bubble_for_target_internal(hir, arena, target, None)
+}
+
+/// Lowers HIR for one exact target with artifact-owned SHA-256 identities for
+/// source-selected FFI layouts.
+///
+/// # Errors
+///
+/// Returns deterministic MIR or FFI layout invariant violations.
+pub fn lower_hir_bubble_for_target_with_fingerprint(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
+    fingerprint: impl Fn(&[u8]) -> String,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
+    lower_hir_bubble_for_target_internal(hir, arena, target, Some(&fingerprint))
+}
+
+fn lower_hir_bubble_for_target_internal(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
+    fingerprint: OptionalFfiLayoutFingerprint<'_>,
+) -> Result<MirBubble, Vec<MirVerificationError>> {
     let all_declarations = specialization_declarations(hir);
     let all_methods = specialization_methods(hir);
+    let reference_effects: BTreeMap<_, _> = hir
+        .function_references()
+        .iter()
+        .map(|reference| {
+            (
+                reference.identity(),
+                lower_effect_summary(reference.effects()),
+            )
+        })
+        .collect();
     let function_references: Vec<_> = hir
         .function_references()
         .iter()
+        .filter(|reference| reference.foreign_declaration().is_none())
         .map(|reference| MirFunctionReference {
             identity: reference.identity(),
             is_async: reference.is_async(),
@@ -53,10 +138,6 @@ pub fn lower_hir_bubble(
             results: reference.results().to_vec(),
             effects: lower_effect_summary(reference.effects()),
         })
-        .collect();
-    let reference_effects: BTreeMap<_, _> = function_references
-        .iter()
-        .map(|reference| (reference.identity, reference.effects))
         .collect();
     let declarations: Vec<_> = all_declarations
         .iter()
@@ -72,7 +153,89 @@ pub fn lower_hir_bubble(
         })
         .filter_map(lower_declaration)
         .collect();
+    let mut foreign_functions: Vec<_> = hir
+        .foreign_functions()
+        .iter()
+        .map(|function| MirForeignFunction {
+            function: function.function(),
+            symbol: function.symbol(),
+            parameters: function
+                .parameters()
+                .iter()
+                .map(pop_hir::HirParameter::type_id)
+                .collect(),
+            results: function.results().to_vec(),
+            effects: lower_effect_summary(function.effects()),
+            declaration: function.declaration().clone(),
+            reference_identity: None,
+        })
+        .collect();
+    let mut next_foreign_symbol = hir
+        .functions()
+        .iter()
+        .map(|function| function.symbol().raw())
+        .chain(
+            hir.foreign_functions()
+                .iter()
+                .map(|function| function.symbol().raw()),
+        )
+        .chain(
+            hir.declarations()
+                .iter()
+                .map(|declaration| declaration.symbol().raw()),
+        )
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut next_foreign_function = hir
+        .functions()
+        .iter()
+        .map(|function| function.function().raw())
+        .chain(
+            hir.foreign_functions()
+                .iter()
+                .map(|function| function.function().raw()),
+        )
+        .chain(
+            hir.methods()
+                .iter()
+                .map(|method| method.function().function().raw()),
+        )
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut referenced_foreign_symbols = BTreeMap::new();
+    for reference in hir.function_references() {
+        let Some(source) = reference.foreign_declaration() else {
+            continue;
+        };
+        let symbol = SymbolId::from_raw(next_foreign_symbol);
+        next_foreign_symbol = next_foreign_symbol.saturating_add(1);
+        let function = FunctionId::from_raw(next_foreign_function);
+        next_foreign_function = next_foreign_function.saturating_add(1);
+        let declaration = pop_types::ForeignFunctionDeclaration::new(
+            symbol,
+            source.external_symbol(),
+            source.abi(),
+            source.link_aliases().to_vec(),
+            source.is_nonblocking(),
+            source.span(),
+        );
+        referenced_foreign_symbols.insert(reference.identity(), symbol);
+        foreign_functions.push(MirForeignFunction {
+            function,
+            symbol,
+            parameters: reference.parameters().to_vec(),
+            results: reference.results().to_vec(),
+            effects: lower_effect_summary(reference.effects()),
+            declaration,
+            reference_identity: Some(reference.identity()),
+        });
+    }
+    foreign_functions.sort_by_key(MirForeignFunction::symbol);
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
+    let (ffi_layouts, provisional_ffi_layouts) =
+        source_ffi_layout_catalog(hir, arena, target, fingerprint)?;
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let empty_function_effects = BTreeMap::new();
     let empty_method_effects = BTreeMap::new();
@@ -86,6 +249,7 @@ pub fn lower_hir_bubble(
                 &reference_effects,
                 &empty_function_effects,
                 &empty_method_effects,
+                &ffi_layouts,
             )
             .0
         })
@@ -104,15 +268,25 @@ pub fn lower_hir_bubble(
                 &reference_effects,
                 &empty_function_effects,
                 &empty_method_effects,
+                &ffi_layouts,
             )
             .0,
         })
         .collect();
-    recompute_callable_effects(&mut provisional_functions, &mut provisional_methods);
-    let function_effects: BTreeMap<_, _> = provisional_functions
+    recompute_callable_effects(
+        &mut provisional_functions,
+        &mut provisional_methods,
+        &BTreeMap::new(),
+    );
+    let mut function_effects: BTreeMap<_, _> = provisional_functions
         .iter()
         .map(|function| (function.symbol(), function.effects()))
         .collect();
+    function_effects.extend(
+        foreign_functions
+            .iter()
+            .map(|function| (function.symbol(), function.effects())),
+    );
     let method_effects: BTreeMap<_, _> = provisional_methods
         .iter()
         .map(|method| (method.method(), method.function().effects()))
@@ -128,6 +302,7 @@ pub fn lower_hir_bubble(
                 &reference_effects,
                 &function_effects,
                 &method_effects,
+                &ffi_layouts,
             );
             nested_functions.append(&mut nested);
             function
@@ -146,6 +321,7 @@ pub fn lower_hir_bubble(
                 &reference_effects,
                 &function_effects,
                 &method_effects,
+                &ffi_layouts,
             );
             nested_functions.append(&mut nested);
             MirMethod {
@@ -162,10 +338,19 @@ pub fn lower_hir_bubble(
         dependencies: hir.dependencies().to_vec(),
         declarations,
         functions,
+        foreign_functions,
         methods,
         nested_functions,
         function_references,
+        ffi_layouts,
     };
+    if provisional_ffi_layouts {
+        if mir_uses_ffi_unsafe_memory(&mir) {
+            return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
+        }
+        mir.ffi_layouts = MirFfiLayoutCatalog::empty(target);
+    }
+    rewrite_foreign_calls(&mut mir, &referenced_foreign_symbols);
     recompute_effects(&mut mir);
     while insert_gc_safe_points(&mut mir, arena) {
         // Backedge safe points make their containing function a GC safe point.
@@ -173,9 +358,326 @@ pub fn lower_hir_bubble(
         // also require a safe point immediately before the call.
         recompute_effects(&mut mir);
     }
+    populate_foreign_call_roots(&mut mir);
     seal_effects(&mut mir);
     verify_mir_bubble(&mir, arena)?;
     Ok(mir)
+}
+
+fn source_ffi_layout_catalog(
+    hir: &HirBubble,
+    arena: &TypeArena,
+    target: &TargetSpec,
+    fingerprint: OptionalFfiLayoutFingerprint<'_>,
+) -> Result<(MirFfiLayoutCatalog, bool), Vec<MirVerificationError>> {
+    let mut buffer_elements = BTreeSet::new();
+    let mut pointer_elements = BTreeSet::new();
+    for semantic in
+        (0..arena.len()).filter_map(|raw| arena.get(TypeId::from_raw(u32::try_from(raw).ok()?)))
+    {
+        match semantic {
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+                buffer_elements.insert(arguments[0]);
+            }
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } if pop_types::is_ffi_pointer_type_constructor(*definition)
+                && arguments.len() == 1 =>
+            {
+                pointer_elements.insert(arguments[0]);
+            }
+            _ => {}
+        }
+    }
+    if !buffer_elements.is_empty() && fingerprint.is_none() {
+        return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
+    }
+    let provisional = fingerprint.is_none() && !pointer_elements.is_empty();
+    let elements = buffer_elements
+        .into_iter()
+        .chain(pointer_elements)
+        .collect::<BTreeSet<_>>();
+    if elements.is_empty() {
+        return Ok((MirFfiLayoutCatalog::empty(target), false));
+    }
+    let trusted_records = hir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            HirDeclarationKind::Record(record) if record.has_ffi_c_layout() => {
+                Some((record.type_id(), record))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut entries = Vec::new();
+    let mut by_type = BTreeMap::new();
+    let mut next_id = 1;
+    for element in elements {
+        ensure_source_ffi_layout(
+            element,
+            arena,
+            target,
+            &trusted_records,
+            &mut entries,
+            &mut by_type,
+            &mut next_id,
+        )
+        .ok_or_else(|| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+    }
+    let catalog = if let Some(fingerprint) = fingerprint {
+        MirFfiLayoutCatalog::new(target, entries, arena, fingerprint)
+    } else {
+        let next = Cell::new(1_u64);
+        MirFfiLayoutCatalog::new(target, entries, arena, |_| {
+            let identity = next.get();
+            next.set(identity.saturating_add(1));
+            format!("{identity:016x}{:048x}", 0)
+        })
+    }
+    .map_err(|_| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+    Ok((catalog, provisional))
+}
+
+fn mir_uses_ffi_unsafe_memory(mir: &MirBubble) -> bool {
+    let functions = mir
+        .functions
+        .iter()
+        .map(MirFunction::blocks)
+        .chain(mir.methods.iter().map(|method| method.function.blocks()))
+        .chain(mir.nested_functions.iter().map(MirNestedFunction::blocks));
+    functions
+        .flatten()
+        .flat_map(MirBlock::instructions)
+        .any(|instruction| {
+            matches!(
+                instruction.kind(),
+                MirInstructionKind::FfiUnsafeLoad { .. }
+                    | MirInstructionKind::FfiUnsafeStore { .. }
+                    | MirInstructionKind::FfiUnsafeAdvance { .. }
+                    | MirInstructionKind::FfiUnsafeCopy { .. }
+                    | MirInstructionKind::FfiUnsafeAddress { .. }
+                    | MirInstructionKind::FfiUnsafePointerFromAddress { .. }
+            )
+        })
+}
+
+fn ensure_source_ffi_layout(
+    element: TypeId,
+    arena: &TypeArena,
+    target: &TargetSpec,
+    trusted_records: &BTreeMap<TypeId, &pop_hir::HirRecordDeclaration>,
+    entries: &mut Vec<MirFfiLayout>,
+    by_type: &mut BTreeMap<TypeId, FfiAbiLayoutId>,
+    next_id: &mut u64,
+) -> Option<FfiAbiLayoutId> {
+    if let Some(layout) = by_type.get(&element) {
+        return Some(*layout);
+    }
+    let provisional = FfiAbiLayoutId::new(*next_id)?;
+    *next_id = next_id.checked_add(1)?;
+    by_type.insert(element, provisional);
+    let (size, alignment, value_class) = match arena.get(element)? {
+        SemanticType::Primitive(PrimitiveType::Integer(kind)) => {
+            let size = u64::from(kind.bit_width()) / 8;
+            (size, size, MirFfiValueClass::Integer)
+        }
+        SemanticType::Primitive(PrimitiveType::Float32) => (4, 4, MirFfiValueClass::Float),
+        SemanticType::Primitive(PrimitiveType::Float64) => (8, 8, MirFfiValueClass::Float),
+        SemanticType::Builtin { definition, .. }
+            if is_ffi_integer_abi_builtin_type(*definition) =>
+        {
+            let layout = target
+                .c_abi_scalar_layout(target_ffi_integer_kind(ffi_c_integer_kind(*definition)?))?;
+            (layout.size(), layout.alignment(), MirFfiValueClass::Integer)
+        }
+        SemanticType::Builtin { definition, .. }
+            if is_ffi_pointer_type_constructor(*definition) =>
+        {
+            let (size, alignment) = target.ffi_pointer_layout()?;
+            (size, alignment, MirFfiValueClass::Pointer)
+        }
+        SemanticType::Builtin { definition, .. }
+            if is_ffi_function_type_constructor(*definition) =>
+        {
+            let (size, alignment) = target.ffi_pointer_layout()?;
+            (size, alignment, MirFfiValueClass::FunctionPointer)
+        }
+        SemanticType::Builtin { definition, .. }
+            if *definition == pop_types::FFI_HANDLE_TYPE_ID =>
+        {
+            (8, 8, MirFfiValueClass::Handle)
+        }
+        SemanticType::Record(semantic_fields) => {
+            let record = trusted_records.get(&element)?;
+            if semantic_fields.len() != record.fields().len() || semantic_fields.is_empty() {
+                return None;
+            }
+            let mut offset = 0_u64;
+            let mut alignment = 1_u64;
+            let mut fields = Vec::with_capacity(semantic_fields.len());
+            for (index, ((_, field_type), field)) in
+                semantic_fields.iter().zip(record.fields()).enumerate()
+            {
+                if *field_type != field.field_type() {
+                    return None;
+                }
+                let child = ensure_source_ffi_layout(
+                    *field_type,
+                    arena,
+                    target,
+                    trusted_records,
+                    entries,
+                    by_type,
+                    next_id,
+                )?;
+                let child_layout = entries.iter().find(|entry| entry.id() == child)?;
+                alignment = alignment.max(child_layout.alignment());
+                offset = align_ffi_offset(offset, child_layout.alignment())?;
+                fields.push(MirFfiLayoutField::new(
+                    field.field(),
+                    u32::try_from(index).ok()?,
+                    child,
+                    offset,
+                ));
+                offset = offset.checked_add(child_layout.size())?;
+            }
+            let size = align_ffi_offset(offset, alignment)?;
+            (size, alignment, MirFfiValueClass::Record(fields))
+        }
+        _ => return None,
+    };
+    entries.push(MirFfiLayout::new(
+        provisional,
+        element,
+        size,
+        alignment,
+        value_class,
+    ));
+    Some(provisional)
+}
+
+fn align_ffi_offset(offset: u64, alignment: u64) -> Option<u64> {
+    let mask = alignment.checked_sub(1)?;
+    offset.checked_add(mask).map(|value| value & !mask)
+}
+
+const fn target_ffi_integer_kind(kind: FfiCIntegerKind) -> CAbiScalarKind {
+    match kind {
+        FfiCIntegerKind::Char => CAbiScalarKind::Char,
+        FfiCIntegerKind::SignedChar => CAbiScalarKind::SignedChar,
+        FfiCIntegerKind::UnsignedChar => CAbiScalarKind::UnsignedChar,
+        FfiCIntegerKind::Short => CAbiScalarKind::Short,
+        FfiCIntegerKind::UnsignedShort => CAbiScalarKind::UnsignedShort,
+        FfiCIntegerKind::Int => CAbiScalarKind::Int,
+        FfiCIntegerKind::UnsignedInt => CAbiScalarKind::UnsignedInt,
+        FfiCIntegerKind::Long => CAbiScalarKind::Long,
+        FfiCIntegerKind::UnsignedLong => CAbiScalarKind::UnsignedLong,
+        FfiCIntegerKind::LongLong => CAbiScalarKind::LongLong,
+        FfiCIntegerKind::UnsignedLongLong => CAbiScalarKind::UnsignedLongLong,
+        FfiCIntegerKind::Size => CAbiScalarKind::Size,
+        FfiCIntegerKind::PointerDifference => CAbiScalarKind::PointerDifference,
+    }
+}
+
+fn rewrite_foreign_calls(
+    bubble: &mut MirBubble,
+    referenced_foreign_symbols: &BTreeMap<SymbolIdentity, SymbolId>,
+) {
+    let foreign = bubble
+        .foreign_functions
+        .iter()
+        .map(MirForeignFunction::symbol)
+        .collect::<BTreeSet<_>>();
+    for instruction in bubble
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.blocks)
+        .chain(
+            bubble
+                .methods
+                .iter_mut()
+                .flat_map(|method| &mut method.function.blocks),
+        )
+        .chain(
+            bubble
+                .nested_functions
+                .iter_mut()
+                .flat_map(|nested| &mut nested.blocks),
+        )
+        .flat_map(|block| &mut block.instructions)
+    {
+        let (function, arguments, declared_effects, unwind) = match instruction.kind.clone() {
+            MirInstructionKind::CallDirect {
+                function,
+                arguments,
+                declared_effects,
+                unwind,
+            } if foreign.contains(&function) => (function, arguments, declared_effects, unwind),
+            MirInstructionKind::CallReferenced {
+                function,
+                arguments,
+                declared_effects,
+                unwind,
+            } if referenced_foreign_symbols.contains_key(&function) => (
+                referenced_foreign_symbols[&function],
+                arguments,
+                declared_effects,
+                unwind,
+            ),
+            _ => continue,
+        };
+        instruction.kind = MirInstructionKind::CallForeign {
+            function,
+            arguments,
+            safe_point: SafePointId::new(0),
+            roots: Vec::new(),
+            declared_effects,
+            unwind,
+        };
+    }
+}
+
+fn populate_foreign_call_roots(bubble: &mut MirBubble) {
+    for block in bubble
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.blocks)
+        .chain(
+            bubble
+                .methods
+                .iter_mut()
+                .flat_map(|method| &mut method.function.blocks),
+        )
+        .chain(
+            bubble
+                .nested_functions
+                .iter_mut()
+                .flat_map(|nested| &mut nested.blocks),
+        )
+    {
+        let mut previous_safe_point = None;
+        for instruction in &mut block.instructions {
+            match &mut instruction.kind {
+                MirInstructionKind::GcSafePoint {
+                    safe_point, roots, ..
+                } => previous_safe_point = Some((*safe_point, roots.clone())),
+                MirInstructionKind::CallForeign {
+                    safe_point, roots, ..
+                } => {
+                    if let Some((previous, previous_roots)) = previous_safe_point.take() {
+                        *safe_point = previous;
+                        *roots = previous_roots;
+                    }
+                }
+                _ => previous_safe_point = None,
+            }
+        }
+    }
 }
 
 fn specialization_declarations(hir: &HirBubble) -> Vec<&pop_hir::HirDeclaration> {
@@ -665,6 +1167,7 @@ fn lower_function(
     reference_effects: &BTreeMap<SymbolIdentity, MirEffectSummary>,
     function_effects: &BTreeMap<SymbolId, MirEffectSummary>,
     method_effects: &BTreeMap<MethodId, MirEffectSummary>,
+    ffi_layouts: &MirFfiLayoutCatalog,
 ) -> (MirFunction, Vec<MirNestedFunction>) {
     let (mut lowered, nested) = FunctionBuilder::new(
         function,
@@ -673,6 +1176,7 @@ fn lower_function(
         reference_effects,
         function_effects,
         method_effects,
+        ffi_layouts,
     )
     .lower();
     lowered.function = function.function();
@@ -719,7 +1223,22 @@ struct BuildingBlock {
 #[derive(Clone, Copy)]
 struct ActiveCleanup<'hir> {
     scope: CleanupScopeId,
-    body: &'hir [HirStatement],
+    action: CleanupAction<'hir>,
+}
+
+#[derive(Clone, Copy)]
+enum CleanupAction<'hir> {
+    Statements(&'hir [HirStatement]),
+    FfiBufferBorrow {
+        buffer: ValueId,
+        region: BorrowRegionId,
+        span: SourceSpan,
+    },
+    FfiBytesBorrow {
+        bytes: ValueId,
+        region: BorrowRegionId,
+        span: SourceSpan,
+    },
 }
 
 #[derive(Clone)]
@@ -784,6 +1303,7 @@ struct FunctionBuilder<'hir> {
     reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
     function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
     method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+    ffi_layouts: &'hir MirFfiLayoutCatalog,
     blocks: Vec<BuildingBlock>,
     current: BlockId,
     next_value: u32,
@@ -1078,6 +1598,30 @@ fn visit_expression_closures(
                 }
             }
         }
+        HirExpressionKind::FfiBufferWithPointer {
+            buffer: owner,
+            body,
+            ..
+        }
+        | HirExpressionKind::FfiBytesWithPin {
+            bytes: owner, body, ..
+        } => {
+            visit_expression_closures(owner, parameters, locals);
+            for capture in body.captures() {
+                if capture.mode() != HirCaptureMode::Cell {
+                    continue;
+                }
+                match capture.source() {
+                    HirCaptureSource::Local(local) => {
+                        locals.insert(local);
+                    }
+                    HirCaptureSource::Parameter(parameter) => {
+                        parameters.insert(parameter);
+                    }
+                    HirCaptureSource::Capture(_) => {}
+                }
+            }
+        }
         HirExpressionKind::Field { base, .. }
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
@@ -1194,6 +1738,55 @@ fn visit_expression_closures(
         | HirExpressionKind::TaskCancel { source } => {
             visit_expression_closures(source, parameters, locals);
         }
+        HirExpressionKind::FfiHandleOpen { value }
+        | HirExpressionKind::FfiHandleGet { handle: value }
+        | HirExpressionKind::FfiHandleClose { handle: value }
+        | HirExpressionKind::FfiBufferOpen { length: value, .. }
+        | HirExpressionKind::FfiBufferLength { buffer: value }
+        | HirExpressionKind::FfiBufferClose { buffer: value }
+        | HirExpressionKind::FfiPointerToOptional { pointer: value }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: value }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: value }
+        | HirExpressionKind::FfiPointerRequire { pointer: value, .. } => {
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirExpressionKind::FfiUnsafeLoad { pointer, .. }
+        | HirExpressionKind::FfiUnsafeAddress { pointer, .. }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer, ..
+        } => visit_expression_closures(pointer, parameters, locals),
+        HirExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            visit_expression_closures(pointer, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            visit_expression_closures(source, parameters, locals);
+            visit_expression_closures(destination, parameters, locals);
+            visit_expression_closures(count, parameters, locals);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            visit_expression_closures(buffer, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            visit_expression_closures(buffer, parameters, locals);
+            visit_expression_closures(index, parameters, locals);
+            visit_expression_closures(value, parameters, locals);
+        }
         HirExpressionKind::TaskGroup { cancel, body } => {
             visit_expression_closures(cancel, parameters, locals);
             visit_expression_closures(body, parameters, locals);
@@ -1228,7 +1821,8 @@ fn visit_expression_closures(
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
-        | HirExpressionKind::TaskCancellationSource => {}
+        | HirExpressionKind::TaskCancellationSource
+        | HirExpressionKind::FfiPointerNone { .. } => {}
         HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -1241,6 +1835,7 @@ impl<'hir> FunctionBuilder<'hir> {
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
         function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
         method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+        ffi_layouts: &'hir MirFfiLayoutCatalog,
     ) -> Self {
         let parameter_specs: Vec<_> = hir
             .parameters()
@@ -1259,6 +1854,7 @@ impl<'hir> FunctionBuilder<'hir> {
             reference_effects,
             function_effects,
             method_effects,
+            ffi_layouts,
         )
     }
 
@@ -1270,6 +1866,7 @@ impl<'hir> FunctionBuilder<'hir> {
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
         function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
         method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+        ffi_layouts: &'hir MirFfiLayoutCatalog,
     ) -> Self {
         let parameter_specs = closure
             .parameters()
@@ -1308,6 +1905,7 @@ impl<'hir> FunctionBuilder<'hir> {
             reference_effects,
             function_effects,
             method_effects,
+            ffi_layouts,
         )
     }
 
@@ -1324,6 +1922,7 @@ impl<'hir> FunctionBuilder<'hir> {
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
         function_effects: &'hir BTreeMap<SymbolId, MirEffectSummary>,
         method_effects: &'hir BTreeMap<MethodId, MirEffectSummary>,
+        ffi_layouts: &'hir MirFfiLayoutCatalog,
     ) -> Self {
         let mut arguments = Vec::new();
         let mut parameters = BTreeMap::new();
@@ -1352,6 +1951,7 @@ impl<'hir> FunctionBuilder<'hir> {
             reference_effects,
             function_effects,
             method_effects,
+            ffi_layouts,
             blocks: vec![BuildingBlock {
                 cleanup: None,
                 arguments,
@@ -1643,12 +2243,18 @@ impl<'hir> FunctionBuilder<'hir> {
                 HirStatementKind::Defer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
-                    self.active_cleanups.push(ActiveCleanup { scope, body });
+                    self.active_cleanups.push(ActiveCleanup {
+                        scope,
+                        action: CleanupAction::Statements(body),
+                    });
                 }
                 HirStatementKind::AsyncDefer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
-                    self.active_cleanups.push(ActiveCleanup { scope, body });
+                    self.active_cleanups.push(ActiveCleanup {
+                        scope,
+                        action: CleanupAction::Statements(body),
+                    });
                 }
                 HirStatementKind::FieldSet { base, field, value } => {
                     let base = self.lower_expression(base);
@@ -1884,7 +2490,15 @@ impl<'hir> FunctionBuilder<'hir> {
                     self.emit_effect(kind, call.span());
                 }
                 HirStatementKind::Expression(expression) => {
-                    self.lower_expression(expression);
+                    if let HirExpressionKind::FfiHandleClose { handle } = expression.kind() {
+                        let handle = self.lower_expression(handle);
+                        self.emit_effect(
+                            MirInstructionKind::FfiHandleClose { handle },
+                            expression.span(),
+                        );
+                    } else {
+                        self.lower_expression(expression);
+                    }
                 }
             }
         }
@@ -1909,7 +2523,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 scope: cleanup.scope,
                 reason,
             });
-            self.lower_statements(cleanup.body);
+            self.lower_cleanup_action(cleanup.action);
             self.current_cleanup = previous_cleanup;
         }
         self.active_cleanups = registered;
@@ -3115,6 +3729,313 @@ impl<'hir> FunctionBuilder<'hir> {
                 group: self.lower_expression(group),
                 task: self.lower_expression(task),
             },
+            HirExpressionKind::FfiHandleOpen { value } => MirInstructionKind::FfiHandleOpen {
+                value: self.lower_expression(value),
+            },
+            HirExpressionKind::FfiHandleGet { handle } => MirInstructionKind::FfiHandleGet {
+                handle: self.lower_expression(handle),
+            },
+            HirExpressionKind::FfiHandleClose { handle } => {
+                let handle = self.lower_expression(handle);
+                self.emit_effect(
+                    MirInstructionKind::FfiHandleClose { handle },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiBufferOpen {
+                length, element, ..
+            } => {
+                let (layout, element_size, alignment) = self.ffi_layout(*element);
+                let result = match self.arena.get(expression.type_id()) {
+                    Some(SemanticType::Builtin { definition, .. }) => *definition,
+                    _ => unreachable!("verified FFI buffer allocation has an exact Result type"),
+                };
+                MirInstructionKind::FfiBufferOpen {
+                    length: self.lower_expression(length),
+                    element: *element,
+                    layout,
+                    element_size,
+                    alignment,
+                    result,
+                    success: ResultCaseId::from_raw(0),
+                    failure: ResultCaseId::from_raw(1),
+                }
+            }
+            HirExpressionKind::FfiBufferLength { buffer } => {
+                let element = ffi_buffer_type_element(self.arena, buffer.type_id())
+                    .expect("verified FFI buffer operand has one element type");
+                let (layout, _, _) = self.ffi_layout(element);
+                MirInstructionKind::FfiBufferLength {
+                    buffer: self.lower_expression(buffer),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiBufferRead { buffer, index } => {
+                let (layout, _, _) = self.ffi_layout(expression.type_id());
+                MirInstructionKind::FfiBufferRead {
+                    buffer: self.lower_expression(buffer),
+                    index: self.lower_expression(index),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiBufferWrite {
+                buffer,
+                index,
+                value,
+            } => {
+                let (layout, _, _) = self.ffi_layout(value.type_id());
+                let buffer = self.lower_expression(buffer);
+                let index = self.lower_expression(index);
+                let value = self.lower_expression(value);
+                self.emit_effect(
+                    MirInstructionKind::FfiBufferWrite {
+                        buffer,
+                        index,
+                        value,
+                        layout,
+                    },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiBufferClose { buffer } => {
+                let buffer = self.lower_expression(buffer);
+                self.emit_effect(
+                    MirInstructionKind::FfiBufferClose { buffer },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiBufferWithPointer {
+                buffer,
+                body,
+                element,
+                region,
+                ..
+            } => {
+                let buffer = self.lower_expression(buffer);
+                let (layout, _, _) = self.ffi_layout(*element);
+                let length = self.emit(
+                    MirInstructionKind::FfiBufferLength { buffer, layout },
+                    body.parameters()[1].type_id(),
+                    expression.span(),
+                );
+                let pointer = self.emit(
+                    MirInstructionKind::FfiBufferBorrow {
+                        buffer,
+                        expected_length: length,
+                        layout,
+                        region: *region,
+                    },
+                    body.parameters()[0].type_id(),
+                    expression.span(),
+                );
+                let cleanup_scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                self.active_cleanups.push(ActiveCleanup {
+                    scope: cleanup_scope,
+                    action: CleanupAction::FfiBufferBorrow {
+                        buffer,
+                        region: *region,
+                        span: expression.span(),
+                    },
+                });
+                let (captures, declared_effects) = self.lower_scoped_closure(body);
+                let result = self.emit(
+                    MirInstructionKind::CallScopedBorrow {
+                        owner: self.owner,
+                        function: body.function(),
+                        captures,
+                        arguments: vec![pointer, length],
+                        region: *region,
+                        declared_effects,
+                        unwind: MirUnwindAction::Propagate,
+                    },
+                    expression.type_id(),
+                    expression.span(),
+                );
+                self.active_cleanups
+                    .pop()
+                    .expect("scoped FFI borrow cleanup was registered");
+                self.emit_effect(
+                    MirInstructionKind::FfiBufferEndBorrow {
+                        buffer,
+                        region: *region,
+                    },
+                    expression.span(),
+                );
+                return result;
+            }
+            HirExpressionKind::FfiBytesWithPin {
+                bytes,
+                body,
+                region,
+                ..
+            } => {
+                let bytes = self.lower_expression(bytes);
+                let pointer = self.emit(
+                    MirInstructionKind::FfiBytesBorrow {
+                        bytes,
+                        region: *region,
+                    },
+                    body.parameters()[0].type_id(),
+                    expression.span(),
+                );
+                let cleanup_scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                self.active_cleanups.push(ActiveCleanup {
+                    scope: cleanup_scope,
+                    action: CleanupAction::FfiBytesBorrow {
+                        bytes,
+                        region: *region,
+                        span: expression.span(),
+                    },
+                });
+                let length = self.emit(
+                    MirInstructionKind::FfiBytesBorrowLength {
+                        bytes,
+                        region: *region,
+                    },
+                    body.parameters()[1].type_id(),
+                    expression.span(),
+                );
+                let (captures, declared_effects) = self.lower_scoped_closure(body);
+                let result = self.emit(
+                    MirInstructionKind::CallScopedBorrow {
+                        owner: self.owner,
+                        function: body.function(),
+                        captures,
+                        arguments: vec![pointer, length],
+                        region: *region,
+                        declared_effects,
+                        unwind: MirUnwindAction::Propagate,
+                    },
+                    expression.type_id(),
+                    expression.span(),
+                );
+                self.active_cleanups
+                    .pop()
+                    .expect("scoped FFI byte cleanup was registered");
+                self.emit_effect(
+                    MirInstructionKind::FfiBytesEndBorrow {
+                        bytes,
+                        region: *region,
+                    },
+                    expression.span(),
+                );
+                return result;
+            }
+            HirExpressionKind::FfiPointerNone { .. } => MirInstructionKind::FfiPointerNone,
+            HirExpressionKind::FfiPointerToOptional { pointer } => {
+                MirInstructionKind::FfiPointerToOptional {
+                    pointer: self.lower_expression(pointer),
+                }
+            }
+            HirExpressionKind::FfiPointerReadOnly { pointer } => {
+                MirInstructionKind::FfiPointerReadOnly {
+                    pointer: self.lower_expression(pointer),
+                }
+            }
+            HirExpressionKind::FfiPointerIsPresent { pointer } => {
+                MirInstructionKind::FfiPointerIsPresent {
+                    pointer: self.lower_expression(pointer),
+                }
+            }
+            HirExpressionKind::FfiPointerRequire {
+                pointer,
+                result,
+                success,
+                failure,
+            } => MirInstructionKind::FfiPointerRequire {
+                pointer: self.lower_expression(pointer),
+                result: *result,
+                success: *success,
+                failure: *failure,
+            },
+            HirExpressionKind::FfiUnsafeLoad {
+                pointer, element, ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafeLoad {
+                    pointer: self.lower_expression(pointer),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiUnsafeStore {
+                pointer,
+                value,
+                element,
+                ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                let pointer = self.lower_expression(pointer);
+                let value = self.lower_expression(value);
+                self.emit_effect(
+                    MirInstructionKind::FfiUnsafeStore {
+                        pointer,
+                        value,
+                        layout,
+                    },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiUnsafeAdvance {
+                pointer,
+                elements,
+                element,
+                read_only,
+                ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafeAdvance {
+                    pointer: self.lower_expression(pointer),
+                    elements: self.lower_expression(elements),
+                    layout,
+                    read_only: *read_only,
+                }
+            }
+            HirExpressionKind::FfiUnsafeCopy {
+                source,
+                destination,
+                count,
+                element,
+                ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                let source = self.lower_expression(source);
+                let destination = self.lower_expression(destination);
+                let count = self.lower_expression(count);
+                self.emit_effect(
+                    MirInstructionKind::FfiUnsafeCopy {
+                        source,
+                        destination,
+                        count,
+                        layout,
+                    },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
+            HirExpressionKind::FfiUnsafeAddress {
+                pointer, element, ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafeAddress {
+                    pointer: self.lower_expression(pointer),
+                    layout,
+                }
+            }
+            HirExpressionKind::FfiUnsafePointerFromAddress {
+                address, element, ..
+            } => {
+                let (layout, _, _) = self.ffi_layout(*element);
+                MirInstructionKind::FfiUnsafePointerFromAddress {
+                    address: self.lower_expression(address),
+                    layout,
+                }
+            }
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
@@ -3293,7 +4214,10 @@ impl<'hir> FunctionBuilder<'hir> {
         self.emit(kind, expression.type_id(), expression.span())
     }
 
-    fn lower_closure(&mut self, closure: &HirClosure, closure_type: TypeId) -> ValueId {
+    fn lower_scoped_closure(
+        &mut self,
+        closure: &HirClosure,
+    ) -> (Vec<MirClosureCapture>, MirEffectSummary) {
         let (lowered, mut nested) = FunctionBuilder::new_closure(
             self.owner,
             closure,
@@ -3302,6 +4226,7 @@ impl<'hir> FunctionBuilder<'hir> {
             self.reference_effects,
             self.function_effects,
             self.method_effects,
+            self.ffi_layouts,
         )
         .lower();
         let captures: Vec<_> = closure
@@ -3338,8 +4263,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 }
             })
             .collect();
-        let object_map = closure_environment_object_map(self.arena, &captures);
-        self.nested_functions.push(MirNestedFunction {
+        let mut nested_function = MirNestedFunction {
             owner: self.owner,
             function: closure.function(),
             is_async: closure.is_async(),
@@ -3363,8 +4287,20 @@ impl<'hir> FunctionBuilder<'hir> {
             effects: lowered.effects,
             effects_explicit: lowered.effects_explicit,
             blocks: lowered.blocks,
-        });
+        };
+        let mut adapter = nested_function.transformation_adapter();
+        while recompute_function_effects(&mut adapter, self.function_effects, self.method_effects) {
+        }
+        nested_function.apply_transformation(adapter);
+        let declared_effects = nested_function.effects();
+        self.nested_functions.push(nested_function);
         self.nested_functions.append(&mut nested);
+        (captures, declared_effects)
+    }
+
+    fn lower_closure(&mut self, closure: &HirClosure, closure_type: TypeId) -> ValueId {
+        let (captures, _) = self.lower_scoped_closure(closure);
+        let object_map = closure_environment_object_map(self.arena, &captures);
         self.emit(
             MirInstructionKind::ClosureEnvironmentAllocate {
                 owner: self.owner,
@@ -3375,6 +4311,16 @@ impl<'hir> FunctionBuilder<'hir> {
             closure_type,
             closure.span(),
         )
+    }
+
+    fn ffi_layout(&self, element: TypeId) -> (FfiAbiLayoutId, u64, u64) {
+        let layout = self
+            .ffi_layouts
+            .entries()
+            .iter()
+            .find(|layout| layout.element() == element)
+            .expect("verified source FFI buffer type has one target layout");
+        (layout.id(), layout.size(), layout.alignment())
     }
 
     fn lower_capture_source(
@@ -4014,7 +4960,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 scope: cleanup.scope,
                 reason: MirCleanupExitReason::Unwind,
             });
-            self.lower_statements(cleanup.body);
+            self.lower_cleanup_action(cleanup.action);
             self.current_cleanup = previous_cleanup;
         }
         self.terminate(MirTerminator::ResumeUnwind);
@@ -4023,11 +4969,13 @@ impl<'hir> FunctionBuilder<'hir> {
         let cleanup = cleanup_entry.expect("active cleanup set is nonempty");
         let unwind = match &mut instruction {
             MirInstructionKind::CallDirect { unwind, .. }
+            | MirInstructionKind::CallForeign { unwind, .. }
             | MirInstructionKind::CallReferenced { unwind, .. }
             | MirInstructionKind::CallDirectMethod { unwind, .. }
             | MirInstructionKind::CallInterface { unwind, .. }
             | MirInstructionKind::CallBuiltinInterface { unwind, .. }
             | MirInstructionKind::CallIndirect { unwind, .. } => Some(unwind),
+            MirInstructionKind::CallScopedBorrow { unwind, .. } => Some(unwind),
             _ => None,
         };
         if let Some(unwind) = unwind {
@@ -4046,6 +4994,28 @@ impl<'hir> FunctionBuilder<'hir> {
             lowered.push((key, value));
         }
         lowered
+    }
+
+    fn lower_cleanup_action(&mut self, action: CleanupAction<'hir>) {
+        match action {
+            CleanupAction::Statements(statements) => self.lower_statements(statements),
+            CleanupAction::FfiBufferBorrow {
+                buffer,
+                region,
+                span,
+            } => self.emit_effect(
+                MirInstructionKind::FfiBufferEndBorrow { buffer, region },
+                span,
+            ),
+            CleanupAction::FfiBytesBorrow {
+                bytes,
+                region,
+                span,
+            } => self.emit_effect(
+                MirInstructionKind::FfiBytesEndBorrow { bytes, region },
+                span,
+            ),
+        }
     }
 
     fn emit(&mut self, kind: MirInstructionKind, type_id: TypeId, span: SourceSpan) -> ValueId {
@@ -4409,6 +5379,18 @@ pub(crate) fn list_element_map(arena: &TypeArena, type_id: TypeId) -> ArrayEleme
     }
 }
 
+fn ffi_buffer_type_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn table_element_maps(
     arena: &TypeArena,
     type_id: TypeId,
@@ -4453,24 +5435,29 @@ fn closure_environment_object_map(arena: &TypeArena, captures: &[MirClosureCaptu
     .expect("closure captures form a valid logical object map")
 }
 
-pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeArena>) -> bool {
+#[must_use]
+pub fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeArena>) -> bool {
     let Some(arena) = arena else {
         return false;
     };
-    matches!(
-        arena.get(type_id),
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin { definition, .. }) => {
+            !pop_types::is_ffi_abi_builtin_type(*definition)
+                && *definition != pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID
+                && *definition != pop_types::FFI_ALLOCATION_ERROR_TYPE_ID
+        }
         Some(
             SemanticType::Primitive(PrimitiveType::String)
-                | SemanticType::Tuple(_)
-                | SemanticType::Array(_)
-                | SemanticType::Table { .. }
-                | SemanticType::Class { .. }
-                | SemanticType::Interface { .. }
-                | SemanticType::Builtin { .. }
-                | SemanticType::Function { .. }
-                | SemanticType::ErrorUnion { .. }
-        )
-    )
+            | SemanticType::Tuple(_)
+            | SemanticType::Array(_)
+            | SemanticType::Table { .. }
+            | SemanticType::Class { .. }
+            | SemanticType::Interface { .. }
+            | SemanticType::Function { .. }
+            | SemanticType::ErrorUnion { .. },
+        ) => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn task_group_object_map(
@@ -4654,6 +5641,44 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::ReleaseRoot { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. } => MirEffectSummary::empty().with(MirEffect::Roots),
+        MirInstructionKind::FfiHandleOpen { .. }
+        | MirInstructionKind::FfiHandleGet { .. }
+        | MirInstructionKind::FfiHandleClose { .. } => {
+            MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
+        }
+        MirInstructionKind::FfiBufferOpen { .. } => MirEffectSummary::from_effects([
+            MirEffect::Allocates,
+            MirEffect::MayTrap,
+            MirEffect::GcSafePoint,
+            MirEffect::Roots,
+        ]),
+        MirInstructionKind::FfiBufferClose { .. } => {
+            MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
+        }
+        MirInstructionKind::FfiBufferLength { .. }
+        | MirInstructionKind::FfiBufferRead { .. }
+        | MirInstructionKind::FfiBufferWrite { .. }
+        | MirInstructionKind::FfiBufferBorrow { .. }
+        | MirInstructionKind::FfiBufferEndBorrow { .. } => {
+            MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::FfiBytesBorrow { .. }
+        | MirInstructionKind::FfiBytesEndBorrow { .. } => {
+            MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
+        }
+        MirInstructionKind::FfiBytesBorrowLength { .. } => {
+            MirEffectSummary::empty().with(MirEffect::MayTrap)
+        }
+        MirInstructionKind::FfiUnsafeLoad { .. }
+        | MirInstructionKind::FfiUnsafeStore { .. }
+        | MirInstructionKind::FfiUnsafeAdvance { .. }
+        | MirInstructionKind::FfiUnsafeCopy { .. } => {
+            MirEffectSummary::from_effects([MirEffect::UnsafeMemory, MirEffect::MayTrap])
+        }
+        MirInstructionKind::FfiUnsafeAddress { .. }
+        | MirInstructionKind::FfiUnsafePointerFromAddress { .. } => {
+            MirEffectSummary::empty().with(MirEffect::UnsafeMemory)
+        }
         MirInstructionKind::WriteBarrier { .. } => {
             MirEffectSummary::empty().with(MirEffect::WritesManagedReference)
         }
@@ -4661,6 +5686,9 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
             MirEffectSummary::from_effects([MirEffect::WritesManagedReference])
         }
         MirInstructionKind::CallDirect {
+            declared_effects, ..
+        }
+        | MirInstructionKind::CallForeign {
             declared_effects, ..
         }
         | MirInstructionKind::CallReferenced {
@@ -4680,12 +5708,20 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         }
         | MirInstructionKind::CallIndirect {
             declared_effects, ..
+        }
+        | MirInstructionKind::CallScopedBorrow {
+            declared_effects, ..
         } => *declared_effects,
         MirInstructionKind::IntegerConstant(_)
         | MirInstructionKind::FloatConstant(_)
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::FfiPointerNone
+        | MirInstructionKind::FfiPointerToOptional { .. }
+        | MirInstructionKind::FfiPointerReadOnly { .. }
+        | MirInstructionKind::FfiPointerIsPresent { .. }
+        | MirInstructionKind::FfiPointerRequire { .. }
         | MirInstructionKind::OptionalIsPresent { .. }
         | MirInstructionKind::OptionalGet { .. }
         | MirInstructionKind::ResultMake { .. }
@@ -4775,14 +5811,25 @@ fn conservative_indirect_effects() -> MirEffectSummary {
 }
 
 fn recompute_effects(bubble: &mut MirBubble) {
-    recompute_callable_effects(&mut bubble.functions, &mut bubble.methods);
+    let foreign_effects = bubble
+        .foreign_functions
+        .iter()
+        .map(|function| (function.symbol(), function.effects()))
+        .collect();
+    recompute_callable_effects(&mut bubble.functions, &mut bubble.methods, &foreign_effects);
 }
 
-fn recompute_callable_effects(functions: &mut [MirFunction], methods: &mut [MirMethod]) {
-    let mut function_effects: BTreeMap<_, _> = functions
-        .iter()
-        .map(|function| (function.symbol, function.effects))
-        .collect();
+fn recompute_callable_effects(
+    functions: &mut [MirFunction],
+    methods: &mut [MirMethod],
+    foreign_effects: &BTreeMap<SymbolId, MirEffectSummary>,
+) {
+    let mut function_effects = foreign_effects.clone();
+    function_effects.extend(
+        functions
+            .iter()
+            .map(|function| (function.symbol, function.effects)),
+    );
     let mut method_effects: BTreeMap<_, _> = methods
         .iter()
         .map(|method| (method.method, method.function.effects))
@@ -4820,6 +5867,9 @@ fn recompute_function_effects(
                 MirInstructionKind::CallDirect { function, .. } => {
                     function_effects.get(function).copied().unwrap_or_default()
                 }
+                MirInstructionKind::CallForeign { function, .. } => {
+                    function_effects.get(function).copied().unwrap_or_default()
+                }
                 MirInstructionKind::CallDirectMethod { method, .. } => {
                     method_effects.get(method).copied().unwrap_or_default()
                 }
@@ -4835,6 +5885,9 @@ fn recompute_function_effects(
             if !instruction.effects_explicit {
                 match &mut instruction.kind {
                     MirInstructionKind::CallDirect {
+                        declared_effects, ..
+                    }
+                    | MirInstructionKind::CallForeign {
                         declared_effects, ..
                     }
                     | MirInstructionKind::CallDirectMethod {
@@ -4914,9 +5967,11 @@ fn insert_function_safe_points(function: &mut MirFunction, arena: &TypeArena) ->
                 || matches!(
                     instruction.kind,
                     MirInstructionKind::CallDirect { .. }
+                        | MirInstructionKind::CallForeign { .. }
                         | MirInstructionKind::CallDirectMethod { .. }
                         | MirInstructionKind::CallInterface { .. }
                         | MirInstructionKind::CallIndirect { .. }
+                        | MirInstructionKind::CallScopedBorrow { .. }
                 ) && instruction.effects.contains(MirEffect::GcSafePoint);
             let already_at_safe_point = instructions.last().is_some_and(|previous| {
                 matches!(previous.kind, MirInstructionKind::GcSafePoint { .. })

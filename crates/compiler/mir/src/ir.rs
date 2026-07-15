@@ -8,17 +8,19 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    BindingId, BlockId, BubbleId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId,
-    CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId,
-    InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId, NamespaceId,
-    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
+    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId,
+    InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId,
+    NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
+    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
+    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap,
+    Trap, UnwindReason,
 };
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
+use crate::MirFfiLayoutCatalog;
 use crate::render::{
     dump_declaration, dump_function, dump_function_reference, dump_nested_function,
 };
@@ -151,9 +153,11 @@ pub struct MirBubble {
     pub(crate) dependencies: Vec<BubbleId>,
     pub(crate) declarations: Vec<MirDeclaration>,
     pub(crate) functions: Vec<MirFunction>,
+    pub(crate) foreign_functions: Vec<MirForeignFunction>,
     pub(crate) methods: Vec<MirMethod>,
     pub(crate) nested_functions: Vec<MirNestedFunction>,
     pub(crate) function_references: Vec<MirFunctionReference>,
+    pub(crate) ffi_layouts: MirFfiLayoutCatalog,
 }
 
 impl MirBubble {
@@ -168,8 +172,24 @@ impl MirBubble {
     }
 
     #[must_use]
+    pub const fn ffi_layouts(&self) -> &MirFfiLayoutCatalog {
+        &self.ffi_layouts
+    }
+
+    #[must_use]
+    pub fn with_ffi_layouts(mut self, ffi_layouts: MirFfiLayoutCatalog) -> Self {
+        self.ffi_layouts = ffi_layouts;
+        self
+    }
+
+    #[must_use]
     pub fn functions(&self) -> &[MirFunction] {
         &self.functions
+    }
+
+    #[must_use]
+    pub fn foreign_functions(&self) -> &[MirForeignFunction] {
+        &self.foreign_functions
     }
 
     #[must_use]
@@ -208,6 +228,9 @@ impl MirBubble {
         for function in &self.functions {
             dump_function(&mut output, function);
         }
+        for function in &self.foreign_functions {
+            crate::render::dump_foreign_function(&mut output, function);
+        }
         for method in &self.methods {
             let _ = writeln!(
                 output,
@@ -221,6 +244,56 @@ impl MirBubble {
             dump_nested_function(&mut output, function);
         }
         output
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirForeignFunction {
+    pub(crate) function: FunctionId,
+    pub(crate) symbol: SymbolId,
+    pub(crate) parameters: Vec<TypeId>,
+    pub(crate) results: Vec<TypeId>,
+    pub(crate) effects: MirEffectSummary,
+    pub(crate) declaration: pop_types::ForeignFunctionDeclaration,
+    pub(crate) reference_identity: Option<SymbolIdentity>,
+}
+
+impl MirForeignFunction {
+    #[must_use]
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> MirEffectSummary {
+        self.effects
+    }
+
+    #[must_use]
+    pub const fn declaration(&self) -> &pop_types::ForeignFunctionDeclaration {
+        &self.declaration
+    }
+
+    /// Returns the producer identity when this foreign declaration originated
+    /// in direct-dependency reference metadata.
+    #[must_use]
+    pub const fn reference_identity(&self) -> Option<SymbolIdentity> {
+        self.reference_identity
     }
 }
 
@@ -927,9 +1000,9 @@ impl MirInstruction {
 
     /// Returns the ordinary SSA operands read by this instruction.
     ///
-    /// Precise GC roots are stack-map metadata and are intentionally not
-    /// ordinary operands; consumers that transform roots must inspect the
-    /// `GcSafePoint` instruction directly.
+    /// `GcSafePoint` roots are stack-map metadata and are intentionally not
+    /// ordinary operands. `CallForeign` transition roots are semantic uses
+    /// held across native execution and therefore are ordinary operands.
     #[must_use]
     pub fn operands(&self) -> Vec<ValueId> {
         instruction_operands(&self.kind)
@@ -944,10 +1017,12 @@ impl MirInstruction {
     pub const fn unwind_action(&self) -> MirUnwindAction {
         match &self.kind {
             MirInstructionKind::CallDirect { unwind, .. }
+            | MirInstructionKind::CallForeign { unwind, .. }
             | MirInstructionKind::CallReferenced { unwind, .. }
             | MirInstructionKind::CallDirectMethod { unwind, .. }
             | MirInstructionKind::CallInterface { unwind, .. }
             | MirInstructionKind::CallIndirect { unwind, .. } => *unwind,
+            MirInstructionKind::CallScopedBorrow { unwind, .. } => *unwind,
             _ => self.unwind,
         }
     }
@@ -1256,6 +1331,14 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
+    CallForeign {
+        function: SymbolId,
+        arguments: Vec<ValueId>,
+        safe_point: SafePointId,
+        roots: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
     CallReferenced {
         function: SymbolIdentity,
         arguments: Vec<ValueId>,
@@ -1291,6 +1374,15 @@ pub enum MirInstructionKind {
     CallIndirect {
         callee: ValueId,
         arguments: Vec<ValueId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
+    CallScopedBorrow {
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: Vec<MirClosureCapture>,
+        arguments: Vec<ValueId>,
+        region: BorrowRegionId,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
@@ -1380,6 +1472,110 @@ pub enum MirInstructionKind {
     },
     ReleaseRoot {
         handle: ValueId,
+    },
+    FfiHandleOpen {
+        value: ValueId,
+    },
+    FfiHandleGet {
+        handle: ValueId,
+    },
+    FfiHandleClose {
+        handle: ValueId,
+    },
+    FfiBufferOpen {
+        length: ValueId,
+        element: TypeId,
+        layout: FfiAbiLayoutId,
+        element_size: u64,
+        alignment: u64,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    FfiBufferLength {
+        buffer: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiBufferRead {
+        buffer: ValueId,
+        index: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiBufferWrite {
+        buffer: ValueId,
+        index: ValueId,
+        value: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiBufferBorrow {
+        buffer: ValueId,
+        expected_length: ValueId,
+        layout: FfiAbiLayoutId,
+        region: BorrowRegionId,
+    },
+    FfiBufferEndBorrow {
+        buffer: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiBufferClose {
+        buffer: ValueId,
+    },
+    FfiBytesBorrow {
+        bytes: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiBytesBorrowLength {
+        bytes: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiBytesEndBorrow {
+        bytes: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiPointerNone,
+    FfiPointerToOptional {
+        pointer: ValueId,
+    },
+    FfiPointerReadOnly {
+        pointer: ValueId,
+    },
+    FfiPointerIsPresent {
+        pointer: ValueId,
+    },
+    FfiPointerRequire {
+        pointer: ValueId,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    FfiUnsafeLoad {
+        pointer: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafeStore {
+        pointer: ValueId,
+        value: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafeAdvance {
+        pointer: ValueId,
+        elements: ValueId,
+        layout: FfiAbiLayoutId,
+        read_only: bool,
+    },
+    FfiUnsafeCopy {
+        source: ValueId,
+        destination: ValueId,
+        count: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafeAddress {
+        pointer: ValueId,
+        layout: FfiAbiLayoutId,
+    },
+    FfiUnsafePointerFromAddress {
+        address: ValueId,
+        layout: FfiAbiLayoutId,
     },
     Pin {
         value: ValueId,
@@ -1608,11 +1804,15 @@ impl MirUnionSwitchArm {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirVerificationError {
+    DuplicateFunction(SymbolId),
+    InvalidForeignFunction(SymbolId),
     GenericSpecializationBudgetExceeded {
         limit: usize,
     },
     UnknownGenericTemplate(SymbolId),
     InvalidGenericSpecialization(SymbolId),
+    MissingFfiLayoutFingerprint,
+    InvalidFfiLayoutCatalog,
     InvalidType(TypeId),
     DuplicateValue(ValueId),
     UnknownValue(ValueId),
@@ -1700,6 +1900,31 @@ pub enum MirVerificationError {
         found_arguments: usize,
         expected_results: usize,
         found_results: usize,
+    },
+    InvalidForeignCall {
+        instruction: ValueId,
+        function: SymbolId,
+    },
+    InvalidForeignRoots {
+        instruction: ValueId,
+    },
+    InvalidFfiHandleOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiBufferOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiBytesOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiPointerOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiUnsafeOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiBufferBorrowRegion {
+        region: BorrowRegionId,
     },
     InvalidTaskOperation {
         instruction: ValueId,

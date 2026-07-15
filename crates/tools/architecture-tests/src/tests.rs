@@ -29,6 +29,7 @@ const MEMBERS: &[&str] = &[
     "crates/extensions/ai",
     "crates/extensions/cli",
     "crates/extensions/data",
+    "crates/extensions/ffi",
     "crates/extensions/lsp",
     "crates/extensions/rpc",
     "crates/extensions/syntax",
@@ -187,6 +188,16 @@ const OFFICIAL_EXTENSIONS: &[ExtensionExpectation] = &[
         sources: &[
             ("src/lib.pop", "namespace Pop.Syntax"),
             ("src/source.pop", "namespace Pop.Source"),
+        ],
+        dependencies: &[],
+    },
+    ExtensionExpectation {
+        directory: "ffi",
+        package: "Pop.Ffi",
+        cargo_package: "pop-extension-ffi",
+        sources: &[
+            ("src/lib.pop", "namespace Ffi"),
+            ("src/c.pop", "namespace Ffi.C"),
         ],
         dependencies: &[],
     },

@@ -8,11 +8,11 @@
 use std::fmt::Write;
 
 use pop_foundation::{
-    AttributeId, BindingId, BubbleId, BuiltinTypeId, CaptureId, ClassId, EnumCaseId, ErrorCaseId,
-    ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId,
-    IterationProtocolMethodId, LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId,
-    NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
-    TypeId, UnionCaseId, ValueParameterId,
+    AttributeId, BindingId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
+    EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId,
+    IterationCaseId, IterationProtocolMethodId, LocalId, MethodId, ModuleId, NamespaceId,
+    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -35,6 +35,7 @@ pub struct HirBubble {
     pub(crate) dependencies: Vec<BubbleId>,
     pub(crate) declarations: Vec<HirDeclaration>,
     pub(crate) functions: Vec<HirFunction>,
+    pub(crate) foreign_functions: Vec<HirForeignFunction>,
     pub(crate) methods: Vec<HirMethod>,
     pub(crate) public_symbols: Vec<SymbolId>,
     pub(crate) function_references: Vec<HirFunctionReference>,
@@ -157,10 +158,46 @@ impl HirBubble {
             dependencies,
             declarations,
             functions,
+            foreign_functions: Vec::new(),
             methods,
             public_symbols,
             function_references: Vec::new(),
         })
+    }
+
+    /// Attaches verified bodyless foreign declarations to this Bubble.
+    ///
+    /// # Errors
+    ///
+    /// Rejects wrong Bubble ownership or a symbol duplicated by another local
+    /// function.
+    pub fn with_foreign_functions(
+        mut self,
+        mut functions: Vec<HirForeignFunction>,
+    ) -> Result<Self, HirBubbleError> {
+        functions.sort_by_key(HirForeignFunction::symbol);
+        let mut symbols: std::collections::BTreeSet<_> =
+            self.functions.iter().map(HirFunction::symbol).collect();
+        for function in &functions {
+            if function.bubble() != self.bubble {
+                return Err(HirBubbleError::WrongOwner {
+                    symbol: function.symbol(),
+                    expected: self.bubble,
+                    found: function.bubble(),
+                });
+            }
+            if !symbols.insert(function.symbol()) {
+                return Err(HirBubbleError::DuplicateFunction(function.symbol()));
+            }
+            if function.visibility() == Visibility::Public {
+                self.public_symbols.push(function.symbol());
+            }
+        }
+        self.public_symbols.sort_unstable();
+        self.public_symbols.dedup();
+        self.foreign_functions = functions;
+        self.recompute_call_effects();
+        Ok(self)
     }
 
     /// Attaches verified direct-dependency function signatures.
@@ -187,7 +224,51 @@ impl HirBubble {
             previous = Some(reference.identity);
         }
         self.function_references = references;
+        self.recompute_call_effects();
         Ok(self)
+    }
+
+    fn recompute_call_effects(&mut self) {
+        let foreign_effects: std::collections::BTreeMap<_, _> = self
+            .foreign_functions
+            .iter()
+            .map(|function| (function.symbol(), function.effects()))
+            .collect();
+        let reference_effects: std::collections::BTreeMap<_, _> = self
+            .function_references
+            .iter()
+            .map(|reference| (reference.identity(), reference.effects()))
+            .collect();
+        loop {
+            let function_effects: std::collections::BTreeMap<_, _> = self
+                .functions
+                .iter()
+                .map(|function| (function.symbol(), function.effects()))
+                .chain(
+                    foreign_effects
+                        .iter()
+                        .map(|(symbol, effects)| (*symbol, *effects)),
+                )
+                .collect();
+            let mut changed = false;
+            for function in &mut self.functions {
+                let direct = hir_direct_call_instances(function)
+                    .into_iter()
+                    .filter_map(|(callee, _)| function_effects.get(&callee))
+                    .fold(function.effects, |effects, callee| effects.union(*callee));
+                let complete = hir_referenced_call_instances(function)
+                    .into_iter()
+                    .filter_map(|(callee, _)| reference_effects.get(&callee))
+                    .fold(direct, |effects, callee| effects.union(*callee));
+                if function.effects != complete {
+                    function.effects = complete;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     #[must_use]
@@ -213,6 +294,11 @@ impl HirBubble {
     #[must_use]
     pub fn functions(&self) -> &[HirFunction] {
         &self.functions
+    }
+
+    #[must_use]
+    pub fn foreign_functions(&self) -> &[HirForeignFunction] {
+        &self.foreign_functions
     }
 
     #[must_use]
@@ -265,6 +351,9 @@ impl HirBubble {
         for function in &self.functions {
             dump_function(&mut output, function, arena);
         }
+        for function in &self.foreign_functions {
+            crate::text::dump_foreign_function(&mut output, function, arena);
+        }
         for method in &self.methods {
             dump_method(&mut output, method, arena);
         }
@@ -296,6 +385,8 @@ pub struct HirFunctionReference {
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: pop_types::EffectSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) foreign_declaration: Option<pop_types::ForeignFunctionDeclaration>,
     pub(crate) specialization_capsule: Option<HirSpecializationCapsule>,
 }
 
@@ -318,8 +409,18 @@ impl HirFunctionReference {
             parameters,
             results,
             effects,
+            foreign_declaration: None,
             specialization_capsule: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_foreign_declaration(
+        mut self,
+        declaration: Option<pop_types::ForeignFunctionDeclaration>,
+    ) -> Self {
+        self.foreign_declaration = declaration;
+        self
     }
 
     #[must_use]
@@ -361,6 +462,11 @@ impl HirFunctionReference {
     #[must_use]
     pub const fn effects(&self) -> pop_types::EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn foreign_declaration(&self) -> Option<&pop_types::ForeignFunctionDeclaration> {
+        self.foreign_declaration.as_ref()
     }
 
     #[must_use]
@@ -464,6 +570,7 @@ impl HirDeclaration {
                         span: field.span(),
                     })
                     .collect(),
+                ffi_c_layout: definition.has_ffi_c_layout(),
             }),
             span: definition.span(),
         }
@@ -888,6 +995,7 @@ impl HirEnumCase {
 pub struct HirRecordDeclaration {
     pub(crate) type_id: TypeId,
     pub(crate) fields: Vec<HirRecordField>,
+    pub(crate) ffi_c_layout: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1043,6 +1151,11 @@ impl HirRecordDeclaration {
     #[must_use]
     pub const fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    #[must_use]
+    pub const fn has_ffi_c_layout(&self) -> bool {
+        self.ffi_c_layout
     }
 
     #[must_use]
@@ -1424,6 +1537,77 @@ pub struct HirFunction {
     pub(crate) body: Vec<HirStatement>,
     pub(crate) attributes: Vec<HirAttribute>,
     pub(crate) effects: pop_types::EffectSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirForeignFunction {
+    pub(crate) function: FunctionId,
+    pub(crate) symbol: SymbolId,
+    pub(crate) module: ModuleId,
+    pub(crate) bubble: BubbleId,
+    pub(crate) visibility: Visibility,
+    pub(crate) name: String,
+    pub(crate) parameters: Vec<HirParameter>,
+    pub(crate) results: Vec<TypeId>,
+    pub(crate) attributes: Vec<HirAttribute>,
+    pub(crate) declaration: pop_types::ForeignFunctionDeclaration,
+}
+
+impl HirForeignFunction {
+    #[must_use]
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub const fn bubble(&self) -> BubbleId {
+        self.bubble
+    }
+
+    #[must_use]
+    pub const fn visibility(&self) -> Visibility {
+        self.visibility
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[HirParameter] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub fn attributes(&self) -> &[HirAttribute] {
+        &self.attributes
+    }
+
+    #[must_use]
+    pub const fn declaration(&self) -> &pop_types::ForeignFunctionDeclaration {
+        &self.declaration
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> pop_types::EffectSummary {
+        self.declaration.effects()
+    }
 }
 
 impl HirFunction {
@@ -2235,6 +2419,46 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             }
             remap_aggregate_statements(&mut closure.body, instances)
         }
+        HirExpressionKind::FfiBufferWithPointer {
+            buffer,
+            body,
+            body_type,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(buffer, instances);
+            *element = instances.type_id(*element);
+            *body_type = instances.type_id(*body_type);
+            for parameter in &mut body.parameters {
+                parameter.type_id = instances.type_id(parameter.type_id);
+            }
+            for result in &mut body.results {
+                *result = instances.type_id(*result);
+            }
+            for capture in &mut body.captures {
+                capture.type_id = instances.type_id(capture.type_id);
+            }
+            remap_aggregate_statements(&mut body.body, instances);
+        }
+        HirExpressionKind::FfiBytesWithPin {
+            bytes,
+            body,
+            body_type,
+            ..
+        } => {
+            remap_aggregate_expression(bytes, instances);
+            *body_type = instances.type_id(*body_type);
+            for parameter in &mut body.parameters {
+                parameter.type_id = instances.type_id(parameter.type_id);
+            }
+            for result in &mut body.results {
+                *result = instances.type_id(*result);
+            }
+            for capture in &mut body.captures {
+                capture.type_id = instances.type_id(capture.type_id);
+            }
+            remap_aggregate_statements(&mut body.body, instances);
+        }
         HirExpressionKind::Field { base, field } => {
             remap_aggregate_expression(base, instances);
             *field = instances.field(base.type_id(), *field);
@@ -2247,9 +2471,82 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::Await { task: base }
         | HirExpressionKind::TaskCancelToken { source: base }
         | HirExpressionKind::TaskCancel { source: base }
+        | HirExpressionKind::FfiHandleOpen { value: base }
+        | HirExpressionKind::FfiHandleGet { handle: base }
+        | HirExpressionKind::FfiHandleClose { handle: base }
+        | HirExpressionKind::FfiBufferLength { buffer: base }
+        | HirExpressionKind::FfiBufferClose { buffer: base }
+        | HirExpressionKind::FfiPointerToOptional { pointer: base }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: base }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: base }
+        | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
+        }
+        HirExpressionKind::FfiBufferOpen {
+            length, element, ..
+        } => {
+            remap_aggregate_expression(length, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiPointerNone { element, .. } => {
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiUnsafeLoad {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafeAddress {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(pointer, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            ..
+        }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(pointer, instances);
+            remap_aggregate_expression(value, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            ..
+        } => {
+            remap_aggregate_expression(source, instances);
+            remap_aggregate_expression(destination, instances);
+            remap_aggregate_expression(count, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            remap_aggregate_expression(buffer, instances);
+            remap_aggregate_expression(index, instances);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            remap_aggregate_expression(buffer, instances);
+            remap_aggregate_expression(index, instances);
+            remap_aggregate_expression(value, instances);
         }
         HirExpressionKind::TaskGroup { cancel, body } => {
             remap_aggregate_expression(cancel, instances);
@@ -2724,6 +3021,14 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
 fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirCollectedCall>) {
     match expression.kind() {
         HirExpressionKind::Closure(closure) => collect_statement_calls(closure.body(), calls),
+        HirExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            collect_expression_calls(buffer, calls);
+            collect_statement_calls(body.body(), calls);
+        }
+        HirExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            collect_expression_calls(bytes, calls);
+            collect_statement_calls(body.body(), calls);
+        }
         HirExpressionKind::Field { base, .. }
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
@@ -2733,6 +3038,19 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::Await { task: base }
         | HirExpressionKind::TaskCancelToken { source: base }
         | HirExpressionKind::TaskCancel { source: base }
+        | HirExpressionKind::FfiHandleOpen { value: base }
+        | HirExpressionKind::FfiHandleGet { handle: base }
+        | HirExpressionKind::FfiHandleClose { handle: base }
+        | HirExpressionKind::FfiBufferOpen { length: base, .. }
+        | HirExpressionKind::FfiBufferLength { buffer: base }
+        | HirExpressionKind::FfiBufferClose { buffer: base }
+        | HirExpressionKind::FfiPointerToOptional { pointer: base }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: base }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: base }
+        | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
+        | HirExpressionKind::FfiUnsafeLoad { pointer: base, .. }
+        | HirExpressionKind::FfiUnsafeAddress { pointer: base, .. }
+        | HirExpressionKind::FfiUnsafePointerFromAddress { address: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -2746,6 +3064,38 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         HirExpressionKind::TableGet { table, key } => {
             collect_expression_calls(table, calls);
             collect_expression_calls(key, calls);
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            collect_expression_calls(buffer, calls);
+            collect_expression_calls(index, calls);
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            collect_expression_calls(buffer, calls);
+            collect_expression_calls(index, calls);
+            collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => {
+            collect_expression_calls(pointer, calls);
+            collect_expression_calls(value, calls);
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => {
+            collect_expression_calls(source, calls);
+            collect_expression_calls(destination, calls);
+            collect_expression_calls(count, calls);
         }
         HirExpressionKind::ArrayGet { array, index }
         | HirExpressionKind::ArrayGetChecked { array, index }
@@ -2890,6 +3240,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
         | HirExpressionKind::TaskCancellationSource
+        | HirExpressionKind::FfiPointerNone { .. }
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -3240,6 +3591,46 @@ fn specialize_expression(
             }
             specialize_statements(&mut closure.body, substitutions, instances, arena)?;
         }
+        HirExpressionKind::FfiBufferWithPointer {
+            buffer,
+            body,
+            body_type,
+            element,
+            ..
+        } => {
+            specialize_expression(buffer, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+            specialize_type(body_type, substitutions, arena)?;
+            for parameter in &mut body.parameters {
+                specialize_type(&mut parameter.type_id, substitutions, arena)?;
+            }
+            for result in &mut body.results {
+                specialize_type(result, substitutions, arena)?;
+            }
+            for capture in &mut body.captures {
+                specialize_type(&mut capture.type_id, substitutions, arena)?;
+            }
+            specialize_statements(&mut body.body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiBytesWithPin {
+            bytes,
+            body,
+            body_type,
+            ..
+        } => {
+            specialize_expression(bytes, substitutions, instances, arena)?;
+            specialize_type(body_type, substitutions, arena)?;
+            for parameter in &mut body.parameters {
+                specialize_type(&mut parameter.type_id, substitutions, arena)?;
+            }
+            for result in &mut body.results {
+                specialize_type(result, substitutions, arena)?;
+            }
+            for capture in &mut body.captures {
+                specialize_type(&mut capture.type_id, substitutions, arena)?;
+            }
+            specialize_statements(&mut body.body, substitutions, instances, arena)?;
+        }
         HirExpressionKind::Field { base, .. }
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
@@ -3249,9 +3640,82 @@ fn specialize_expression(
         | HirExpressionKind::Await { task: base }
         | HirExpressionKind::TaskCancelToken { source: base }
         | HirExpressionKind::TaskCancel { source: base }
+        | HirExpressionKind::FfiHandleOpen { value: base }
+        | HirExpressionKind::FfiHandleGet { handle: base }
+        | HirExpressionKind::FfiHandleClose { handle: base }
+        | HirExpressionKind::FfiBufferLength { buffer: base }
+        | HirExpressionKind::FfiBufferClose { buffer: base }
+        | HirExpressionKind::FfiPointerToOptional { pointer: base }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: base }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: base }
+        | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiBufferOpen {
+            length, element, ..
+        } => {
+            specialize_expression(length, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiPointerNone { element, .. } => {
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiUnsafeLoad {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafeAddress {
+            pointer, element, ..
+        }
+        | HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: pointer,
+            element,
+            ..
+        } => {
+            specialize_expression(pointer, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            ..
+        }
+        | HirExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            element,
+            ..
+        } => {
+            specialize_expression(pointer, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            ..
+        } => {
+            specialize_expression(source, substitutions, instances, arena)?;
+            specialize_expression(destination, substitutions, instances, arena)?;
+            specialize_expression(count, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiBufferRead { buffer, index } => {
+            specialize_expression(buffer, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => {
+            specialize_expression(buffer, substitutions, instances, arena)?;
+            specialize_expression(index, substitutions, instances, arena)?;
+            specialize_expression(value, substitutions, instances, arena)?;
         }
         HirExpressionKind::TaskGroup { cancel, body } => {
             specialize_expression(cancel, substitutions, instances, arena)?;
@@ -4170,6 +4634,104 @@ pub enum HirExpressionKind {
     TaskStart {
         group: Box<HirExpression>,
         task: Box<HirExpression>,
+    },
+    FfiHandleOpen {
+        value: Box<HirExpression>,
+    },
+    FfiHandleGet {
+        handle: Box<HirExpression>,
+    },
+    FfiHandleClose {
+        handle: Box<HirExpression>,
+    },
+    FfiBufferOpen {
+        length: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiBufferLength {
+        buffer: Box<HirExpression>,
+    },
+    FfiBufferRead {
+        buffer: Box<HirExpression>,
+        index: Box<HirExpression>,
+    },
+    FfiBufferWrite {
+        buffer: Box<HirExpression>,
+        index: Box<HirExpression>,
+        value: Box<HirExpression>,
+    },
+    FfiBufferClose {
+        buffer: Box<HirExpression>,
+    },
+    FfiBufferWithPointer {
+        buffer: Box<HirExpression>,
+        body: HirClosure,
+        body_type: TypeId,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        region: BorrowRegionId,
+    },
+    FfiBytesWithPin {
+        bytes: Box<HirExpression>,
+        body: HirClosure,
+        body_type: TypeId,
+        region: BorrowRegionId,
+    },
+    FfiPointerNone {
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiPointerToOptional {
+        pointer: Box<HirExpression>,
+    },
+    FfiPointerReadOnly {
+        pointer: Box<HirExpression>,
+    },
+    FfiPointerIsPresent {
+        pointer: Box<HirExpression>,
+    },
+    FfiPointerRequire {
+        pointer: Box<HirExpression>,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    FfiUnsafeLoad {
+        pointer: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeStore {
+        pointer: Box<HirExpression>,
+        value: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAdvance {
+        pointer: Box<HirExpression>,
+        elements: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiUnsafeCopy {
+        source: Box<HirExpression>,
+        destination: Box<HirExpression>,
+        count: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafeAddress {
+        pointer: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+    },
+    FfiUnsafePointerFromAddress {
+        address: Box<HirExpression>,
+        element: TypeId,
+        layout_record: Option<SymbolId>,
     },
     Call {
         dispatch: HirCallDispatch,

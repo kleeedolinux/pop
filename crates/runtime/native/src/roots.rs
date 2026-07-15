@@ -20,6 +20,19 @@ pub extern "C" fn pop_rt_retain_root(reference: u64) -> u64 {
         .map_or(0, RootHandle::raw)
 }
 
+/// Resolves one live strong-root handle to its current managed reference.
+/// Zero reports an invalid, forged, stale, or already released handle.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_resolve_root(root: u64) -> u64 {
+    let Ok(mut runtime) = lock_abi_runtime() else {
+        return 0;
+    };
+    runtime
+        .resolve_root(RootHandle::new(root))
+        .map_or(0, ManagedReference::raw)
+}
+
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
@@ -91,7 +104,7 @@ pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
     u8::from(serviced)
 }
 
-fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublication> {
+pub(crate) fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublication> {
     let root_slots = (0..roots.len())
         .filter_map(|index| u32::try_from(index).ok())
         .map(pop_runtime_interface::RootSlot::new)
@@ -110,7 +123,7 @@ fn abi_root_publication(safe_point: u32, roots: &[u64]) -> Option<RootPublicatio
     RootPublication::new(stack_map, roots).ok()
 }
 
-fn service_root_publication(
+pub(crate) fn service_root_publication(
     runtime: &mut StableGenerationalRuntime,
     binding: Option<NativeExecutionBinding>,
     publication: &mut RootPublication,

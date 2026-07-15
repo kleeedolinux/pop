@@ -12,6 +12,18 @@ complete precise map and every managed initializer before delegating one
 failure-atomic publication to the stable collector. Ordinary post-publication
 mutation continues through checked scalar or reference-store paths.
 
+ABI 1.13 adds balanced foreign transitions. Blocking calls retain every live
+root in runtime-owned handles while the scheduler mutator is `HandlesOnly`;
+reviewed nonblocking calls use `BoundedForeign`. Both modes require the current
+managed scheduler binding, preserve an exact writable root shape, and consume
+one thread-local LIFO transition token on leave.
+
+ABI 1.14 adds balanced managed-thread attachment for generated program entry
+and callback adapters. Attachment registers one exact scheduler mutator,
+enters managed state, and returns explicit thread-bound authority. Detach is
+rejected until every foreign transition is closed, then clears and unregisters
+the same binding.
+
 Heap storage, reachability, roots, pins, and collection policy remain in
 `pop-runtime-collector`; symbol/version vocabulary remains in
 `pop-runtime-native-abi`. See
@@ -21,9 +33,10 @@ The native collector transition is specified by
 Atomic initialized publication is specified by
 [ADR 0072](../../../architecture/decisions/0072-atomic-initialized-object-allocation.md).
 
-The facade is divided into `identity`, `allocation`, `storage`, `text`, `roots`,
-`failure`, `scheduler`, and private `state` modules. The scheduler provides the
-bounded synchronized M:N correctness implementation, deterministic
+The facade is divided into `identity`, `allocation`, `binding`, `storage`,
+`text`, `roots`, `foreign`, `failure`, `scheduler`, and private `state` modules.
+The scheduler provides the bounded synchronized M:N correctness implementation,
+deterministic
 per-dispatch work budgets and record/replay, typed collector-transition hooks,
 bounded scheduler-work-unit ready and driver-delivery percentiles, and a
 separate bounded blocking pool plus bounded host/virtual timer and

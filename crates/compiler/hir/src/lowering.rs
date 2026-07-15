@@ -13,10 +13,11 @@ use pop_foundation::{
 use pop_resolve::Visibility;
 use pop_types::{
     CaptureMode, CaptureSource, ClassDefinition, ClassInterfaceImplementation,
-    ClassMethodDefinition, InterfaceDefinition, ResolvedAttribute, ResolvedFunctionSignature,
-    TypeArena, TypedAssignmentTarget, TypedBody, TypedCall, TypedCallDispatch, TypedCapture,
-    TypedClosure, TypedExpression, TypedExpressionKind, TypedFieldValue, TypedIterationSource,
-    TypedMatchArm, TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry,
+    ClassMethodDefinition, ForeignFunctionDeclaration, InterfaceDefinition, ResolvedAttribute,
+    ResolvedFunctionSignature, TypeArena, TypedAssignmentTarget, TypedBody, TypedCall,
+    TypedCallDispatch, TypedCapture, TypedClosure, TypedExpression, TypedExpressionKind,
+    TypedFieldValue, TypedIterationSource, TypedMatchArm, TypedMatchBinding, TypedStatement,
+    TypedStatementKind, TypedTableEntry,
 };
 
 use crate::ir::*;
@@ -64,6 +65,63 @@ impl HirFunctionContext {
             visibility,
         }
     }
+}
+
+/// Constructs one bodyless backend-neutral HIR foreign declaration.
+///
+/// # Errors
+///
+/// Returns a deterministic error when the signature lacks canonical types or
+/// disagrees with the typed foreign declaration identity.
+pub fn build_hir_foreign_function(
+    context: HirFunctionContext,
+    signature: &ResolvedFunctionSignature,
+    declaration: &ForeignFunctionDeclaration,
+    attributes: &[ResolvedAttribute],
+) -> Result<HirForeignFunction, Vec<HirBuildError>> {
+    if signature.symbol() != declaration.symbol()
+        || signature.is_async()
+        || !signature.type_parameters().is_empty()
+    {
+        return Err(vec![HirVerificationError::InvalidGenericBounds {
+            function: signature.symbol(),
+            span: declaration.span(),
+        }]);
+    }
+    let parameters: Option<Vec<_>> = signature
+        .parameters()
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            Some(HirParameter {
+                binding: BindingId::from_raw(u32::try_from(index).ok()?),
+                parameter: ValueParameterId::from_raw(u32::try_from(index).ok()?),
+                name: parameter.name().to_owned(),
+                type_id: parameter.parameter_type().type_id()?,
+                span: parameter.span(),
+            })
+        })
+        .collect();
+    let results: Option<Vec<_>> = signature
+        .results()
+        .iter()
+        .map(pop_types::ResolvedType::type_id)
+        .collect();
+    let Some((parameters, results)) = parameters.zip(results) else {
+        return Err(vec![HirVerificationError::MissingCanonicalType]);
+    };
+    Ok(HirForeignFunction {
+        function: FunctionId::from_raw(signature.symbol().raw()),
+        symbol: signature.symbol(),
+        module: context.module,
+        bubble: context.bubble,
+        visibility: context.visibility,
+        name: signature.name().to_owned(),
+        parameters,
+        results,
+        attributes: attributes.iter().map(lower_attribute).collect(),
+        declaration: declaration.clone(),
+    })
 }
 
 /// Constructs HIR from an accepted typed body, then verifies the result.
@@ -1041,6 +1099,168 @@ fn lower_expression(
             group: Box::new(lower_expression(group, interface_slots)),
             task: Box::new(lower_expression(task, interface_slots)),
         },
+        TypedExpressionKind::FfiHandleOpen { value } => HirExpressionKind::FfiHandleOpen {
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
+        TypedExpressionKind::FfiHandleGet { handle } => HirExpressionKind::FfiHandleGet {
+            handle: Box::new(lower_expression(handle, interface_slots)),
+        },
+        TypedExpressionKind::FfiHandleClose { handle } => HirExpressionKind::FfiHandleClose {
+            handle: Box::new(lower_expression(handle, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferOpen {
+            length,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiBufferOpen {
+            length: Box::new(lower_expression(length, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiBufferLength { buffer } => HirExpressionKind::FfiBufferLength {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferRead { buffer, index } => HirExpressionKind::FfiBufferRead {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => HirExpressionKind::FfiBufferWrite {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferClose { buffer } => HirExpressionKind::FfiBufferClose {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+        },
+        TypedExpressionKind::FfiBufferWithPointer {
+            buffer,
+            body,
+            body_type,
+            element,
+            layout_record,
+            region,
+        } => HirExpressionKind::FfiBufferWithPointer {
+            buffer: Box::new(lower_expression(buffer, interface_slots)),
+            body: lower_closure(body, interface_slots),
+            body_type: *body_type,
+            element: *element,
+            layout_record: *layout_record,
+            region: *region,
+        },
+        TypedExpressionKind::FfiBytesWithPin {
+            bytes,
+            body,
+            body_type,
+            region,
+        } => HirExpressionKind::FfiBytesWithPin {
+            bytes: Box::new(lower_expression(bytes, interface_slots)),
+            body: lower_closure(body, interface_slots),
+            body_type: *body_type,
+            region: *region,
+        },
+        TypedExpressionKind::FfiPointerNone {
+            element,
+            layout_record,
+            read_only,
+        } => HirExpressionKind::FfiPointerNone {
+            element: *element,
+            layout_record: *layout_record,
+            read_only: *read_only,
+        },
+        TypedExpressionKind::FfiPointerToOptional { pointer } => {
+            HirExpressionKind::FfiPointerToOptional {
+                pointer: Box::new(lower_expression(pointer, interface_slots)),
+            }
+        }
+        TypedExpressionKind::FfiPointerReadOnly { pointer } => {
+            HirExpressionKind::FfiPointerReadOnly {
+                pointer: Box::new(lower_expression(pointer, interface_slots)),
+            }
+        }
+        TypedExpressionKind::FfiPointerIsPresent { pointer } => {
+            HirExpressionKind::FfiPointerIsPresent {
+                pointer: Box::new(lower_expression(pointer, interface_slots)),
+            }
+        }
+        TypedExpressionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => HirExpressionKind::FfiPointerRequire {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            result: *result,
+            success: *success,
+            failure: *failure,
+        },
+        TypedExpressionKind::FfiUnsafeLoad {
+            pointer,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeLoad {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafeStore {
+            pointer,
+            value,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeStore {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            value: Box::new(lower_expression(value, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements,
+            element,
+            layout_record,
+            read_only,
+        } => HirExpressionKind::FfiUnsafeAdvance {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            elements: Box::new(lower_expression(elements, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+            read_only: *read_only,
+        },
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeCopy {
+            source: Box::new(lower_expression(source, interface_slots)),
+            destination: Box::new(lower_expression(destination, interface_slots)),
+            count: Box::new(lower_expression(count, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafeAddress {
+            pointer,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafeAddress {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
+        TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiUnsafePointerFromAddress {
+            address: Box::new(lower_expression(address, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1515,6 +1735,14 @@ fn first_unknown_interface_expression(
         TypedExpressionKind::Closure(closure) => {
             first_unknown_interface_call(closure.body().statements(), slots)
         }
+        TypedExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            first_unknown_interface_expression(buffer, slots)
+                .or_else(|| first_unknown_interface_call(body.body().statements(), slots))
+        }
+        TypedExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            first_unknown_interface_expression(bytes, slots)
+                .or_else(|| first_unknown_interface_call(body.body().statements(), slots))
+        }
         TypedExpressionKind::Field { base, .. } => first_unknown_interface_expression(base, slots),
         TypedExpressionKind::ClassConstruct { fields, .. }
         | TypedExpressionKind::Record { fields, .. } => fields
@@ -1591,6 +1819,55 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::TaskCancel { source: operand } => {
             first_unknown_interface_expression(operand, slots)
         }
+        TypedExpressionKind::FfiHandleOpen { value: operand }
+        | TypedExpressionKind::FfiHandleGet { handle: operand }
+        | TypedExpressionKind::FfiHandleClose { handle: operand }
+        | TypedExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | TypedExpressionKind::FfiBufferLength { buffer: operand }
+        | TypedExpressionKind::FfiBufferClose { buffer: operand }
+        | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
+        | TypedExpressionKind::FfiPointerRequire {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
+        } => first_unknown_interface_expression(operand, slots),
+        TypedExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => first_unknown_interface_expression(pointer, slots)
+            .or_else(|| first_unknown_interface_expression(value, slots)),
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => first_unknown_interface_expression(source, slots)
+            .or_else(|| first_unknown_interface_expression(destination, slots))
+            .or_else(|| first_unknown_interface_expression(count, slots)),
+        TypedExpressionKind::FfiBufferRead { buffer, index } => {
+            first_unknown_interface_expression(buffer, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
+        }
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => first_unknown_interface_expression(buffer, slots)
+            .or_else(|| first_unknown_interface_expression(index, slots))
+            .or_else(|| first_unknown_interface_expression(value, slots)),
         TypedExpressionKind::TaskGroup { cancel, body } => {
             first_unknown_interface_expression(cancel, slots)
                 .or_else(|| first_unknown_interface_expression(body, slots))
@@ -1665,6 +1942,7 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
         | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
@@ -1841,6 +2119,14 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::Closure(closure) => {
             first_compile_time_only_statement(closure.body().statements())
         }
+        TypedExpressionKind::FfiBufferWithPointer { buffer, body, .. } => {
+            first_compile_time_only_expression(buffer)
+                .or_else(|| first_compile_time_only_statement(body.body().statements()))
+        }
+        TypedExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
+            first_compile_time_only_expression(bytes)
+                .or_else(|| first_compile_time_only_statement(body.body().statements()))
+        }
         TypedExpressionKind::Field { base, .. } => first_compile_time_only_expression(base),
         TypedExpressionKind::ClassConstruct { fields, .. }
         | TypedExpressionKind::Record { fields, .. } => fields
@@ -1909,6 +2195,55 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::TaskCancel { source: operand } => {
             first_compile_time_only_expression(operand)
         }
+        TypedExpressionKind::FfiHandleOpen { value: operand }
+        | TypedExpressionKind::FfiHandleGet { handle: operand }
+        | TypedExpressionKind::FfiHandleClose { handle: operand }
+        | TypedExpressionKind::FfiBufferOpen {
+            length: operand, ..
+        }
+        | TypedExpressionKind::FfiBufferLength { buffer: operand }
+        | TypedExpressionKind::FfiBufferClose { buffer: operand }
+        | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
+        | TypedExpressionKind::FfiPointerRequire {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeLoad {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafeAddress {
+            pointer: operand, ..
+        }
+        | TypedExpressionKind::FfiUnsafePointerFromAddress {
+            address: operand, ..
+        } => first_compile_time_only_expression(operand),
+        TypedExpressionKind::FfiUnsafeStore { pointer, value, .. }
+        | TypedExpressionKind::FfiUnsafeAdvance {
+            pointer,
+            elements: value,
+            ..
+        } => first_compile_time_only_expression(pointer)
+            .or_else(|| first_compile_time_only_expression(value)),
+        TypedExpressionKind::FfiUnsafeCopy {
+            source,
+            destination,
+            count,
+            ..
+        } => first_compile_time_only_expression(source)
+            .or_else(|| first_compile_time_only_expression(destination))
+            .or_else(|| first_compile_time_only_expression(count)),
+        TypedExpressionKind::FfiBufferRead { buffer, index } => {
+            first_compile_time_only_expression(buffer)
+                .or_else(|| first_compile_time_only_expression(index))
+        }
+        TypedExpressionKind::FfiBufferWrite {
+            buffer,
+            index,
+            value,
+        } => first_compile_time_only_expression(buffer)
+            .or_else(|| first_compile_time_only_expression(index))
+            .or_else(|| first_compile_time_only_expression(value)),
         TypedExpressionKind::TaskGroup { cancel, body } => {
             first_compile_time_only_expression(cancel)
                 .or_else(|| first_compile_time_only_expression(body))
@@ -1991,6 +2326,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
         | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => None,
     }
 }

@@ -1,6 +1,7 @@
 //! Bootstrap heap state and public construction/query surface.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use pop_runtime_interface::{
     AllocationClass, ArrayElementMap, ManagedReference, ObjectMap, PinHandle, RootHandle,
@@ -117,6 +118,7 @@ pub(crate) struct Allocation {
     pub(crate) class: AllocationClass,
     pub(crate) object_map: ObjectMap,
     pub(crate) slots: SlotStorage,
+    pub(crate) immutable_bytes: Option<Arc<[u8]>>,
 }
 
 pub struct BootstrapRuntime {

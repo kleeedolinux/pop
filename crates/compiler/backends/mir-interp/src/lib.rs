@@ -17,6 +17,7 @@
 )]
 
 mod evaluation;
+mod ffi_buffer;
 mod interpreter;
 mod runtime;
 mod values;

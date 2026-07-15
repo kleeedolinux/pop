@@ -72,6 +72,343 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
 }
 
 #[test]
+fn llvm_lowers_foreign_calls_with_exact_abi_and_balanced_transitions() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/native.pop",
+        "@Ffi.Link(\"SystemC\")\n\
+         namespace Native\n\
+         @Ffi.Foreign(\"native_poll\")\n\
+         @Ffi.Nonblocking\n\
+         internal function poll(value: Ffi.C.Int): Ffi.C.Int\n\
+         end\n\
+         internal function pollWrapper(value: Ffi.C.Int): Ffi.C.Int\n\
+             return poll(value)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("foreign LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("declare i32 @native_poll(i32)"), "{text}");
+    assert!(text.contains("define i64 @pop_b0_s0(i64 %v0)"), "{text}");
+    assert!(text.contains("trunc i64 %v0 to i32"), "{text}");
+    assert!(text.contains("sext i32 %foreign_result to i64"), "{text}");
+    assert!(text.contains("call i64 @pop_rt_enter_foreign"), "{text}");
+    assert!(text.contains("call i8 @pop_rt_leave_foreign"), "{text}");
+    assert!(
+        text.contains("i8 1"),
+        "nonblocking mode must be exact: {text}"
+    );
+    assert!(module.verify().is_ok(), "foreign LLVM must verify: {text}");
+
+    let harness = concat!(
+        "target triple = \"x86_64-unknown-linux-gnu\"\n",
+        "declare i64 @pop_b0_s1(i64)\n",
+        "declare i64 @pop_rt_attach_managed_thread(i32)\n",
+        "declare i8 @pop_rt_detach_managed_thread(i64)\n",
+        "declare void @pop_rt_trap()\n",
+        "define i32 @native_poll(i32 %value) {\n",
+        "entry:\n",
+        "  %result = add i32 %value, 1\n",
+        "  ret i32 %result\n",
+        "}\n",
+        "define i32 @main() {\n",
+        "entry:\n",
+        "  %binding = call i64 @pop_rt_attach_managed_thread(i32 1)\n",
+        "  %attached = icmp ne i64 %binding, 0\n",
+        "  br i1 %attached, label %call, label %fail\n",
+        "call:\n",
+        "  %result = call i64 @pop_b0_s1(i64 41)\n",
+        "  %detached = call i8 @pop_rt_detach_managed_thread(i64 %binding)\n",
+        "  %detached_ok = icmp eq i8 %detached, 1\n",
+        "  br i1 %detached_ok, label %done, label %fail\n",
+        "done:\n",
+        "  %exit = trunc i64 %result to i32\n",
+        "  ret i32 %exit\n",
+        "fail:\n",
+        "  call void @pop_rt_trap()\n",
+        "  unreachable\n",
+        "}\n",
+    )
+    .to_owned();
+    let result =
+        link_llvm_modules_with_runtime_and_run(&[text, harness], "statically-bound-foreign-call");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native foreign call failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn llvm_contains_c_unwind_at_one_balanced_foreign_boundary() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nativeUnwind.pop",
+        "namespace Native\n\
+         @Ffi.Foreign(\"native_may_unwind\", abi = \"CUnwind\")\n\
+         internal function mayUnwind(value: Ffi.C.Int): Ffi.C.Int\n\
+         end\n\
+         internal function cleanup()\n\
+             return\n\
+         end\n\
+         internal function invoke(value: Ffi.C.Int): Ffi.C.Int\n\
+             defer\n\
+                 cleanup()\n\
+             end\n\
+             return mayUnwind(value)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    assert!(matches!(
+        lower_mir_to_llvm_ir(
+            &mir,
+            front_end.types(),
+            &target(),
+            LlvmLoweringOptions::default(),
+        ),
+        Err(pop_backend_llvm::LlvmLoweringError::UnsupportedForeignFunction(_))
+    ));
+    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
+        .pointer_width(PointerWidth::Bits64)
+        .endianness(Endianness::Little)
+        .capability(TargetCapability::PreciseStackMaps)
+        .capability(TargetCapability::Exceptions)
+        .build()
+        .expect("exception-capable target");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target,
+        LlvmLoweringOptions::default(),
+    )
+    .expect("CUnwind LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("invoke i64 @pop_b0_s0"), "{text}");
+    assert!(text.contains("landingpad { ptr, i32 } cleanup"), "{text}");
+    let landing = text
+        .split("landingpad { ptr, i32 } cleanup")
+        .nth(1)
+        .expect("one CUnwind landing pad");
+    assert!(landing.contains("@pop_rt_leave_foreign"), "{text}");
+    assert!(landing.contains("@pop_rt_continue_unwind"), "{text}");
+    assert!(module.verify().is_ok(), "CUnwind LLVM must verify: {text}");
+}
+
+#[test]
+fn llvm_executes_read_only_and_optional_read_only_foreign_pointers() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nativePointers.pop",
+        "namespace Native.Pointer\n\
+         @Ffi.Foreign(\"native_data\")\n\
+         internal function data(): Ffi.ReadOnlyPointer<Byte>\n\
+         end\n\
+         @Ffi.Foreign(\"native_first\")\n\
+         internal function first(pointer: Ffi.ReadOnlyPointer<Byte>): UInt8\n\
+         end\n\
+         @Ffi.Foreign(\"native_optional_data\")\n\
+         internal function optionalData(): Ffi.OptionalReadOnlyPointer<Byte>\n\
+         end\n\
+         @Ffi.Foreign(\"native_optional_first\")\n\
+         internal function optionalFirst(pointer: Ffi.OptionalReadOnlyPointer<Byte>): UInt8\n\
+         end\n\
+         private function main(): Int\n\
+             return Int(first(data())) + Int(optionalFirst(optionalData()))\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("foreign pointer LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("declare ptr @native_data()"), "{text}");
+    assert!(text.contains("declare i8 @native_first(ptr)"), "{text}");
+    assert!(
+        text.contains("declare ptr @native_optional_data()"),
+        "{text}"
+    );
+    assert!(
+        text.contains("declare i8 @native_optional_first(ptr)"),
+        "{text}"
+    );
+
+    let native = concat!(
+        "@native_pointer_bytes = private constant [1 x i8] c\"\\15\"\n",
+        "define ptr @native_data() {\n",
+        "entry:\n",
+        "  ret ptr @native_pointer_bytes\n",
+        "}\n",
+        "define i8 @native_first(ptr %pointer) {\n",
+        "entry:\n",
+        "  %value = load i8, ptr %pointer, align 1\n",
+        "  ret i8 %value\n",
+        "}\n",
+        "define ptr @native_optional_data() {\n",
+        "entry:\n",
+        "  ret ptr @native_pointer_bytes\n",
+        "}\n",
+        "define i8 @native_optional_first(ptr %pointer) {\n",
+        "entry:\n",
+        "  %value = load i8, ptr %pointer, align 1\n",
+        "  ret i8 %value\n",
+        "}\n",
+    )
+    .to_owned();
+    let result = link_llvm_modules_with_runtime_and_run(&[text, native], "read-only-pointers");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native read-only pointer call failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn relocating_foreign_transition_reloads_roots_before_managed_code_resumes() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/relocatingNative.pop",
+        "namespace Native\n\
+         @Ffi.Foreign(\"native_poll\")\n\
+         @Ffi.Nonblocking\n\
+         internal function poll(value: Ffi.C.Int): Ffi.C.Int\n\
+         end\n\
+         internal function pollWrapper(value: Ffi.C.Int, retained: String): Ffi.C.Int\n\
+             local result = poll(value)\n\
+             print(retained)\n\
+             return result\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_runtime_profile(RuntimeProfile::ProductionGenerational),
+    )
+    .expect("relocating foreign LLVM lowering");
+    let mut text = module.to_string();
+    assert!(
+        text.contains("%v2_foreign_roots = alloca [1 x i64]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%v2_foreign_roots_0_reload = getelementptr"),
+        "{text}"
+    );
+    assert!(text.contains("%v1_after_foreign_v2 = load i64"), "{text}");
+    assert!(
+        text.contains("call void @pop_std_print_string(i64 %v1_before_v3)"),
+        "managed code must consume the post-foreign root alias: {text}"
+    );
+    text.push_str(concat!(
+        "\ndefine i32 @main() {\n",
+        "entry:\n",
+        "  %binding = call i64 @pop_rt_attach_managed_thread(i32 1)\n",
+        "  %token = call i64 @pop_rt_allocate_array(i64 0, i1 false)\n",
+        "  %result = call i64 @pop_b0_s1(i64 41, i64 %token)\n",
+        "  %detached = call i8 @pop_rt_detach_managed_thread(i64 %binding)\n",
+        "  %exit = trunc i64 %result to i32\n",
+        "  ret i32 %exit\n",
+        "}\n",
+    ));
+
+    let result = link_with_forced_relocation_runtime_and_run(&text, "foreign-relocation");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "foreign transition resumed with a stale root: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn llvm_lowers_async_functions_to_native_scheduler_poll_state_machines() {
     let source = SourceFile::new(
         FileId::from_raw(0),
@@ -1406,6 +1743,15 @@ fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
 
     assert!(text.contains("declare i64 @pop_rt_retain_root(i64)"));
     assert!(text.contains("declare i8 @pop_rt_release_root(i64)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_open(i64, i64, i64, i64, ptr)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_length(i64, i64, ptr)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_read(i64, i64, i64, ptr, i64)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_write(i64, i64, i64, ptr, i64)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_borrow(i64, i64, ptr, ptr, ptr)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_end_borrow(i64, i64)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_buffer_close(i64)"));
+    assert!(text.contains("declare i64 @pop_rt_ffi_bytes_borrow(i64, ptr, ptr)"));
+    assert!(text.contains("declare i8 @pop_rt_ffi_bytes_end_borrow(i64, i64)"));
     assert!(text.contains("%v2 = call i64 @pop_rt_retain_root(i64 %v1)"));
     assert!(text.contains("call i8 @pop_rt_release_root(i64 %v2)"));
 
@@ -1416,6 +1762,56 @@ fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
         String::from_utf8_lossy(&result.stderr),
         module
     );
+}
+
+#[test]
+fn typed_ffi_handle_operations_check_every_native_abi_result() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let handle = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_HANDLE_TYPE_ID,
+            arguments: vec![array],
+        })
+        .expect("array handle");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    v0:t{integer} = const.integer Int64 7\n    do v1 gcSafePoint sp0 roots ()\n    v2:t{array} = arrayMake scalar (v0)\n    v3:t{handle} = ffiHandleOpen v2\n    v4:t{array} = ffiHandleGet v3\n    do v5 ffiHandleClose v3\n    v6:t{integer} = arrayLength v4\n    return (v6)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+        handle = handle.raw(),
+    ))
+    .expect("typed FFI handle MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM handle lowering");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("call i64 @pop_rt_retain_root(i64 %v2)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i64 @pop_rt_resolve_root(i64 %v3)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i8 @pop_rt_release_root(i64 %v3)"),
+        "{text}"
+    );
+    assert!(
+        text.matches("call void @pop_rt_trap()").count() >= 3,
+        "{text}"
+    );
+
+    let result = link_with_runtime_and_run(&module, "typed-ffi-handle");
+    assert_eq!(result.status.code(), Some(1), "{module}");
 }
 
 #[test]
@@ -1894,6 +2290,8 @@ fn emitted_llvm_executes_a_pure_pop_function() {
     assert!(text.contains("define i32 @main(i32 %pop_argc, ptr %pop_argv)"));
     assert!(text.contains("call i64 @pop_rt_process_arguments"));
     assert!(text.contains("call i64 @pop_b0_s0(i64 %pop_arguments)"));
+    assert!(text.contains("call i64 @pop_rt_attach_managed_thread(i32 1)"));
+    assert!(text.contains("call i8 @pop_rt_detach_managed_thread"));
     assert!(
         !text.contains("pop_rt_supports_abi"),
         "ABI 1 entry must retain its fixed bootstrap descriptor"
@@ -4041,11 +4439,20 @@ fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output
             "#include <stdint.h>\n",
             "#include <stdlib.h>\n",
             "static uint64_t current_token;\n",
+            "static uint8_t attached;\n",
+            "static uint8_t foreign_active;\n",
+            "int32_t native_poll(int32_t value) { return value + 1; }\n",
             "uint8_t pop_rt_supports_abi(uint16_t major, uint16_t minor) {\n",
             "  return major == 2 && minor == 0;\n",
             "}\n",
             "uint64_t pop_rt_allocate_array(uint64_t length, uint8_t references) {\n",
             "  (void)length; (void)references; current_token = 41; return current_token;\n",
+            "}\n",
+            "uint64_t pop_rt_attach_managed_thread(uint32_t scheduler) {\n",
+            "  if (scheduler == 0 || attached) abort(); attached = 1; return 1;\n",
+            "}\n",
+            "uint8_t pop_rt_detach_managed_thread(uint64_t binding) {\n",
+            "  if (binding != 1 || !attached || foreign_active) abort(); attached = 0; return 1;\n",
             "}\n",
             "uint8_t pop_rt_gc_safe_point_v2(uint32_t point, uint64_t *roots, uint64_t count) {\n",
             "  (void)point;\n",
@@ -4055,11 +4462,30 @@ fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output
             "  }\n",
             "  return 1;\n",
             "}\n",
+            "uint64_t pop_rt_enter_foreign(uint32_t point, uint64_t *roots, uint64_t count, uint8_t mode) {\n",
+            "  (void)point; if (!attached || foreign_active || mode > 1) abort();\n",
+            "  for (uint64_t index = 0; index < count; ++index) {\n",
+            "    if (roots[index] != current_token) abort();\n",
+            "    current_token += 100; roots[index] = current_token;\n",
+            "  }\n",
+            "  foreign_active = 1; return 1;\n",
+            "}\n",
+            "uint8_t pop_rt_leave_foreign(uint64_t transition, uint64_t *roots, uint64_t count) {\n",
+            "  if (transition != 1 || !foreign_active) abort();\n",
+            "  for (uint64_t index = 0; index < count; ++index) {\n",
+            "    if (roots[index] != current_token) abort();\n",
+            "    current_token += 100; roots[index] = current_token;\n",
+            "  }\n",
+            "  foreign_active = 0; return 1;\n",
+            "}\n",
             "uint64_t pop_rt_retain_root(uint64_t token) {\n",
             "  if (token != current_token) abort(); return token;\n",
             "}\n",
             "uint8_t pop_rt_release_root(uint64_t token) {\n",
             "  if (token != current_token) abort(); return 1;\n",
+            "}\n",
+            "void pop_std_print_string(uint64_t token) {\n",
+            "  if (token != current_token) abort();\n",
             "}\n",
             "void pop_rt_trap(void) { abort(); }\n",
         ),
