@@ -60,7 +60,7 @@ pub use bootstrap::{
     AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
     BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
     BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
-    CompilerAttributeRole, CompilerAttributeTarget, embedded_bootstrap_schema,
+    CompilerAttributeRole, CompilerAttributeTarget, FFI_HANDLE_TYPE_ID, embedded_bootstrap_schema,
     is_ffi_abi_builtin_type,
 };
 pub use classes::{

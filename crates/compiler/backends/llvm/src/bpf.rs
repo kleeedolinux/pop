@@ -489,6 +489,9 @@ fn validate_instruction(
         | MirInstructionKind::GcSafePoint { .. }
         | MirInstructionKind::RetainRoot { .. }
         | MirInstructionKind::ReleaseRoot { .. }
+        | MirInstructionKind::FfiHandleOpen { .. }
+        | MirInstructionKind::FfiHandleGet { .. }
+        | MirInstructionKind::FfiHandleClose { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. }
         | MirInstructionKind::WriteBarrier { .. }

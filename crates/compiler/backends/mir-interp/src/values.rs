@@ -34,6 +34,7 @@ pub enum MirValue {
     CancellationSource(SymbolId),
     CancellationToken(SymbolId),
     TaskGroup(SymbolId),
+    FfiHandle(u64),
     Enum {
         definition: SymbolId,
         case: EnumCaseId,

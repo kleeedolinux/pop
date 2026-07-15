@@ -497,6 +497,33 @@ pub(crate) fn lower_instruction(
             native_runtime_symbol(RuntimeOperation::ReleaseRoot),
             handle.raw()
         ),
+        MirInstructionKind::FfiHandleOpen { value } => {
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_handle = call i64 @{}(i64 %v{})\n{result}_valid = icmp ne i64 {result}_handle, 0\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:\n  {result} = add i64 {result}_handle, 0",
+                native_runtime_symbol(RuntimeOperation::RetainRoot),
+                value.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
+        MirInstructionKind::FfiHandleGet { handle } => {
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_managed = call i64 @{}(i64 %v{})\n{result}_valid = icmp ne i64 {result}_managed, 0\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:\n  {result} = add i64 {result}_managed, 0",
+                native_runtime_symbol(RuntimeOperation::ResolveRoot),
+                handle.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
+        MirInstructionKind::FfiHandleClose { handle } => {
+            let label = result.trim_start_matches('%');
+            format!(
+                "{result}_closed = call i8 @{}(i64 %v{})\n{result}_valid = icmp eq i8 {result}_closed, 1\nbr i1 {result}_valid, label %{label}_ready, label %{label}_trap\n{label}_trap:\n  call void @{}()\n  unreachable\n{label}_ready:",
+                native_runtime_symbol(RuntimeOperation::ReleaseRoot),
+                handle.raw(),
+                native_runtime_symbol(RuntimeOperation::Trap),
+            )
+        }
         MirInstructionKind::Pin { value } => format!(
             "{result} = call i64 @{}(i64 %v{})",
             native_runtime_symbol(RuntimeOperation::Pin),

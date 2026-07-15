@@ -1159,6 +1159,7 @@ fn unpublished_owner_operation(instruction: &MirInstruction, owner: ValueId) -> 
         MirInstructionKind::GcSafePoint { .. } => true,
         MirInstructionKind::RetainRoot { value }
         | MirInstructionKind::Pin { value }
+        | MirInstructionKind::FfiHandleOpen { value }
         | MirInstructionKind::CaptureCellStore { value, .. }
         | MirInstructionKind::CaptureStore { value, .. } => *value != owner,
         MirInstructionKind::CallDirect { .. }
@@ -1804,6 +1805,7 @@ fn verify_instruction_types(
         MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
+            | MirInstructionKind::FfiHandleClose { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. }
@@ -1828,6 +1830,44 @@ fn verify_instruction_types(
         return;
     }
     match instruction.kind() {
+        MirInstructionKind::FfiHandleOpen { value } => {
+            let valid = values.get(value).copied().is_some_and(|payload| {
+                is_managed_reference_type_id(payload, Some(arena))
+                    && ffi_handle_payload(arena, instruction.result_type()) == Some(payload)
+            });
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiHandleGet { handle } => {
+            let valid = values
+                .get(handle)
+                .copied()
+                .and_then(|handle_type| ffi_handle_payload(arena, handle_type))
+                .is_some_and(|payload| {
+                    payload == instruction.result_type()
+                        && is_managed_reference_type_id(payload, Some(arena))
+                });
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiHandleClose { handle } => {
+            let valid = values
+                .get(handle)
+                .copied()
+                .and_then(|handle_type| ffi_handle_payload(arena, handle_type))
+                .is_some_and(|payload| is_managed_reference_type_id(payload, Some(arena)));
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
                 .get(optional)
@@ -2366,6 +2406,18 @@ fn verify_instruction_types(
             verify_operand_type(instruction.result(), *step, first_type, values, errors);
         }
         _ => {}
+    }
+}
+
+fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_HANDLE_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
     }
 }
 
@@ -4245,6 +4297,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         MirInstructionKind::FieldSet { base, value, .. } => vec![*base, *value],
         MirInstructionKind::RetainRoot { value } => vec![*value],
         MirInstructionKind::ReleaseRoot { handle } => vec![*handle],
+        MirInstructionKind::FfiHandleOpen { value } => vec![*value],
+        MirInstructionKind::FfiHandleGet { handle }
+        | MirInstructionKind::FfiHandleClose { handle } => vec![*handle],
         MirInstructionKind::Pin { value } => vec![*value],
         MirInstructionKind::Unpin { handle } => vec![*handle],
         MirInstructionKind::WriteBarrier {

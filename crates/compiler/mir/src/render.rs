@@ -734,6 +734,15 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::ReleaseRoot { handle } => {
             let _ = write!(output, "releaseRoot v{}", handle.raw());
         }
+        MirInstructionKind::FfiHandleOpen { value } => {
+            let _ = write!(output, "ffiHandleOpen v{}", value.raw());
+        }
+        MirInstructionKind::FfiHandleGet { handle } => {
+            let _ = write!(output, "ffiHandleGet v{}", handle.raw());
+        }
+        MirInstructionKind::FfiHandleClose { handle } => {
+            let _ = write!(output, "ffiHandleClose v{}", handle.raw());
+        }
         MirInstructionKind::Pin { value } => {
             let _ = write!(output, "pin v{}", value.raw());
         }

@@ -4770,6 +4770,11 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::ReleaseRoot { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. } => MirEffectSummary::empty().with(MirEffect::Roots),
+        MirInstructionKind::FfiHandleOpen { .. }
+        | MirInstructionKind::FfiHandleGet { .. }
+        | MirInstructionKind::FfiHandleClose { .. } => {
+            MirEffectSummary::from_effects([MirEffect::MayTrap, MirEffect::Roots])
+        }
         MirInstructionKind::WriteBarrier { .. } => {
             MirEffectSummary::empty().with(MirEffect::WritesManagedReference)
         }

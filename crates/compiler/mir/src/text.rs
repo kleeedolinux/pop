@@ -885,6 +885,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::GcSafePoint { .. }
                 | MirInstructionKind::RetainRoot { .. }
                 | MirInstructionKind::ReleaseRoot { .. }
+                | MirInstructionKind::FfiHandleClose { .. }
                 | MirInstructionKind::Pin { .. }
                 | MirInstructionKind::Unpin { .. }
                 | MirInstructionKind::WriteBarrier { .. }
@@ -1361,6 +1362,21 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     }
     if let Some(value) = text.strip_prefix("releaseRoot ") {
         return Ok(MirInstructionKind::ReleaseRoot {
+            handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(value) = text.strip_prefix("ffiHandleOpen ") {
+        return Ok(MirInstructionKind::FfiHandleOpen {
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(value) = text.strip_prefix("ffiHandleGet ") {
+        return Ok(MirInstructionKind::FfiHandleGet {
+            handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(value) = text.strip_prefix("ffiHandleClose ") {
+        return Ok(MirInstructionKind::FfiHandleClose {
             handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
         });
     }

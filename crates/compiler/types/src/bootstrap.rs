@@ -339,6 +339,9 @@ pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
     matches!(id.raw(), 200..=206 | 210..=222)
 }
 
+/// Stable bootstrap identity of the exact `Ffi.Handle<T>` type constructor.
+pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTypeRole {
     Array,

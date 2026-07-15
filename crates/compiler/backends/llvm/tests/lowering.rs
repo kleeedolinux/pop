@@ -1684,6 +1684,56 @@ fn root_handle_transitions_preserve_the_native_abi_result_and_argument() {
 }
 
 #[test]
+fn typed_ffi_handle_operations_check_every_native_abi_result() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let handle = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_HANDLE_TYPE_ID,
+            arguments: vec![array],
+        })
+        .expect("array handle");
+    let mir = parse_mir_dump(&format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{integer}) effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    v0:t{integer} = const.integer Int64 7\n    do v1 gcSafePoint sp0 roots ()\n    v2:t{array} = arrayMake scalar (v0)\n    v3:t{handle} = ffiHandleOpen v2\n    v4:t{array} = ffiHandleGet v3\n    do v5 ffiHandleClose v3\n    v6:t{integer} = arrayLength v4\n    return (v6)\n",
+        integer = integer.raw(),
+        array = array.raw(),
+        handle = handle.raw(),
+    ))
+    .expect("typed FFI handle MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(mir.functions()[0].symbol()),
+    )
+    .expect("LLVM handle lowering");
+    let text = module.to_string();
+
+    assert!(
+        text.contains("call i64 @pop_rt_retain_root(i64 %v2)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i64 @pop_rt_resolve_root(i64 %v3)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i8 @pop_rt_release_root(i64 %v3)"),
+        "{text}"
+    );
+    assert!(
+        text.matches("call void @pop_rt_trap()").count() >= 3,
+        "{text}"
+    );
+
+    let result = link_with_runtime_and_run(&module, "typed-ffi-handle");
+    assert_eq!(result.status.code(), Some(1), "{module}");
+}
+
+#[test]
 fn abi_two_safe_points_reload_roots_before_later_uses() {
     let mut types = pop_types::TypeArena::new();
     let integer = types.source_type("Int").expect("Int");

@@ -528,6 +528,80 @@ fn textual_trap_panic_unwind_and_root_actions_are_explicit_and_verified() {
 }
 
 #[test]
+fn typed_ffi_handle_operations_are_distinct_from_private_root_tokens() {
+    let mut types = pop_types::TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let string = types.source_type("String").expect("String");
+    let array = types
+        .intern(pop_types::SemanticType::Array(integer))
+        .expect("array");
+    let handle = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_HANDLE_TYPE_ID,
+            arguments: vec![array],
+        })
+        .expect("array handle");
+    let string_handle = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_HANDLE_TYPE_ID,
+            arguments: vec![string],
+        })
+        .expect("string handle");
+
+    let valid = format!(
+        "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> (t{array}) effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{handle} = ffiHandleOpen v1\n    v3:t{array} = ffiHandleGet v2\n    do v4 ffiHandleClose v2\n    return (v3)\n",
+        array = array.raw(),
+        handle = handle.raw(),
+    );
+    let valid = parse_mir_dump(&valid).expect("typed FFI handle MIR");
+    assert!(verify_mir_bubble(&valid, &types).is_ok());
+    let dump = valid.dump();
+    assert!(dump.contains("ffiHandleOpen v1"));
+    assert!(dump.contains("ffiHandleGet v2"));
+    assert!(dump.contains("ffiHandleClose v2"));
+    assert_eq!(parse_mir_dump(&dump).expect("handle round trip"), valid);
+    let optimized = pop_mir::optimize_mir(valid, &types).expect("optimized handles");
+    let optimized_dump = optimized.dump();
+    assert!(optimized_dump.contains("ffiHandleOpen v1"));
+    assert!(optimized_dump.contains("ffiHandleGet v2"));
+    assert!(optimized_dump.contains("ffiHandleClose v2"));
+
+    let invalid_cases = [
+        format!(
+            "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[MayTrap,Roots]\n  b0():\n    v0:t{integer} = const.integer Int64 1\n    v1:t{handle} = ffiHandleOpen v0\n    return ()\n",
+            integer = integer.raw(),
+            handle = handle.raw(),
+        ),
+        format!(
+            "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{string_handle} = ffiHandleOpen v1\n    return ()\n",
+            array = array.raw(),
+            string_handle = string_handle.raw(),
+        ),
+        format!(
+            "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{handle} = ffiHandleOpen v1\n    v3:t{string} = ffiHandleGet v2\n    do v4 ffiHandleClose v2\n    return ()\n",
+            array = array.raw(),
+            handle = handle.raw(),
+            string = string.raw(),
+        ),
+        format!(
+            "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    v2:t{array} = ffiHandleGet v1\n    return ()\n",
+            array = array.raw(),
+        ),
+        format!(
+            "mir bubble b0 namespace n0\ndependencies\nfunction s0 f0() -> () effects[Allocates,MayTrap,MayUnwind,GcSafePoint,Roots]\n  b0():\n    do v0 gcSafePoint sp0 roots ()\n    v1:t{array} = arrayMake scalar ()\n    do v2 retainRoot v1\n    v3:t{array} = ffiHandleGet v2\n    do v4 releaseRoot v2\n    return ()\n",
+            array = array.raw(),
+        ),
+    ];
+    for text in invalid_cases {
+        let invalid = parse_mir_dump(&text).expect("parse invalid typed handle MIR");
+        assert!(
+            verify_mir_bubble(&invalid, &types).is_err(),
+            "invalid typed handle MIR was accepted:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn call_effects_are_exact_and_cleanup_edges_are_verified_cfg_edges() {
     let types = pop_types::TypeArena::new();
     let valid = parse_mir_dump(concat!(

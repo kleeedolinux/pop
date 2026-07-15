@@ -165,6 +165,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             depth: 0,
             runtime: &mut *runtime,
             root_handles: BTreeMap::new(),
+            ffi_handles: BTreeMap::new(),
             pin_handles: BTreeMap::new(),
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
@@ -184,6 +185,7 @@ struct Engine<'mir, 'runtime, R> {
     depth: u32,
     runtime: &'runtime mut R,
     root_handles: BTreeMap<ValueId, RootHandle>,
+    ffi_handles: BTreeMap<RootHandle, RuntimeValue>,
     pin_handles: BTreeMap<ValueId, PinHandle>,
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
@@ -1716,6 +1718,46 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     &value(values, *right)?.visible,
                 ))
             }
+            MirInstructionKind::FfiHandleOpen { value: managed } => {
+                let managed = value(values, *managed)?.clone();
+                let reference = managed.reference.ok_or(ExecutionError::TypeMismatch)?;
+                let handle = self
+                    .runtime
+                    .retain_root(reference)
+                    .map_err(ExecutionError::Runtime)?;
+                if handle.raw() == 0 {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    ));
+                }
+                self.ffi_handles.insert(handle, managed);
+                MirValue::FfiHandle(handle.raw())
+            }
+            MirInstructionKind::FfiHandleGet { handle } => {
+                let MirValue::FfiHandle(raw) = value(values, *handle)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let handle = RootHandle::new(raw);
+                let reference = self
+                    .runtime
+                    .resolve_root(handle)
+                    .map_err(ExecutionError::Runtime)?;
+                if reference.raw() == 0 {
+                    return Err(ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    ));
+                }
+                let managed = self.ffi_handles.get_mut(&handle).ok_or_else(|| {
+                    ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    )
+                })?;
+                managed.install_relocated_reference(Some(reference))?;
+                return Ok(managed.clone());
+            }
             MirInstructionKind::IntegerConstant(_)
             | MirInstructionKind::FloatConstant(_)
             | MirInstructionKind::CheckedIntegerAdd { .. }
@@ -1769,6 +1811,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::GcSafePoint { .. }
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
+            | MirInstructionKind::FfiHandleClose { .. }
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. } => {
@@ -1924,6 +1967,22 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 self.runtime
                     .release_root(handle)
                     .map_err(ExecutionError::Runtime)?;
+                return Ok(());
+            }
+            MirInstructionKind::FfiHandleClose { handle } => {
+                let MirValue::FfiHandle(raw) = value(values, *handle)?.visible else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let handle = RootHandle::new(raw);
+                self.runtime
+                    .release_root(handle)
+                    .map_err(ExecutionError::Runtime)?;
+                self.ffi_handles.remove(&handle).ok_or_else(|| {
+                    ExecutionError::Runtime(
+                        self.runtime
+                            .raise_trap(Trap::new(TrapKind::ImpossibleState)),
+                    )
+                })?;
                 return Ok(());
             }
             MirInstructionKind::Pin { value: pinned } => {

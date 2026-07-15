@@ -1441,6 +1441,15 @@ pub enum MirInstructionKind {
     ReleaseRoot {
         handle: ValueId,
     },
+    FfiHandleOpen {
+        value: ValueId,
+    },
+    FfiHandleGet {
+        handle: ValueId,
+    },
+    FfiHandleClose {
+        handle: ValueId,
+    },
     Pin {
         value: ValueId,
     },
@@ -1768,6 +1777,9 @@ pub enum MirVerificationError {
         function: SymbolId,
     },
     InvalidForeignRoots {
+        instruction: ValueId,
+    },
+    InvalidFfiHandleOperation {
         instruction: ValueId,
     },
     InvalidTaskOperation {
