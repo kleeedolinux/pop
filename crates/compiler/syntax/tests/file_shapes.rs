@@ -57,6 +57,37 @@ fn canonical_data_and_declaration_file_has_stable_structure() {
 }
 
 #[test]
+fn namespace_attributes_precede_the_file_scoped_namespace() {
+    let tree = parse(
+        "@Ffi.Link(\"Pcre\")\n\
+         namespace Example.Pcre.Unsafe\n\
+         \n\
+         @Ffi.Foreign(\"pcre2_config_8\")\n\
+         internal function configure(what: Int32): Int32\n\
+         end\n",
+    );
+
+    assert!(
+        tree.diagnostics().is_empty(),
+        "{}",
+        tree.diagnostic_snapshot()
+    );
+    assert_eq!(
+        tree.root()
+            .children()
+            .iter()
+            .map(pop_syntax::SyntaxNode::kind)
+            .collect::<Vec<_>>(),
+        [
+            NodeKind::AttributeUse,
+            NodeKind::NamespaceDeclaration,
+            NodeKind::AttributeUse,
+            NodeKind::FunctionDeclaration,
+        ]
+    );
+}
+
+#[test]
 fn class_blocks_include_nested_methods_and_control_flow() {
     let tree = parse(
         "namespace Network.Transport\n\

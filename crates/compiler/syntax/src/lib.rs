@@ -197,6 +197,14 @@ impl Parser<'_, '_> {
     fn parse_root(&mut self) -> Vec<SyntaxNode> {
         let mut children = Vec::new();
         let mut cursor = 0;
+        while let Some(attribute) = self
+            .next_significant(cursor)
+            .filter(|index| self.tokens[*index].kind() == TokenKind::At)
+        {
+            let end = self.line_end(attribute);
+            children.push(self.node_for_tokens(NodeKind::AttributeUse, attribute, end));
+            cursor = end;
+        }
         let first = self.next_significant(cursor);
         if let Some(namespace) =
             first.filter(|index| self.tokens[*index].kind() == TokenKind::Namespace)
