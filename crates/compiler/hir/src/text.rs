@@ -585,6 +585,12 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::AsyncDefer { body } => {
+                output.push_str("async defer\n");
+                dump_statements(output, body, arena, depth + 1);
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 output.push_str("field.set ");
                 dump_expression(output, base, arena);
@@ -1028,6 +1034,33 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
         HirExpressionKind::Await { task } => {
             output.push_str("await(");
+            dump_expression(output, task, arena);
+            output.push(')');
+        }
+        HirExpressionKind::TaskCancellationSource => {
+            output.push_str("task.cancellationSource()");
+        }
+        HirExpressionKind::TaskCancelToken { source } => {
+            output.push_str("task.cancelToken(");
+            dump_expression(output, source, arena);
+            output.push(')');
+        }
+        HirExpressionKind::TaskCancel { source } => {
+            output.push_str("task.cancel(");
+            dump_expression(output, source, arena);
+            output.push(')');
+        }
+        HirExpressionKind::TaskGroup { cancel, body } => {
+            output.push_str("task.group(");
+            dump_expression(output, cancel, arena);
+            output.push_str(", ");
+            dump_expression(output, body, arena);
+            output.push(')');
+        }
+        HirExpressionKind::TaskStart { group, task } => {
+            output.push_str("task.start(");
+            dump_expression(output, group, arena);
+            output.push_str(", ");
             dump_expression(output, task, arena);
             output.push(')');
         }

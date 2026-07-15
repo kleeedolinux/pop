@@ -70,8 +70,17 @@ and does not define the work remaining for `0.1.0`.
     private transitive helpers without widening Bubble visibility.
   - [x] Execute cross-Bubble generic capsules through the MIR interpreter and
     LLVM, including ordinary `Sequence` implementations.
-- [ ] Complete coroutines, async functions, awaiting, cancellation, and scoped
+- [x] Complete coroutines, async functions, awaiting, cancellation, and scoped
   cleanup with one backend-neutral HIR/MIR contract.
+  - [x] Parse and type exact cold `Task<T>` calls, async functions/closures,
+    prefix `await`, and distinct suspension-capable `async defer` cleanup while
+    rejecting suspension in ordinary cleanup.
+  - [x] Lower task creation, precise live coroutine frames, resume,
+    cancellation, unwind, and synchronous/async cleanup into verified
+    backend-neutral HIR/MIR, with deterministic MIR-interpreter execution.
+  - [x] Connect compiler-created task frames to the native scheduler and
+    implement LLVM execution, structured task ownership, explicit token
+    propagation, cancellation masking, and cross-backend differential proof.
 - [ ] Close the remaining accepted first-release gaps for FFI, view lifetimes,
   checked casts, effects, and generated typed metadata adapters before exposing
   those surfaces as stable.
@@ -282,7 +291,7 @@ Post-baseline library work has begun without widening the release foundation:
     - [x] Add exact current/high-water queue and blocking depth, bounded steal
       search/outcome/batch, and worker lifecycle telemetry, including a final
       shutdown snapshot and the `pop-scheduler-benchmark-v2` schema.
-    - [ ] Bind scheduler transition events to native mutator registration,
+    - [x] Bind scheduler transition events to native mutator registration,
       precise suspended-frame root publication, collector epochs, and the ABI 2
       writable-root transition before claiming production GC integration.
       ADR 0077 requires the stronger ready-and-suspended task-frame root

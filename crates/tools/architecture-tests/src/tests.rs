@@ -1245,6 +1245,8 @@ fn standard_bootstrap_preserves_the_adr_0058_prelude() {
             "112\tAsyncClose\tPop.Standard\t0\tInterface\ttrue",
             "113\tIteration\tPop.Standard\t1\tNominal\ttrue",
             "114\tCancelToken\tPop.Standard\t0\tNominal\ttrue",
+            "115\tTask.Group\tPop.Standard\t0\tNominal\tfalse",
+            "116\tTask.CancelSource\tPop.Standard\t0\tNominal\tfalse",
         ],
         "ADR 0058 prelude inventory drifted"
     );

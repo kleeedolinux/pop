@@ -82,6 +82,15 @@ fn standard_foundation_prelude_matches_the_frozen_adr_0058_type_baseline() {
         ]
     );
     assert!(schema.type_by_source_name("Option").is_none());
+    let group = schema
+        .type_by_source_name("Task.Group")
+        .expect("Task.Group");
+    let source = schema
+        .type_by_source_name("Task.CancelSource")
+        .expect("Task.CancelSource");
+    assert_eq!(group.id().raw(), 115);
+    assert_eq!(source.id().raw(), 116);
+    assert!(!group.is_in_prelude() && !source.is_in_prelude());
 }
 
 #[test]

@@ -928,7 +928,7 @@ fn visit_statement_closures(
                 }
             }
         }
-        HirStatementKind::Defer { body } => {
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
             for nested in body {
                 visit_statement_closures(nested, parameters, locals);
             }
@@ -1029,7 +1029,9 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         HirStatementKind::ResultMatch { arms, .. } => arms
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
-        HirStatementKind::Defer { body } => contains_continue_for_current_loop(body),
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+            contains_continue_for_current_loop(body)
+        }
         HirStatementKind::While { .. }
         | HirStatementKind::OptionalWhile { .. }
         | HirStatementKind::RepeatUntil { .. }
@@ -1188,6 +1190,18 @@ fn visit_expression_closures(
         HirExpressionKind::Await { task } => {
             visit_expression_closures(task, parameters, locals);
         }
+        HirExpressionKind::TaskCancelToken { source }
+        | HirExpressionKind::TaskCancel { source } => {
+            visit_expression_closures(source, parameters, locals);
+        }
+        HirExpressionKind::TaskGroup { cancel, body } => {
+            visit_expression_closures(cancel, parameters, locals);
+            visit_expression_closures(body, parameters, locals);
+        }
+        HirExpressionKind::TaskStart { group, task } => {
+            visit_expression_closures(group, parameters, locals);
+            visit_expression_closures(task, parameters, locals);
+        }
         HirExpressionKind::ResultPropagate { result, .. } => {
             visit_expression_closures(result, parameters, locals);
         }
@@ -1213,7 +1227,8 @@ fn visit_expression_closures(
         | HirExpressionKind::Local(_)
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
-        | HirExpressionKind::Function(_) => {}
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::TaskCancellationSource => {}
         HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -1626,6 +1641,11 @@ impl<'hir> FunctionBuilder<'hir> {
                     arms,
                 } => self.lower_result_match(scrutinee, *result, *result_type, arms),
                 HirStatementKind::Defer { body } => {
+                    let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
+                    self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
+                    self.active_cleanups.push(ActiveCleanup { scope, body });
+                }
+                HirStatementKind::AsyncDefer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
                     self.active_cleanups.push(ActiveCleanup { scope, body });
@@ -3057,6 +3077,41 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::Await { task } => {
                 return self.lower_await(task, expression.type_id(), expression.span());
             }
+            HirExpressionKind::TaskCancellationSource => MirInstructionKind::CancelSourceCreate,
+            HirExpressionKind::TaskCancelToken { source } => {
+                MirInstructionKind::CancelSourceToken {
+                    source: self.lower_expression(source),
+                }
+            }
+            HirExpressionKind::TaskCancel { source } => MirInstructionKind::CancelRequest {
+                source: self.lower_expression(source),
+            },
+            HirExpressionKind::TaskGroup { cancel, body } => {
+                let completion_type = match self.arena.get(expression.type_id()) {
+                    Some(SemanticType::Builtin { arguments, .. }) if arguments.len() == 1 => {
+                        arguments[0]
+                    }
+                    _ => unreachable!("verified task groups produce exact Task<T> values"),
+                };
+                let cancel = self.lower_expression(cancel);
+                let body = self.lower_expression(body);
+                let object_map = task_group_object_map(
+                    self.value_type(cancel),
+                    self.value_type(body),
+                    completion_type,
+                    self.arena,
+                );
+                MirInstructionKind::TaskGroupCreate {
+                    cancel,
+                    body,
+                    completion_type,
+                    object_map,
+                }
+            }
+            HirExpressionKind::TaskStart { group, task } => MirInstructionKind::TaskStart {
+                group: self.lower_expression(group),
+                task: self.lower_expression(task),
+            },
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
@@ -3767,8 +3822,11 @@ impl<'hir> FunctionBuilder<'hir> {
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                is_managed_reference_type_id(slot.type_id, Some(self.arena))
-                    .then(|| RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+                if is_managed_reference_type_id(slot.type_id, Some(self.arena)) {
+                    Some(RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+                } else {
+                    None
+                }
             })
             .collect();
         let stack_map = StackMap::new(safe_point, root_slots)
@@ -3797,6 +3855,11 @@ impl<'hir> FunctionBuilder<'hir> {
             operation: MirSuspendOperation::Task { task, result_type },
             resume,
             cancellation,
+            cancellation_mode: if self.current_cleanup.is_some() {
+                MirCancellationMode::Masked
+            } else {
+                MirCancellationMode::Observe
+            },
             unwind,
             safe_point,
             live_frame,
@@ -4401,9 +4464,31 @@ pub(crate) fn is_managed_reference_type_id(type_id: TypeId, arena: Option<&TypeA
                 | SemanticType::Class { .. }
                 | SemanticType::Interface { .. }
                 | SemanticType::Builtin { .. }
+                | SemanticType::Function { .. }
                 | SemanticType::ErrorUnion { .. }
         )
     )
+}
+
+pub(crate) fn task_group_object_map(
+    cancel_type: TypeId,
+    body_type: TypeId,
+    completion_type: TypeId,
+    arena: &TypeArena,
+) -> ObjectMap {
+    let references = [cancel_type, body_type, completion_type]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, type_id)| {
+            if is_managed_reference_type_id(type_id, Some(arena)) {
+                Some(ObjectSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    ObjectMap::new(3, references)
+        .expect("verified task-group captures form a canonical logical object map")
 }
 
 pub(crate) fn task_object_map(
@@ -4422,13 +4507,15 @@ pub(crate) fn task_object_map(
             .iter()
             .enumerate()
             .filter_map(|(index, argument_type)| {
-                is_managed_reference_type_id(*argument_type, Some(arena)).then(|| {
-                    ObjectSlot::new(
+                if is_managed_reference_type_id(*argument_type, Some(arena)) {
+                    Some(ObjectSlot::new(
                         u32::try_from(index)
                             .unwrap_or(u32::MAX)
                             .saturating_add(indirect_offset),
-                    )
-                })
+                    ))
+                } else {
+                    None
+                }
             }),
     );
     let completion_slot = u32::try_from(argument_types.len())
@@ -4489,7 +4576,8 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
                 effects
             }
         }
-        MirInstructionKind::TupleMake(_)
+        MirInstructionKind::FunctionReference(_)
+        | MirInstructionKind::TupleMake(_)
         | MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
         | MirInstructionKind::ClassMake { .. }
@@ -4501,11 +4589,28 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
                 MirEffect::GcSafePoint,
             ])
         }
-        MirInstructionKind::TaskCreate { .. } => MirEffectSummary::from_effects([
+        MirInstructionKind::TaskCreate { .. } | MirInstructionKind::CancelSourceCreate => {
+            MirEffectSummary::from_effects([
+                MirEffect::Allocates,
+                MirEffect::MayUnwind,
+                MirEffect::GcSafePoint,
+            ])
+        }
+        MirInstructionKind::TaskGroupCreate { .. } => MirEffectSummary::from_effects([
             MirEffect::Allocates,
             MirEffect::MayUnwind,
             MirEffect::GcSafePoint,
+            MirEffect::Synchronizes,
         ]),
+        MirInstructionKind::TaskStart { .. } => MirEffectSummary::from_effects([
+            MirEffect::Synchronizes,
+            MirEffect::MayUnwind,
+            MirEffect::GcSafePoint,
+        ]),
+        MirInstructionKind::CancelRequest { .. } => {
+            MirEffectSummary::empty().with(MirEffect::Synchronizes)
+        }
+        MirInstructionKind::CancelSourceToken { .. } => MirEffectSummary::empty(),
         MirInstructionKind::StringConcat { .. } | MirInstructionKind::StringFormat { .. } => {
             MirEffectSummary::from_effects([
                 MirEffect::Allocates,
@@ -4587,7 +4692,6 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::ResultGetOk { .. }
         | MirInstructionKind::ResultGetError { .. }
         | MirInstructionKind::EnumConstant { .. }
-        | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::TupleGet { .. }
         | MirInstructionKind::ArrayGet { .. }
         | MirInstructionKind::TableGet { .. }
@@ -4654,6 +4758,7 @@ fn conservative_indirect_effects() -> MirEffectSummary {
     MirEffectSummary::from_effects([
         MirEffect::Allocates,
         MirEffect::WritesManagedReference,
+        MirEffect::Synchronizes,
         MirEffect::MayTrap,
         MirEffect::MayUnwind,
         MirEffect::Suspends,
@@ -4753,6 +4858,11 @@ pub(crate) fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) -
     }
     for method in &mut bubble.methods {
         changed |= insert_function_safe_points(&mut method.function, arena);
+    }
+    for nested in &mut bubble.nested_functions {
+        let mut function = nested.transformation_adapter();
+        changed |= insert_function_safe_points(&mut function, arena);
+        nested.apply_transformation(function);
     }
     changed
 }
@@ -4914,8 +5024,11 @@ fn populate_suspend_frames(function: &mut MirFunction, arena: &TypeArena) {
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                is_managed_reference_type_id(slot.type_id, Some(arena))
-                    .then(|| RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+                if is_managed_reference_type_id(slot.type_id, Some(arena)) {
+                    Some(RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+                } else {
+                    None
+                }
             })
             .collect();
         live_frame.stack_map = StackMap::new(*safe_point, roots)
@@ -4954,13 +5067,13 @@ pub(crate) fn expected_suspend_frame_slots(
         .collect()
 }
 
-fn live_value_facts(
-    function: &MirFunction,
-) -> (
+type LiveValueFacts = (
     BTreeMap<ValueId, TypeId>,
     BTreeMap<BlockId, BTreeSet<ValueId>>,
     BTreeMap<BlockId, BTreeSet<ValueId>>,
-) {
+);
+
+fn live_value_facts(function: &MirFunction) -> LiveValueFacts {
     let blocks: BTreeMap<_, _> = function
         .blocks
         .iter()
@@ -5077,11 +5190,11 @@ fn normal_live_out(
         }
         MirTerminator::UnionSwitch { arms, .. } => arms
             .iter()
-            .flat_map(|arm| live_in.get(&arm.target).into_iter().flatten().copied())
+            .flat_map(|arm| edge_live_values(arm.target, &[], live_in, blocks))
             .collect(),
         MirTerminator::ErrorSwitch { arms, .. } => arms
             .iter()
-            .flat_map(|arm| live_in.get(&arm.target).into_iter().flatten().copied())
+            .flat_map(|arm| edge_live_values(arm.target, &[], live_in, blocks))
             .collect(),
         MirTerminator::Suspend {
             resume,
@@ -5089,15 +5202,10 @@ fn normal_live_out(
             unwind,
             ..
         } => {
-            let mut outgoing = live_in.get(resume).cloned().unwrap_or_default();
-            if let Some(resume_block) = blocks.get(resume) {
-                for argument in resume_block.arguments() {
-                    outgoing.remove(&argument.value());
-                }
-            }
-            outgoing.extend(live_in.get(cancellation).into_iter().flatten().copied());
+            let mut outgoing = edge_live_values(*resume, &[], live_in, blocks);
+            outgoing.extend(edge_live_values(*cancellation, &[], live_in, blocks));
             if let MirUnwindAction::Cleanup(target) = unwind {
-                outgoing.extend(live_in.get(target).into_iter().flatten().copied());
+                outgoing.extend(edge_live_values(*target, &[], live_in, blocks));
             }
             outgoing
         }
@@ -5121,8 +5229,10 @@ fn edge_live_values(
     let Some(target) = blocks.get(&target) else {
         return live;
     };
-    for (parameter, argument) in target.arguments().iter().zip(arguments) {
-        if live.remove(&parameter.value()) {
+    for (index, parameter) in target.arguments().iter().enumerate() {
+        if live.remove(&parameter.value())
+            && let Some(argument) = arguments.get(index)
+        {
             live.insert(*argument);
         }
     }

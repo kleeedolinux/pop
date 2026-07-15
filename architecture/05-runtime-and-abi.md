@@ -54,8 +54,11 @@ keeps ABI 1.11 and ABI 2.0 as distinct closed descriptors. ABI 1 retains
 `pop_rt_gc_safe_point`; ABI 2 uses `pop_rt_gc_safe_point_v2` with an exact
 writable root array and reloads every returned slot before any later managed
 use. `pop_rt_supports_abi(major, minor)` is a defensive typed load/link check,
-not runtime symbol selection. A stable facade continues to report only ABI
-1.11 until a complete moving composition exists.
+not runtime symbol selection. [ADR 0079](./decisions/0079-native-task-frame-and-cancellation-abi.md)
+adds the coexisting ABI 1.12 stable-token descriptor for compiler-created task
+frames and distinct cancellation source/token authority. A conforming 1.12
+facade continues to support 1.11, and neither descriptor may report ABI 2
+until the complete moving composition exists.
 
 Under ADR 0070, ABI 1 native execution no longer uses `BootstrapRuntime`.
 Instead it composes the generational allocator and incremental SATB mature
@@ -145,6 +148,17 @@ initializer before publication and returns either a completely initialized
 object or the closed allocation-failure sentinel. MIR retains one backend-neutral
 typed record/class construction operation; later mutation still uses the
 ordinary checked store and barrier path.
+
+ADR 0079 advances native ABI 1 to version 1.12 with opaque compiler coroutine
+frames, cold task creation, direct and structured ownership transfer, explicit
+cancellation source/token authority, and exact task completion retention. Task
+creation and task-group wrapping receive the compiler-proven managed-completion
+flag, so the task control object precisely maps its completion and cancellation
+token slots. Cold frame roots remain retained until native scheduler admission
+overlaps them with the ready-frame publication; admission rejection restores
+the unpolled ownership state atomically. Structured groups retain every owned
+child until join, while unreachable cold/terminal side records are weakly
+pruned after collection without adding source-visible finalization.
 
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and

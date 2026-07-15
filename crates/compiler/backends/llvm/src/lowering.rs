@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::api::{LlvmLoweringError, LlvmLoweringOptions, LlvmModule};
+use crate::async_lowering::{lower_async_function, lower_async_nested};
 use crate::instruction_lowering::{
     llvm_results, llvm_type, lower_instruction, lower_runtime_slot_load, lower_terminator,
 };
@@ -24,8 +25,9 @@ use crate::module_lowering::{
     analyze_memory_none_functions, checked_integer_declarations, collect_field_layout,
     collect_record_field_types, collect_record_fields, collect_self_capture_slots,
     collect_string_literals, direct_scalar_array_fill_function,
-    lower_builtin_interface_dispatchers, lower_indirect_dispatchers, lower_interface_dispatchers,
-    render_string_literals, runtime_declarations,
+    lower_async_indirect_create_dispatchers, lower_builtin_interface_dispatchers,
+    lower_indirect_dispatchers, lower_interface_dispatchers, render_string_literals,
+    runtime_declarations,
 };
 
 pub(crate) const GC_POLL_BUDGET: &str = "%pop_gc_poll_budget";
@@ -49,36 +51,27 @@ pub fn lower_mir_to_llvm_ir(
     options: LlvmLoweringOptions,
 ) -> Result<LlvmModule, LlvmLoweringError> {
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
-    if bubble
-        .functions()
-        .iter()
-        .any(pop_mir::MirFunction::is_async)
-        || bubble
-            .methods()
-            .iter()
-            .any(|method| method.function().is_async())
-        || bubble
-            .nested_functions()
-            .iter()
-            .any(pop_mir::MirNestedFunction::is_async)
-        || bubble
-            .function_references()
-            .iter()
-            .any(pop_mir::MirFunctionReference::is_async)
-    {
-        return Err(LlvmLoweringError::UnsupportedAsync);
-    }
     let field_layout = collect_field_layout(bubble);
     let record_fields = collect_record_fields(bubble);
     let record_field_types = collect_record_field_types(bubble);
     let string_literals = collect_string_literals(bubble);
     let self_capture_slots = collect_self_capture_slots(bubble);
     let memory_none_functions = analyze_memory_none_functions(bubble);
-    let mut functions = bubble
-        .functions()
-        .iter()
-        .map(|function| {
-            lower_function(
+    let mut functions = Vec::new();
+    for function in bubble.functions() {
+        if function.is_async() {
+            functions.extend(lower_async_function(
+                bubble.bubble(),
+                function,
+                types,
+                options,
+                &field_layout,
+                &record_fields,
+                &record_field_types,
+                &string_literals,
+            )?);
+        } else {
+            functions.push(lower_function(
                 bubble.bubble(),
                 function,
                 types,
@@ -88,9 +81,9 @@ pub fn lower_mir_to_llvm_ir(
                 &record_fields,
                 &record_field_types,
                 &string_literals,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+            )?);
+        }
+    }
     for method in bubble.methods() {
         let mut lowered = lower_function(
             bubble.bubble(),
@@ -107,6 +100,24 @@ pub fn lower_mir_to_llvm_ir(
         functions.push(lowered);
     }
     for nested in bubble.nested_functions() {
+        if nested.is_async() {
+            let self_slots = self_capture_slots
+                .get(&(nested.owner(), nested.function()))
+                .cloned()
+                .unwrap_or_default();
+            functions.extend(lower_async_nested(
+                bubble.bubble(),
+                nested,
+                types,
+                options,
+                &field_layout,
+                &record_fields,
+                &record_field_types,
+                &string_literals,
+                &self_slots,
+            )?);
+            continue;
+        }
         let self_slots = self_capture_slots
             .get(&(nested.owner(), nested.function()))
             .cloned()
@@ -128,10 +139,11 @@ pub fn lower_mir_to_llvm_ir(
             &string_literals,
         )?);
     }
-    functions.push(direct_scalar_array_fill_function());
+    functions.push(direct_scalar_array_fill_function(bubble.bubble()));
     functions.extend(lower_interface_dispatchers(bubble, types)?);
     functions.extend(lower_builtin_interface_dispatchers(bubble, types)?);
     functions.extend(lower_indirect_dispatchers(bubble, types)?);
+    functions.extend(lower_async_indirect_create_dispatchers(bubble, types)?);
     let entry_point = options
         .entry_point
         .map(|symbol| lower_entry_point(symbol, bubble, types, options.runtime_profile))
@@ -206,6 +218,78 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::Resume)
         ),
         format!(
+            "declare i64 @{}()",
+            native_runtime_symbol(RuntimeOperation::CancelSourceCreate)
+        ),
+        format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::CancelSourceToken)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::TaskCancel)
+        ),
+        format!(
+            "declare i64 @{}(i64, i32, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::TaskFrameCreate)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::TaskFrameRelease)
+        ),
+        format!(
+            "declare i8 @{}(i64, i32, ptr)",
+            native_runtime_symbol(RuntimeOperation::TaskFrameLoad)
+        ),
+        format!(
+            "declare i8 @{}(i64, i32, i64)",
+            native_runtime_symbol(RuntimeOperation::TaskFrameStore)
+        ),
+        format!(
+            "declare i8 @{}(i64, i32, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::TaskFrameSetLiveMap)
+        ),
+        format!(
+            "declare i64 @{}(i64, ptr, i64, i8)",
+            native_runtime_symbol(RuntimeOperation::TaskCreate)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::TaskStartDirect)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::TaskStartGroup)
+        ),
+        format!(
+            "declare i8 @{}(i64, ptr)",
+            native_runtime_symbol(RuntimeOperation::TaskAwait)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64)",
+            native_runtime_symbol(RuntimeOperation::TaskCompletionStore)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::TaskRelease)
+        ),
+        format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::TaskGroupCreate)
+        ),
+        format!(
+            "declare i64 @{}(i64, i64, i8)",
+            native_runtime_symbol(RuntimeOperation::TaskGroupWrap)
+        ),
+        format!(
+            "declare i8 @{}(i64, i8)",
+            native_runtime_symbol(RuntimeOperation::TaskGroupClose)
+        ),
+        format!(
+            "declare i8 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::TaskGroupJoin)
+        ),
+        format!(
             "declare i64 @{}(i64, i64)",
             native_runtime_symbol(RuntimeOperation::StringConcat)
         ),
@@ -232,17 +316,29 @@ pub fn lower_mir_to_llvm_ir(
         ));
     }
     for reference in bubble.function_references() {
-        let result = llvm_results(reference.results(), types)?;
-        let parameters = reference
+        let mut parameters = reference
             .parameters()
             .iter()
             .map(|type_id| llvm_type(*type_id, types))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(", ");
-        declarations.push(format!(
-            "declare {result} @{}({parameters})",
-            function_name(reference.identity().bubble(), reference.identity().symbol())
-        ));
+            .collect::<Result<Vec<_>, _>>()?;
+        if reference.is_async() {
+            parameters.push("i64".to_owned());
+            declarations.push(format!(
+                "declare i64 @{}({})",
+                async_function_create_name(
+                    reference.identity().bubble(),
+                    reference.identity().symbol(),
+                ),
+                parameters.join(", ")
+            ));
+        } else {
+            let result = llvm_results(reference.results(), types)?;
+            declarations.push(format!(
+                "declare {result} @{}({})",
+                function_name(reference.identity().bubble(), reference.identity().symbol()),
+                parameters.join(", ")
+            ));
+        }
     }
     declarations.extend(runtime_declarations());
     declarations.extend(checked_integer_declarations());
@@ -430,6 +526,52 @@ pub(crate) fn nested_name(
 
 pub(crate) fn indirect_name(bubble: BubbleId, function_type: TypeId) -> String {
     format!("pop_b{}_indirect_t{}", bubble.raw(), function_type.raw())
+}
+
+pub(crate) fn async_function_poll_name(bubble: BubbleId, symbol: SymbolId) -> String {
+    format!("pop_b{}_async_s{}_poll", bubble.raw(), symbol.raw())
+}
+
+pub(crate) fn async_function_create_name(bubble: BubbleId, symbol: SymbolId) -> String {
+    format!("pop_b{}_async_s{}_create", bubble.raw(), symbol.raw())
+}
+
+pub(crate) fn async_nested_poll_name(
+    bubble: BubbleId,
+    owner: SymbolId,
+    function: pop_foundation::NestedFunctionId,
+) -> String {
+    format!(
+        "pop_b{}_async_nested_{}_{}_poll",
+        bubble.raw(),
+        owner.raw(),
+        function.raw()
+    )
+}
+
+pub(crate) fn async_nested_create_name(
+    bubble: BubbleId,
+    owner: SymbolId,
+    function: pop_foundation::NestedFunctionId,
+) -> String {
+    format!(
+        "pop_b{}_async_nested_{}_{}_create",
+        bubble.raw(),
+        owner.raw(),
+        function.raw()
+    )
+}
+
+pub(crate) fn async_indirect_create_name(bubble: BubbleId, function_type: TypeId) -> String {
+    format!(
+        "pop_b{}_async_indirect_t{}_create",
+        bubble.raw(),
+        function_type.raw()
+    )
+}
+
+pub(crate) fn direct_scalar_array_fill_name(bubble: BubbleId) -> String {
+    format!("pop_b{}_llvm_fill_scalar_array", bubble.raw())
 }
 
 impl PrivateFunction {
@@ -1039,7 +1181,7 @@ fn terminator_values(terminator: &MirTerminator) -> Vec<ValueId> {
     }
 }
 
-fn replace_llvm_value_token(text: &str, original: &str, replacement: &str) -> String {
+pub(crate) fn replace_llvm_value_token(text: &str, original: &str, replacement: &str) -> String {
     let mut rewritten = String::with_capacity(text.len());
     let mut remainder = text;
     while let Some(index) = remainder.find(original) {
@@ -1090,23 +1232,6 @@ fn contains_llvm_value_token(text: &str, value: &str) -> bool {
         remainder = after;
     }
     false
-}
-
-#[cfg(test)]
-mod relocation_verification_tests {
-    use super::*;
-
-    #[test]
-    fn writable_root_verifier_rejects_an_old_post_safe_point_ssa_use() {
-        let value = ValueId::from_raw(7);
-        let aliases = BTreeMap::from([(value, "%v7_before_v9".to_owned())]);
-
-        assert!(verify_rewritten_root_uses("call i64 @consume(i64 %v7)", &aliases, "v9").is_err());
-        assert!(
-            verify_rewritten_root_uses("call i64 @consume(i64 %v7_before_v9)", &aliases, "v9")
-                .is_ok()
-        );
-    }
 }
 
 pub(crate) fn proven_counted_reduction_adds(blocks: &[pop_mir::MirBlock]) -> BTreeSet<ValueId> {
@@ -1532,4 +1657,21 @@ pub(crate) fn lower_block_arguments(
         }));
     }
     Ok(instructions)
+}
+
+#[cfg(test)]
+mod relocation_verification_tests {
+    use super::*;
+
+    #[test]
+    fn writable_root_verifier_rejects_an_old_post_safe_point_ssa_use() {
+        let value = ValueId::from_raw(7);
+        let aliases = BTreeMap::from([(value, "%v7_before_v9".to_owned())]);
+
+        assert!(verify_rewritten_root_uses("call i64 @consume(i64 %v7)", &aliases, "v9").is_err());
+        assert!(
+            verify_rewritten_root_uses("call i64 @consume(i64 %v7_before_v9)", &aliases, "v9")
+                .is_ok()
+        );
+    }
 }

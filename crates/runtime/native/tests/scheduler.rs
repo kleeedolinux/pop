@@ -1,4 +1,4 @@
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 use pop_runtime_collector::SchedulerId;
@@ -9,9 +9,17 @@ use pop_runtime_native::{
     SchedulerRuntimeTransitionFailure, SchedulerRuntimeTransitions, SchedulerTask,
     SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskFrameError, SchedulerTaskFrameFailure,
     SchedulerTaskId, SchedulerTaskMobility, SchedulerTaskPoll, SchedulerTaskState,
-    SchedulerWorkBudgetError, SchedulerWorkBudgetStatus, abi_safe_point, native_epoch_telemetry,
-    pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root, request_abi_collection,
+    SchedulerWorkBudgetError, SchedulerWorkBudgetStatus, abi_safe_point, abi_safe_point_writable,
+    native_epoch_telemetry, pop_rt_allocate_object, pop_rt_release_root, pop_rt_retain_root,
+    request_abi_collection,
 };
+
+fn epoch_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("epoch test lock")
+}
 
 #[derive(Default)]
 struct RecordingRuntimeTransitions {
@@ -282,6 +290,21 @@ impl SchedulerTask for EpochPollingTask {
         assert!(request_abi_collection());
         assert_eq!(abi_safe_point(931, &[]), 1);
         assert_eq!(abi_safe_point(932, &[]), 1);
+        SchedulerTaskPoll::Complete
+    }
+}
+
+struct WritableEpochPollingTask {
+    value: u64,
+}
+
+impl SchedulerTask for WritableEpochPollingTask {
+    fn poll(&mut self, _context: &SchedulerTaskContext) -> SchedulerTaskPoll {
+        assert!(request_abi_collection());
+        let mut roots = [self.value];
+        assert_eq!(abi_safe_point_writable(933, &mut roots), 1);
+        assert_eq!(roots, [self.value]);
+        assert_eq!(abi_safe_point_writable(934, &mut roots), 1);
         SchedulerTaskPoll::Complete
     }
 }
@@ -582,6 +605,7 @@ impl_explicit_rootless_frame!(SuspendOnceTask, 916);
 impl_explicit_rootless_frame!(WakeDuringPollTask, 917);
 impl_explicit_rootless_frame!(BlockingProbeTask, 918);
 impl_explicit_rootless_frame!(EpochPollingTask, 920);
+impl_explicit_rootless_frame!(WritableEpochPollingTask, 923);
 impl_explicit_rootless_frame!(BudgetExhaustionTask, 921);
 impl_explicit_rootless_frame!(OrderedCompleteTask, 922);
 
@@ -842,6 +866,7 @@ fn rejected_dispatch_detaches_and_unregisters_without_losing_frame_roots() {
 
 #[test]
 fn managed_safe_point_acknowledges_the_current_collector_epoch_once() {
+    let _epoch_test = epoch_test_lock();
     let before = native_epoch_telemetry();
     let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
     scheduler
@@ -854,6 +879,29 @@ fn managed_safe_point_acknowledges_the_current_collector_epoch_once() {
     scheduler
         .wait_until_idle(Duration::from_secs(1))
         .expect("epoch task completes");
+    scheduler.shutdown().expect("scheduler shutdown");
+    let after = native_epoch_telemetry();
+
+    assert_eq!(after.acknowledgements(), before.acknowledgements() + 1);
+}
+
+#[test]
+fn managed_worker_uses_the_abi_two_writable_root_transition_in_its_epoch() {
+    let _epoch_test = epoch_test_lock();
+    let value = pop_rt_allocate_object(0);
+    assert_ne!(value, 0);
+    let before = native_epoch_telemetry();
+    let scheduler = NativeScheduler::new(configuration(1, 1)).expect("native scheduler");
+    scheduler
+        .schedule_on(
+            SchedulerId::new(1),
+            SchedulerTaskMobility::Affine,
+            WritableEpochPollingTask { value },
+        )
+        .expect("schedule writable epoch poll");
+    scheduler
+        .wait_until_idle(Duration::from_secs(1))
+        .expect("writable epoch task completes");
     scheduler.shutdown().expect("scheduler shutdown");
     let after = native_epoch_telemetry();
 

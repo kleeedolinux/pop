@@ -9,7 +9,7 @@ use pop_types::embedded_bootstrap_schema;
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 83);
+    assert_eq!(baseline.entries().len(), 90);
 
     let prelude_names = baseline
         .entries()
@@ -87,6 +87,11 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
             ("Pop.Sequence", "findLastOr"),
             ("Pop.Sequence", "indexLastOr"),
             ("Pop.Sequence", "reduceOr"),
+            ("Pop.Task", "cancellationSource"),
+            ("Pop.Task", "cancelToken"),
+            ("Pop.Task", "cancel"),
+            ("Pop.Task", "group"),
+            ("Pop.Task", "start"),
         ]
     );
 }
@@ -106,9 +111,13 @@ fn standard_api_baseline_agrees_with_trusted_bootstrap_identities() {
                     .any(|primitive| primitive.source_name() == entry.name())
             ),
             ApiKind::Type => {
+                let source_name = entry.namespace().strip_prefix("Pop.").map_or_else(
+                    || entry.name().to_owned(),
+                    |namespace| format!("{namespace}.{}", entry.name()),
+                );
                 let metadata = bootstrap
-                    .type_by_source_name(entry.name())
-                    .unwrap_or_else(|| panic!("missing bootstrap type {}", entry.name()));
+                    .type_by_source_name(&source_name)
+                    .unwrap_or_else(|| panic!("missing bootstrap type {source_name}"));
                 assert_eq!(metadata.id().raw().to_string(), raw_id);
                 assert_eq!(metadata.owner_bubble(), entry.owner_bubble());
                 assert_eq!(metadata.is_in_prelude(), entry.prelude());

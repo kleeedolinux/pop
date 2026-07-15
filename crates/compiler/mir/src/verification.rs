@@ -17,7 +17,7 @@ use crate::ir::*;
 use crate::lowering::{
     array_element_map, expected_safe_point_roots, expected_suspend_frame_slots,
     is_managed_reference_type_id, list_element_map, local_instruction_effects, table_element_maps,
-    task_object_map, terminator_effects,
+    task_group_object_map, task_object_map, terminator_effects,
 };
 use crate::render::{float_kind_text, integer_kind_text};
 
@@ -582,7 +582,11 @@ fn verify_function(
                     block: block.block(),
                 });
             }
-            for target in terminator_targets(block.terminator()) {
+            let structural_targets = match block.terminator() {
+                MirTerminator::Suspend { resume, .. } => vec![*resume],
+                terminator => terminator_targets(terminator),
+            };
+            for target in structural_targets {
                 if let Some(target_cleanup) = blocks.get(&target).and_then(|block| block.cleanup())
                     && (target_cleanup.reason() != cleanup.reason()
                         || target_cleanup.scope() > cleanup.scope())
@@ -855,6 +859,22 @@ fn verify_gc_contracts(
                         task_object_map(dispatch, &argument_types, *completion_type, arena)
                             != *object_map
                     }) {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::TaskGroupCreate {
+                    cancel,
+                    body,
+                    completion_type,
+                    object_map,
+                } => {
+                    if let (Some(cancel_type), Some(body_type)) =
+                        (facts.values.get(cancel), facts.values.get(body))
+                        && task_group_object_map(*cancel_type, *body_type, *completion_type, arena)
+                            != *object_map
+                    {
                         errors.push(MirVerificationError::InvalidObjectMap {
                             instruction: instruction.result(),
                         });
@@ -3183,6 +3203,70 @@ fn verify_callable_instruction(
                 });
             }
         }
+        MirInstructionKind::CancelSourceCreate => {
+            verify_task_operation(
+                instruction,
+                is_exact_bootstrap_type(arena, instruction.result_type(), "Task.CancelSource", &[]),
+                errors,
+            );
+        }
+        MirInstructionKind::CancelSourceToken { source } => {
+            let valid =
+                values.get(source).is_some_and(|source_type| {
+                    is_exact_bootstrap_type(arena, *source_type, "Task.CancelSource", &[])
+                }) && is_exact_bootstrap_type(arena, instruction.result_type(), "CancelToken", &[]);
+            verify_task_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::CancelRequest { source } => {
+            let valid = values.get(source).is_some_and(|source_type| {
+                is_exact_bootstrap_type(arena, *source_type, "Task.CancelSource", &[])
+            }) && arena.get(instruction.result_type())
+                == Some(&SemanticType::Primitive(pop_types::PrimitiveType::Nil));
+            verify_task_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::TaskStart { group, task } => {
+            let valid = values.get(group).is_some_and(|group_type| {
+                is_exact_bootstrap_type(arena, *group_type, "Task.Group", &[])
+            }) && values.get(task).is_some_and(|task_type| {
+                task_completion_type(arena, *task_type).is_some()
+                    && *task_type == instruction.result_type()
+            });
+            verify_task_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::TaskGroupCreate {
+            cancel,
+            body,
+            completion_type,
+            ..
+        } => {
+            let valid_cancel = values.get(cancel).is_some_and(|cancel_type| {
+                is_exact_bootstrap_type(arena, *cancel_type, "CancelToken", &[])
+            });
+            let valid_body = values.get(body).is_some_and(|body_type| {
+                matches!(
+                    arena.get(*body_type),
+                    Some(SemanticType::Function {
+                        is_async: true,
+                        parameters,
+                        results,
+                        ..
+                    }) if parameters.len() == 1
+                        && is_exact_bootstrap_type(arena, parameters[0], "Task.Group", &[])
+                        && match results.as_slice() {
+                            [result] => *result == *completion_type,
+                            results => arena.find(&SemanticType::Tuple(results.to_vec()))
+                                == Some(*completion_type),
+                        }
+                )
+            });
+            let valid_result =
+                task_completion_type(arena, instruction.result_type()) == Some(*completion_type);
+            verify_task_operation(
+                instruction,
+                valid_cancel && valid_body && valid_result,
+                errors,
+            );
+        }
         MirInstructionKind::CallDirect {
             function,
             arguments,
@@ -3338,6 +3422,55 @@ fn verify_task_signature(
             instruction: instruction.result(),
             result_type: instruction.result_type(),
         });
+    }
+}
+
+fn verify_task_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidTaskOperation {
+            instruction: instruction.result(),
+        });
+    }
+}
+
+fn is_exact_bootstrap_type(
+    arena: &TypeArena,
+    type_id: TypeId,
+    source_name: &str,
+    arguments: &[TypeId],
+) -> bool {
+    let definition = embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.type_by_source_name(source_name).copied())
+        .map(|entry| entry.id());
+    matches!(
+        (definition, arena.get(type_id)),
+        (
+            Some(expected),
+            Some(SemanticType::Builtin {
+                definition,
+                arguments: found,
+            })
+        ) if *definition == expected && found == arguments
+    )
+}
+
+fn task_completion_type(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    let definition = embedded_bootstrap_schema()
+        .ok()?
+        .type_by_source_name("Task")
+        .copied()?
+        .id();
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin {
+            definition: found,
+            arguments,
+        }) if *found == definition && arguments.len() == 1 => Some(arguments[0]),
+        _ => None,
     }
 }
 
@@ -3650,6 +3783,7 @@ fn verify_terminator(
             operation: MirSuspendOperation::Task { task, result_type },
             resume,
             cancellation,
+            cancellation_mode,
             unwind,
             safe_point,
             live_frame,
@@ -3690,6 +3824,16 @@ fn verify_terminator(
                     block.block,
                 ));
             }
+            let expected_cancellation_mode = if block.cleanup.is_some() {
+                MirCancellationMode::Masked
+            } else {
+                MirCancellationMode::Observe
+            };
+            if *cancellation_mode != expected_cancellation_mode {
+                errors.push(MirVerificationError::InvalidSuspendCancellationMode(
+                    block.block,
+                ));
+            }
             if let MirUnwindAction::Cleanup(target) = unwind {
                 verify_target(*target, facts.blocks, errors);
                 if !facts.blocks.get(target).is_some_and(|target| {
@@ -3718,14 +3862,17 @@ fn verify_terminator(
                         .then(|| RootSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
                 })
                 .collect::<Vec<_>>();
-            if live_frame.state.raw()
-                >= function
+            let suspend_count = u32::try_from(
+                function
                     .blocks
                     .iter()
                     .filter(|candidate| {
                         matches!(candidate.terminator, MirTerminator::Suspend { .. })
                     })
-                    .count() as u32
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
+            if live_frame.state.raw() >= suspend_count
                 || live_frame.stack_map.safe_point() != *safe_point
                 || live_frame.stack_map.root_slots() != expected_roots
                 || expected_suspend_frames.get(&block.block) != Some(&live_frame.slots)
@@ -3796,6 +3943,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::NilConstant
         | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
+        | MirInstructionKind::CancelSourceCreate
         | MirInstructionKind::GcSafePoint { .. } => Vec::new(),
         MirInstructionKind::TupleMake(values)
         | MirInstructionKind::ArrayMake {
@@ -3841,6 +3989,10 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
                 .chain(arguments.iter().copied())
                 .collect(),
         },
+        MirInstructionKind::CancelSourceToken { source }
+        | MirInstructionKind::CancelRequest { source } => vec![*source],
+        MirInstructionKind::TaskGroupCreate { cancel, body, .. } => vec![*cancel, *body],
+        MirInstructionKind::TaskStart { group, task } => vec![*group, *task],
         MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
         MirInstructionKind::IterationIsItem { iteration, .. }
         | MirInstructionKind::IterationGetItem { iteration, .. } => vec![*iteration],

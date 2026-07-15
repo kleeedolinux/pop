@@ -193,6 +193,7 @@ struct Parser<'source, 'diagnostics> {
 }
 
 impl Parser<'_, '_> {
+    #[allow(clippy::too_many_lines)]
     fn parse_root(&mut self) -> Vec<SyntaxNode> {
         let mut children = Vec::new();
         let mut cursor = 0;

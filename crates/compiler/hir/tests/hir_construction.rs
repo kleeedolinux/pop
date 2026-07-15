@@ -106,7 +106,20 @@ fn typed_fixture() -> TypedFixture {
              return value\n\
          end\n\
          private async function consume(): Int\n\
+             async defer\n\
+                 local ignored = await load(0)\n\
+             end\n\
              return await load(42)\n\
+         end\n\
+         private async function structured(): Int\n\
+             local source: Task.CancelSource = Task.cancellationSource()\n\
+             local cancel: CancelToken = Task.cancelToken(source)\n\
+             local grouped: Task<Int> = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child = Task.start(group, load(42))\n\
+                 return await child\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
          end\n",
     )
     .expect("source");
@@ -165,6 +178,58 @@ fn typed_fixture() -> TypedFixture {
 }
 
 #[test]
+fn construction_retains_structured_task_and_cancellation_operations() {
+    let fixture = typed_fixture();
+    let known: BTreeSet<_> = fixture
+        .functions
+        .iter()
+        .map(|(signature, _, _)| signature.symbol())
+        .collect();
+    let (signature, body, visibility) = fixture
+        .functions
+        .iter()
+        .find(|(signature, _, _)| signature.name() == "structured")
+        .expect("structured");
+    let hir = build_hir_function(
+        ModuleId::from_raw(0),
+        BubbleId::from_raw(4),
+        *visibility,
+        signature,
+        body,
+        &fixture.arena,
+        &known,
+    )
+    .expect("structured HIR");
+
+    let HirStatementKind::Local { initializer, .. } = hir.body()[0].kind() else {
+        panic!("source local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::TaskCancellationSource
+    ));
+    let HirStatementKind::Local { initializer, .. } = hir.body()[1].kind() else {
+        panic!("token local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::TaskCancelToken { .. }
+    ));
+    let HirStatementKind::Local { initializer, .. } = hir.body()[2].kind() else {
+        panic!("group local");
+    };
+    assert!(matches!(
+        initializer.kind(),
+        HirExpressionKind::TaskGroup { .. }
+    ));
+    assert!(matches!(
+        hir.body()[3].kind(),
+        HirStatementKind::Expression(expression)
+            if matches!(expression.kind(), HirExpressionKind::TaskCancel { .. })
+    ));
+}
+
+#[test]
 fn construction_retains_async_identity_and_typed_await_until_mir() {
     let fixture = typed_fixture();
     let known: BTreeSet<_> = fixture
@@ -189,7 +254,11 @@ fn construction_retains_async_identity_and_typed_await_until_mir() {
     .expect("verified async HIR");
 
     assert!(hir.is_async());
-    let HirStatementKind::Return { values } = hir.body()[0].kind() else {
+    assert!(matches!(
+        hir.body()[0].kind(),
+        HirStatementKind::AsyncDefer { body } if body.len() == 1
+    ));
+    let HirStatementKind::Return { values } = hir.body()[1].kind() else {
         panic!("async HIR return");
     };
     assert!(matches!(

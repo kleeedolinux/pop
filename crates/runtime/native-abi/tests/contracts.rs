@@ -9,7 +9,7 @@ use pop_runtime_native_abi::{
 #[test]
 fn abi_version_and_invalid_handle_are_explicit() {
     assert_eq!(NATIVE_ABI_1_VERSION.major(), 1);
-    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 11);
+    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 12);
     assert_eq!(NATIVE_ABI_2_VERSION.major(), 2);
     assert_eq!(NATIVE_ABI_2_VERSION.minor(), 0);
     assert_ne!(NATIVE_ABI_1_VERSION, NATIVE_ABI_2_VERSION);
@@ -55,6 +55,25 @@ fn supported_symbols_are_unique_and_native() {
         RuntimeOperation::SatbWriteBarrier,
         RuntimeOperation::Trap,
         RuntimeOperation::ContinueUnwind,
+        RuntimeOperation::CancelSourceCreate,
+        RuntimeOperation::CancelSourceToken,
+        RuntimeOperation::CancelSourceRelease,
+        RuntimeOperation::CancelTokenRelease,
+        RuntimeOperation::TaskFrameCreate,
+        RuntimeOperation::TaskFrameRelease,
+        RuntimeOperation::TaskFrameLoad,
+        RuntimeOperation::TaskFrameStore,
+        RuntimeOperation::TaskFrameSetLiveMap,
+        RuntimeOperation::TaskCreate,
+        RuntimeOperation::TaskStartDirect,
+        RuntimeOperation::TaskStartGroup,
+        RuntimeOperation::TaskAwait,
+        RuntimeOperation::TaskCompletionStore,
+        RuntimeOperation::TaskRelease,
+        RuntimeOperation::TaskGroupCreate,
+        RuntimeOperation::TaskGroupWrap,
+        RuntimeOperation::TaskGroupClose,
+        RuntimeOperation::TaskGroupJoin,
         RuntimeOperation::Suspend,
         RuntimeOperation::Resume,
         RuntimeOperation::TaskCancel,

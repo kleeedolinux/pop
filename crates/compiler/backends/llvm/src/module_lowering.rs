@@ -16,13 +16,15 @@ use crate::instruction_lowering::{
     llvm_results, llvm_type, lower_builtin_iteration_call, nested_function_tag,
 };
 use crate::lowering::{
-    PrivateBlock, PrivateFunction, builtin_interface_name, function_name, indirect_name,
-    interface_name, llvm_memory_none_instruction, method_name, native_runtime_symbol, nested_name,
+    PrivateBlock, PrivateFunction, async_function_create_name, async_indirect_create_name,
+    async_nested_create_name, builtin_interface_name, direct_scalar_array_fill_name, function_name,
+    indirect_name, interface_name, llvm_memory_none_instruction, method_name,
+    native_runtime_symbol, nested_name,
 };
 
-pub(crate) fn direct_scalar_array_fill_function() -> PrivateFunction {
+pub(crate) fn direct_scalar_array_fill_function(bubble: BubbleId) -> PrivateFunction {
     PrivateFunction {
-        name: "pop_llvm_fill_scalar_array".to_owned(),
+        name: direct_scalar_array_fill_name(bubble),
         parameters: vec![
             "ptr %storage".to_owned(),
             "i64 %length".to_owned(),
@@ -645,6 +647,206 @@ pub(crate) fn lower_indirect_dispatchers(
         .collect()
 }
 
+pub(crate) fn lower_async_indirect_create_dispatchers(
+    bubble: &MirBubble,
+    types: &TypeArena,
+) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
+    let mut function_types = BTreeSet::new();
+    for blocks in bubble
+        .functions()
+        .iter()
+        .map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .map(|method| method.function().blocks()),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .map(pop_mir::MirNestedFunction::blocks),
+        )
+    {
+        let value_types = collect_block_value_types(blocks);
+        for instruction in blocks.iter().flat_map(pop_mir::MirBlock::instructions) {
+            match instruction.kind() {
+                MirInstructionKind::TaskCreate {
+                    dispatch: pop_mir::MirTaskDispatch::Indirect(callee),
+                    ..
+                } => {
+                    if let Some(type_id) = value_types.get(callee) {
+                        function_types.insert(*type_id);
+                    }
+                }
+                MirInstructionKind::TaskGroupCreate { body, .. } => {
+                    if let Some(type_id) = value_types.get(body) {
+                        function_types.insert(*type_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    function_types
+        .into_iter()
+        .map(|type_id| lower_async_indirect_create_dispatcher(type_id, bubble, types))
+        .collect()
+}
+
+fn lower_async_indirect_create_dispatcher(
+    function_type: TypeId,
+    bubble: &MirBubble,
+    types: &TypeArena,
+) -> Result<PrivateFunction, LlvmLoweringError> {
+    let Some(SemanticType::Function {
+        is_async: true,
+        parameters: parameter_types,
+        results: result_types,
+        ..
+    }) = types.get(function_type)
+    else {
+        return Err(LlvmLoweringError::InvalidType(function_type));
+    };
+    let typed_arguments = parameter_types
+        .iter()
+        .enumerate()
+        .map(|(index, type_id)| {
+            llvm_type(*type_id, types).map(|ty| format!("{ty} %v{}", index + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut parameters = vec!["i64 %v0".to_owned()];
+    parameters.extend(typed_arguments.clone());
+    parameters.push("i64 %pop_cancel_token".to_owned());
+    let call_arguments = typed_arguments
+        .iter()
+        .cloned()
+        .chain(std::iter::once("i64 %pop_cancel_token".to_owned()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let direct = bubble
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.is_async()
+                && function.parameters() == parameter_types
+                && function.results() == result_types
+        })
+        .collect::<Vec<_>>();
+    let nested = bubble
+        .nested_functions()
+        .iter()
+        .filter(|function| {
+            function.is_async()
+                && function.parameters() == parameter_types
+                && function.results() == result_types
+        })
+        .collect::<Vec<_>>();
+    let direct_cases = direct
+        .iter()
+        .map(|function| {
+            format!(
+                "    i64 {}, label %direct_s{}",
+                function.symbol().raw(),
+                function.symbol().raw()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let nested_cases = nested
+        .iter()
+        .map(|function| {
+            format!(
+                "    i64 {}, label %nested_{}_{}",
+                nested_function_tag(function.owner(), function.function()),
+                function.owner().raw(),
+                function.function().raw()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut blocks = vec![
+        PrivateBlock {
+            label: "dispatch".to_owned(),
+            instructions: vec![
+                format!(
+                    "%callable_tag = call i64 @{}(i64 %v0, i64 1)",
+                    native_runtime_symbol(RuntimeOperation::FieldGet)
+                ),
+                "%direct_bits = and i64 %callable_tag, 9223372036854775808".to_owned(),
+                "%is_direct = icmp ne i64 %direct_bits, 0".to_owned(),
+            ],
+            terminator: "br i1 %is_direct, label %direct, label %closure".to_owned(),
+        },
+        PrivateBlock {
+            label: "direct".to_owned(),
+            instructions: vec![
+                "%direct_symbol = and i64 %callable_tag, 9223372036854775807".to_owned(),
+            ],
+            terminator: format!(
+                "switch i64 %direct_symbol, label %invalid_async [\n{direct_cases}\n  ]"
+            ),
+        },
+        PrivateBlock {
+            label: "closure".to_owned(),
+            instructions: Vec::new(),
+            terminator: format!(
+                "switch i64 %callable_tag, label %invalid_async [\n{nested_cases}\n  ]"
+            ),
+        },
+    ];
+    blocks.extend(direct.into_iter().map(|function| PrivateBlock {
+        label: format!("direct_s{}", function.symbol().raw()),
+        instructions: vec![format!(
+            "%direct_task_{} = call i64 @{}({call_arguments})",
+            function.symbol().raw(),
+            async_function_create_name(bubble.bubble(), function.symbol())
+        )],
+        terminator: format!("ret i64 %direct_task_{}", function.symbol().raw()),
+    }));
+    blocks.extend(nested.into_iter().map(|function| {
+        let arguments = std::iter::once("i64 %v0".to_owned())
+            .chain(typed_arguments.iter().cloned())
+            .chain(std::iter::once("i64 %pop_cancel_token".to_owned()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        PrivateBlock {
+            label: format!(
+                "nested_{}_{}",
+                function.owner().raw(),
+                function.function().raw()
+            ),
+            instructions: vec![format!(
+                "%nested_task_{}_{} = call i64 @{}({arguments})",
+                function.owner().raw(),
+                function.function().raw(),
+                async_nested_create_name(bubble.bubble(), function.owner(), function.function())
+            )],
+            terminator: format!(
+                "ret i64 %nested_task_{}_{}",
+                function.owner().raw(),
+                function.function().raw()
+            ),
+        }
+    }));
+    blocks.push(PrivateBlock {
+        label: "invalid_async".to_owned(),
+        instructions: vec![format!(
+            "call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        )],
+        terminator: "unreachable".to_owned(),
+    });
+    Ok(PrivateFunction {
+        name: async_indirect_create_name(bubble.bubble(), function_type),
+        parameters,
+        result: "i64".to_owned(),
+        blocks,
+        attributes: Vec::new(),
+    })
+}
+
 pub(crate) fn collect_block_value_types(blocks: &[pop_mir::MirBlock]) -> BTreeMap<ValueId, TypeId> {
     blocks
         .iter()
@@ -728,26 +930,29 @@ pub(crate) fn lower_indirect_dispatcher(
         PrivateBlock {
             label: "dispatch".to_owned(),
             instructions: vec![
-                "%direct_bits = and i64 %v0, 9223372036854775808".to_owned(),
+                format!(
+                    "%callable_tag = call i64 @{}(i64 %v0, i64 1)",
+                    native_runtime_symbol(RuntimeOperation::FieldGet)
+                ),
+                "%direct_bits = and i64 %callable_tag, 9223372036854775808".to_owned(),
                 "%is_direct = icmp ne i64 %direct_bits, 0".to_owned(),
             ],
             terminator: "br i1 %is_direct, label %direct, label %closure".to_owned(),
         },
         PrivateBlock {
             label: "direct".to_owned(),
-            instructions: vec!["%direct_symbol = and i64 %v0, 9223372036854775807".to_owned()],
+            instructions: vec![
+                "%direct_symbol = and i64 %callable_tag, 9223372036854775807".to_owned(),
+            ],
             terminator: format!(
                 "switch i64 %direct_symbol, label %invalid_indirect [\n{direct_cases}\n  ]"
             ),
         },
         PrivateBlock {
             label: "closure".to_owned(),
-            instructions: vec![format!(
-                "%closure_tag = call i64 @{}(i64 %v0, i64 1)",
-                native_runtime_symbol(RuntimeOperation::FieldGet)
-            )],
+            instructions: Vec::new(),
             terminator: format!(
-                "switch i64 %closure_tag, label %invalid_indirect [\n{nested_cases}\n  ]"
+                "switch i64 %callable_tag, label %invalid_indirect [\n{nested_cases}\n  ]"
             ),
         },
     ];

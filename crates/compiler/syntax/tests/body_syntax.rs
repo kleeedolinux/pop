@@ -455,6 +455,24 @@ fn parses_result_propagation_and_lexical_cleanup_as_distinct_nodes() {
 }
 
 #[test]
+fn parses_suspension_capable_cleanup_as_a_distinct_statement() {
+    let body = parse_body(
+        "namespace Example\n\
+         public async function run(pending: Task<Int>): Int\n\
+             async defer\n\
+                 local ignored = await pending\n\
+             end\n\
+             return 1\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        body.statements()[0].kind(),
+        StatementSyntaxKind::AsyncDefer { body } if body.len() == 1
+    ));
+}
+
+#[test]
 fn malformed_optional_binding_reports_an_owned_recovery_expectation() {
     let text = "namespace Example\n\
                 private function invalid(value: String?)\n\

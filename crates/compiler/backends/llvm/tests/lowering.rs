@@ -1,10 +1,13 @@
 use pop_backend_api::RuntimeProfile;
-use pop_backend_llvm::{LlvmLoweringError, LlvmLoweringOptions, lower_mir_to_llvm_ir};
+use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
+use pop_backend_mir_interp::{ExecutionError, MirInterpreter, MirValue};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{lower_hir_bubble, parse_mir_dump};
+use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
+use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind, UnwindReason};
 use pop_source::SourceFile;
 use pop_target::{Endianness, PointerWidth, TargetSpec};
+use pop_types::{IntegerKind, IntegerValue};
 use std::fmt::Write as _;
 use std::fs;
 use std::num::NonZeroU32;
@@ -67,7 +70,7 @@ fn lowers_verified_mir_through_private_ir_to_deterministic_llvm_ir() {
 }
 
 #[test]
-fn llvm_rejects_async_functions_until_task_state_machine_lowering_exists() {
+fn llvm_lowers_async_functions_to_native_scheduler_poll_state_machines() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/async.pop",
@@ -91,15 +94,918 @@ fn llvm_rejects_async_functions_until_task_state_machine_lowering_exists() {
     let mir =
         lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
 
-    assert!(matches!(
-        lower_mir_to_llvm_ir(
-            &mir,
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM coroutine lowering");
+    let text = module.to_string();
+    assert!(text.contains("define i8 @pop_b0_async_s0_poll"), "{text}");
+    assert!(text.contains("@pop_rt_task_frame_load"), "{text}");
+    assert!(text.contains("@pop_rt_task_completion_store"), "{text}");
+    assert!(
+        module.verify().is_ok(),
+        "LLVM must verify coroutine state machines"
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_cold_async_tasks_and_nested_await_on_the_native_scheduler() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncNative.pop",
+        "namespace Main\n\
+         private async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function consume(): Int\n\
+             return await load()\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM async lowering");
+    let mut text = module.to_string();
+    text.push_str(
+        "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+         entry:\n\
+           %task = call i64 @pop_b0_async_s1_create(i64 0)\n\
+           %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+           %output = alloca i64\n\
+           %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+           %completed = icmp eq i8 %status, 3\n\
+           br i1 %completed, label %done, label %failed\n\
+         done:\n\
+           %value = load i64, ptr %output\n\
+           %exit = trunc i64 %value to i32\n\
+           ret i32 %exit\n\
+         failed:\n\
+           %failed_status = zext i8 %status to i32\n\
+           %failed_exit = add i32 %failed_status, 90\n\
+           ret i32 %failed_exit\n\
+         }\n",
+    );
+    let result = link_llvm_text_with_runtime_and_run(&text, "async-native");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native async execution failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_async_union_switches() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncUnionControlFlow.pop",
+        "namespace Main\n\
+         private union Choice\n\
+             Ready(value: Int)\n\
+             Other\n\
+         end\n\
+         private async function loadChoice(): Choice\n\
+             return Choice.Ready(42)\n\
+         end\n\
+         public async function run(): Int\n\
+             local choice = await loadChoice()\n\
+             match choice\n\
+             when Choice.Ready(value) then\n\
+                 return value\n\
+             when Choice.Other then\n\
+                 return 1\n\
+             end\n\
+             return 2\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("typed async LLVM lowering");
+    assert!(module.verify().is_ok(), "typed async LLVM must verify");
+    let mut text = module.to_string();
+    text.push_str(native_async_main("pop_b0_async_s2_create"));
+    let result = link_llvm_text_with_runtime_and_run(&text, "async-union-control-flow");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "typed async execution failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_async_error_switches() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncErrorControlFlow.pop",
+        "namespace Main\n\
+         private error LoadError\n\
+             Missing(code: Int)\n\
+             Denied\n\
+         end\n\
+         private async function loadError(): LoadError\n\
+             return LoadError.Missing(42)\n\
+         end\n\
+         public async function run(): Int\n\
+             local error = await loadError()\n\
+             match error\n\
+             when LoadError.Missing(code) then\n\
+                 return code\n\
+             when LoadError.Denied then\n\
+                 return 1\n\
+             end\n\
+             return 2\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("error-switch async LLVM lowering");
+    assert!(
+        module.verify().is_ok(),
+        "error-switch async LLVM must verify"
+    );
+    let mut text = module.to_string();
+    text.push_str(native_async_main("pop_b0_async_s2_create"));
+    let result = link_llvm_text_with_runtime_and_run(&text, "async-error-control-flow");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "error-switch async execution failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_float_values_across_async_frames() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncFloatFrame.pop",
+        "namespace Main\n\
+         private async function loadRatio(): Float64\n\
+             return 42.0\n\
+         end\n\
+         public async function run(): Int\n\
+             local ratio = await loadRatio()\n\
+             if ratio >= 42.0 and ratio <= 42.0 then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("float async LLVM lowering");
+    assert!(
+        module.verify().is_ok(),
+        "float async LLVM must verify: {:?}\n{}",
+        module.verify(),
+        module
+    );
+    let mut text = module.to_string();
+    text.push_str(native_async_main("pop_b0_async_s1_create"));
+    let result = link_llvm_text_with_runtime_and_run(&text, "async-float-frame");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "float async frame execution failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_recursive_async_local_functions() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/recursiveAsync.pop",
+        "namespace Main\n\
+         public async function run(): Int\n\
+             local async function count(value: Int): Int\n\
+                 if value == 0 then\n\
+                     return 42\n\
+                 end\n\
+                 return await count(value - 1)\n\
+             end\n\
+             return await count(3)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("recursive async LLVM lowering");
+    let mut text = module.to_string();
+    text.push_str(native_async_main("pop_b0_async_s0_create"));
+    let result = link_llvm_text_with_runtime_and_run(&text, "recursive-async");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "recursive async local function failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_retains_optional_completion_for_repeated_await() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optionalTaskCompletion.pop",
+        "namespace Main\n\
+         private async function maybe(value: Int?): Int?\n\
+             return value\n\
+         end\n\
+         public async function run(): Int\n\
+             local values: {[String]: Int} = { answer = 42 }\n\
+             local task = maybe(values[\"answer\"])\n\
+             local first = await task\n\
+             local second = await task\n\
+             return (first ?? 0) + (second ?? 0) - 42\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("optional completion LLVM lowering");
+    assert!(
+        module.verify().is_ok(),
+        "optional completion LLVM must verify: {:?}\n{module}",
+        module.verify()
+    );
+    let mut text = module.to_string();
+    text.push_str(native_async_main("pop_b0_async_s1_create"));
+    let result = link_llvm_text_with_runtime_and_run(&text, "optional-task-completion");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "optional repeated await failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_structured_group_ownership_and_token_propagation() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/structuredNative.pop",
+        "namespace Main\n\
+         private async function load(cancel: CancelToken): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child = Task.start(group, load(cancel))\n\
+                 return await child\n\
+             end)\n\
+             return await grouped\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let run = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run HIR")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(mir.clone(), front_end.types()).expect("optimized async MIR");
+    let expected = vec![MirValue::Integer(
+        IntegerValue::parse_decimal("42", IntegerKind::Int64).expect("forty two"),
+    )];
+    for (label, candidate) in [("before", &mir), ("after", &optimized)] {
+        let interpreter =
+            MirInterpreter::new(candidate, front_end.types()).expect("verified interpreter MIR");
+        assert_eq!(
+            interpreter
+                .call(run, &[])
+                .expect("interpreter structured task"),
+            expected,
+            "MIR interpreter diverged {label} optimization"
+        );
+        let module = lower_mir_to_llvm_ir(
+            candidate,
             front_end.types(),
             &target(),
             LlvmLoweringOptions::default(),
-        ),
-        Err(LlvmLoweringError::UnsupportedAsync)
+        )
+        .expect("LLVM structured-task lowering");
+        let mut text = module.to_string();
+        text.push_str(native_async_main("pop_b0_async_s1_create"));
+        let result =
+            link_llvm_text_with_runtime_and_run(&text, &format!("structured-async-native-{label}"));
+        assert_eq!(
+            result.status.code(),
+            Some(42),
+            "native structured async execution diverged {label} optimization: {}\n{text}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn emitted_llvm_retains_managed_task_group_completion() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/managedGroupCompletion.pop",
+        "namespace Main\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): String\n\
+                 return \"retained\"\n\
+             end)\n\
+             local completion = await grouped\n\
+             if completion == \"retained\" then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
     ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("managed group completion LLVM lowering");
+    let mut text = module.to_string();
+    assert!(
+        text.contains("@pop_rt_task_group_wrap(i64") && text.contains(", i8 1)"),
+        "managed group completion must select a precise managed task slot: {text}"
+    );
+    text.push_str(native_async_main("pop_b0_async_s0_create"));
+    let result = link_llvm_text_with_runtime_and_run(&text, "managed-group-completion");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "managed group completion was not retained: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn interpreter_and_llvm_preserve_async_cleanup_side_effect_order() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/cleanupOrder.pop",
+        "namespace Main\n\
+         private async function cleanupStep(): Int\n\
+             return 0\n\
+         end\n\
+         public async function run(): Int\n\
+             local trace = 0\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 async defer\n\
+                     trace = trace * 10 + 2\n\
+                     local cleanup = await cleanupStep()\n\
+                     trace = trace * 10 + 1\n\
+                 end\n\
+                 return 0\n\
+             end)\n\
+             local ignored = await grouped\n\
+             return trace\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let run = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run HIR")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(mir.clone(), front_end.types()).expect("optimized cleanup MIR");
+    let expected = vec![MirValue::Integer(
+        IntegerValue::parse_decimal("21", IntegerKind::Int64).expect("twenty one"),
+    )];
+    for (label, candidate) in [("before", &mir), ("after", &optimized)] {
+        let interpreter =
+            MirInterpreter::new(candidate, front_end.types()).expect("cleanup interpreter");
+        assert_eq!(
+            interpreter.call(run, &[]).expect("cleanup execution"),
+            expected,
+            "MIR interpreter changed cleanup order {label} optimization"
+        );
+        let module = lower_mir_to_llvm_ir(
+            candidate,
+            front_end.types(),
+            &target(),
+            LlvmLoweringOptions::default(),
+        )
+        .expect("cleanup LLVM lowering");
+        let mut text = module.to_string();
+        text.push_str(native_async_main("pop_b0_async_s1_create"));
+        let result =
+            link_llvm_text_with_runtime_and_run(&text, &format!("cleanup-order-native-{label}"));
+        assert_eq!(
+            result.status.code(),
+            Some(21),
+            "LLVM changed cleanup order {label} optimization: {}\n{text}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn interpreter_and_llvm_propagate_group_child_panic_after_join() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/childPanic.pop",
+        "namespace Main\n\
+         private async function fail(cancel: CancelToken): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child = Task.start(group, fail(cancel))\n\
+                 return 7\n\
+             end)\n\
+             return await grouped\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let run = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run HIR")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(mir.clone(), front_end.types()).expect("optimized child panic");
+    for (label, candidate) in [("before", &mir), ("after", &optimized)] {
+        let interpreter =
+            MirInterpreter::new(candidate, front_end.types()).expect("panic interpreter");
+        assert_eq!(
+            interpreter.call(run, &[]),
+            Err(ExecutionError::Runtime(RuntimeFailure::Trap(Trap::new(
+                TrapKind::DivisionByZero
+            )))),
+            "MIR interpreter lost child panic {label} optimization"
+        );
+        let module = lower_mir_to_llvm_ir(
+            candidate,
+            front_end.types(),
+            &target(),
+            LlvmLoweringOptions::default(),
+        )
+        .expect("child panic LLVM lowering");
+        let mut text = module.to_string();
+        text.push_str(
+            "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+             entry:\n\
+               %task = call i64 @pop_b0_async_s1_create(i64 0)\n\
+               %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+               %output = alloca i64\n\
+               %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+               %panicked = icmp eq i8 %status, 5\n\
+               %exit = select i1 %panicked, i32 0, i32 1\n\
+               ret i32 %exit\n\
+             }\n",
+        );
+        let result =
+            link_llvm_text_with_runtime_and_run(&text, &format!("child-panic-native-{label}"));
+        assert!(
+            result.status.success(),
+            "LLVM lost joined child panic {label} optimization (exit {:?}): {}\n{text}",
+            result.status.code(),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn emitted_llvm_propagates_explicit_cancellation_as_a_distinct_terminal_status() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/cancelNative.pop",
+        "namespace Main\n\
+         private async function load(cancel: CancelToken): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 local child = Task.start(group, load(cancel))\n\
+                 return await child\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let run = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "run")
+        .expect("run HIR")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let optimized = optimize_mir(mir.clone(), front_end.types()).expect("optimized cancellation");
+    for (label, candidate) in [("before", &mir), ("after", &optimized)] {
+        let interpreter =
+            MirInterpreter::new(candidate, front_end.types()).expect("cancellation interpreter");
+        assert_eq!(
+            interpreter.call(run, &[]),
+            Err(ExecutionError::Runtime(RuntimeFailure::Unwind(
+                UnwindReason::Cancellation
+            ))),
+            "MIR interpreter lost cancellation {label} optimization"
+        );
+        let module = lower_mir_to_llvm_ir(
+            candidate,
+            front_end.types(),
+            &target(),
+            LlvmLoweringOptions::default(),
+        )
+        .expect("LLVM cancellation lowering");
+        let mut text = module.to_string();
+        text.push_str(
+            "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+             entry:\n\
+               %task = call i64 @pop_b0_async_s1_create(i64 0)\n\
+               %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+               %output = alloca i64\n\
+               %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+               %cancelled = icmp eq i8 %status, 4\n\
+               %exit = select i1 %cancelled, i32 0, i32 1\n\
+               ret i32 %exit\n\
+             }\n",
+        );
+        let result =
+            link_llvm_text_with_runtime_and_run(&text, &format!("cancel-async-native-{label}"));
+        assert!(
+            result.status.success(),
+            "native cancellation status diverged {label} optimization: {}\n{text}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn emitted_llvm_masks_cancellation_while_cleanup_awaits_then_propagates_its_panic() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/maskedCleanupNative.pop",
+        "namespace Main\n\
+         private async function pending(cancel: CancelToken): Int\n\
+             return 8\n\
+         end\n\
+         private async function failDuringCleanup(): Int\n\
+             return 1 / 0\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 async defer\n\
+                     local ignored = await failDuringCleanup()\n\
+                 end\n\
+                 local child = Task.start(group, pending(cancel))\n\
+                 return await child\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM masked cleanup lowering");
+    let mut text = module.to_string();
+    text.push_str(
+        "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+         entry:\n\
+           %task = call i64 @pop_b0_async_s2_create(i64 0)\n\
+           %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+           %output = alloca i64\n\
+           %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+           %panicked = icmp eq i8 %status, 5\n\
+           %exit = select i1 %panicked, i32 0, i32 1\n\
+           ret i32 %exit\n\
+         }\n",
+    );
+    let result = link_llvm_text_with_runtime_and_run(&text, "masked-cleanup-native");
+    assert!(
+        result.status.success(),
+        "masked cleanup await was skipped or its panic escaped the task boundary: {text}"
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_cancellation_after_successful_masked_async_cleanup() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/cancelCleanupNative.pop",
+        "namespace Main\n\
+         private async function child(cancel: CancelToken): Int\n\
+             return 8\n\
+         end\n\
+         private async function cleanup(): Int\n\
+             return 1\n\
+         end\n\
+         public async function run(): Int\n\
+             local source = Task.cancellationSource()\n\
+             local cancel = Task.cancelToken(source)\n\
+             local grouped = Task.group(cancel, async function(group: Task.Group): Int\n\
+                 async defer\n\
+                     local ignored = await cleanup()\n\
+                 end\n\
+                 local running = Task.start(group, child(cancel))\n\
+                 return await running\n\
+             end)\n\
+             Task.cancel(source)\n\
+             return await grouped\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("cancellation cleanup LLVM lowering");
+    let mut text = module.to_string();
+    text.push_str(
+        "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+         entry:\n\
+           %task = call i64 @pop_b0_async_s2_create(i64 0)\n\
+           %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+           %output = alloca i64\n\
+           %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+           %cancelled = icmp eq i8 %status, 4\n\
+           %exit = select i1 %cancelled, i32 0, i32 1\n\
+           ret i32 %exit\n\
+         }\n",
+    );
+    let result = link_llvm_text_with_runtime_and_run(&text, "cancel-cleanup-native");
+    assert!(
+        result.status.success(),
+        "successful masked cleanup lost the cancellation outcome: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+fn native_async_main(create: &str) -> &'static str {
+    match create {
+        "pop_b0_async_s0_create" => {
+            "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+             entry:\n\
+               %task = call i64 @pop_b0_async_s0_create(i64 0)\n\
+               %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+               %output = alloca i64\n\
+               %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+               %completed = icmp eq i8 %status, 3\n\
+               br i1 %completed, label %done, label %failed\n\
+             done:\n\
+               %value = load i64, ptr %output\n\
+               %exit = trunc i64 %value to i32\n\
+               ret i32 %exit\n\
+             failed:\n\
+               %failed_status = zext i8 %status to i32\n\
+               %failed_exit = add i32 %failed_status, 90\n\
+               ret i32 %failed_exit\n\
+             }\n"
+        }
+        "pop_b0_async_s1_create" => {
+            "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+             entry:\n\
+               %task = call i64 @pop_b0_async_s1_create(i64 0)\n\
+               %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+               %output = alloca i64\n\
+               %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+               %completed = icmp eq i8 %status, 3\n\
+               br i1 %completed, label %done, label %failed\n\
+             done:\n\
+               %value = load i64, ptr %output\n\
+               %exit = trunc i64 %value to i32\n\
+               ret i32 %exit\n\
+             failed:\n\
+               %failed_status = zext i8 %status to i32\n\
+               %failed_exit = add i32 %failed_status, 90\n\
+               ret i32 %failed_exit\n\
+             }\n"
+        }
+        "pop_b0_async_s2_create" => {
+            "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+             entry:\n\
+               %task = call i64 @pop_b0_async_s2_create(i64 0)\n\
+               %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+               %output = alloca i64\n\
+               %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+               %completed = icmp eq i8 %status, 3\n\
+               br i1 %completed, label %done, label %failed\n\
+             done:\n\
+               %value = load i64, ptr %output\n\
+               %exit = trunc i64 %value to i32\n\
+               ret i32 %exit\n\
+             failed:\n\
+               %failed_status = zext i8 %status to i32\n\
+               %failed_exit = add i32 %failed_status, 90\n\
+               ret i32 %failed_exit\n\
+             }\n"
+        }
+        _ => unreachable!("test helper uses a fixed verified create symbol"),
+    }
 }
 
 #[test]
@@ -829,9 +1735,10 @@ fn optimized_abi_two_execution_rejects_stale_tokens_after_forced_relocation() {
         1,
     );
     assert_ne!(stale, text, "test mutation must restore the old SSA token");
-    let stale_result = link_with_forced_relocation_runtime_and_run(&stale, "abi-two-stale-token");
+    let stale_execution =
+        link_with_forced_relocation_runtime_and_run(&stale, "abi-two-stale-token");
     assert!(
-        !stale_result.status.success(),
+        !stale_execution.status.success(),
         "the forced-relocation runtime accepted an old token"
     );
 }
@@ -2396,6 +3303,11 @@ private function main(arguments: Array<String>): Int\n\
     return apply(increment, 20) + factorial(3) + 15\n\
 end\n",
     );
+    let text = module.to_string();
+    assert!(
+        text.contains("call i64 @pop_rt_allocate_mapped_object(i64 1"),
+        "direct function values must use the same managed callable representation as closures: {text}"
+    );
     let result = link_with_runtime_and_run(&module, "recursive-closure");
     assert_eq!(
         result.status.code(),
@@ -2664,6 +3576,114 @@ fn emitted_llvm_executes_portable_cross_bubble_generic_capsules() {
     );
 }
 
+#[test]
+#[allow(clippy::too_many_lines)]
+fn emitted_llvm_executes_cross_bubble_async_calling_conventions() {
+    let library_bubble = BubbleId::from_raw(2);
+    let library_source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncLibrary.pop",
+        "namespace Pop.AsyncLibrary\n\
+         public async function load(value: Int): Int\n\
+             return value\n\
+         end\n",
+    )
+    .expect("library source");
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        library_bubble,
+        NamespaceId::from_raw(2),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), library_source)],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let metadata = library
+        .reference_metadata()
+        .expect("async metadata")
+        .clone();
+    let application_source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\n\
+         using Pop.AsyncLibrary\n\
+         public async function run(): Int\n\
+             return await load(42)\n\
+         end\n",
+    )
+    .expect("application source");
+    let application = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(7),
+            NamespaceId::from_raw(7),
+            vec![library_bubble],
+            vec![FrontEndModule::new(
+                ModuleId::from_raw(1),
+                application_source,
+            )],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        application.diagnostics().is_empty(),
+        "{}",
+        application.diagnostic_snapshot()
+    );
+    let library_mir = lower_hir_bubble(library.hir().expect("library HIR"), library.types())
+        .expect("library MIR");
+    let application_mir = lower_hir_bubble(
+        application.hir().expect("application HIR"),
+        application.types(),
+    )
+    .expect("application MIR");
+    let library_module = lower_mir_to_llvm_ir(
+        &library_mir,
+        library.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("library LLVM");
+    let application_module = lower_mir_to_llvm_ir(
+        &application_mir,
+        application.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("application LLVM");
+    let mut application_text = application_module.to_string();
+    assert!(
+        application_text.contains("declare i64 @pop_b2_async_s0_create(i64, i64)"),
+        "consumer must declare the dependency async create ABI:\n{application_text}"
+    );
+    application_text.push_str(
+        "\ndefine i32 @main(i32 %argc, ptr %argv) {\n\
+         entry:\n\
+           %task = call i64 @pop_b7_async_s0_create(i64 0)\n\
+           %started = call i8 @pop_rt_task_start_direct(i64 %task, i64 0)\n\
+           %output = alloca i64\n\
+           %status = call i8 @pop_rt_task_await(i64 %task, ptr %output)\n\
+           %completed = icmp eq i8 %status, 3\n\
+           br i1 %completed, label %done, label %failed\n\
+         done:\n\
+           %value = load i64, ptr %output\n\
+           %exit = trunc i64 %value to i32\n\
+           ret i32 %exit\n\
+         failed:\n\
+           ret i32 1\n\
+         }\n",
+    );
+    let modules = [library_module.to_string(), application_text];
+    let result = link_llvm_modules_with_runtime_and_run(&modules, "cross-bubble-async");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "cross-Bubble async execution failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
     native_modules(&[("src/main.pop", source_text)])
 }
@@ -2908,6 +3928,14 @@ fn numeric_conversion_matrix_source() -> String {
 }
 
 fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) -> Output {
+    link_llvm_text_with_runtime_and_run(&module.to_string(), name)
+}
+
+fn link_llvm_text_with_runtime_and_run(text: &str, name: &str) -> Output {
+    link_llvm_modules_with_runtime_and_run(&[text.to_owned()], name)
+}
+
+fn link_llvm_modules_with_runtime_and_run(texts: &[String], name: &str) -> Output {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(4)
@@ -2922,11 +3950,19 @@ fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) 
         "runtime build failed: {}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
+    let inputs = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}-{index}.ll"));
+            fs::write(&input, text).expect("write temporary LLVM input");
+            input
+        })
+        .collect::<Vec<_>>();
     let executable = std::env::temp_dir().join(format!("pop-backend-llvm-{name}"));
-    fs::write(&input, module.to_string()).expect("write temporary LLVM input");
-    let link = Command::new("clang")
-        .arg(&input)
+    let mut command = Command::new("clang");
+    command.args(&inputs);
+    let link = command
         .arg(root.join("target/debug/libpop_runtime_native.a"))
         .arg("-o")
         .arg(&executable)
@@ -2936,12 +3972,14 @@ fn link_with_runtime_and_run(module: &pop_backend_llvm::LlvmModule, name: &str) 
         link.status.success(),
         "clang rejected LLVM: {}\n{}",
         String::from_utf8_lossy(&link.stderr),
-        module
+        texts.join("\n")
     );
     let result = Command::new(&executable)
         .output()
         .expect("native executable runs");
-    let _ = fs::remove_file(input);
+    for input in inputs {
+        let _ = fs::remove_file(input);
+    }
     let _ = fs::remove_file(executable);
     result
 }

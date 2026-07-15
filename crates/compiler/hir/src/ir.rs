@@ -2092,7 +2092,9 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
-            HirStatementKind::Defer { body } => remap_aggregate_statements(body, instances),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                remap_aggregate_statements(body, instances);
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 remap_aggregate_expression(base, instances);
                 *field = instances.field(base.type_id(), *field);
@@ -2243,9 +2245,19 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
         | HirExpressionKind::Await { task: base }
+        | HirExpressionKind::TaskCancelToken { source: base }
+        | HirExpressionKind::TaskCancel { source: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
+        }
+        HirExpressionKind::TaskGroup { cancel, body } => {
+            remap_aggregate_expression(cancel, instances);
+            remap_aggregate_expression(body, instances);
+        }
+        HirExpressionKind::TaskStart { group, task } => {
+            remap_aggregate_expression(group, instances);
+            remap_aggregate_expression(task, instances);
         }
         HirExpressionKind::TableGet { table, key } => {
             remap_aggregate_expression(table, instances);
@@ -2443,6 +2455,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
+        | HirExpressionKind::TaskCancellationSource
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -2624,7 +2637,9 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
                     collect_statement_calls(&arm.body, calls);
                 }
             }
-            HirStatementKind::Defer { body } => collect_statement_calls(body, calls),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                collect_statement_calls(body, calls);
+            }
             HirStatementKind::FieldSet { base, value, .. }
             | HirStatementKind::CompoundFieldSet { base, value, .. } => {
                 collect_expression_calls(base, calls);
@@ -2716,8 +2731,18 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
         | HirExpressionKind::Await { task: base }
+        | HirExpressionKind::TaskCancelToken { source: base }
+        | HirExpressionKind::TaskCancel { source: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
+        HirExpressionKind::TaskGroup { cancel, body } => {
+            collect_expression_calls(cancel, calls);
+            collect_expression_calls(body, calls);
+        }
+        HirExpressionKind::TaskStart { group, task } => {
+            collect_expression_calls(group, calls);
+            collect_expression_calls(task, calls);
+        }
         HirExpressionKind::TableGet { table, key } => {
             collect_expression_calls(table, calls);
             collect_expression_calls(key, calls);
@@ -2864,6 +2889,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
+        | HirExpressionKind::TaskCancellationSource
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -3062,7 +3088,7 @@ fn specialize_statement(
                 specialize_statements(&mut arm.body, substitutions, instances, arena)?;
             }
         }
-        HirStatementKind::Defer { body } => {
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
             specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::FieldSet { base, value, .. } => {
@@ -3221,9 +3247,19 @@ fn specialize_expression(
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
         | HirExpressionKind::Await { task: base }
+        | HirExpressionKind::TaskCancelToken { source: base }
+        | HirExpressionKind::TaskCancel { source: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::TaskGroup { cancel, body } => {
+            specialize_expression(cancel, substitutions, instances, arena)?;
+            specialize_expression(body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::TaskStart { group, task } => {
+            specialize_expression(group, substitutions, instances, arena)?;
+            specialize_expression(task, substitutions, instances, arena)?;
         }
         HirExpressionKind::TableGet { table, key } => {
             specialize_expression(table, substitutions, instances, arena)?;
@@ -3373,6 +3409,7 @@ fn specialize_expression(
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
+        | HirExpressionKind::TaskCancellationSource
         | HirExpressionKind::EnumCase { .. } => {}
     }
     Some(())
@@ -3589,6 +3626,9 @@ pub enum HirStatementKind {
         arms: Vec<HirResultMatchArm>,
     },
     Defer {
+        body: Vec<HirStatement>,
+    },
+    AsyncDefer {
         body: Vec<HirStatement>,
     },
     FieldSet {
@@ -4114,6 +4154,21 @@ pub enum HirExpressionKind {
         when_false: Box<HirExpression>,
     },
     Await {
+        task: Box<HirExpression>,
+    },
+    TaskCancellationSource,
+    TaskCancelToken {
+        source: Box<HirExpression>,
+    },
+    TaskCancel {
+        source: Box<HirExpression>,
+    },
+    TaskGroup {
+        cancel: Box<HirExpression>,
+        body: Box<HirExpression>,
+    },
+    TaskStart {
+        group: Box<HirExpression>,
         task: Box<HirExpression>,
     },
     Call {

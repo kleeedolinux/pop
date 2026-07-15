@@ -2032,6 +2032,9 @@ impl<'index> SignatureResolver<'index> {
         {
             return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
         }
+        if let Some(entry) = self.schema.type_by_source_name(&path.join(".")).copied() {
+            return self.resolve_builtin(module, syntax, entry, arguments, generics, diagnostics);
+        }
         let name = path.join(".");
         let resolution = self
             .database
@@ -2347,6 +2350,7 @@ impl<'index> SignatureResolver<'index> {
         Some(resolved(kind, type_id, syntax.span()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_function_type(
         &mut self,
         module: ModuleId,

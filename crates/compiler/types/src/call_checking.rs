@@ -143,6 +143,17 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .check_range_create(arguments, span)
                     .map(CheckedInvocation::Value);
             }
+            if matches!(path.as_slice(), [task, operation]
+            if task == "Task"
+                && matches!(
+                    operation.as_str(),
+                    "cancellationSource" | "cancelToken" | "cancel" | "group" | "start"
+                ))
+            {
+                return self
+                    .check_task_invocation(path, arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if let Some(checked) = self.check_standard_invocation(path, arguments, span) {
                 return Some(CheckedInvocation::Call(checked));
             }
@@ -415,7 +426,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
         }
 
-        let mut type_arguments = Vec::with_capacity(signature.type_parameters().len());
+        let mut inferred_type_arguments = Vec::with_capacity(signature.type_parameters().len());
         for parameter in signature.type_parameters() {
             let Some(argument) = substitutions.get(&parameter.parameter()).copied() else {
                 self.diagnostics
@@ -426,12 +437,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     ));
                 return None;
             };
-            type_arguments.push(argument);
+            inferred_type_arguments.push(argument);
         }
         let substitution_map: BTreeMap<_, _> = signature
             .type_parameters()
             .iter()
-            .zip(&type_arguments)
+            .zip(&inferred_type_arguments)
             .map(|(parameter, argument)| (parameter.parameter(), *argument))
             .collect();
         self.resolver
@@ -478,7 +489,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             call: TypedCall {
                 dispatch,
                 is_async: signature.is_async(),
-                type_arguments,
+                type_arguments: inferred_type_arguments,
                 arguments: typed_arguments,
                 span,
             },
@@ -818,6 +829,166 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             type_id: string,
             span,
         })
+    }
+
+    fn task_builtin_type(&mut self, name: &str, arguments: Vec<TypeId>) -> Option<TypeId> {
+        let definition = self.resolver.schema().type_by_source_name(name)?.id();
+        self.resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition,
+                arguments,
+            })
+            .ok()
+    }
+
+    fn task_argument(
+        &mut self,
+        argument: &ExpressionSyntax,
+        expected: TypeId,
+        operation: &str,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let typed = self
+            .check_expression_expected(argument, Some(ExpectedExpressionType::plain(expected)))?;
+        if typed.type_id() != expected {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                argument.span(),
+                self.type_name(expected),
+                self.type_name(typed.type_id()),
+                span,
+            ));
+            let _ = operation;
+            return None;
+        }
+        Some(typed)
+    }
+
+    fn check_task_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let operation = path.get(1)?.as_str();
+        let expected_arity = match operation {
+            "cancellationSource" => 0,
+            "cancelToken" | "cancel" => 1,
+            "group" | "start" => 2,
+            _ => return None,
+        };
+        if arguments.len() != expected_arity {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                format!("Task.{operation}"),
+                expected_arity,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let source_type = self.task_builtin_type("Task.CancelSource", Vec::new())?;
+        let group_type = self.task_builtin_type("Task.Group", Vec::new())?;
+        let cancel_type = self.task_builtin_type("CancelToken", Vec::new())?;
+        match operation {
+            "cancellationSource" => Some(TypedExpression {
+                kind: TypedExpressionKind::TaskCancellationSource,
+                type_id: source_type,
+                span,
+            }),
+            "cancelToken" | "cancel" => {
+                let source = self.task_argument(&arguments[0], source_type, operation, span)?;
+                Some(TypedExpression {
+                    kind: if operation == "cancelToken" {
+                        TypedExpressionKind::TaskCancelToken {
+                            source: Box::new(source),
+                        }
+                    } else {
+                        TypedExpressionKind::TaskCancel {
+                            source: Box::new(source),
+                        }
+                    },
+                    type_id: if operation == "cancelToken" {
+                        cancel_type
+                    } else {
+                        self.resolver.arena().source_type("nil")?
+                    },
+                    span,
+                })
+            }
+            "start" => {
+                let group = self.task_argument(&arguments[0], group_type, operation, span)?;
+                let task = self.check_expression(&arguments[1])?;
+                let task_definition = self.resolver.schema().type_by_source_name("Task")?.id();
+                if !matches!(
+                    self.resolver.arena().get(task.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == task_definition && arguments.len() == 1
+                ) {
+                    self.diagnostics.push(type_diagnostics::type_mismatch(
+                        arguments[1].span(),
+                        "Task<T>",
+                        self.type_name(task.type_id()),
+                        span,
+                    ));
+                    return None;
+                }
+                let task_type = task.type_id();
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::TaskStart {
+                        group: Box::new(group),
+                        task: Box::new(task),
+                    },
+                    type_id: task_type,
+                    span,
+                })
+            }
+            "group" => {
+                let cancel = self.task_argument(&arguments[0], cancel_type, operation, span)?;
+                let body = self.check_expression(&arguments[1])?;
+                let Some(SemanticType::Function {
+                    is_async: true,
+                    parameters,
+                    results,
+                    ..
+                }) = self.resolver.arena().get(body.type_id()).cloned()
+                else {
+                    self.diagnostics.push(type_diagnostics::type_mismatch(
+                        arguments[1].span(),
+                        "async function(Task.Group): T",
+                        self.type_name(body.type_id()),
+                        span,
+                    ));
+                    return None;
+                };
+                if parameters.as_slice() != [group_type] {
+                    self.diagnostics.push(type_diagnostics::type_mismatch(
+                        arguments[1].span(),
+                        "async function(Task.Group): T",
+                        self.type_name(body.type_id()),
+                        span,
+                    ));
+                    return None;
+                }
+                let completion = match results.as_slice() {
+                    [result] => *result,
+                    _ => self
+                        .resolver
+                        .arena_mut()
+                        .intern(SemanticType::Tuple(results))
+                        .ok()?,
+                };
+                let task_type = self.task_builtin_type("Task", vec![completion])?;
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::TaskGroup {
+                        cancel: Box::new(cancel),
+                        body: Box::new(body),
+                    },
+                    type_id: task_type,
+                    span,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn check_numeric_conversion(

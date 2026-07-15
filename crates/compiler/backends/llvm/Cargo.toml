@@ -19,6 +19,7 @@ pop-target.workspace = true
 pop-types.workspace = true
 
 [dev-dependencies]
+pop-backend-mir-interp.workspace = true
 pop-driver.workspace = true
 pop-foundation.workspace = true
 pop-source.workspace = true

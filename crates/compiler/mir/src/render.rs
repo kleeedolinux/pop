@@ -524,6 +524,30 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             output.push_str(" args ");
             dump_value_list(output, arguments);
         }
+        MirInstructionKind::CancelSourceCreate => output.push_str("cancelSourceCreate"),
+        MirInstructionKind::CancelSourceToken { source } => {
+            let _ = write!(output, "cancelSourceToken v{}", source.raw());
+        }
+        MirInstructionKind::CancelRequest { source } => {
+            let _ = write!(output, "cancelRequest v{}", source.raw());
+        }
+        MirInstructionKind::TaskGroupCreate {
+            cancel,
+            body,
+            completion_type,
+            object_map,
+        } => {
+            let _ = write!(
+                output,
+                "taskGroupCreate completion:t{} ",
+                completion_type.raw()
+            );
+            dump_object_map(output, object_map);
+            let _ = write!(output, " cancel:v{} body:v{}", cancel.raw(), body.raw());
+        }
+        MirInstructionKind::TaskStart { group, task } => {
+            let _ = write!(output, "taskStart v{} v{}", group.raw(), task.raw());
+        }
         MirInstructionKind::TupleMake(values) => dump_values(output, "tupleMake", values),
         MirInstructionKind::TupleGet { tuple, index } => {
             let _ = write!(output, "tupleGet {index} v{}", tuple.raw());
@@ -1226,17 +1250,22 @@ fn dump_terminator(output: &mut String, terminator: &MirTerminator) {
             operation: MirSuspendOperation::Task { task, result_type },
             resume,
             cancellation,
+            cancellation_mode,
             unwind,
             safe_point,
             live_frame,
         } => {
             let _ = write!(
                 output,
-                "suspend.task v{} result:t{} resume:b{} cancellation:b{} unwind:",
+                "suspend.task v{} result:t{} resume:b{} cancellation:b{} cancellation-mode:{} unwind:",
                 task.raw(),
                 result_type.raw(),
                 resume.raw(),
-                cancellation.raw()
+                cancellation.raw(),
+                match cancellation_mode {
+                    MirCancellationMode::Observe => "observe",
+                    MirCancellationMode::Masked => "masked",
+                }
             );
             match unwind {
                 MirUnwindAction::Propagate => output.push_str("propagate"),
@@ -1386,6 +1415,7 @@ fn dump_effects(output: &mut String, effects: MirEffectSummary) {
         output.push_str(match effect {
             MirEffect::Allocates => "Allocates",
             MirEffect::WritesManagedReference => "WritesManagedReference",
+            MirEffect::Synchronizes => "Synchronizes",
             MirEffect::MayTrap => "MayTrap",
             MirEffect::MayUnwind => "MayUnwind",
             MirEffect::Suspends => "Suspends",

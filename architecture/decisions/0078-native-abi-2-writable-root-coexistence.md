@@ -5,6 +5,10 @@
 - Depends on: ADR 0038, ADR 0039, ADR 0070, and ADR 0077
 - Supersedes: none
 
+ADR 0079 later extends the stable-token family with the coexisting ABI 1.12
+task-frame descriptor. It does not change this ADR's ABI 1.11 root semantics or
+ABI 2.0 writable-root requirements.
+
 ## Context
 
 Native ABI 1.11 is the accepted stable-token bootstrap interface. Its GC safe
