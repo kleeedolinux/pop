@@ -404,6 +404,11 @@ deterministic reviewable source plus hashed ABI metadata, and safe public
 wrappers convert those declarations into normal typed Pop APIs. See
 [ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
+Native ABI 1.15 adds `pop_rt_resolve_root` for the exact current target of a
+live generation-checked handle. Creation/release retain their existing
+retain-root/release-root entries. Invalid, stale, forged, zero, or closed
+handles fail before a managed reference is returned.
+
 ## Versioning
 
 Artifacts record the language version, MIR version when serialized, PLRI ABI

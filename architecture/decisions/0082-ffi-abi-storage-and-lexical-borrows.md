@@ -160,6 +160,15 @@ A forged, zero, stale, wrong-generation, or already-closed token is an
 invariant panic with no managed value returned. Native code may preserve and
 return the token but cannot dereference it or reinterpret it as a pointer.
 
+Native ABI 1.15 adds
+`pop_rt_resolve_root(u64 handle) -> u64 managedReference`. Zero reports a
+failed invariant at this narrow C boundary; valid managed references and root
+handles are nonzero. The generated `Ffi.Handle.get` adapter traps on zero
+before managed code resumes. Handle creation and close continue to use the
+existing `pop_rt_retain_root` and `pop_rt_release_root` entries. PLRI names the
+backend-neutral operation `resolveRoot`; MIR carries the exact static managed
+result type and never treats the returned token as a pointer.
+
 ### Fixed-layout record marshalling
 
 An `Ffi.C.Layout` record remains an ordinary Pop record, not an exposed object
