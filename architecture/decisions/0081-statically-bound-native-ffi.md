@@ -204,6 +204,26 @@ safe-point symbol. Native ABI 2 uses the same logical transition with relocating
 root writeback; a backend may advertise relocating FFI only after forced-
 relocation tests cover both successful return and unwind cleanup.
 
+Native execution must establish a managed-thread binding before the first
+managed allocation, root publication, or foreign transition. The generated
+program-entry adapter calls backend-neutral `attachManagedThread` before
+decoding process arguments or invoking Pop code and calls
+`detachManagedThread` after the Pop entry returns. Native scheduler workers use
+their already registered dispatch binding instead. Attach returns an opaque
+nonzero `ManagedThreadBindingId`; it registers the exact scheduler/mutator pair
+in `Managed` state. Detach is thread-bound and single-use, requires no active
+foreign or callback transition, changes the mutator to `Detached`, clears the
+thread binding, and unregisters it. Duplicate attachment, wrong-thread or stale
+identity, active-transition detach, and partial cleanup fail as runtime
+invariants.
+
+Native ABI 1.14 adds `pop_rt_attach_managed_thread(i32 scheduler) -> i64`
+and `pop_rt_detach_managed_thread(i64 binding) -> i8`. The generated primary
+entry uses logical scheduler `1`; zero is invalid. Callback adapters use the
+same PLRI identity only when entering from an otherwise unattached native
+thread and must detach on every exit. Attaching is not ambient thread-local
+discovery: the returned identity is explicit, balanced runtime authority.
+
 Native unwind is forbidden by default. `abi = "CUnwind"` selects the C ABI with
 an explicit unwind boundary and adds `MayUnwind`; an incompatible target
 rejects it. No native exception or panic crosses into Pop as an untyped payload. A

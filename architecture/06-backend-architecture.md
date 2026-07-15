@@ -94,6 +94,9 @@ identity and root-slot shape remain coupled across every normal and unwind edge;
 LLVM reloads every writable root slot after leave before later managed use.
 `Ffi.Nonblocking` selects only the closed bounded mode and never removes the
 transition. Missing target unwind support rejects `CUnwind` before emission.
+The native `main` adapter balances `AttachManagedThread`/
+`DetachManagedThread` around argument decoding and Pop invocation; it cannot
+enter managed code or allocate an argument array while unbound.
 The driver—not LLVM semantic lowering—consumes the typed `NativeLinkPlan` to
 link system/framework/object/archive/shared/import-library inputs. LLVM never
 parses raw linker flags or reconstructs ownership, callback, or movement facts.

@@ -172,6 +172,15 @@ new ABI 1.13 arguments and do not alter the immutable ABI 1 safe-point entry.
 ABI 2 preserves the same PLRI operation while additionally proving relocating
 writeback on return and unwind.
 
+The same ADR advances native ABI 1 to version 1.14 with balanced managed-thread
+attachment. `AttachManagedThread` registers an exact scheduler/mutator binding
+in managed state and returns a thread-bound `ManagedThreadBindingId`;
+`DetachManagedThread` requires no active native transition, detaches,
+unregisters, and consumes that identity. The generated native program entry
+attaches logical scheduler 1 before argument decoding or Pop invocation and
+detaches after normal return. Scheduler workers retain their existing
+dispatch-owned binding rather than attaching again.
+
 At an argument-taking binary boundary, the target entry adapter omits the
 executable path, validates each remaining platform argument as UTF-8, and
 constructs the canonical managed `Array<String>` before invoking the entry
