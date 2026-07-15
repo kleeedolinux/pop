@@ -390,6 +390,13 @@ and mailbox publication preserve the invariant that a shared object never
 points into local young/actor memory. Task/actor migration performs required
 copy, promotion, publication, or delay before changing scheduler ownership.
 
+ADR 0085 may elide handler scalars, keep proven non-escaping arrays/aggregates
+in frame-owned storage, and place one-handler temporary graphs in a scoped
+region. Mailbox-retained values, shared registries, escaping frames, and
+long-lived actor graphs whose internal garbage dies before the actor still use
+managed tracing unless a smaller complete lifetime proof exists. Actor identity
+alone never forces all memory static or all memory managed.
+
 The MIR interpreter supplies a deterministic scheduler and in-process cluster
 transport. LLVM and a future VM preserve the same local semantics. Production
 timing stays nondeterministic inside the ordering contract. The experimental C

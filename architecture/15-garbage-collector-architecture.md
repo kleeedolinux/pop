@@ -4,6 +4,11 @@
 
 This document defines the target architecture for Pop Lang's production garbage collector.
 
+Pop GC is the managed fallback inside the proof-directed hybrid defined by
+[Static memory management](./24-static-memory-management.md) and ADR 0085.
+Values with verified static/region lifetimes do not enter the collector; this
+document governs allocations whose death remains a runtime reachability fact.
+
 It is not a claim that the current runtime already implements every mechanism described here. The design is intentionally staged so that correctness infrastructure, allocation performance, concurrency, and low-latency behavior can be validated independently.
 
 The collector is provisionally named **Pop GC**.
@@ -137,6 +142,11 @@ The compiler should aggressively use:
 - ownership transfer;
 - immutable sharing;
 - region lifetime inference.
+
+ADR 0085 makes this principle executable architecture. Optimized canonical MIR
+records `Elided`, `StaticSlot`, `ScopedRegion`, or managed storage plans plus
+verified non-lexical lifetime frontiers. A backend cannot invent a weaker escape
+rule, and any incomplete proof stays managed.
 
 ## 2.2 Keep local memory local
 
@@ -274,6 +284,11 @@ The collector sees such values only when they contain managed references that re
 
 The compiler must preserve observable identity. An object cannot be scalar-replaced if the program can observe that two references designate the same object and the transformation would change that result.
 
+Activation-owned storage is not restricted to a machine stack. A dynamic scalar
+array may use a checked activation side buffer, and a value live across
+suspension may use a compiler-created frame slot. The exact `LifetimeId` and
+every-exit frontier come from verified MIR under ADR 0085.
+
 ## 4.2 Scoped arenas
 
 A scoped arena supports groups of objects with a common lifetime.
@@ -291,6 +306,12 @@ arena frame {
 The arena uses bump allocation and bulk reclamation.
 
 A reference into an arena must not outlive the arena. The compiler enforces this through lifetime analysis, borrowing rules, escape checks, or explicit annotations.
+
+For ordinary Pop source, ADR 0085 selects compiler-inferred `ScopedRegion`
+plans rather than explicit annotations. The verifier proves every interior
+alias ends before close, managed storage never points into the region, outward
+managed edges remain precise roots, and normal/failure/unwind/cancellation
+exits balance the close.
 
 Arenas are especially useful for:
 
@@ -1450,6 +1471,10 @@ The following invariants are mandatory.
 - No reachable object is reclaimed.
 - Every live managed reference is in a traced object, precise root, isolated-owner record, or registered handle.
 - Every evacuated reference is updated or safely resolved before stale storage is reused.
+- Every statically reclaimed allocation has a verified complete lifetime
+  frontier; every unproven allocation remains managed.
+- Managed storage never points into an activation-owned slot or compiler-scoped
+  region, and their precise outward roots remain live until end/close.
 
 ## 22.2 Local/shared separation
 
@@ -1558,6 +1583,10 @@ Initial production gates should include:
 
 - local allocation fast path is a pointer bump with no global lock;
 - stack-allocated and scalar-replaced objects perform no GC allocation;
+- proven non-escaping scalar arrays and aggregates consume the ADR 0085 static
+  plan in every primary backend and close on every applicable exit;
+- missing or rejected static proofs retain the managed path without changing
+  source acceptance;
 - no routine global young-generation pause;
 - no routine pause proportional to total heap capacity;
 - no routine full-heap stop-the-world mark or sweep;

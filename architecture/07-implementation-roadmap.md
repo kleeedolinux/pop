@@ -63,6 +63,8 @@ conversions.
 - MIR parser, printer, verifier, and deterministic `pop check <source.pop>
   --dump mir` bootstrap inspection;
 - portable constant folding and dead-code elimination;
+- stable allocation-site/lifetime/region identities, closed call-retention
+  summaries, and negative proof-verifier fixtures from ADR 0085;
 - a simple MIR interpreter and minimal runtime adapter.
 - warning-wave policy, scoped suppression, LSP/JSON output, and fix-all engine.
 - `.poplib` `documentation.xml`, `pop documentation`, and compiled documentation examples.
@@ -116,6 +118,9 @@ not table or runtime-name lookup.
 - backend-private scalar replacement for non-escaping scalar arrays, including
   read-only loop-local instances, with exact shape/bounds traps, loop safe
   points, and managed, escaping, or mutated-loop negative coverage;
+- migrate that scalar-array escape decision into verified portable MIR, add
+  every-exit activation-owned storage, and require interpreter/LLVM agreement
+  before generalizing proof-directed static reclamation;
 - scoped pin handle/object counting and deterministic long-lived-pin telemetry;
 - domain/scheduler-homogeneous regions with exact fragmentation telemetry and
   bounded reserve-admitted selective-evacuation candidate selection;
@@ -178,6 +183,10 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   edges before the deterministic collector-owned commit, while phase-specific
   reference resolution and mutator-concurrent evacuation remain open;
   typed scoped bump arenas provide precise external roots and bulk reclamation;
+  proof-directed `Elided`, `StaticSlot`, and compiler-inferred `ScopedRegion`
+  plans cover proven scalars, arrays, aggregates, and closure environments,
+  with conservative managed fallback and exact cleanup/unwind/cancellation/
+  coroutine frontiers under ADR 0085;
   fixed scheduler-local contexts now carry explicit identities, disjoint token
   namespaces, independently locked TLABs, and concurrent scheduler-scoped minor
   evacuation; replacing the ABI 1 stable facade's process-global lock remains
