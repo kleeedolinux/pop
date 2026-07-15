@@ -963,6 +963,7 @@ fn verify_gc_contracts(
                     slot,
                     previous,
                     value,
+                    proof,
                 } => {
                     verify_write_barrier(
                         instruction,
@@ -975,6 +976,14 @@ fn verify_gc_contracts(
                         facts.values,
                         errors,
                     );
+                    if let Some(proof) = proof
+                        && !valid_barrier_elision_proof(block, index, *owner, *proof)
+                    {
+                        errors.push(MirVerificationError::InvalidBarrierElisionProof {
+                            instruction: instruction.result(),
+                            proof: *proof,
+                        });
+                    }
                     let followed_by_matching_store = block
                         .instructions()
                         .get(index.saturating_add(1))
@@ -1031,6 +1040,56 @@ fn verify_gc_contracts(
     }
     verify_root_balance(function, errors);
     verify_pin_balance(function, errors);
+}
+
+pub(crate) fn valid_barrier_elision_proof(
+    block: &MirBlock,
+    barrier_index: usize,
+    owner: ValueId,
+    proof: BarrierElisionProof,
+) -> bool {
+    match proof {
+        BarrierElisionProof::UnpublishedOwner => {
+            let Some(allocation_index) =
+                block.instructions()[..barrier_index]
+                    .iter()
+                    .rposition(|instruction| {
+                        instruction.result() == owner
+                            && matches!(instruction.kind(), MirInstructionKind::ClassMake { .. })
+                    })
+            else {
+                return false;
+            };
+            block.instructions()[allocation_index + 1..barrier_index]
+                .iter()
+                .all(|instruction| unpublished_owner_operation(instruction, owner))
+        }
+    }
+}
+
+fn unpublished_owner_operation(instruction: &MirInstruction, owner: ValueId) -> bool {
+    match instruction.kind() {
+        MirInstructionKind::FieldGet { base, .. } | MirInstructionKind::FieldSet { base, .. } => {
+            *base == owner
+        }
+        MirInstructionKind::WriteBarrier {
+            owner: barrier_owner,
+            ..
+        } => *barrier_owner == owner,
+        MirInstructionKind::GcSafePoint { .. } => true,
+        MirInstructionKind::RetainRoot { value }
+        | MirInstructionKind::Pin { value }
+        | MirInstructionKind::CaptureCellStore { value, .. }
+        | MirInstructionKind::CaptureStore { value, .. } => *value != owner,
+        MirInstructionKind::CallDirect { .. }
+        | MirInstructionKind::CallReferenced { .. }
+        | MirInstructionKind::CallStandard { .. }
+        | MirInstructionKind::CallDirectMethod { .. }
+        | MirInstructionKind::CallInterface { .. }
+        | MirInstructionKind::CallBuiltinInterface { .. }
+        | MirInstructionKind::CallIndirect { .. } => false,
+        kind => !instruction_operands(kind).contains(&owner),
+    }
 }
 
 fn expected_class_object_map(declaration: &MirClassDeclaration, arena: &TypeArena) -> ObjectMap {

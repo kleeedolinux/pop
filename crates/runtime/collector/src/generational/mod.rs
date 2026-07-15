@@ -11,6 +11,7 @@ mod heap;
 mod major;
 mod memory;
 mod ownership;
+mod parallel;
 mod pinning;
 mod stable;
 mod task_roots;
@@ -36,6 +37,10 @@ pub use heap::{
 pub use memory::{
     GenerationalMemoryConfig, GenerationalMemoryConfigError, GenerationalMemoryTelemetry,
     NonHeapMemoryUsage, NonHeapMemoryUsageError,
+};
+pub use parallel::{
+    ParallelSchedulerLocalConfigError, ParallelSchedulerLocalRuntime,
+    ParallelSchedulerLocalTelemetry, SchedulerLocalContext,
 };
 pub use pinning::{PinningConfig, PinningTelemetry};
 pub use stable::StableGenerationalRuntime;

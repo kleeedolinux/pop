@@ -31,6 +31,7 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: Option<ManagedReference>,
     ) -> Result<(), RuntimeFailure> {
+        self.ensure_mutable(owner)?;
         let previous = self.nursery.load_reference(owner, slot)?;
         if value.is_some_and(|reference| !self.nursery.contains(reference)) {
             return Err(RuntimeFailure::runtime_invariant());

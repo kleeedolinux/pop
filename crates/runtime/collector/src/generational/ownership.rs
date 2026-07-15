@@ -7,8 +7,8 @@ use pop_runtime_interface::{ManagedReference, RootHandle, RootPublication, Runti
 use crate::SchedulerId;
 use crate::heap::BootstrapRuntime;
 use crate::ownership::{
-    IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
-    PublicationStatistics,
+    FreezeStatistics, IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectMutability,
+    ObjectOwnership, PublicationStatistics,
 };
 use crate::relocation::CollectorGeneration;
 
@@ -59,6 +59,57 @@ impl GenerationalRuntime {
             .objects
             .get(&reference)
             .map(|object| object.ownership)
+    }
+
+    #[must_use]
+    pub fn mutability(&self, reference: ManagedReference) -> Option<ObjectMutability> {
+        self.nursery
+            .objects
+            .get(&reference)
+            .map(|object| object.mutability)
+    }
+
+    /// Atomically freezes the complete managed-reference closure of a shared root.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale references, malformed maps, or any reached non-shared
+    /// object without partially changing mutability.
+    pub fn freeze_shared(
+        &mut self,
+        root: ManagedReference,
+    ) -> Result<FreezeStatistics, RuntimeFailure> {
+        let mut pending = vec![root];
+        let mut freeze = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            let object = self
+                .nursery
+                .objects
+                .get(&reference)
+                .filter(|object| object.ownership == ObjectOwnership::Shared)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            if !freeze.insert(reference) {
+                continue;
+            }
+            append_object_references(object, &mut pending)?;
+        }
+        for reference in &freeze {
+            self.nursery
+                .objects
+                .get_mut(reference)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?
+                .mutability = ObjectMutability::SharedImmutable;
+        }
+        Ok(FreezeStatistics::new(freeze.len()))
+    }
+
+    pub(crate) fn ensure_mutable(&self, owner: ManagedReference) -> Result<(), RuntimeFailure> {
+        match self.mutability(owner) {
+            Some(ObjectMutability::Mutable) => Ok(()),
+            Some(ObjectMutability::SharedImmutable) | None => {
+                Err(RuntimeFailure::runtime_invariant())
+            }
+        }
     }
 
     /// Constructs an isolated region after verifying one external owner.

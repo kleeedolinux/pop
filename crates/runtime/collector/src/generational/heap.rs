@@ -205,6 +205,15 @@ impl GenerationalRuntime {
         Self::with_config(MajorCollectorConfig::default())
     }
 
+    pub(crate) fn for_scheduler_context(
+        scheduler: SchedulerId,
+    ) -> Result<Self, pop_runtime_interface::RuntimeFailure> {
+        let mut runtime = Self::new();
+        runtime.nursery.configure_scheduler_namespace(scheduler)?;
+        runtime.select_scheduler(scheduler);
+        Ok(runtime)
+    }
+
     #[must_use]
     pub fn with_config(config: MajorCollectorConfig) -> Self {
         Self::with_allocation_config(config, AllocationInfrastructureConfig::default())

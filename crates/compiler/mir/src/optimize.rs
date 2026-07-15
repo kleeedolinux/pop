@@ -28,6 +28,7 @@ pub fn optimize_mir(
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     verify_mir_bubble(&bubble, arena)?;
     for function in &mut bubble.functions {
+        elide_unpublished_owner_barriers(function);
         summarize_constant_reduction(function);
         fold_constants(function);
         remove_unreachable_blocks(function);
@@ -36,6 +37,7 @@ pub fn optimize_mir(
         recompute_optimized_effects(function);
     }
     for method in &mut bubble.methods {
+        elide_unpublished_owner_barriers(&mut method.function);
         summarize_constant_reduction(&mut method.function);
         fold_constants(&mut method.function);
         remove_unreachable_blocks(&mut method.function);
@@ -45,6 +47,7 @@ pub fn optimize_mir(
     }
     for nested in &mut bubble.nested_functions {
         let mut function = nested.transformation_adapter();
+        elide_unpublished_owner_barriers(&mut function);
         summarize_constant_reduction(&mut function);
         fold_constants(&mut function);
         remove_unreachable_blocks(&mut function);
@@ -73,6 +76,38 @@ pub fn optimize_mir(
     }
     verify_mir_bubble(&bubble, arena)?;
     Ok(bubble)
+}
+
+fn elide_unpublished_owner_barriers(function: &mut super::MirFunction) {
+    for block in &mut function.blocks {
+        let proofs = block
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| match instruction.kind() {
+                MirInstructionKind::WriteBarrier {
+                    owner, proof: None, ..
+                } if crate::verification::valid_barrier_elision_proof(
+                    block,
+                    index,
+                    *owner,
+                    super::BarrierElisionProof::UnpublishedOwner,
+                ) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for index in proofs {
+            let MirInstructionKind::WriteBarrier { proof, .. } =
+                &mut block.instructions[index].kind
+            else {
+                unreachable!("collected write barrier index")
+            };
+            *proof = Some(super::BarrierElisionProof::UnpublishedOwner);
+        }
+    }
 }
 
 fn refresh_transitive_call_effects(bubble: &mut MirBubble) {

@@ -1670,6 +1670,7 @@ impl<'hir> FunctionBuilder<'hir> {
                                 slot,
                                 previous: Some(previous),
                                 value: Some(value),
+                                proof: None,
                             },
                             statement.span(),
                         );
@@ -1729,6 +1730,7 @@ impl<'hir> FunctionBuilder<'hir> {
                                 slot,
                                 previous: Some(previous),
                                 value: Some(value),
+                                proof: None,
                             },
                             statement.span(),
                         );
@@ -2047,6 +2049,7 @@ impl<'hir> FunctionBuilder<'hir> {
                             slot,
                             previous: Some(previous),
                             value: Some(value),
+                            proof: None,
                         },
                         span,
                     );

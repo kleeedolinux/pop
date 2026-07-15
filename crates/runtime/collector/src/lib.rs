@@ -26,13 +26,15 @@ pub use generational::{
     GenerationalMemoryConfigError, GenerationalMemoryTelemetry, GenerationalRuntime, HeapDomain,
     MajorCollectionHandshakeError, MajorCollectionTelemetry, MajorCollectorConfig, MajorCyclePhase,
     MutatorExecutionState, MutatorId, MutatorPublication, NonHeapMemoryUsage,
-    NonHeapMemoryUsageError, PageDescriptor, PageId, PinningConfig, PinningTelemetry, RegionId,
-    RegionState, RegionTelemetry, StableGenerationalRuntime, TaskFrameRootConfig,
-    TaskFrameRootConfigError, TaskFrameRootError, TaskFrameRootTelemetry,
+    NonHeapMemoryUsageError, PageDescriptor, PageId, ParallelSchedulerLocalConfigError,
+    ParallelSchedulerLocalRuntime, ParallelSchedulerLocalTelemetry, PinningConfig,
+    PinningTelemetry, RegionId, RegionState, RegionTelemetry, SchedulerLocalContext,
+    StableGenerationalRuntime, TaskFrameRootConfig, TaskFrameRootConfigError, TaskFrameRootError,
+    TaskFrameRootTelemetry,
 };
 pub use heap::{BootstrapRuntime, CollectorMetrics, HeapLimits};
 pub use ownership::{
-    IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectOwnership,
-    PublicationStatistics,
+    FreezeStatistics, IsolatedRegionId, IsolationStatistics, IsolationTelemetry, ObjectMutability,
+    ObjectOwnership, PublicationStatistics,
 };
 pub use relocation::{CollectorGeneration, CollectorObjectId, RelocationRuntime};

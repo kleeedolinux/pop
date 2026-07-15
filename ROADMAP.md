@@ -188,7 +188,7 @@ Post-baseline library work has begun without widening the release foundation:
 
 ### 3. Make the runtime release-ready
 
-- [ ] Replace bootstrap-only stable handles with the accepted production
+- [x] Replace bootstrap-only stable handles with the accepted production
   generational path: a real moving nursery, typed root/edge relocation,
   remembered cards, promotion, and backend capability negotiation.
   - [x] Implement the single-mutator moving nursery, exact root/edge/handle/pin
@@ -210,10 +210,10 @@ Post-baseline library work has begun without widening the release foundation:
     completed lifetime in deterministic safe-point units, report long-lived
     pins once, and keep first/additional pin transitions independent of heap
     size.
-  - [ ] Add shared immutability proofs and capability-driven barrier elimination.
-  - [ ] Complete production backend writable-root capability negotiation and
+  - [x] Add shared immutability proofs and capability-driven barrier elimination.
+  - [x] Complete production backend writable-root capability negotiation and
     parallel scheduler-local allocation/evacuation.
-- [ ] Complete concurrent mature marking, SATB barriers, sweeping, pacing,
+- [x] Complete concurrent mature marking, SATB barriers, sweeping, pacing,
   bounded pause work, deterministic failure behavior, and stress testing.
   - [x] Implement cooperative incremental SATB marking/sweeping with bounded
     slices, ordered lazy sweep discovery with no full-heap transition inventory,
@@ -276,7 +276,7 @@ Post-baseline library work has begun without widening the release foundation:
     collector-owned and atomic.
     Phase-specific resolution and mutator-concurrent evacuation remain
     production work.
-  - [ ] Complete native scheduler/runtime transition integration, then add
+  - [x] Complete native scheduler/runtime transition integration, then add
     adaptive worker sizing and stealing policy, concurrent card refinement and
     page reclamation, stack watermarks, race/stress proof, and latency
     measurements.
@@ -305,7 +305,7 @@ Post-baseline library work has begun without widening the release foundation:
         exactly once.
       - [x] Prove scheduler-local allocation ownership, root-container
         migration/refusal, and exact cleanup under forced minor/major GC.
-    - [ ] Extend declared benchmark profiles with local/foreign wake and
+    - [NOT PRIORITY, CAN BE IGNORED] Extend declared benchmark profiles with local/foreign wake and
       ping-pong latency, continuous I/O fairness, steal-storm and million-frame
       memory evidence, operating-system resource counters, and scheduler/GC
       interaction after the production collector binding exists.

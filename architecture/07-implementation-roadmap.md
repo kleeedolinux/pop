@@ -128,6 +128,8 @@ not table or runtime-name lookup.
 - mutable typed root updates, runtime-profile/backend capability negotiation,
   and a real single-mutator relocation conformance collector before production
   TLAB/parallel-evacuation claims (ADR 0039);
+- atomic shared-graph freezing with mutability kept separate from ownership,
+  plus verified backend-neutral `UnpublishedOwner` barrier proofs (ADR 0080);
 - `Pop.Standard` I/O, time, tasks, and platform adapters;
 - debug locations and stack traces;
 - differential tests against the MIR interpreter.
@@ -172,8 +174,10 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   edges before the deterministic collector-owned commit, while phase-specific
   reference resolution and mutator-concurrent evacuation remain open;
   typed scoped bump arenas provide precise external roots and bulk reclamation;
-  parallel scheduler execution and native scheduler transition integration
-  remain open;
+  fixed scheduler-local contexts now carry explicit identities, disjoint token
+  namespaces, independently locked TLABs, and concurrent scheduler-scoped minor
+  evacuation; replacing the ABI 1 stable facade's process-global lock remains
+  separate native integration work;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.

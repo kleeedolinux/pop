@@ -50,6 +50,24 @@ pub fn lower_mir_to_llvm_ir(
     target: &TargetSpec,
     options: LlvmLoweringOptions,
 ) -> Result<LlvmModule, LlvmLoweringError> {
+    let native_abi = match options.runtime_profile {
+        pop_backend_api::RuntimeProfile::BootstrapStableHandles => {
+            pop_runtime_native_abi::NATIVE_ABI_1_VERSION
+        }
+        pop_backend_api::RuntimeProfile::ProductionGenerational => {
+            pop_runtime_native_abi::NATIVE_ABI_2_VERSION
+        }
+        pop_backend_api::RuntimeProfile::LinuxEbpf => {
+            return Err(LlvmLoweringError::RuntimeProfile(
+                pop_backend_api::RuntimeProfileError::IncompatibleNativeAbi {
+                    profile: options.runtime_profile,
+                    major: 1,
+                },
+            ));
+        }
+    };
+    crate::api::validate_llvm_runtime_profile(options.runtime_profile, target, native_abi)
+        .map_err(LlvmLoweringError::RuntimeProfile)?;
     verify_mir_bubble(bubble, types).map_err(LlvmLoweringError::MirVerification)?;
     let field_layout = collect_field_layout(bubble);
     let record_fields = collect_record_fields(bubble);

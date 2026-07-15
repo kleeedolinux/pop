@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use pop_runtime_interface::{ManagedReference, ObjectSlot, PinHandle, RootHandle, RuntimeFailure};
 
 use crate::heap::{Allocation, CollectorMetrics, SlotValue};
-use crate::ownership::ObjectOwnership;
+use crate::ownership::{ObjectMutability, ObjectOwnership};
 
 use super::table::ObjectTable;
 
@@ -24,6 +24,7 @@ pub(crate) struct RelocationAllocation {
     pub(crate) generation: CollectorGeneration,
     pub(crate) allocation: Allocation,
     pub(crate) ownership: ObjectOwnership,
+    pub(crate) mutability: ObjectMutability,
 }
 
 pub struct RelocationRuntime {
@@ -33,6 +34,7 @@ pub struct RelocationRuntime {
     pub(crate) dirty_cards: BTreeSet<ManagedReference>,
     pub(crate) refined_cards: Option<BTreeMap<ManagedReference, Vec<ManagedReference>>>,
     pub(crate) next_reference: u64,
+    pub(crate) reference_limit: u64,
     pub(super) next_identity: u64,
     pub(super) next_root: u64,
     pub(super) next_pin: u64,
@@ -50,6 +52,7 @@ impl RelocationRuntime {
             dirty_cards: BTreeSet::new(),
             refined_cards: None,
             next_reference: 1,
+            reference_limit: u64::MAX,
             next_identity: 1,
             next_root: 1,
             next_pin: 1,
@@ -267,11 +270,33 @@ impl RelocationRuntime {
 
     pub(super) fn fresh_reference(&mut self) -> Result<ManagedReference, RuntimeFailure> {
         let reference = ManagedReference::new(self.next_reference);
-        self.next_reference = self
+        let next = self
             .next_reference
             .checked_add(1)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if next > self.reference_limit {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        self.next_reference = next;
         Ok(reference)
+    }
+
+    pub(crate) fn configure_scheduler_namespace(
+        &mut self,
+        scheduler: crate::SchedulerId,
+    ) -> Result<(), RuntimeFailure> {
+        if !self.objects.is_empty()
+            || !self.roots.is_empty()
+            || !self.pins.is_empty()
+            || scheduler.raw() == 0
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        let base = u64::from(scheduler.raw()) << 32;
+        self.next_reference = base | 1;
+        self.reference_limit = base | u64::from(u32::MAX);
+        self.next_identity = self.next_reference;
+        Ok(())
     }
 
     pub(super) fn validate_reference(

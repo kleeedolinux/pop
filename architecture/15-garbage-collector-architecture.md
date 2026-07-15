@@ -925,6 +925,18 @@ The compiler may eliminate a barrier when it proves:
 
 Barrier elimination must be verified conservatively.
 
+Object mutability remains distinct from ownership and placement. Freezing a
+shared graph first verifies its complete managed-reference closure and then
+atomically marks every reached object `SharedImmutable`; all later payload
+mutation fails before barrier or heap state changes. Shared ownership by itself
+does not imply immutability.
+
+Verified MIR retains a closed proof on an elided barrier rather than deleting
+the safety argument. The first proof is a same-block, non-escaping
+`UnpublishedOwner` allocation fact. Backends consume that verified proof and do
+not infer weaker backend-local barrier rules. See
+[ADR 0080](./decisions/0080-shared-immutability-and-barrier-proofs.md).
+
 ## 11.3 Remembered sets
 
 The common store path should perform only a cheap card or page-state update.

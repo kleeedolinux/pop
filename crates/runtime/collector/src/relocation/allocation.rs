@@ -140,6 +140,7 @@ impl RelocationRuntime {
                     slots,
                 },
                 ownership: ObjectOwnership::default(),
+                mutability: crate::ObjectMutability::Mutable,
             },
         );
         self.metrics.record_allocation();

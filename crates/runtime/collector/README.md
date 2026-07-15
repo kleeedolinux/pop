@@ -161,8 +161,10 @@ isolated regions as separate mechanisms. Isolation verifies a unique registered
 owner and rejects other handles, pins, stack roots, or outside incoming edges
 before transactionally assigning a distinct region and placement. Transfer
 changes only the owner scheduler; dissolution returns the graph to local mature
-ownership. Borrowing integration, shared immutability proofs, and
-compiler-proved barrier elimination remain separate required work.
+ownership. Borrowing integration remains separate required work. Complete
+shared graphs can freeze atomically into mutability metadata distinct from
+ownership, and verified backend-neutral `UnpublishedOwner` proofs elide the
+same runtime barrier in LLVM and the MIR interpreter.
 
 Scoped arenas use typed `ArenaReference` tokens rather than managed references.
 Their layouts distinguish scalar, same-arena, and managed-reference slots;
@@ -175,8 +177,12 @@ Scheduler-local allocation records the owning scheduler in object ownership and
 page metadata. Each scheduler retains an independent TLAB cursor and minor
 request; local evacuation traces, relocates, and reclaims only that scheduler's
 nursery, preserving other schedulers' tokens and pages. Direct local edges
-between scheduler heaps are rejected before mutation. Parallel scheduler
-execution and parallel local evacuation remain unfinished production work.
+between scheduler heaps are rejected before mutation. Fixed
+`ParallelSchedulerLocalRuntime` inventories provide one independently locked
+context and disjoint managed-token namespace per explicit scheduler identity.
+Scheduler workers can therefore allocate through separate TLABs and run
+scheduler-scoped minor evacuation concurrently without a shared selected-
+scheduler lock.
 
 `RelocationRuntime` reports `RelocationConformance`, not production GC. It has
 a moving nursery and card barrier but intentionally retains mature objects and
