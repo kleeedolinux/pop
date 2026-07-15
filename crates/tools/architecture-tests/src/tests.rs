@@ -324,6 +324,20 @@ fn accepted_adrs_have_unique_numeric_identities() {
     }
 }
 
+#[test]
+fn pull_request_tests_do_not_execute_harness_free_benchmarks() {
+    let workflow = read_required(repository_root().join(".github/workflows/pr-check.yml"));
+
+    assert!(
+        workflow.contains("run: cargo test --workspace --lib --bins --tests --examples"),
+        "PR tests must select test targets without executing harness-free benchmarks"
+    );
+    assert!(
+        !workflow.contains("run: cargo test --workspace --all-targets"),
+        "Cargo's all-targets test mode executes harness-free benchmark binaries"
+    );
+}
+
 fn quoted_values_in_array(manifest: &str, key: &str) -> BTreeSet<String> {
     let key_start = manifest
         .find(key)
