@@ -10,6 +10,7 @@ mod roots;
 mod scheduler;
 mod state;
 mod storage;
+mod task;
 mod text;
 
 pub use allocation::*;
@@ -21,4 +22,5 @@ pub use range::*;
 pub use roots::*;
 pub use scheduler::*;
 pub use storage::*;
+pub use task::*;
 pub use text::*;

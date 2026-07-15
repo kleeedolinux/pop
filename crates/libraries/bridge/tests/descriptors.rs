@@ -22,6 +22,16 @@ pub extern "C" fn contributor_identity(value: i64) -> i64 {
 )]
 pub extern "C" fn internal_safe_point(_reference: u64) {}
 
+#[poplib(
+    bubble = Internal,
+    namespace = "Pop.Internal.Task",
+    name = "Task.BlockingPoll",
+    parameters(),
+    results(),
+    effects(Blocks),
+)]
+pub extern "C" fn internal_blocking_poll() {}
+
 #[test]
 fn standard_descriptor_preserves_the_typed_binding_and_abi() {
     let export = CONTRIBUTOR_IDENTITY_POPLIB_EXPORT;
@@ -48,4 +58,16 @@ fn internal_descriptor_uses_the_same_closed_contract() {
         export.effects(),
         &[NativeEffect::ForeignFunction, NativeEffect::GcSafePoint]
     );
+}
+
+#[test]
+fn native_descriptor_keeps_blocking_distinct_from_suspension() {
+    let export = INTERNAL_BLOCKING_POLL_POPLIB_EXPORT;
+    internal_blocking_poll();
+    assert_eq!(export.bubble(), FoundationBubble::Internal);
+    assert_eq!(export.namespace(), "Pop.Internal.Task");
+    assert_eq!(export.name(), "Task.BlockingPoll");
+    assert!(export.parameters().is_empty());
+    assert!(export.results().is_empty());
+    assert_eq!(export.effects(), &[NativeEffect::Blocks]);
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_for_method_calls)]
+
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, NominalInterfaceId};
 use pop_hir::{HirCallDispatch, HirDeclarationKind, HirExpressionKind, HirStatementKind};
@@ -484,6 +486,120 @@ fn standard_print_overloads_are_identity_bound_and_survive_hir_and_mir() {
     assert!(!dump.contains("pop_std_print_string"));
     let parsed = pop_mir::parse_mir_dump(&dump).expect("round trip");
     assert_eq!(parsed.dump(), dump);
+}
+
+#[test]
+fn exact_source_overloads_select_one_static_symbol() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/overloads.pop",
+        "namespace Main\n\
+         public function choose(value: Int): Int\n\
+             return value + 1\n\
+         end\n\
+         public function choose(value: String): String\n\
+             return value .. \"!\"\n\
+         end\n\
+         public function integerChoice(): Int\n\
+             return choose(41)\n\
+         end\n\
+         public function textChoice(): String\n\
+             return choose(\"pop\")\n\
+         end\n",
+    )
+    .expect("source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("overloaded source HIR");
+    let dump = hir.dump(result.types());
+    assert!(dump.contains("integerChoice"));
+    assert!(dump.contains("textChoice"));
+    assert!(dump.matches("call.direct s0").count() == 1, "{dump}");
+    assert!(dump.matches("call.direct s1").count() == 1, "{dump}");
+    let mir = lower_hir_bubble(hir, result.types()).expect("verified overloaded MIR");
+    assert!(mir.dump().matches("callDirect s0").count() == 1);
+    assert!(mir.dump().matches("callDirect s1").count() == 1);
+}
+
+#[test]
+fn exact_source_overload_groups_span_modules_and_distinguish_arity() {
+    let first = SourceFile::new(
+        FileId::from_raw(0),
+        "src/first.pop",
+        "namespace Main\n\
+         public function choose(value: Int): Int return value + 1 end\n\
+         public function choose(first: Int, second: Int): Int return first + second end\n",
+    )
+    .expect("first source");
+    let second = SourceFile::new(
+        FileId::from_raw(1),
+        "src/second.pop",
+        "namespace Main\n\
+         public function choose(value: String): String return value .. \"!\" end\n\
+         public function useAll(): Int\n\
+             local text = choose(\"pop\")\n\
+             return choose(40) + choose(1, 0)\n\
+         end\n",
+    )
+    .expect("second source");
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![
+            FrontEndModule::new(ModuleId::from_raw(0), first),
+            FrontEndModule::new(ModuleId::from_raw(1), second),
+        ],
+    ));
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let hir = result.hir().expect("multi-Module overload HIR");
+    let dump = hir.dump(result.types());
+    assert_eq!(dump.matches("call.direct s0").count(), 1, "{dump}");
+    assert_eq!(dump.matches("call.direct s1").count(), 1, "{dump}");
+    assert_eq!(dump.matches("call.direct s2").count(), 1, "{dump}");
+    lower_hir_bubble(hir, result.types()).expect("verified multi-Module overload MIR");
+}
+
+#[test]
+fn source_overloads_reject_duplicate_parameters_generics_and_bare_values() {
+    for source_text in [
+        "namespace Main\n\
+         public function choose(value: Int): Int return value end\n\
+         public function choose(value: Int): String return \"value\" end\n",
+        "namespace Main\n\
+         public function choose<T>(value: T): T return value end\n\
+         public function choose(value: Int): Int return value end\n",
+        "namespace Main\n\
+         public function choose(value: Int): Int return value end\n\
+         public function choose(value: String): String return value end\n\
+         public function invalid(): function(value: Int): Int return choose end\n",
+    ] {
+        let source =
+            SourceFile::new(FileId::from_raw(0), "src/invalid.pop", source_text).expect("source");
+        let result = analyze_bubble(FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        ));
+        assert!(!result.diagnostics().is_empty());
+        assert!(result.hir().is_none());
+    }
 }
 
 #[test]

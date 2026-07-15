@@ -1,5 +1,12 @@
 //! Unified `pop` command and build orchestration.
 
+#![allow(
+    clippy::map_unwrap_or,
+    clippy::option_option,
+    clippy::redundant_closure_for_method_calls,
+    clippy::too_many_lines
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -7,13 +14,17 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use pop_backend_api::RuntimeProfile;
 use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
-use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
+use pop_backend_llvm::{
+    BpfLoweringOptions, BpfProgramKind, LlvmLoweringOptions, lower_mir_to_bpf_module,
+    lower_mir_to_llvm_ir,
+};
 use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, PoplibDependency, PoplibEmission,
     ReferenceFunction, ReferenceMetadata, ReferenceType, analyze_bubble, emit_poplib,
-    encode_reference_metadata,
+    encode_reference_metadata, load_poplib,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{lower_hir_bubble, optimize_mir};
@@ -25,14 +36,21 @@ use pop_projects::{
 };
 use pop_resolve::Visibility;
 use pop_source::SourceFile;
-use pop_target::{Endianness, PointerWidth, TargetSpec};
+use pop_target::TargetSpec;
 use pop_types::SemanticType;
+
+const INTERNAL_BUBBLE: BubbleId = BubbleId::from_raw(1);
+const STANDARD_BUBBLE: BubbleId = BubbleId::from_raw(2);
+const FIRST_PACKAGE_BUBBLE: u32 = 3;
+const INTERNAL_PACKAGE_NAME: &str = "Pop.Internal";
+const STANDARD_PACKAGE_NAME: &str = "Pop.Standard";
 
 const USAGE: &str = "\
 Usage:
     pop check <source.pop> [--dump <hir|mir|ll>]...
     pop check --manifestPath <bubble.toml>
     pop build <source.pop> --output <executable>
+    pop build <source.pop> --target bpfel-unknown-none --runtime-profile linux-ebpf --bpf-program xdp --emit-object <object.o>
     pop build --manifestPath <bubble.toml>
     pop documentation --manifestPath <bubble.toml>
     pop transpile <source.pop> --to c
@@ -64,6 +82,13 @@ enum CommandLine {
     },
     Build {
         source_path: PathBuf,
+        output_path: PathBuf,
+    },
+    BuildBpf {
+        source_path: PathBuf,
+        target: String,
+        runtime_profile: RuntimeProfile,
+        program: BpfProgramKind,
         output_path: PathBuf,
     },
     PackageBuild {
@@ -100,6 +125,19 @@ fn main() -> ExitCode {
             source_path,
             output_path,
         }) => build_source(&source_path, &output_path),
+        Ok(CommandLine::BuildBpf {
+            source_path,
+            target,
+            runtime_profile,
+            program,
+            output_path,
+        }) => build_bpf_source(
+            &source_path,
+            &target,
+            runtime_profile,
+            program,
+            &output_path,
+        ),
         Ok(CommandLine::PackageBuild {
             manifest_path,
             lock_mode,
@@ -265,8 +303,74 @@ fn parse_build_arguments(
     }
     let source_path = required_source_path(first, "build")?;
     let Some(option) = arguments.next() else {
-        return Err("`pop build` requires `--output <executable>`".to_owned());
+        return Err(
+            "`pop build` requires `--output <executable>` or `--target <triple>`".to_owned(),
+        );
     };
+    if option == "--target" {
+        let target = arguments
+            .next()
+            .ok_or_else(|| "`--target` requires a target triple".to_owned())?
+            .to_string_lossy()
+            .into_owned();
+        let Some(runtime_option) = arguments.next() else {
+            return Err("BPF builds require `--runtime-profile linux-ebpf`".to_owned());
+        };
+        if runtime_option != "--runtime-profile" {
+            return Err(format!(
+                "unsupported option `{}`; expected --runtime-profile",
+                runtime_option.to_string_lossy()
+            ));
+        }
+        let runtime_profile = arguments
+            .next()
+            .ok_or_else(|| "`--runtime-profile` requires a profile name".to_owned())
+            .and_then(|profile| {
+                RuntimeProfile::parse(&profile.to_string_lossy()).map_err(|error| error.to_string())
+            })?;
+        let Some(program_option) = arguments.next() else {
+            return Err("BPF builds require `--bpf-program xdp`".to_owned());
+        };
+        if program_option != "--bpf-program" {
+            return Err(format!(
+                "unsupported option `{}`; expected --bpf-program",
+                program_option.to_string_lossy()
+            ));
+        }
+        let program = match arguments.next().as_deref() {
+            Some(value) if value == OsStr::new("xdp") => BpfProgramKind::Xdp,
+            Some(value) => {
+                return Err(format!(
+                    "unsupported BPF program `{}`; expected xdp",
+                    value.to_string_lossy()
+                ));
+            }
+            None => return Err("`--bpf-program` requires xdp".to_owned()),
+        };
+        let Some(output_option) = arguments.next() else {
+            return Err("BPF builds require `--emit-object <object.o>`".to_owned());
+        };
+        if output_option != "--emit-object" {
+            return Err(format!(
+                "unsupported option `{}`; expected --emit-object",
+                output_option.to_string_lossy()
+            ));
+        }
+        let output_path = arguments
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| "`--emit-object` requires an object path".to_owned())?;
+        if arguments.next().is_some() {
+            return Err("`pop build` received unexpected arguments".to_owned());
+        }
+        return Ok(CommandLine::BuildBpf {
+            source_path,
+            target,
+            runtime_profile,
+            program,
+            output_path,
+        });
+    }
     if option != "--output" {
         return Err(format!("unsupported option `{}`", option.to_string_lossy()));
     }
@@ -415,12 +519,18 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = analyze_bubble(FrontEndBubbleInput::new(
-        BubbleId::from_raw(0),
-        NamespaceId::from_raw(0),
-        Vec::new(),
-        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
-    ));
+    let Some((standard, _)) = lower_toolchain_standard() else {
+        return ExitCode::FAILURE;
+    };
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
+            NamespaceId::from_raw(FIRST_PACKAGE_BUBBLE),
+            vec![STANDARD_BUBBLE],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_reference_metadata(vec![standard.metadata]),
+    );
     if !result.diagnostics().is_empty() {
         return write_diagnostics(&result.diagnostic_snapshot());
     }
@@ -477,10 +587,7 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
 }
 
 fn native_target() -> TargetSpec {
-    TargetSpec::builder("x86_64-unknown-linux-gnu")
-        .pointer_width(PointerWidth::Bits64)
-        .endianness(Endianness::Little)
-        .build()
+    TargetSpec::for_triple("x86_64-unknown-linux-gnu")
         .expect("repository native target is complete")
 }
 
@@ -503,6 +610,9 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let Some(program) = lower_native_source(source_path) else {
         return ExitCode::FAILURE;
     };
+    let Some((_, standard)) = lower_toolchain_standard() else {
+        return ExitCode::FAILURE;
+    };
     let target = native_target();
     let module = match lower_mir_to_llvm_ir(
         &program.mir,
@@ -521,13 +631,62 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
         }
     };
     let object_path = std::env::temp_dir().join(format!("pop-native-{}.o", std::process::id()));
+    let standard_object_path =
+        std::env::temp_dir().join(format!("pop-standard-{}.o", std::process::id()));
     if let Err(error) = module.emit_object(&object_path) {
         eprintln!("pop: {error}");
         return ExitCode::FAILURE;
     }
-    let result = link_native_executable(std::slice::from_ref(&object_path), output_path);
+    if emit_native_object(&standard.program, &standard_object_path).is_none() {
+        let _ = fs::remove_file(&object_path);
+        return ExitCode::FAILURE;
+    }
+    let result = link_native_executable(
+        &[object_path.clone(), standard_object_path.clone()],
+        output_path,
+    );
     let _ = fs::remove_file(object_path);
+    let _ = fs::remove_file(standard_object_path);
     result
+}
+
+fn build_bpf_source(
+    source_path: &Path,
+    target_triple: &str,
+    runtime_profile: RuntimeProfile,
+    program: BpfProgramKind,
+    output_path: &Path,
+) -> ExitCode {
+    let target = match TargetSpec::for_triple(target_triple) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("pop: {error}: `{target_triple}`");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(program_mir) = lower_native_source(source_path) else {
+        return ExitCode::FAILURE;
+    };
+    let Some(entry) = program_mir.entry else {
+        eprintln!("pop: BPF build requires an explicit entry point");
+        return ExitCode::FAILURE;
+    };
+    let options = match program {
+        BpfProgramKind::Xdp => BpfLoweringOptions::xdp(entry).with_runtime_profile(runtime_profile),
+    };
+    let module =
+        match lower_mir_to_bpf_module(&program_mir.mir, &program_mir.types, &target, options) {
+            Ok(module) => module,
+            Err(error) => {
+                eprintln!("pop: {}: {error}", error.diagnostic_code());
+                return ExitCode::FAILURE;
+            }
+        };
+    if let Err(error) = module.emit_object(output_path) {
+        eprintln!("pop: {}: {error}", error.diagnostic_code());
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 fn transpile_source_to_c(source_path: &Path) -> ExitCode {
@@ -600,7 +759,14 @@ fn lower_package(manifest_path: &Path) -> Option<LoweredPackage> {
         })
         .ok()?;
     let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut state = PackageLoweringState::default();
+    let (standard, standard_bubble) = lower_toolchain_standard()?;
+    let mut state = PackageLoweringState {
+        next_bubble: FIRST_PACKAGE_BUBBLE,
+        visiting: BTreeSet::new(),
+        resolved: BTreeMap::new(),
+        bubbles: vec![standard_bubble],
+        standard,
+    };
     lower_package_recursive(&manifest_path, true, &mut state)?;
     Some(LoweredPackage {
         root: package_root.to_path_buf(),
@@ -631,12 +797,12 @@ impl ResolvedPackageLibrary {
     }
 }
 
-#[derive(Default)]
 struct PackageLoweringState {
     next_bubble: u32,
     visiting: BTreeSet<PathBuf>,
     resolved: BTreeMap<PathBuf, Option<ResolvedPackageLibrary>>,
     bubbles: Vec<LoweredPackageBubble>,
+    standard: ResolvedPackageLibrary,
 }
 
 fn lower_package_recursive(
@@ -663,8 +829,18 @@ fn lower_package_recursive(
     let manifest = parse_package_manifest(&manifest_text)
         .map_err(|error| eprintln!("pop: {error}"))
         .ok()?;
+    if matches!(
+        manifest.name(),
+        INTERNAL_PACKAGE_NAME | STANDARD_PACKAGE_NAME
+    ) {
+        eprintln!(
+            "pop: Package `{}` attempts to replace a reserved foundation identity",
+            manifest.name()
+        );
+        return None;
+    }
 
-    let mut external_libraries = Vec::new();
+    let mut external_libraries = vec![state.standard.clone()];
     for requirement in manifest.dependencies() {
         let dependency_manifest = match requirement.source() {
             DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
@@ -788,6 +964,7 @@ fn lower_package_recursive(
             &modules,
             bubble.kind() == BubbleKind::Binary,
             dependency_metadata,
+            Vec::new(),
         )?;
         if bubble.kind() == BubbleKind::Library {
             let reference = encode_reference_metadata(&program.reference_metadata)
@@ -1048,12 +1225,23 @@ fn build_package_to(
             bubble.bubble.raw(),
             suffix
         ));
-        emit_native_object(&bubble.program, &object)?;
+        let emission_object = dependency_root.join(format!(
+            "{}.b{}.{}.emission.o",
+            bubble.name,
+            bubble.bubble.raw(),
+            suffix
+        ));
+        let lowering_output = if bubble.kind == BubbleKind::Library {
+            &emission_object
+        } else {
+            &object
+        };
+        emit_native_object(&bubble.program, lowering_output)?;
         if bubble.kind == BubbleKind::Library {
             let documentation = render_xml(&bubble.name, &documentation_members(&bubble.program))
                 .map_err(|error| eprintln!("pop: documentation output failed: {error}"))
                 .ok()?;
-            let implementation = fs::read(&object)
+            let implementation = fs::read(&emission_object)
                 .map_err(|error| eprintln!("pop: could not read native object: {error}"))
                 .ok()?;
             let target = native_target();
@@ -1073,6 +1261,25 @@ fn build_package_to(
             emit_poplib(&artifact, &emission)
                 .map_err(|error| eprintln!("pop: library artifact emission failed: {error}"))
                 .ok()?;
+            let loaded = load_poplib(&artifact)
+                .map_err(|error| eprintln!("pop: emitted library verification failed: {error:?}"))
+                .ok()?;
+            let (selected_target, selected_implementation) =
+                loaded.target_implementation().or_else(|| {
+                    eprintln!("pop: library artifact has no target implementation");
+                    None
+                })?;
+            if selected_target != target.triple() {
+                eprintln!(
+                    "pop: library target mismatch: expected {}, found {selected_target}",
+                    target.triple()
+                );
+                return None;
+            }
+            fs::write(&object, selected_implementation)
+                .map_err(|error| eprintln!("pop: could not select library object: {error}"))
+                .ok()?;
+            let _ = fs::remove_file(&emission_object);
             library_objects.push(object);
         } else if bubble.root_package {
             binary_objects.push((bubble, object));
@@ -1509,12 +1716,92 @@ struct NativeProgram {
 }
 
 fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
+    let (standard, _) = lower_toolchain_standard()?;
     lower_native_bubble(
-        BubbleId::from_raw(0),
+        BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
         &[(source_path.to_path_buf(), source_path.to_path_buf())],
         true,
+        vec![standard.metadata],
         Vec::new(),
     )
+}
+
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is below repository root")
+        .to_path_buf()
+}
+
+fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageBubble)> {
+    let package_root = repository_root().join("crates/libraries/standard/pop");
+    let manifest_path = package_root.join("bubble.toml");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|error| eprintln!("pop: could not read reserved Standard manifest: {error}"))
+        .ok()?;
+    let manifest = parse_package_manifest(&manifest_text)
+        .map_err(|error| eprintln!("pop: invalid reserved Standard manifest: {error}"))
+        .ok()?;
+    if manifest.name() != STANDARD_PACKAGE_NAME {
+        eprintln!("pop: reserved Standard manifest has the wrong identity");
+        return None;
+    }
+    let source_paths = collect_package_sources(&package_root).ok()?;
+    let relative_paths = source_paths.keys().map(String::as_str).collect::<Vec<_>>();
+    let discovered = discover_conventional_bubbles(&manifest, &relative_paths)
+        .map_err(|error| eprintln!("pop: could not discover reserved Standard: {error}"))
+        .ok()?;
+    let [bubble] = discovered.as_slice() else {
+        eprintln!("pop: reserved Standard must contain exactly one library Bubble");
+        return None;
+    };
+    if bubble.kind() != BubbleKind::Library {
+        eprintln!("pop: reserved Standard must be a library Bubble");
+        return None;
+    }
+    let modules = bubble
+        .modules()
+        .iter()
+        .map(|relative| {
+            source_paths
+                .get(relative)
+                .cloned()
+                .map(|source| (PathBuf::from(relative), source))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let program = lower_native_bubble(
+        STANDARD_BUBBLE,
+        &modules,
+        false,
+        Vec::new(),
+        vec![INTERNAL_BUBBLE],
+    )?;
+    let reference = encode_reference_metadata(&program.reference_metadata)
+        .map_err(|error| eprintln!("pop: Standard metadata encoding failed: {error}"))
+        .ok()?;
+    let source_sha256 = package_content_hash(&manifest_path, &source_paths)?;
+    let library = ResolvedPackageLibrary {
+        package: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        source_sha256: source_sha256.clone(),
+        bubble: bubble.name().to_owned(),
+        public_api_sha256: sha256_hex(&reference),
+        metadata: program.reference_metadata.clone(),
+    };
+    let lowered = LoweredPackageBubble {
+        bubble: STANDARD_BUBBLE,
+        package: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        source_sha256,
+        edition: manifest.edition().to_owned(),
+        name: bubble.name().to_owned(),
+        kind: BubbleKind::Library,
+        root_package: false,
+        dependencies: Vec::new(),
+        program,
+    };
+    Some((library, lowered))
 }
 
 fn lower_native_bubble(
@@ -1522,6 +1809,7 @@ fn lower_native_bubble(
     modules: &[(PathBuf, PathBuf)],
     requires_entry: bool,
     dependency_metadata: Vec<ReferenceMetadata>,
+    additional_dependencies: Vec<BubbleId>,
 ) -> Option<NativeProgram> {
     let modules = modules
         .iter()
@@ -1545,10 +1833,13 @@ fn lower_native_bubble(
         })
         .collect::<Result<Vec<_>, ()>>()
         .ok()?;
-    let dependencies = dependency_metadata
+    let mut dependencies = dependency_metadata
         .iter()
         .map(ReferenceMetadata::bubble)
-        .collect();
+        .collect::<Vec<_>>();
+    dependencies.extend(additional_dependencies);
+    dependencies.sort();
+    dependencies.dedup();
     let input = FrontEndBubbleInput::new(
         bubble,
         NamespaceId::from_raw(bubble.raw()),

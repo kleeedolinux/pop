@@ -1,0 +1,5 @@
+namespace Bpf.Examples
+
+function main(): Int
+    return 2
+end

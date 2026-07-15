@@ -5,10 +5,25 @@
 //! function lowering, and instruction lowering so backend mechanics cannot
 //! become canonical HIR/MIR semantics.
 
+// The LLVM backend contains large lowering/emission passes that predate the
+// Rust 1.96 clippy gate. Keep the baseline explicit until those passes are
+// split deliberately.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::comparison_chain,
+    clippy::format_push_string,
+    clippy::match_same_arms,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::wildcard_imports
+)]
+
 mod api;
+mod bpf;
 mod instruction_lowering;
 mod lowering;
 mod module_lowering;
 
 pub use api::*;
+pub use bpf::*;
 pub use lowering::*;

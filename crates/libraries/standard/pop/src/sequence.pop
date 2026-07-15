@@ -173,6 +173,92 @@ private class ConcatenatingIterator<T> implements Iterator<T>
     end
 end
 
+private class AppendingIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private value: T
+    private pending: Boolean
+    private sourceComplete: Boolean
+
+    public function AppendingIterator.new(source: Iterator<T>, value: T): AppendingIterator<T>
+        return AppendingIterator { source = source, value = value, pending = true, sourceComplete = false }
+    end
+
+    public function AppendingIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function AppendingIterator:next(): Iteration<T>
+        if not self.sourceComplete then
+            for value in self.source do
+                return Iteration.Item(value)
+            end
+            self.sourceComplete = true
+        end
+        if self.pending then
+            self.pending = false
+            return Iteration.Item(self.value)
+        end
+        return Iteration.End
+    end
+end
+
+private class PrependingIterator<T> implements Iterator<T>
+    private source: Iterator<T>
+    private value: T
+    private pending: Boolean
+    private finished: Boolean
+
+    public function PrependingIterator.new(source: Iterator<T>, value: T): PrependingIterator<T>
+        return PrependingIterator { source = source, value = value, pending = true, finished = false }
+    end
+
+    public function PrependingIterator:iterator(): Iterator<T>
+        return self
+    end
+
+    public function PrependingIterator:next(): Iteration<T>
+        if self.pending then
+            self.pending = false
+            return Iteration.Item(self.value)
+        end
+        if self.finished then
+            return Iteration.End
+        end
+        for value in self.source do
+            return Iteration.Item(value)
+        end
+        self.finished = true
+        return Iteration.End
+    end
+end
+
+private class ScanningIterator<T, TState> implements Iterator<TState>
+    private source: Iterator<T>
+    private state: TState
+    private combine: function(state: TState, value: T): TState
+    private finished: Boolean
+
+    public function ScanningIterator.new(source: Iterator<T>, initial: TState, combine: function(state: TState, value: T): TState): ScanningIterator<T, TState>
+        return ScanningIterator { source = source, state = initial, combine = combine, finished = false }
+    end
+
+    public function ScanningIterator:iterator(): Iterator<TState>
+        return self
+    end
+
+    public function ScanningIterator:next(): Iteration<TState>
+        if self.finished then
+            return Iteration.End
+        end
+        for value in self.source do
+            self.state = self.combine(self.state, value)
+            return Iteration.Item(self.state)
+        end
+        self.finished = true
+        return Iteration.End
+    end
+end
+
 --- <summary>
 --- Creates a lazy single-pass iterator that transforms source items.
 --- </summary>
@@ -951,4 +1037,486 @@ public function maxOr<TSource: Iterable<Int>>(source: TSource, fallback: Int): I
         end
     end
     return result
+end
+
+--- <summary>
+--- Returns the first matching item or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called in order until it returns true.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when no item matches.
+--- </param>
+---
+--- <returns>
+--- The first matching item, or the fallback when none matches.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function findOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean,
+    fallback: T
+): T
+    for value in source do
+        if predicate(value) then
+            return value
+        end
+    end
+    return fallback
+end
+
+--- <summary>
+--- Returns the one-based index of the first matching item or a fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called in order until it returns true.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when no item matches.
+--- </param>
+---
+--- <returns>
+--- The checked one-based index of the first match, or the fallback.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function indexOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean,
+    fallback: Int
+): Int
+    local index = 1
+    for value in source do
+        if predicate(value) then
+            return index
+        end
+        index += 1
+    end
+    return fallback
+end
+
+--- <summary>
+--- Returns the item at a one-based index or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="index">
+--- The one-based position to return.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when the index is nonpositive or out of range.
+--- </param>
+---
+--- <returns>
+--- The item at the requested position, or the fallback.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function elementAtOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    index: Int,
+    fallback: T
+): T
+    if index <= 0 then
+        return fallback
+    end
+    local current = 1
+    for value in source do
+        if current == index then
+            return value
+        end
+        current += 1
+    end
+    return fallback
+end
+
+--- <summary>
+--- Returns the last matching item or an explicit fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called exactly once for every item.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when no item matches.
+--- </param>
+---
+--- <returns>
+--- The last matching item, or the fallback when none matches.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function findLastOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean,
+    fallback: T
+): T
+    local result = fallback
+    for value in source do
+        if predicate(value) then
+            result = value
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Returns the one-based index of the last matching item or a fallback.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="predicate">
+--- The function called exactly once for every item.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned when no item matches.
+--- </param>
+---
+--- <returns>
+--- The checked one-based index of the last match, or the fallback.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function indexLastOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    predicate: function(value: T): Boolean,
+    fallback: Int
+): Int
+    local result = fallback
+    local index = 1
+    for value in source do
+        if predicate(value) then
+            result = index
+        end
+        index += 1
+    end
+    return result
+end
+
+--- <summary>
+--- Reduces a sequence from its first item or returns a fallback when empty.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="combine">
+--- The function called left to right for every item after the first.
+--- </param>
+---
+--- <param name="fallback">
+--- The value returned only when the source is empty.
+--- </param>
+---
+--- <returns>
+--- The reduced value, or the fallback for an empty source.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function reduceOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    combine: function(left: T, right: T): T,
+    fallback: T
+): T
+    local result = fallback
+    local found = false
+    for value in source do
+        if found then
+            result = combine(result, value)
+        else
+            result = value
+            found = true
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Adds projected integer values using checked arithmetic.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="select">
+--- The integer projection called once per item.
+--- </param>
+---
+--- <returns>
+--- The checked projected sum, or zero for an empty source.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function sumBy<T, TSource: Iterable<T>>(
+    source: TSource,
+    select: function(value: T): Int
+): Int
+    local total = 0
+    for value in source do
+        total += select(value)
+    end
+    return total
+end
+
+--- <summary>
+--- Multiplies projected integer values using checked arithmetic.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="select">
+--- The integer projection called once per item.
+--- </param>
+---
+--- <returns>
+--- The checked projected product, or one for an empty source.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function productBy<T, TSource: Iterable<T>>(
+    source: TSource,
+    select: function(value: T): Int
+): Int
+    local result = 1
+    for value in source do
+        result *= select(value)
+    end
+    return result
+end
+
+--- <summary>
+--- Returns the first item with the least projected integer key.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="select">
+--- The integer projection called exactly once per visited item.
+--- </param>
+---
+--- <param name="fallback">
+--- The unprojected value returned only for an empty source.
+--- </param>
+---
+--- <returns>
+--- The first item with the least key, or the fallback when empty.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function minByOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    select: function(value: T): Int,
+    fallback: T
+): T
+    local result = fallback
+    local resultKey = 0
+    local found = false
+    for value in source do
+        local key = select(value)
+        if not found or key < resultKey then
+            result = value
+            resultKey = key
+            found = true
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Returns the first item with the greatest projected integer key.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="select">
+--- The integer projection called exactly once per visited item.
+--- </param>
+---
+--- <param name="fallback">
+--- The unprojected value returned only for an empty source.
+--- </param>
+---
+--- <returns>
+--- The first item with the greatest key, or the fallback when empty.
+--- </returns>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate storage of its own.
+--- </allocation>
+public function maxByOr<T, TSource: Iterable<T>>(
+    source: TSource,
+    select: function(value: T): Int,
+    fallback: T
+): T
+    local result = fallback
+    local resultKey = 0
+    local found = false
+    for value in source do
+        local key = select(value)
+        if not found or key > resultKey then
+            result = value
+            resultKey = key
+            found = true
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Creates a lazy iterator that yields one value after the source.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="value">
+--- The value yielded after the source is exhausted.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object and does not materialize source items.
+--- </allocation>
+public function append<T, TSource: Iterable<T>>(source: TSource, value: T): Iterator<T>
+    local iterator = AppendingIterator.new(source:iterator(), value)
+    return iterator
+end
+
+--- <summary>
+--- Creates a lazy iterator that yields one value before the source.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="value">
+--- The value yielded before the first source item.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator adapter.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object and does not materialize source items.
+--- </allocation>
+public function prepend<T, TSource: Iterable<T>>(source: TSource, value: T): Iterator<T>
+    local iterator = PrependingIterator.new(source:iterator(), value)
+    return iterator
+end
+
+--- <summary>
+--- Creates a lazy iterator over successive accumulated states.
+--- </summary>
+---
+--- <param name="source">
+--- The statically iterable source.
+--- </param>
+---
+--- <param name="initial">
+--- The state used before the first source item.
+--- </param>
+---
+--- <param name="combine">
+--- The function called once for each requested source item.
+--- </param>
+---
+--- <returns>
+--- A newly allocated lazy iterator that omits the initial state itself.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Allocates one adapter-state object and does not materialize source items.
+--- </allocation>
+public function scan<T, TSource: Iterable<T>, TState>(
+    source: TSource,
+    initial: TState,
+    combine: function(state: TState, value: T): TState
+): Iterator<TState>
+    local iterator = ScanningIterator.new(source:iterator(), initial, combine)
+    return iterator
 end

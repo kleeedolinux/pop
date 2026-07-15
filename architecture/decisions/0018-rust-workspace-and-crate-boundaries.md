@@ -45,7 +45,8 @@ dependency requires a concrete component need, license/security review
 proportional to its role, and tests proving the boundary it supports. Inkwell
 0.9 is the first approved exception: the LLVM backend alone uses its Apache-2.0
 safe wrapper with the exact installed LLVM-major feature, no default target
-set, and only the native target enabled. Inkwell and `llvm-sys` types cannot
+set, and only the reviewed native and BPF targets enabled. Inkwell and
+`llvm-sys` types cannot
 cross the backend crate boundary. Cargo
 package/crate names are implementation details and do not replace Pop Lang's
 `Item → Module → Bubble → Package → Workspace` terminology.

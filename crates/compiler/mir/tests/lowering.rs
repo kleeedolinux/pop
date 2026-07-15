@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_for_method_calls, clippy::too_many_lines)]
+
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{
@@ -297,6 +299,77 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
         verify_mir_bubble(&malformed, front_end.types()),
         Err(errors) if errors.contains(&MirVerificationError::InvalidBlock(pop_foundation::BlockId::from_raw(999)))
     ));
+}
+
+#[test]
+fn async_await_lowers_to_explicit_suspending_mir_instruction() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/async.pop",
+        "namespace Main\n\
+         public async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function close(): Int\n\
+             return 0\n\
+         end\n\
+         public async function useTask(): Int\n\
+             async defer\n\
+                 local ignored = await close()\n\
+             end\n\
+             local pending = load()\n\
+             return await pending\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    assert!(
+        front_end
+            .hir()
+            .expect("HIR")
+            .functions()
+            .iter()
+            .find(|function| function.name() == "load")
+            .expect("load HIR")
+            .is_async()
+    );
+    let use_task_symbol = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "useTask")
+        .expect("useTask HIR")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified async MIR");
+
+    let use_task = mir
+        .functions()
+        .iter()
+        .find(|function| function.symbol() == use_task_symbol)
+        .expect("useTask MIR");
+    let await_instruction = use_task
+        .blocks()
+        .iter()
+        .flat_map(|block| block.instructions())
+        .find(|instruction| matches!(instruction.kind(), MirInstructionKind::Await { .. }))
+        .expect("await MIR instruction");
+    assert!(
+        await_instruction
+            .effects()
+            .contains(pop_mir::MirEffect::Suspends)
+    );
 }
 
 #[test]

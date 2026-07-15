@@ -92,6 +92,7 @@ fn validate_function(function: &MirFunction, types: &TypeArena) -> Result<(), CB
         MirEffect::WritesManagedReference,
         MirEffect::MayUnwind,
         MirEffect::Suspends,
+        MirEffect::Blocks,
         MirEffect::UnsafeMemory,
         MirEffect::ForeignFunction,
         MirEffect::CompilerQuery,

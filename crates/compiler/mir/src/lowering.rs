@@ -928,7 +928,7 @@ fn visit_statement_closures(
                 }
             }
         }
-        HirStatementKind::Defer { body } => {
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
             for nested in body {
                 visit_statement_closures(nested, parameters, locals);
             }
@@ -1029,7 +1029,9 @@ fn contains_continue_for_current_loop(statements: &[HirStatement]) -> bool {
         HirStatementKind::ResultMatch { arms, .. } => arms
             .iter()
             .any(|arm| contains_continue_for_current_loop(arm.body())),
-        HirStatementKind::Defer { body } => contains_continue_for_current_loop(body),
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+            contains_continue_for_current_loop(body)
+        }
         HirStatementKind::While { .. }
         | HirStatementKind::OptionalWhile { .. }
         | HirStatementKind::RepeatUntil { .. }
@@ -1080,7 +1082,8 @@ fn visit_expression_closures(
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
         | HirExpressionKind::NumericConvert { value: base, .. }
-        | HirExpressionKind::StringFormat { value: base, .. } => {
+        | HirExpressionKind::StringFormat { value: base, .. }
+        | HirExpressionKind::Await { task: base } => {
             visit_expression_closures(base, parameters, locals);
         }
         HirExpressionKind::TableGet { table, key } => {
@@ -1625,7 +1628,7 @@ impl<'hir> FunctionBuilder<'hir> {
                     result_type,
                     arms,
                 } => self.lower_result_match(scrutinee, *result, *result_type, arms),
-                HirStatementKind::Defer { body } => {
+                HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
                     let scope = CleanupScopeId::from_raw(self.next_cleanup_scope);
                     self.next_cleanup_scope = self.next_cleanup_scope.saturating_add(1);
                     self.active_cleanups.push(ActiveCleanup { scope, body });
@@ -2919,6 +2922,9 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::Function(function) => {
                 MirInstructionKind::FunctionReference(*function)
             }
+            HirExpressionKind::Await { task } => MirInstructionKind::Await {
+                task: self.lower_expression(task),
+            },
             HirExpressionKind::Tuple(elements) => MirInstructionKind::TupleMake(
                 elements
                     .iter()
@@ -4573,6 +4579,9 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::CallIndirect {
             declared_effects, ..
         } => *declared_effects,
+        MirInstructionKind::Await { .. } => {
+            MirEffectSummary::from_effects([MirEffect::Suspends, MirEffect::GcSafePoint])
+        }
         MirInstructionKind::IntegerConstant(_)
         | MirInstructionKind::FloatConstant(_)
         | MirInstructionKind::StringConstant(_)
@@ -4657,6 +4666,7 @@ fn conservative_indirect_effects() -> MirEffectSummary {
         MirEffect::MayTrap,
         MirEffect::MayUnwind,
         MirEffect::Suspends,
+        MirEffect::Blocks,
         MirEffect::UnsafeMemory,
         MirEffect::ForeignFunction,
         MirEffect::AmbientIo,
@@ -4745,7 +4755,7 @@ fn recompute_function_effects(
     changed
 }
 
-fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) -> bool {
+pub(crate) fn insert_gc_safe_points(bubble: &mut MirBubble, arena: &TypeArena) -> bool {
     let mut changed = false;
     for function in &mut bubble.functions {
         changed |= insert_function_safe_points(function, arena);

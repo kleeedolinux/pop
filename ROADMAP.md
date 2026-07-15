@@ -162,6 +162,15 @@ Post-baseline library work has begun without widening the release foundation:
   functions and checked overflow behavior.
 - [x] Add an exact machine-readable public-root/tier/status projection without
   presenting planned catalog families as implemented.
+- [x] Make every ordinary CLI Bubble receive the reserved Standard reference
+  and link the exact target implementation reloaded from its verified
+  `.poplib` under ADR 0073.
+- [x] Implement ADR 0074 exact non-generic source overloads through reference
+  metadata, HIR, MIR, the interpreter, and LLVM.
+- [x] Complete ADR 0075 predicate search, projection, and lazy composition
+  prototypes with checked documentation and differential coverage.
+- [x] Complete ADR 0076 positional/last-match inspection and first-item
+  reduction prototypes with exact callback and cross-backend coverage.
 - Define view lifetimes before exposing `Bytes` views or `Text.View`.
 - Make reserved `Iteration<T>` exhaustively matchable in ordinary source
   before adding no-fallback sequence inspection.
@@ -456,6 +465,8 @@ Post-baseline library work has begun without widening the release foundation:
 ## Explicitly after 0.1.0
 
 - expanding the experimental C backend beyond its accepted fail-closed subset;
+- stabilizing or expanding the experimental eBPF backend beyond the initial
+  runtime-free XDP object experiment;
 - a custom VM or stable serialized MIR/bytecode compatibility promise;
 - the complete official extension and public-library catalog;
 - finalizers, weak references, unrestricted runtime reflection, and Bubble

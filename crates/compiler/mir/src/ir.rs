@@ -33,6 +33,7 @@ pub enum MirEffect {
     MayTrap,
     MayUnwind,
     Suspends,
+    Blocks,
     UnsafeMemory,
     ForeignFunction,
     AmbientIo,
@@ -87,12 +88,13 @@ impl MirEffectSummary {
     }
 
     pub fn iter(self) -> impl Iterator<Item = MirEffect> {
-        const EFFECTS: [MirEffect; 11] = [
+        const EFFECTS: [MirEffect; 12] = [
             MirEffect::Allocates,
             MirEffect::WritesManagedReference,
             MirEffect::MayTrap,
             MirEffect::MayUnwind,
             MirEffect::Suspends,
+            MirEffect::Blocks,
             MirEffect::UnsafeMemory,
             MirEffect::ForeignFunction,
             MirEffect::AmbientIo,
@@ -107,7 +109,7 @@ impl MirEffectSummary {
 }
 
 pub(crate) fn lower_effect_summary(summary: pop_types::EffectSummary) -> MirEffectSummary {
-    const EFFECTS: [(pop_types::Effect, MirEffect); 11] = [
+    const EFFECTS: [(pop_types::Effect, MirEffect); 12] = [
         (pop_types::Effect::Allocates, MirEffect::Allocates),
         (
             pop_types::Effect::WritesManagedReference,
@@ -116,6 +118,7 @@ pub(crate) fn lower_effect_summary(summary: pop_types::EffectSummary) -> MirEffe
         (pop_types::Effect::MayTrap, MirEffect::MayTrap),
         (pop_types::Effect::MayUnwind, MirEffect::MayUnwind),
         (pop_types::Effect::Suspends, MirEffect::Suspends),
+        (pop_types::Effect::Blocks, MirEffect::Blocks),
         (pop_types::Effect::UnsafeMemory, MirEffect::UnsafeMemory),
         (
             pop_types::Effect::ForeignFunction,
@@ -1251,6 +1254,9 @@ pub enum MirInstructionKind {
         arguments: Vec<ValueId>,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
+    },
+    Await {
+        task: ValueId,
     },
     RecordMake {
         record: SymbolId,

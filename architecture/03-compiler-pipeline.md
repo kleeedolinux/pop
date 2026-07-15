@@ -14,6 +14,8 @@ flowchart LR
     M --> O[Optimized MIR]
     O --> L[LLVM backend]
     L --> N[Native object]
+    O -. experimental .-> B[LLVM BPF target]
+    B -. experimental .-> E[ELF eBPF object]
     O -. experimental .-> C[C11 source backend]
     O -. future .-> V[VM bytecode backend]
     O -. tools .-> I[MIR interpreter / verifier]
@@ -165,6 +167,16 @@ The experimental C backend follows the same handoff after portable MIR
 optimization. It emits deterministic C11 for its declared runtime-free
 capability subset and rejects unsupported MIR before publishing source; it never
 reconstructs semantics from Pop source text.
+
+The experimental eBPF backend follows the same handoff after portable MIR
+optimization. It derives runtime-contract requirements from MIR, resolves them
+against an explicit runtime profile, validates eBPF-specific target limits,
+lowers through backend-private LLVM IR, selects LLVM's BPF target, and emits an
+ELF eBPF object for an explicit program kind such as XDP. Missing runtime
+contracts, unsupported backend representations, floating-point behavior,
+dispatch, recursion, or unproven loop behavior are diagnosed before any object
+is written; see
+[ADR 0070](./decisions/0070-experimental-ebpf-backend.md).
 
 ## Tooling and incremental queries
 

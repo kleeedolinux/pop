@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_closure_for_method_calls)]
+
 use pop_backend_mir_interp::{MirInterpreter, MirValue, ReferenceRuntimeEvent};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};

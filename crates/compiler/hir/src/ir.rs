@@ -2092,7 +2092,9 @@ fn remap_aggregate_statements(statements: &mut [HirStatement], instances: &HirDa
                     remap_aggregate_statements(&mut arm.body, instances);
                 }
             }
-            HirStatementKind::Defer { body } => remap_aggregate_statements(body, instances),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                remap_aggregate_statements(body, instances);
+            }
             HirStatementKind::FieldSet { base, field, value } => {
                 remap_aggregate_expression(base, instances);
                 *field = instances.field(base.type_id(), *field);
@@ -2624,7 +2626,9 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
                     collect_statement_calls(&arm.body, calls);
                 }
             }
-            HirStatementKind::Defer { body } => collect_statement_calls(body, calls),
+            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                collect_statement_calls(body, calls);
+            }
             HirStatementKind::FieldSet { base, value, .. }
             | HirStatementKind::CompoundFieldSet { base, value, .. } => {
                 collect_expression_calls(base, calls);
@@ -3062,7 +3066,7 @@ fn specialize_statement(
                 specialize_statements(&mut arm.body, substitutions, instances, arena)?;
             }
         }
-        HirStatementKind::Defer { body } => {
+        HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
             specialize_statements(body, substitutions, instances, arena)?;
         }
         HirStatementKind::FieldSet { base, value, .. } => {
@@ -3591,6 +3595,9 @@ pub enum HirStatementKind {
     Defer {
         body: Vec<HirStatement>,
     },
+    AsyncDefer {
+        body: Vec<HirStatement>,
+    },
     FieldSet {
         base: HirExpression,
         field: FieldId,
@@ -4104,6 +4111,9 @@ pub enum HirExpressionKind {
         success_type: TypeId,
         error_type: TypeId,
         enclosing_result: TypeId,
+    },
+    Await {
+        task: Box<HirExpression>,
     },
     OptionalNarrow {
         optional: Box<HirExpression>,

@@ -115,6 +115,7 @@ pub enum NativeEffect {
     MayTrap,
     MayUnwind,
     Suspends,
+    Blocks,
     UnsafeMemory,
     ForeignFunction,
     AmbientIo,

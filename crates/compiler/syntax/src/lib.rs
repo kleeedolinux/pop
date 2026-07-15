@@ -292,6 +292,14 @@ impl Parser<'_, '_> {
                 declaration = class;
             }
 
+            if self.tokens[declaration].kind() == TokenKind::Async {
+                let Some(function) = self.next_significant(declaration + 1) else {
+                    children.push(self.error_line(start));
+                    break;
+                };
+                declaration = function;
+            }
+
             let Some((node_kind, is_block)) = self.declaration_node_kind(declaration) else {
                 let found = self.tokens[declaration].text(self.source).to_owned();
                 self.diagnostics.push(syntax_diagnostics::unexpected_token(

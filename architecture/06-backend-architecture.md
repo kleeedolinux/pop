@@ -132,6 +132,31 @@ partial artifact. C text is disposable output and is not a stable ABI, cache,
 or semantic contract. See
 [ADR 0059](./decisions/0059-experimental-secure-c-transpilation-backend.md).
 
+## Experimental eBPF backend
+
+The experimental eBPF backend is an LLVM-backend mode for producing ELF eBPF
+objects from verified MIR under an explicit runtime-contract profile. It
+validates before emission, keeps BPF and Inkwell details inside the backend,
+and uses LLVM's BPF target rather than a custom instruction emitter in the
+first slice.
+
+The initial triples are `bpfel-unknown-none` and `bpfeb-unknown-none`. They
+represent ELF, no-OS LLVM BPF targets. Runtime support is selected separately
+through profiles such as `linux-ebpf`. PLRI remains a set of abstract runtime
+contracts; the `linux-ebpf` profile currently provides only the scalar
+contracts needed by the MVP and therefore cannot satisfy requirements for
+managed allocation, standard-library adapters, GC roots, closures, interfaces,
+coroutines, or similar dynamic representations. Those failures are reported as
+missing runtime contracts, not as HIR/MIR language bans.
+
+The MVP supports an explicit XDP program mode, emits a wrapper in an `xdp`
+section, and rejects checked arithmetic until trap-preserving lowering exists.
+It also has eBPF-specific validation for invalid entry signatures, recursion,
+floating point, unproven loop backedges, unsupported MIR operations, and
+backend representations that have not been implemented yet. If LLVM BPF is
+unavailable, object emission fails with a target diagnostic and no partial
+artifact. See [ADR 0070](./decisions/0070-experimental-ebpf-backend.md).
+
 ## Future VM backend
 
 The VM backend should lower canonical MIR to typed or register-based bytecode.

@@ -1583,6 +1583,7 @@ fn parse_effects(text: &str, line: usize) -> Result<MirEffectSummary, MirParseEr
             "MayTrap" => Ok(MirEffect::MayTrap),
             "MayUnwind" => Ok(MirEffect::MayUnwind),
             "Suspends" => Ok(MirEffect::Suspends),
+            "Blocks" => Ok(MirEffect::Blocks),
             "UnsafeMemory" => Ok(MirEffect::UnsafeMemory),
             "ForeignFunction" => Ok(MirEffect::ForeignFunction),
             "AmbientIo" => Ok(MirEffect::AmbientIo),

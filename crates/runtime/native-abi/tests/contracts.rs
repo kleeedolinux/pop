@@ -55,6 +55,10 @@ fn supported_symbols_are_unique_and_native() {
         RuntimeOperation::SatbWriteBarrier,
         RuntimeOperation::Trap,
         RuntimeOperation::ContinueUnwind,
+        RuntimeOperation::Suspend,
+        RuntimeOperation::Resume,
+        RuntimeOperation::TaskCancel,
+        RuntimeOperation::TaskCancellationRequested,
     ];
     let symbols: BTreeSet<_> = operations
         .into_iter()

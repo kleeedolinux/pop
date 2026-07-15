@@ -44,6 +44,8 @@ pub enum RuntimeOperation {
     ContinueUnwind,
     Suspend,
     Resume,
+    TaskCancel,
+    TaskCancellationRequested,
     InitializeModule,
     InitializeBubble,
 }

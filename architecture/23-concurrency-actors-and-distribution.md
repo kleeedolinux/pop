@@ -326,7 +326,7 @@ location transparency or an ambient global registry.
 The closed effect vocabulary distinguishes at least:
 
 - `Allocates` for task frames, mailbox nodes, copies, and encoded buffers;
-- `Suspends` for await and blocking coordination points;
+- `Suspends` for await and coordination points that suspend a task;
 - `Blocks` for native/OS-worker blocking;
 - managed mutation/synchronization and GC safe points;
 - panic/unwind and cancellation; and

@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use pop_standard::{
     ApiBaselineError, ApiKind, ApiStatus, parse_standard_api_baseline, standard_api_baseline,
 };
@@ -7,7 +9,7 @@ use pop_types::embedded_bootstrap_schema;
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 70);
+    assert_eq!(baseline.entries().len(), 83);
 
     let prelude_names = baseline
         .entries()
@@ -27,12 +29,12 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .filter(|entry| entry.status() == ApiStatus::Prototype)
         .map(|entry| entry.identity())
         .collect::<Vec<_>>();
-    assert_eq!(prototypes.len(), 33);
+    assert_eq!(prototypes.len(), 46);
     assert_eq!(
         &prototypes[..4],
         ["namespace:0", "namespace:1", "function:0", "function:1"]
     );
-    assert_eq!(prototypes.last(), Some(&"api:28"));
+    assert_eq!(prototypes.last(), Some(&"api:41"));
 
     let portable_names = baseline
         .entries()
@@ -72,6 +74,19 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
             ("Pop.Sequence", "product"),
             ("Pop.Sequence", "minOr"),
             ("Pop.Sequence", "maxOr"),
+            ("Pop.Sequence", "findOr"),
+            ("Pop.Sequence", "indexOr"),
+            ("Pop.Sequence", "sumBy"),
+            ("Pop.Sequence", "productBy"),
+            ("Pop.Sequence", "minByOr"),
+            ("Pop.Sequence", "maxByOr"),
+            ("Pop.Sequence", "append"),
+            ("Pop.Sequence", "prepend"),
+            ("Pop.Sequence", "scan"),
+            ("Pop.Sequence", "elementAtOr"),
+            ("Pop.Sequence", "findLastOr"),
+            ("Pop.Sequence", "indexLastOr"),
+            ("Pop.Sequence", "reduceOr"),
         ]
     );
 }
@@ -176,9 +191,10 @@ fn standard_api_baseline_loading_is_bounded() {
 
     let mut oversized_inventory = header.to_owned();
     for identity in 0..1_025 {
-        oversized_inventory.push_str(&format!(
-            "primitive:{identity}\tPrimitive\tPop.Internal\tPop\tBoolean{identity}\tBoolean{identity}\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md\n"
-        ));
+        let _ = writeln!(
+            oversized_inventory,
+            "primitive:{identity}\tPrimitive\tPop.Internal\tPop\tBoolean{identity}\tBoolean{identity}\tprelude\timplemented\ttrue\tarchitecture/02-language-model.md"
+        );
     }
     assert_eq!(
         parse_standard_api_baseline(&oversized_inventory),

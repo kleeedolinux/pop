@@ -126,6 +126,11 @@ transplanted into a Luau-shaped file.
 - Generic calls infer one complete canonical argument list or fail statically;
   nominal bounds and verified portable specialization capsules preserve exact
   types and Bubble identity across dependency boundaries.
+- Source overloads select one non-generic function by exact argument type pack;
+  conversions, result context, declaration order, and runtime values never
+  participate.
+- Every normal Bubble receives the verified reserved `Pop.Standard` reference;
+  package linking consumes the target implementation reloaded from `.poplib`.
 - Lua-shaped `---` XML documentation comments are parsed, signature-checked,
   emitted with library metadata, and available to editors/doc tools.
 - Non-empty XML documentation elements always use separate opening, body, and

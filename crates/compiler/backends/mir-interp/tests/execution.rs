@@ -25,6 +25,34 @@ fn executable_source(text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     (mir, front_end.types().clone())
 }
 
+fn executable_source_function(
+    text: &str,
+    function_name: &str,
+) -> (pop_mir::MirBubble, pop_types::TypeArena, SymbolId) {
+    let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", text).expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let symbol = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == function_name)
+        .expect("named function")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    (mir, front_end.types().clone(), symbol)
+}
+
 fn executable_modules(texts: &[(&str, &str)]) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     let modules = texts
         .iter()
@@ -159,6 +187,24 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .expect("else branch"),
         vec![int(3)]
     );
+}
+
+#[test]
+fn completed_async_tasks_execute_through_await() {
+    let (mir, types, run) = executable_source_function(
+        "namespace Main\n\
+         private async function load(): Int\n\
+             return 42\n\
+         end\n\
+         public async function run(): Int\n\
+             local pending = load()\n\
+             return await pending\n\
+        end\n",
+        "run",
+    );
+    let interpreter = MirInterpreter::new(&mir, &types).expect("verified MIR");
+
+    assert_eq!(interpreter.call(run, &[]).expect("await"), vec![int(42)]);
 }
 
 #[test]
@@ -493,7 +539,17 @@ fn ordinary_pop_integer_sequence_aggregates_are_checked_and_explicit() {
                      return sum(overflow)\n\
                  end\n\
                  local productOverflow: {Int} = {9223372036854775807, 2}\n\
-                 return product(productOverflow)\n\
+                 if mode == 2 then\n\
+                     return product(productOverflow)\n\
+                 end\n\
+                 if mode == 3 then\n\
+                     return sumBy(overflow, function(value: Int): Int\n\
+                         return value\n\
+                     end)\n\
+                 end\n\
+                 return productBy(productOverflow, function(value: Int): Int\n\
+                     return value\n\
+                 end)\n\
              end\n",
         ),
     ]);
@@ -512,6 +568,309 @@ fn ordinary_pop_integer_sequence_aggregates_are_checked_and_explicit() {
     assert_eq!(
         interpreter.call(function, &[int(2)]),
         Err(trap(TrapKind::IntegerOverflow))
+    );
+    assert_eq!(
+        interpreter.call(function, &[int(3)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    assert_eq!(
+        interpreter.call(function, &[int(4)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+}
+
+#[test]
+fn sequence_projections_are_exact_stable_and_generic() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private record Candidate\n\
+                 id: Int\n\
+                 key: Int\n\
+             end\n\
+             public function projectionContract(): Int\n\
+                 local first: Candidate = { id = 1, key = 5 }\n\
+                 local second: Candidate = { id = 2, key = 5 }\n\
+                 local third: Candidate = { id = 3, key = 7 }\n\
+                 local fourth: Candidate = { id = 4, key = 7 }\n\
+                 local candidates: {Candidate} = {first, second, third, fourth}\n\
+                 local minCalls = 0\n\
+                 local least = minByOr(candidates, function(value: Candidate): Int\n\
+                     minCalls += 1\n\
+                     return value.key\n\
+                 end, third)\n\
+                 local maxCalls = 0\n\
+                 local greatest = maxByOr(candidates, function(value: Candidate): Int\n\
+                     maxCalls += 1\n\
+                     return value.key\n\
+                 end, first)\n\
+                 local values: {Int} = {1, 2, 3}\n\
+                 local sumCalls = 0\n\
+                 local total = sumBy(values, function(value: Int): Int\n\
+                     sumCalls += 1\n\
+                     return value\n\
+                 end)\n\
+                 local productCalls = 0\n\
+                 local multiplied = productBy(values, function(value: Int): Int\n\
+                     productCalls += 1\n\
+                     return value\n\
+                 end)\n\
+                 local words: {String} = {\"first\", \"match\", \"last\"}\n\
+                 local word = findOr(words, function(value: String): Boolean\n\
+                     return value == \"match\"\n\
+                 end, \"missing\")\n\
+                 if least.id ~= 1 or greatest.id ~= 3 or minCalls ~= 4 or maxCalls ~= 4 then\n\
+                     return -1\n\
+                 end\n\
+                 if total ~= 6 or multiplied ~= 6 or sumCalls ~= 3 or productCalls ~= 3 then\n\
+                     return -2\n\
+                 end\n\
+                 if word ~= \"match\" then\n\
+                     return -3\n\
+                 end\n\
+                 return 0\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("projectionContract")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified projection MIR")
+            .call(function, &[]),
+        Ok(vec![int(0)])
+    );
+}
+
+#[test]
+fn sequence_append_prepend_and_scan_are_lazy_and_stably_exhausted() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             private class CountingIterator implements Iterator<Int>\n\
+                 private current: Int\n\
+                 private limit: Int\n\
+                 private calls: Int\n\
+                 public function CountingIterator.new(limit: Int): CountingIterator\n\
+                     return CountingIterator { current = 0, limit = limit, calls = 0 }\n\
+                 end\n\
+                 public function CountingIterator:iterator(): Iterator<Int>\n\
+                     return self\n\
+                 end\n\
+                 public function CountingIterator:next(): Iteration<Int>\n\
+                     self.calls += 1\n\
+                     if self.current >= self.limit then\n\
+                         return Iteration.End\n\
+                     end\n\
+                     self.current += 1\n\
+                     return Iteration.Item(self.current)\n\
+                 end\n\
+                 public function CountingIterator:callCount(): Int\n\
+                     return self.calls\n\
+                 end\n\
+             end\n\
+             public function lazyContract(): Int\n\
+                 local appendCounter = CountingIterator.new(2)\n\
+                 local appendSource: Iterator<Int> = appendCounter\n\
+                 local appended = append(appendSource, 9)\n\
+                 if appendCounter:callCount() ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 if count(take(appended, 1)) ~= 1 or appendCounter:callCount() ~= 1 then\n\
+                     return -2\n\
+                 end\n\
+                 if count(appended) ~= 2 or appendCounter:callCount() ~= 3 then\n\
+                     return -3\n\
+                 end\n\
+                 if count(appended) ~= 0 or appendCounter:callCount() ~= 3 then\n\
+                     return -4\n\
+                 end\n\
+                 local prependCounter = CountingIterator.new(2)\n\
+                 local prependSource: Iterator<Int> = prependCounter\n\
+                 local prepended = prepend(prependSource, 9)\n\
+                 if prependCounter:callCount() ~= 0 then\n\
+                     return -5\n\
+                 end\n\
+                 if count(take(prepended, 1)) ~= 1 or prependCounter:callCount() ~= 0 then\n\
+                     return -6\n\
+                 end\n\
+                 if count(prepended) ~= 2 or prependCounter:callCount() ~= 3 then\n\
+                     return -7\n\
+                 end\n\
+                 if count(prepended) ~= 0 or prependCounter:callCount() ~= 3 then\n\
+                     return -8\n\
+                 end\n\
+                 local scanCounter = CountingIterator.new(2)\n\
+                 local scanSource: Iterator<Int> = scanCounter\n\
+                 local combineCalls = 0\n\
+                 local scanned = scan(scanSource, 0, function(state: Int, value: Int): Int\n\
+                     combineCalls += 1\n\
+                     return state + value\n\
+                 end)\n\
+                 if scanCounter:callCount() ~= 0 or combineCalls ~= 0 then\n\
+                     return -9\n\
+                 end\n\
+                 if count(take(scanned, 1)) ~= 1 or scanCounter:callCount() ~= 1 or combineCalls ~= 1 then\n\
+                     return -10\n\
+                 end\n\
+                 if count(scanned) ~= 1 or scanCounter:callCount() ~= 3 or combineCalls ~= 2 then\n\
+                     return -11\n\
+                 end\n\
+                 if count(scanned) ~= 0 or scanCounter:callCount() ~= 3 or combineCalls ~= 2 then\n\
+                     return -12\n\
+                 end\n\
+                 return 0\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("lazyContract")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified lazy Sequence MIR")
+            .call(function, &[]),
+        Ok(vec![int(0)])
+    );
+}
+
+#[test]
+fn exact_source_overloads_execute_in_the_mir_interpreter() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/int.pop",
+            "namespace Main\npublic function choose(value: Int): Int return value + 1 end\n",
+        ),
+        (
+            "src/text.pop",
+            "namespace Main\npublic function choose(value: String): String return value .. \"!\" end\n",
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\npublic function overloadResult(): Int\n    if choose(\"pop\") ~= \"pop!\" then\n        return -1\n    end\n    return choose(41)\nend\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("overloadResult")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified overload MIR")
+            .call(function, &[]),
+        Ok(vec![int(42)])
+    );
+}
+
+#[test]
+fn sequence_index_last_and_reduction_are_generic_and_exact() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            include_str!(
+                "../../../../libraries/standard/tests/programs/sequenceIndexLastReduction.pop"
+            ),
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("main")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified Sequence inspection MIR")
+            .call(function, &[]),
+        Ok(vec![int(0)])
+    );
+}
+
+#[test]
+fn ordinary_pop_sequence_projection_and_composition_are_direct() {
+    let (mir, types) = executable_modules(&[
+        (
+            "src/sequence.pop",
+            include_str!("../../../../libraries/standard/pop/src/sequence.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Sequence\n\
+             public function projectedResult(): Int\n\
+                 local values: {Int} = {3, 1, 2}\n\
+                 local empty: {Int} = {}\n\
+                 local selected = findOr(values, function(value: Int): Boolean\n\
+                     return value % 2 == 0\n\
+                 end, 9)\n\
+                 local position = indexOr(values, function(value: Int): Boolean\n\
+                     return value == 2\n\
+                 end, -1)\n\
+                 local projectedSum = sumBy(values, function(value: Int): Int\n\
+                     return value * 2\n\
+                 end)\n\
+                 local projectedProduct = productBy(values, function(value: Int): Int\n\
+                     return value\n\
+                 end)\n\
+                 local least = minByOr(values, function(value: Int): Int\n\
+                     return value\n\
+                 end, 9)\n\
+                 local greatest = maxByOr(values, function(value: Int): Int\n\
+                     return value\n\
+                 end, 9)\n\
+                 local appended = collect(append(values, 9))\n\
+                 local prepended = collect(prepend(values, 8))\n\
+                 local states = scan(values, 10, function(state: Int, value: Int): Int\n\
+                     return state + value\n\
+                 end)\n\
+                 if findOr(empty, function(value: Int): Boolean\n\
+                     return true\n\
+                 end, 7) ~= 7 or indexOr(empty, function(value: Int): Boolean\n\
+                     return true\n\
+                 end, -4) ~= -4 then\n\
+                     return -1\n\
+                 end\n\
+                 return selected + position + projectedSum + projectedProduct + least + greatest + List.get(appended, 4) + List.get(prepended, 1) + sum(states)\n\
+             end\n",
+        ),
+    ]);
+    let function = mir
+        .functions()
+        .iter()
+        .find(|function| function.parameters().is_empty())
+        .expect("projectedResult")
+        .symbol();
+    assert_eq!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified projected Sequence MIR")
+            .call(function, &[])
+            .expect("Sequence projection and composition"),
+        vec![int(87)]
     );
 }
 

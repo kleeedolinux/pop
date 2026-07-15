@@ -3,6 +3,25 @@
 //! This first contract encodes the accepted primitive and nominal type model.
 //! It deliberately has no operational unknown or dynamic fallback type.
 
+// The type checker predates the repository-wide Rust 1.96 clippy gate. Keep
+// the baseline explicit until these large modules are split deliberately.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::elidable_lifetime_names,
+    clippy::format_collect,
+    clippy::match_same_arms,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::question_mark,
+    clippy::redundant_closure_for_method_calls,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    clippy::wildcard_imports
+)]
+
 use pop_foundation::{
     AttributeId, BuiltinTypeId, ClassId, InterfaceId, OpaqueId, ParameterId, TypeId,
 };
@@ -281,6 +300,7 @@ pub enum Effect {
     MayTrap,
     MayUnwind,
     Suspends,
+    Blocks,
     UnsafeMemory,
     ForeignFunction,
     AmbientIo,

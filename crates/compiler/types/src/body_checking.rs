@@ -540,6 +540,37 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 };
                 self.check_result_propagate(operand, span)
             }
+            ExpressionSyntaxKind::Await { operand } => {
+                if !self
+                    .signature_stack
+                    .last()
+                    .is_some_and(ResolvedFunctionSignature::is_async)
+                {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "await",
+                        "async function",
+                    ));
+                    return None;
+                }
+                let task = self.check_expression(operand)?;
+                let Some(completion) = self.resolver.task_completion_type(task.type_id()) else {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "await",
+                        self.type_name(task.type_id()),
+                    ));
+                    return None;
+                };
+                self.invalidate_flow_narrowings();
+                Some(TypedExpression {
+                    type_id: completion,
+                    kind: TypedExpressionKind::Await {
+                        task: Box::new(task),
+                    },
+                    span,
+                })
+            }
             ExpressionSyntaxKind::Binary {
                 operator,
                 left,
@@ -836,7 +867,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     typed.span(),
                     argument.span(),
                 );
-                typed_arguments.push(typed);
+                checked_arguments.push(typed);
             }
             let dispatch = self
                 .resolver
@@ -852,7 +883,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     dispatch,
                     is_async: signature.is_async(),
                     type_arguments: resolved_arguments,
-                    arguments: typed_arguments,
+                    arguments: checked_arguments,
                     span,
                 },
                 results: result_types,
@@ -1255,6 +1286,21 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         if !resolution.diagnostics().is_empty() {
             self.diagnostics
                 .extend(resolution.diagnostics().iter().cloned());
+            return None;
+        }
+        if resolution.symbols().len() > 1 {
+            self.diagnostics
+                .push(resolution_diagnostics::ambiguous_name(
+                    span,
+                    &name,
+                    resolution.symbols().iter().filter_map(|symbol| {
+                        self.resolver
+                            .database()
+                            .index()
+                            .declaration(*symbol)
+                            .map(pop_resolve::Declaration::span)
+                    }),
+                ));
             return None;
         }
         let symbol = resolution.symbol()?;
@@ -1691,6 +1737,7 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
         | TypedStatementKind::NumericFor { .. }
         | TypedStatementKind::GeneralizedFor { .. }
         | TypedStatementKind::Defer { .. }
+        | TypedStatementKind::AsyncDefer { .. }
         | TypedStatementKind::Break
         | TypedStatementKind::Continue
         | TypedStatementKind::FieldSet { .. }

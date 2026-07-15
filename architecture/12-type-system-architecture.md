@@ -71,6 +71,16 @@ Examples requiring diagnostics include:
 - a table write inconsistent with its inferred key/value type;
 - an overload set with no unique best statically valid candidate.
 
+## Exact source overloads
+
+ADR 0074 permits non-generic namespace functions to share a name only when
+their complete parameter type packs differ. Lookup selects one ordinary
+lexical/namespace/import group before overload selection. Calls then use exact
+arity and exact synthesized argument types; there are no conversions, result-
+type ranking, declaration-order rules, or runtime dispatch. Equal parameter
+packs are duplicates even when results differ. Generic overload groups and bare
+overloaded function values remain rejected in the first slice.
+
 ## Nil and optional types
 
 Pop Lang retains familiar `nil` syntax. `T?` means `T | nil`, and non-optional

@@ -176,6 +176,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 SymbolSpace::Value,
                 callee.span(),
             );
+            if resolution.symbols().len() > 1 {
+                return self
+                    .check_exact_source_overload(&name, resolution.symbols(), arguments, span)
+                    .map(CheckedInvocation::Call);
+            }
             if let Some(symbol) = resolution.symbol()
                 && let Some(signature) = self.signatures.get(&symbol).cloned()
                 && !signature.type_parameters().is_empty()
@@ -250,6 +255,113 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }))
     }
 
+    fn call_results(&mut self, is_async: bool, results: Vec<TypeId>) -> Option<Vec<TypeId>> {
+        if !is_async {
+            return Some(results);
+        }
+        let completion = self.pack_result_types(results)?;
+        Some(vec![self.resolver.task_type(completion)?])
+    }
+
+    fn pack_result_types(&mut self, results: Vec<TypeId>) -> Option<TypeId> {
+        match results.as_slice() {
+            [] => self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Tuple(Vec::new()))
+                .ok(),
+            [single] => Some(*single),
+            _ => self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Tuple(results))
+                .ok(),
+        }
+    }
+
+    fn check_exact_source_overload(
+        &mut self,
+        name: &str,
+        symbols: &[pop_foundation::SymbolId],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<CheckedCall> {
+        let candidates = symbols
+            .iter()
+            .filter_map(|symbol| {
+                self.signatures
+                    .get(symbol)
+                    .cloned()
+                    .map(|signature| (*symbol, signature))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != symbols.len()
+            || candidates
+                .iter()
+                .any(|(_, signature)| !signature.type_parameters().is_empty())
+        {
+            return None;
+        }
+        let mut typed_arguments = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            typed_arguments.push(self.check_expression(argument)?);
+        }
+        let argument_types = typed_arguments
+            .iter()
+            .map(TypedExpression::type_id)
+            .collect::<Vec<_>>();
+        let matching = candidates
+            .iter()
+            .filter(|(_, signature)| {
+                signature.parameters().len() == argument_types.len()
+                    && signature
+                        .parameters()
+                        .iter()
+                        .filter_map(|parameter| parameter.parameter_type().type_id())
+                        .eq(argument_types.iter().copied())
+            })
+            .collect::<Vec<_>>();
+        let [(symbol, signature)] = matching.as_slice() else {
+            self.diagnostics
+                .push(type_diagnostics::no_matching_overload(
+                    span,
+                    name,
+                    symbols.iter().filter_map(|symbol| {
+                        self.resolver
+                            .database()
+                            .index()
+                            .declaration(*symbol)
+                            .map(pop_resolve::Declaration::span)
+                    }),
+                ));
+            return None;
+        };
+        let results = signature
+            .results()
+            .iter()
+            .map(crate::ResolvedType::type_id)
+            .collect::<Option<Vec<_>>>()?;
+        let dispatch = self
+            .resolver
+            .database()
+            .index()
+            .declaration(*symbol)
+            .and_then(pop_resolve::Declaration::reference_identity)
+            .map_or(
+                TypedCallDispatch::Direct { function: *symbol },
+                |function| TypedCallDispatch::Referenced { function },
+            );
+        Some(CheckedCall {
+            call: TypedCall {
+                dispatch,
+                type_arguments: Vec::new(),
+                arguments: typed_arguments,
+                span,
+            },
+            results,
+        })
+    }
+
     fn check_inferred_generic_call(
         &mut self,
         symbol: pop_foundation::SymbolId,
@@ -285,7 +397,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             return None;
         }
 
-        let mut typed_arguments = Vec::with_capacity(arguments.len());
+        let mut checked_values = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(signature.parameters()) {
             let typed = self.check_expression(argument)?;
             if !self.infer_type_pattern(
@@ -306,7 +418,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     ));
                 return None;
             }
-            typed_arguments.push(typed);
+            checked_values.push(typed);
         }
 
         for parameter in signature.type_parameters() {
@@ -325,7 +437,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }
         }
 
-        let mut type_arguments = Vec::with_capacity(signature.type_parameters().len());
+        let mut resolved_generics = Vec::with_capacity(signature.type_parameters().len());
         for parameter in signature.type_parameters() {
             let Some(argument) = substitutions.get(&parameter.parameter()).copied() else {
                 self.diagnostics
@@ -336,12 +448,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     ));
                 return None;
             };
-            type_arguments.push(argument);
+            resolved_generics.push(argument);
         }
         let substitution_map: BTreeMap<_, _> = signature
             .type_parameters()
             .iter()
-            .zip(&type_arguments)
+            .zip(&resolved_generics)
             .map(|(parameter, argument)| (parameter.parameter(), *argument))
             .collect();
         self.resolver
@@ -362,7 +474,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             })
             .collect::<Option<Vec<_>>>()?;
         for ((typed, expected), source) in
-            typed_arguments.iter().zip(&parameter_types).zip(arguments)
+            checked_values.iter().zip(&parameter_types).zip(arguments)
         {
             self.require_same_type(*expected, typed.type_id(), typed.span(), source.span());
         }
@@ -1278,12 +1390,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         if self.binding_by_name(name).is_some() {
             return None;
         }
-        if self
+        if !self
             .resolver
             .database()
             .resolve(self.module, name, SymbolSpace::Value, span)
-            .symbol()
-            .is_some()
+            .symbols()
+            .is_empty()
         {
             return None;
         }

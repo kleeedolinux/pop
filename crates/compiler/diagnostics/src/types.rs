@@ -93,6 +93,56 @@ pub fn wrong_value_arity(
 }
 
 #[must_use]
+pub fn no_matching_overload(
+    span: SourceSpan,
+    name: impl Into<String>,
+    candidates: impl IntoIterator<Item = SourceSpan>,
+) -> Diagnostic {
+    candidates.into_iter().fold(
+        Diagnostic::new(
+            DiagnosticCode::new("POP2030"),
+            DiagnosticSeverity::Error,
+            DiagnosticCategory::Type,
+            MessageKey::new("types.noMatchingOverload"),
+            vec![DiagnosticArgument::Identifier(name.into())],
+            span,
+        ),
+        |diagnostic, candidate| {
+            diagnostic.with_label(DiagnosticLabel::new(
+                candidate,
+                MessageKey::new("resolution.candidate"),
+                Vec::new(),
+            ))
+        },
+    )
+}
+
+#[must_use]
+pub fn invalid_overload_set(
+    span: SourceSpan,
+    name: impl Into<String>,
+    reason: impl Into<String>,
+    original: SourceSpan,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2031"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.invalidOverloadSet"),
+        vec![
+            DiagnosticArgument::Identifier(name.into()),
+            DiagnosticArgument::Identifier(reason.into()),
+        ],
+        span,
+    )
+    .with_label(DiagnosticLabel::new(
+        original,
+        MessageKey::new("resolution.candidate"),
+        Vec::new(),
+    ))
+}
+
+#[must_use]
 pub fn invalid_operator(
     span: SourceSpan,
     operator: impl Into<String>,

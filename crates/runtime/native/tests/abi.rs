@@ -68,6 +68,16 @@ fn writable_abi_two_safe_point_is_failure_atomic_but_not_advertised() {
 }
 
 #[test]
+fn native_task_abi_preserves_scalar_completion_tokens() {
+    let _guard = abi_test_lock();
+    assert_eq!(pop_rt_suspend(42), 42);
+    assert_eq!(pop_rt_resume(7), 7);
+    assert_eq!(pop_rt_task_cancel(1), 1);
+    assert_eq!(pop_rt_task_cancel(0), 0);
+    assert_eq!(pop_rt_task_cancellation_requested(1), 0);
+}
+
+#[test]
 #[allow(unsafe_code)]
 fn initialized_object_allocation_publishes_one_complete_typed_payload() {
     let _guard = abi_test_lock();

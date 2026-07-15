@@ -62,6 +62,12 @@ fn catalog_is_sorted_unique_and_partitioned_by_compiler_phase() {
             && entry.warning_wave() == Some(1)
             && entry.is_suppressible()
     }));
+    assert!(entries[58..].iter().all(|entry| {
+        entry.category() == DiagnosticCategory::Backend
+            && entry.severity() == DiagnosticSeverity::Error
+            && entry.warning_wave().is_none()
+            && !entry.is_suppressible()
+    }));
     assert_eq!(entries[3].quick_fix_providers(), "replaceExportWithPublic");
 }
 
