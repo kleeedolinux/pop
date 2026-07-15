@@ -2362,6 +2362,9 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::Await { task: base }
         | HirExpressionKind::TaskCancelToken { source: base }
         | HirExpressionKind::TaskCancel { source: base }
+        | HirExpressionKind::FfiHandleOpen { value: base }
+        | HirExpressionKind::FfiHandleGet { handle: base }
+        | HirExpressionKind::FfiHandleClose { handle: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
@@ -2848,6 +2851,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::Await { task: base }
         | HirExpressionKind::TaskCancelToken { source: base }
         | HirExpressionKind::TaskCancel { source: base }
+        | HirExpressionKind::FfiHandleOpen { value: base }
+        | HirExpressionKind::FfiHandleGet { handle: base }
+        | HirExpressionKind::FfiHandleClose { handle: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -3364,6 +3370,9 @@ fn specialize_expression(
         | HirExpressionKind::Await { task: base }
         | HirExpressionKind::TaskCancelToken { source: base }
         | HirExpressionKind::TaskCancel { source: base }
+        | HirExpressionKind::FfiHandleOpen { value: base }
+        | HirExpressionKind::FfiHandleGet { handle: base }
+        | HirExpressionKind::FfiHandleClose { handle: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
@@ -4285,6 +4294,15 @@ pub enum HirExpressionKind {
     TaskStart {
         group: Box<HirExpression>,
         task: Box<HirExpression>,
+    },
+    FfiHandleOpen {
+        value: Box<HirExpression>,
+    },
+    FfiHandleGet {
+        handle: Box<HirExpression>,
+    },
+    FfiHandleClose {
+        handle: Box<HirExpression>,
     },
     Call {
         dispatch: HirCallDispatch,

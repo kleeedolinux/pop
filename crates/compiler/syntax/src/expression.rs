@@ -612,7 +612,10 @@ impl BodyParser<'_> {
         let mut end = first.range().end();
         let mut path = vec![first.text(self.source).to_owned()];
         while self.consume(TokenKind::Dot).is_some() {
-            let component = self.expect(TokenKind::Identifier, "qualified name")?;
+            let component = match self.current_kind() {
+                Some(TokenKind::Open) => self.advance().expect("peeked qualified component"),
+                _ => self.expect(TokenKind::Identifier, "qualified name")?,
+            };
             end = component.range().end();
             path.push(component.text(self.source).to_owned());
         }

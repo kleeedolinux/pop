@@ -1306,6 +1306,11 @@ fn visit_expression_closures(
         | HirExpressionKind::TaskCancel { source } => {
             visit_expression_closures(source, parameters, locals);
         }
+        HirExpressionKind::FfiHandleOpen { value }
+        | HirExpressionKind::FfiHandleGet { handle: value }
+        | HirExpressionKind::FfiHandleClose { handle: value } => {
+            visit_expression_closures(value, parameters, locals);
+        }
         HirExpressionKind::TaskGroup { cancel, body } => {
             visit_expression_closures(cancel, parameters, locals);
             visit_expression_closures(body, parameters, locals);
@@ -1996,7 +2001,15 @@ impl<'hir> FunctionBuilder<'hir> {
                     self.emit_effect(kind, call.span());
                 }
                 HirStatementKind::Expression(expression) => {
-                    self.lower_expression(expression);
+                    if let HirExpressionKind::FfiHandleClose { handle } = expression.kind() {
+                        let handle = self.lower_expression(handle);
+                        self.emit_effect(
+                            MirInstructionKind::FfiHandleClose { handle },
+                            expression.span(),
+                        );
+                    } else {
+                        self.lower_expression(expression);
+                    }
                 }
             }
         }
@@ -3227,6 +3240,20 @@ impl<'hir> FunctionBuilder<'hir> {
                 group: self.lower_expression(group),
                 task: self.lower_expression(task),
             },
+            HirExpressionKind::FfiHandleOpen { value } => MirInstructionKind::FfiHandleOpen {
+                value: self.lower_expression(value),
+            },
+            HirExpressionKind::FfiHandleGet { handle } => MirInstructionKind::FfiHandleGet {
+                handle: self.lower_expression(handle),
+            },
+            HirExpressionKind::FfiHandleClose { handle } => {
+                let handle = self.lower_expression(handle);
+                self.emit_effect(
+                    MirInstructionKind::FfiHandleClose { handle },
+                    expression.span(),
+                );
+                MirInstructionKind::NilConstant
+            }
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {

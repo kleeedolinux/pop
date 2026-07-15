@@ -1111,6 +1111,21 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, task, arena);
             output.push(')');
         }
+        HirExpressionKind::FfiHandleOpen { value } => {
+            output.push_str("ffi.handle.open(");
+            dump_expression(output, value, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiHandleGet { handle } => {
+            output.push_str("ffi.handle.get(");
+            dump_expression(output, handle, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiHandleClose { handle } => {
+            output.push_str("ffi.handle.close(");
+            dump_expression(output, handle, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
             type_arguments,

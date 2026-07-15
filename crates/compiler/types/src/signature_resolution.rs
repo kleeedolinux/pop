@@ -778,6 +778,11 @@ impl<'index> SignatureResolver<'index> {
     }
 
     #[must_use]
+    pub const fn has_ffi_dependency(&self) -> bool {
+        self.has_ffi_dependency
+    }
+
+    #[must_use]
     pub const fn arena(&self) -> &TypeArena {
         &self.arena
     }

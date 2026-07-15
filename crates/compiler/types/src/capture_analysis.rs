@@ -325,7 +325,10 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::Unary { operand, .. }
         | TypedExpressionKind::Await { task: operand }
         | TypedExpressionKind::TaskCancelToken { source: operand }
-        | TypedExpressionKind::TaskCancel { source: operand } => {
+        | TypedExpressionKind::TaskCancel { source: operand }
+        | TypedExpressionKind::FfiHandleOpen { value: operand }
+        | TypedExpressionKind::FfiHandleGet { handle: operand }
+        | TypedExpressionKind::FfiHandleClose { handle: operand } => {
             finalize_expression_captures(operand, written);
         }
         TypedExpressionKind::TaskGroup { cancel, body } => {

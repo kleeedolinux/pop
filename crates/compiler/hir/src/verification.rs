@@ -20,6 +20,37 @@ use pop_types::{
 
 use crate::ir::*;
 
+fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == pop_types::FFI_HANDLE_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn is_managed_reference_type(arena: &TypeArena, type_id: TypeId) -> bool {
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin { definition, .. }) => {
+            !pop_types::is_ffi_abi_builtin_type(*definition)
+        }
+        Some(
+            SemanticType::Primitive(PrimitiveType::String)
+            | SemanticType::Tuple(_)
+            | SemanticType::Array(_)
+            | SemanticType::Table { .. }
+            | SemanticType::Class { .. }
+            | SemanticType::Interface { .. }
+            | SemanticType::Function { .. }
+            | SemanticType::ErrorUnion { .. },
+        ) => true,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirVerificationError {
     InvalidForeignDeclaration {
@@ -103,6 +134,9 @@ pub enum HirVerificationError {
         span: SourceSpan,
     },
     InvalidTaskOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiHandleOperation {
         span: SourceSpan,
     },
     ExpressionTypeMismatch {
@@ -2664,6 +2698,41 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiHandleOpen { value } => {
+                self.verify_expression(value, visible);
+                if !is_managed_reference_type(self.arena, value.type_id())
+                    || ffi_handle_payload(self.arena, expression.type_id()) != Some(value.type_id())
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiHandleOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiHandleGet { handle } => {
+                self.verify_expression(handle, visible);
+                if ffi_handle_payload(self.arena, handle.type_id()) != Some(expression.type_id())
+                    || !is_managed_reference_type(self.arena, expression.type_id())
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiHandleOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiHandleClose { handle } => {
+                self.verify_expression(handle, visible);
+                if ffi_handle_payload(self.arena, handle.type_id())
+                    .is_none_or(|payload| !is_managed_reference_type(self.arena, payload))
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiHandleOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::TaskGroup { cancel, body } => {
                 self.verify_expression(cancel, visible);
                 self.verify_expression(body, visible);
@@ -5038,6 +5107,11 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Await { task: operand }
         | HirExpressionKind::TaskCancelToken { source: operand }
         | HirExpressionKind::TaskCancel { source: operand } => {
+            collect_cell_captures(operand, written)
+        }
+        HirExpressionKind::FfiHandleOpen { value: operand }
+        | HirExpressionKind::FfiHandleGet { handle: operand }
+        | HirExpressionKind::FfiHandleClose { handle: operand } => {
             collect_cell_captures(operand, written)
         }
         HirExpressionKind::TaskGroup { cancel, body } => {

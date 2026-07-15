@@ -94,6 +94,26 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<CheckedInvocation> {
         if let ExpressionSyntaxKind::Name(path) = callee.kind() {
+            if matches!(path.as_slice(), [ffi, handle, operation]
+                if ffi == "Ffi" && handle == "Handle"
+                    && matches!(operation.as_str(), "open" | "get" | "close"))
+                && self.resolver.has_ffi_dependency()
+                && self
+                    .resolver
+                    .database()
+                    .resolve(
+                        self.module,
+                        &path.join("."),
+                        SymbolSpace::Value,
+                        callee.span(),
+                    )
+                    .symbol()
+                    .is_none()
+            {
+                return self
+                    .check_ffi_handle_invocation(path, arguments, None, span)
+                    .map(CheckedInvocation::Value);
+            }
             if path.as_slice() == ["String"] {
                 return self
                     .check_string_conversion(arguments, span)
@@ -264,6 +284,114 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    pub(crate) fn check_ffi_handle_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        explicit_payload: Option<TypeId>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let operation = path.get(2)?.as_str();
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                format!("Ffi.Handle.{operation}"),
+                1,
+                arguments.len(),
+            ));
+            return None;
+        }
+        let argument = self.check_expression(&arguments[0])?;
+        let payload = if operation == "open" {
+            argument.type_id()
+        } else {
+            let Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) = self.resolver.arena().get(argument.type_id())
+            else {
+                self.diagnostics.push(type_diagnostics::type_mismatch(
+                    argument.span(),
+                    "Ffi.Handle<T>",
+                    self.type_name(argument.type_id()),
+                    span,
+                ));
+                return None;
+            };
+            if *definition != crate::FFI_HANDLE_TYPE_ID || arguments.len() != 1 {
+                self.diagnostics.push(type_diagnostics::type_mismatch(
+                    argument.span(),
+                    "Ffi.Handle<T>",
+                    self.type_name(argument.type_id()),
+                    span,
+                ));
+                return None;
+            }
+            arguments[0]
+        };
+        if explicit_payload.is_some_and(|expected| expected != payload) {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                argument.span(),
+                self.type_name(explicit_payload?),
+                self.type_name(payload),
+                span,
+            ));
+            return None;
+        }
+        let managed = matches!(
+            self.resolver.arena().get(payload),
+            Some(
+                SemanticType::Primitive(PrimitiveType::String)
+                    | SemanticType::Tuple(_)
+                    | SemanticType::Array(_)
+                    | SemanticType::Table { .. }
+                    | SemanticType::Class { .. }
+                    | SemanticType::Interface { .. }
+                    | SemanticType::Function { .. }
+                    | SemanticType::ErrorUnion { .. }
+            )
+        ) || matches!(
+            self.resolver.arena().get(payload),
+            Some(SemanticType::Builtin { definition, .. })
+                if !crate::is_ffi_abi_builtin_type(*definition)
+        );
+        if !managed {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                argument.span(),
+                "managed reference",
+                self.type_name(payload),
+                span,
+            ));
+            return None;
+        }
+        let handle_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: crate::FFI_HANDLE_TYPE_ID,
+                arguments: vec![payload],
+            })
+            .ok()?;
+        let type_id = match operation {
+            "open" => handle_type,
+            "get" => payload,
+            "close" => self.resolver.arena().source_type("nil")?,
+            _ => return None,
+        };
+        let argument = Box::new(argument);
+        let kind = match operation {
+            "open" => TypedExpressionKind::FfiHandleOpen { value: argument },
+            "get" => TypedExpressionKind::FfiHandleGet { handle: argument },
+            "close" => TypedExpressionKind::FfiHandleClose { handle: argument },
+            _ => return None,
+        };
+        Some(TypedExpression {
+            kind,
+            type_id,
+            span,
+        })
     }
 
     fn check_exact_source_overload(

@@ -85,6 +85,127 @@ fn front_end_enables_ffi_types_only_for_the_verified_ffi_dependency() {
 }
 
 #[test]
+fn ffi_handle_calls_lower_to_typed_backend_neutral_operations() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/handles.pop",
+            "namespace Handles\n\
+             public function roundTrip(value: Array<Int>): Array<Int>\n\
+             local handle = Ffi.Handle.open<<Array<Int>>>(value)\n\
+                 local resolved = Ffi.Handle.get(handle)\n\
+                 Ffi.Handle.close(handle)\n\
+                 return resolved\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("handle HIR"), result.types())
+        .expect("handle MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("ffiHandleOpen"), "{dump}");
+    assert!(dump.contains("ffiHandleGet"), "{dump}");
+    assert!(dump.contains("ffiHandleClose"), "{dump}");
+}
+
+#[test]
+fn ffi_handle_calls_require_the_dependency_and_managed_payloads() {
+    let source = |body: &str| {
+        FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(
+                FileId::from_raw(0),
+                "src/invalidHandle.pop",
+                format!("namespace Handles\n{body}"),
+            )
+            .expect("source"),
+        )
+    };
+    let without_dependency = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(10),
+        NamespaceId::from_raw(10),
+        Vec::new(),
+        vec![source(
+            "public function invalid(value: Array<Int>)\n    Ffi.Handle.open(value)\nend\n",
+        )],
+    ));
+    assert!(without_dependency.hir().is_none());
+
+    let ffi = BubbleId::from_raw(20);
+    let scalar = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![source(
+                "public function invalid()\n    Ffi.Handle.open(1)\nend\n",
+            )],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(scalar.hir().is_none());
+    assert!(!scalar.diagnostics().is_empty());
+}
+
+#[test]
+fn resolved_user_calls_are_not_hijacked_by_ffi_handle_spelling() {
+    let ffi = BubbleId::from_raw(20);
+    let declaration = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/userHandle.pop",
+            "namespace Ffi.Handle\npublic function get(value: Int): Int\n    return value\nend\n",
+        )
+        .expect("source"),
+    );
+    let caller = FrontEndModule::new(
+        ModuleId::from_raw(1),
+        SourceFile::new(
+            FileId::from_raw(1),
+            "src/caller.pop",
+            "namespace Caller\npublic function run(): Int\n    return Ffi.Handle.get(7)\nend\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![declaration, caller],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("user call HIR"), result.types())
+        .expect("user call MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callDirect"), "{dump}");
+    assert!(!dump.contains("ffiHandleGet"), "{dump}");
+}
+
+#[test]
 #[should_panic(expected = "Pop.Ffi must be a direct Bubble dependency")]
 fn front_end_rejects_an_unverified_ffi_bubble() {
     let _ = FrontEndBubbleInput::new(

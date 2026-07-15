@@ -550,6 +550,15 @@ pub enum TypedExpressionKind {
         group: Box<TypedExpression>,
         task: Box<TypedExpression>,
     },
+    FfiHandleOpen {
+        value: Box<TypedExpression>,
+    },
+    FfiHandleGet {
+        handle: Box<TypedExpression>,
+    },
+    FfiHandleClose {
+        handle: Box<TypedExpression>,
+    },
     OptionalNarrow {
         optional: Box<TypedExpression>,
     },

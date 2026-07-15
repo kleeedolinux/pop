@@ -1099,6 +1099,15 @@ fn lower_expression(
             group: Box::new(lower_expression(group, interface_slots)),
             task: Box::new(lower_expression(task, interface_slots)),
         },
+        TypedExpressionKind::FfiHandleOpen { value } => HirExpressionKind::FfiHandleOpen {
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
+        TypedExpressionKind::FfiHandleGet { handle } => HirExpressionKind::FfiHandleGet {
+            handle: Box::new(lower_expression(handle, interface_slots)),
+        },
+        TypedExpressionKind::FfiHandleClose { handle } => HirExpressionKind::FfiHandleClose {
+            handle: Box::new(lower_expression(handle, interface_slots)),
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1649,6 +1658,11 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::TaskCancel { source: operand } => {
             first_unknown_interface_expression(operand, slots)
         }
+        TypedExpressionKind::FfiHandleOpen { value: operand }
+        | TypedExpressionKind::FfiHandleGet { handle: operand }
+        | TypedExpressionKind::FfiHandleClose { handle: operand } => {
+            first_unknown_interface_expression(operand, slots)
+        }
         TypedExpressionKind::TaskGroup { cancel, body } => {
             first_unknown_interface_expression(cancel, slots)
                 .or_else(|| first_unknown_interface_expression(body, slots))
@@ -1965,6 +1979,11 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Await { task: operand }
         | TypedExpressionKind::TaskCancelToken { source: operand }
         | TypedExpressionKind::TaskCancel { source: operand } => {
+            first_compile_time_only_expression(operand)
+        }
+        TypedExpressionKind::FfiHandleOpen { value: operand }
+        | TypedExpressionKind::FfiHandleGet { handle: operand }
+        | TypedExpressionKind::FfiHandleClose { handle: operand } => {
             first_compile_time_only_expression(operand)
         }
         TypedExpressionKind::TaskGroup { cancel, body } => {

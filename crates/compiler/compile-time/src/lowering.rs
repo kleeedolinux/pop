@@ -522,6 +522,11 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::TaskCancel { .. }
         | TypedExpressionKind::TaskGroup { .. }
         | TypedExpressionKind::TaskStart { .. } => UnsupportedCompileTimeConstruct::Suspension,
+        TypedExpressionKind::FfiHandleOpen { .. }
+        | TypedExpressionKind::FfiHandleGet { .. }
+        | TypedExpressionKind::FfiHandleClose { .. } => {
+            UnsupportedCompileTimeConstruct::ResultlessCall
+        }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }
