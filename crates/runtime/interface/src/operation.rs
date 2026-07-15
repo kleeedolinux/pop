@@ -33,6 +33,8 @@ pub enum RuntimeOperation {
     FfiBufferBorrow,
     FfiBufferEndBorrow,
     FfiBufferClose,
+    FfiBytesBorrow,
+    FfiBytesEndBorrow,
     RecordUpdate,
     UnionMake,
     CaptureLoad,

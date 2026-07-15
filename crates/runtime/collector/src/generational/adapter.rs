@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use pop_runtime_interface::{
-    ArrayAllocationRequest, ArrayElementMap, GarbageCollectorContract, ManagedReference,
-    ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication,
-    RuntimeAdapter, RuntimeFailure, SafePointOutcome, TableAllocationRequest, WriteBarrier,
+    AllocationClass, ArrayAllocationRequest, ArrayElementMap, FfiBytesBorrow, FfiBytesBorrowId,
+    GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
+    PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, SafePointOutcome,
+    TableAllocationRequest, WriteBarrier,
 };
 
 use crate::heap::BootstrapRuntime;
@@ -291,6 +292,28 @@ impl RuntimeAdapter for GenerationalRuntime {
             request.allocation_class(),
             request.object_map(),
         )
+    }
+
+    fn allocate_immutable_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.allocate_immutable_bytes_with_class(bytes, AllocationClass::NurseryEligible)
+    }
+
+    fn ffi_bytes_borrow(
+        &mut self,
+        bytes: ManagedReference,
+    ) -> Result<FfiBytesBorrow, RuntimeFailure> {
+        self.borrow_immutable_bytes(bytes)
+    }
+
+    fn ffi_bytes_end_borrow(
+        &mut self,
+        bytes: ManagedReference,
+        borrow: FfiBytesBorrowId,
+    ) -> Result<(), RuntimeFailure> {
+        self.end_immutable_bytes_borrow(bytes, borrow)
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {

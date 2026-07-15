@@ -1,10 +1,10 @@
 //! Stable-token native composition over the generational mature collector.
 
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, GarbageCollectorContract, ManagedReference,
-    ObjectAllocationRequest, ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter,
-    RuntimeFailure, RuntimeTypeId, SafePointOutcome, SchedulerId, StackMap, TableAllocationRequest,
-    TaskFrameRootId, WriteBarrier,
+    AllocationClass, ArrayAllocationRequest, FfiBytesBorrow, FfiBytesBorrowId,
+    GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectSlot, PinHandle,
+    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointOutcome,
+    SchedulerId, StackMap, TableAllocationRequest, TaskFrameRootId, WriteBarrier,
 };
 
 use super::heap::GenerationalRuntime;
@@ -470,6 +470,29 @@ impl RuntimeAdapter for StableGenerationalRuntime {
         )
         .map_err(|_| RuntimeFailure::runtime_invariant())?;
         self.inner.allocate_table(&stable)
+    }
+
+    fn allocate_immutable_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        self.inner
+            .allocate_immutable_bytes_with_class(bytes, AllocationClass::Mature)
+    }
+
+    fn ffi_bytes_borrow(
+        &mut self,
+        bytes: ManagedReference,
+    ) -> Result<FfiBytesBorrow, RuntimeFailure> {
+        self.inner.ffi_bytes_borrow(bytes)
+    }
+
+    fn ffi_bytes_end_borrow(
+        &mut self,
+        bytes: ManagedReference,
+        borrow: FfiBytesBorrowId,
+    ) -> Result<(), RuntimeFailure> {
+        self.inner.ffi_bytes_end_borrow(bytes, borrow)
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {

@@ -197,6 +197,11 @@ pub struct GenerationalRuntime {
     pub(crate) major_root_snapshots: BTreeMap<MutatorId, RootPublication>,
     pub(crate) mutator_schedulers: BTreeMap<MutatorId, SchedulerId>,
     pub(crate) task_frame_roots: TaskFrameRootState,
+    pub(crate) ffi_bytes_borrows: BTreeMap<
+        pop_runtime_interface::FfiBytesBorrowId,
+        (ManagedReference, pop_runtime_interface::PinHandle),
+    >,
+    pub(crate) next_ffi_bytes_borrow: u64,
 }
 
 impl GenerationalRuntime {
@@ -252,6 +257,8 @@ impl GenerationalRuntime {
             major_root_snapshots: BTreeMap::new(),
             mutator_schedulers: BTreeMap::new(),
             task_frame_roots: TaskFrameRootState::new(TaskFrameRootConfig::default()),
+            ffi_bytes_borrows: BTreeMap::new(),
+            next_ffi_bytes_borrow: 0,
         }
     }
 

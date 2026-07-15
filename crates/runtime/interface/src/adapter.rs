@@ -1,9 +1,9 @@
 use crate::{
     ArrayAllocationRequest, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
-    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, ForeignCallMode,
-    ForeignTransitionId, GarbageCollectorContract, ManagedReference, ManagedThreadBindingId,
-    ObjectAllocationRequest, PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure,
-    SchedulerId, TableAllocationRequest, Trap, WriteBarrier,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, FfiBytesBorrow, FfiBytesBorrowId, ForeignAddress,
+    ForeignCallMode, ForeignTransitionId, GarbageCollectorContract, ManagedReference,
+    ManagedThreadBindingId, ObjectAllocationRequest, PanicPayload, PinHandle, RootHandle,
+    RootPublication, RuntimeFailure, SchedulerId, TableAllocationRequest, Trap, WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +197,49 @@ pub trait RuntimeAdapter {
     /// Returns an invariant failure for invalid storage or an active borrow.
     fn ffi_buffer_close(&mut self, buffer: ManagedReference) -> Result<(), RuntimeFailure> {
         let _ = buffer;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Allocates the trusted immutable packed-byte representation.
+    ///
+    /// This is a runtime/library construction boundary, not a general source
+    /// allocation primitive.
+    ///
+    /// # Errors
+    ///
+    /// Returns a portable allocation or invariant failure.
+    fn allocate_immutable_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        let _ = bytes;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Pins one exact immutable byte payload and returns its packed address.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Bytes owners and owners with an active payload borrow.
+    fn ffi_bytes_borrow(
+        &mut self,
+        bytes: ManagedReference,
+    ) -> Result<FfiBytesBorrow, RuntimeFailure> {
+        let _ = bytes;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Ends one exact immutable byte-payload borrow.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale, forged, duplicate, or wrong-owner borrow identities.
+    fn ffi_bytes_end_borrow(
+        &mut self,
+        bytes: ManagedReference,
+        borrow: FfiBytesBorrowId,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (bytes, borrow);
         Err(RuntimeFailure::runtime_invariant())
     }
 

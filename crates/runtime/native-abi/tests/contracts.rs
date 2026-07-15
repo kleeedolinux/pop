@@ -9,7 +9,7 @@ use pop_runtime_native_abi::{
 #[test]
 fn abi_version_and_invalid_handle_are_explicit() {
     assert_eq!(NATIVE_ABI_1_VERSION.major(), 1);
-    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 16);
+    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 17);
     assert_eq!(NATIVE_ABI_2_VERSION.major(), 2);
     assert_eq!(NATIVE_ABI_2_VERSION.minor(), 0);
     assert_ne!(NATIVE_ABI_1_VERSION, NATIVE_ABI_2_VERSION);
@@ -54,6 +54,8 @@ fn supported_symbols_are_unique_and_native() {
         RuntimeOperation::FfiBufferBorrow,
         RuntimeOperation::FfiBufferEndBorrow,
         RuntimeOperation::FfiBufferClose,
+        RuntimeOperation::FfiBytesBorrow,
+        RuntimeOperation::FfiBytesEndBorrow,
         RuntimeOperation::RetainRoot,
         RuntimeOperation::ResolveRoot,
         RuntimeOperation::ReleaseRoot,

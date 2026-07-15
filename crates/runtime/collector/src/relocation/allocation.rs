@@ -138,6 +138,7 @@ impl RelocationRuntime {
                     class,
                     object_map,
                     slots,
+                    immutable_bytes: None,
                 },
                 ownership: ObjectOwnership::default(),
                 mutability: crate::ObjectMutability::Mutable,

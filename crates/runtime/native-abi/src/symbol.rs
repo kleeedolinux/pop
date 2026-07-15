@@ -3,7 +3,7 @@ use pop_runtime_interface::RuntimeOperation;
 /// ABI 1.11 lookup adapter that separates presence from a scalar payload.
 pub const TABLE_GET_CHECKED_SYMBOL: &str = "pop_rt_table_get_checked";
 
-/// Returns the native C symbol for an operation implemented by ABI 1.16.
+/// Returns the native C symbol for an operation implemented by ABI 1.17.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.
@@ -43,6 +43,8 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
         RuntimeOperation::FfiBufferBorrow => Some("pop_rt_ffi_buffer_borrow"),
         RuntimeOperation::FfiBufferEndBorrow => Some("pop_rt_ffi_buffer_end_borrow"),
         RuntimeOperation::FfiBufferClose => Some("pop_rt_ffi_buffer_close"),
+        RuntimeOperation::FfiBytesBorrow => Some("pop_rt_ffi_bytes_borrow"),
+        RuntimeOperation::FfiBytesEndBorrow => Some("pop_rt_ffi_bytes_end_borrow"),
         RuntimeOperation::RetainRoot => Some("pop_rt_retain_root"),
         RuntimeOperation::ResolveRoot => Some("pop_rt_resolve_root"),
         RuntimeOperation::ReleaseRoot => Some("pop_rt_release_root"),

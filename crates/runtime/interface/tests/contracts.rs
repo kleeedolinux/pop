@@ -1,5 +1,6 @@
 use pop_runtime_interface::{
-    ErrorContract, GarbageCollectorContract, InitializationState, PinHandle, PlriVersion,
+    ErrorContract, FfiBytesBorrowId, GarbageCollectorContract, InitializationState, PinHandle,
+    PlriVersion,
 };
 
 #[test]
@@ -16,6 +17,12 @@ fn pin_handles_are_runtime_private_opaque_tokens() {
     let pin = PinHandle::new(7);
 
     assert_eq!(pin.raw(), 7);
+}
+
+#[test]
+fn ffi_byte_borrow_ids_are_distinct_nonzero_runtime_tokens() {
+    assert!(FfiBytesBorrowId::new(0).is_none());
+    assert_eq!(FfiBytesBorrowId::new(7).expect("nonzero borrow").raw(), 7);
 }
 
 #[test]

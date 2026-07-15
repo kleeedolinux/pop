@@ -7,6 +7,7 @@ mod arena;
 mod barrier;
 mod coordination;
 mod evacuation;
+mod ffi_bytes;
 mod heap;
 mod major;
 mod memory;

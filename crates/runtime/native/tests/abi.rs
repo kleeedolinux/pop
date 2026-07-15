@@ -1,5 +1,5 @@
 use pop_runtime_native::{
-    abi_safe_point, allocate_mapped_object, allocate_platform_arguments,
+    abi_safe_point, allocate_immutable_bytes, allocate_mapped_object, allocate_platform_arguments,
     allocate_process_arguments, allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor,
     pop_rt_allocate_array, pop_rt_allocate_array_filled, pop_rt_allocate_initialized_object,
     pop_rt_allocate_object, pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get,
@@ -7,13 +7,14 @@ use pop_runtime_native::{
     pop_rt_cancel_source_release, pop_rt_cancel_source_token, pop_rt_cancel_token_release,
     pop_rt_ffi_buffer_borrow, pop_rt_ffi_buffer_close, pop_rt_ffi_buffer_end_borrow,
     pop_rt_ffi_buffer_length, pop_rt_ffi_buffer_open, pop_rt_ffi_buffer_read,
-    pop_rt_ffi_buffer_write, pop_rt_field_get, pop_rt_field_set, pop_rt_gc_safe_point_v2,
-    pop_rt_gc_stage, pop_rt_iteration_acquire, pop_rt_iteration_next, pop_rt_list_add,
-    pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked, pop_rt_list_length,
-    pop_rt_list_set, pop_rt_pin, pop_rt_range_create, pop_rt_release_root, pop_rt_resolve_root,
-    pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
-    pop_rt_string_format, pop_rt_string_read, pop_rt_supports_abi, pop_rt_suspend,
-    pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set, pop_rt_task_cancel,
+    pop_rt_ffi_buffer_write, pop_rt_ffi_bytes_borrow, pop_rt_ffi_bytes_end_borrow,
+    pop_rt_field_get, pop_rt_field_set, pop_rt_gc_safe_point_v2, pop_rt_gc_stage,
+    pop_rt_iteration_acquire, pop_rt_iteration_next, pop_rt_list_add, pop_rt_list_create,
+    pop_rt_list_get, pop_rt_list_get_checked, pop_rt_list_length, pop_rt_list_set, pop_rt_pin,
+    pop_rt_range_create, pop_rt_release_root, pop_rt_resolve_root, pop_rt_resume,
+    pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format,
+    pop_rt_string_read, pop_rt_supports_abi, pop_rt_suspend, pop_rt_table_get,
+    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_task_cancel,
     pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
@@ -31,7 +32,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn native_runtime_exports_the_stable_generational_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 16);
+    assert_eq!(pop_rt_abi_minor(), 17);
     assert_eq!(pop_rt_gc_stage(), 2);
     assert_eq!(pop_rt_supports_abi(1, 11), 1);
     assert_eq!(pop_rt_supports_abi(1, 12), 1);
@@ -39,7 +40,53 @@ fn native_runtime_exports_the_stable_generational_abi_identity() {
     assert_eq!(pop_rt_supports_abi(1, 14), 1);
     assert_eq!(pop_rt_supports_abi(1, 15), 1);
     assert_eq!(pop_rt_supports_abi(1, 16), 1);
+    assert_eq!(pop_rt_supports_abi(1, 17), 1);
     assert_eq!(pop_rt_supports_abi(2, 0), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn native_ffi_bytes_borrow_is_payload_exact_and_failure_atomic() {
+    let _guard = abi_test_lock();
+    let empty = allocate_immutable_bytes(&[]);
+    let mut address = 91_u64;
+    let mut length = 92_u64;
+    let empty_borrow = unsafe { pop_rt_ffi_bytes_borrow(empty, &raw mut address, &raw mut length) };
+    assert_ne!(empty_borrow, 0);
+    assert_eq!((address, length), (0, 0));
+    assert_eq!(pop_rt_ffi_bytes_end_borrow(empty, empty_borrow), 1);
+
+    let bytes = allocate_immutable_bytes(&[1, 2, 3, 4]);
+    let other = allocate_immutable_bytes(&[9]);
+    let borrow = unsafe { pop_rt_ffi_bytes_borrow(bytes, &raw mut address, &raw mut length) };
+    assert_ne!(borrow, 0);
+    assert_ne!(address, 0);
+    assert_eq!(length, 4);
+    // SAFETY: The ABI borrow remains active until its exact end below.
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(address as *const u8, 4) },
+        [1, 2, 3, 4]
+    );
+
+    let before = (address, length);
+    assert_eq!(
+        unsafe { pop_rt_ffi_bytes_borrow(bytes, &raw mut address, &raw mut length) },
+        0
+    );
+    assert_eq!((address, length), before);
+    assert_eq!(pop_rt_ffi_bytes_end_borrow(other, borrow), 0);
+    assert_eq!(pop_rt_ffi_bytes_end_borrow(bytes, borrow + 1), 0);
+    assert_eq!(pop_rt_ffi_bytes_end_borrow(bytes, borrow), 1);
+    assert_eq!(pop_rt_ffi_bytes_end_borrow(bytes, borrow), 0);
+
+    let forged = pop_rt_allocate_object(0);
+    address = 77;
+    length = 78;
+    assert_eq!(
+        unsafe { pop_rt_ffi_bytes_borrow(forged, &raw mut address, &raw mut length) },
+        0
+    );
+    assert_eq!((address, length), (77, 78));
 }
 
 #[test]

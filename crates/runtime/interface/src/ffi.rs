@@ -1,5 +1,7 @@
 use crate::{ManagedReference, RuntimeFailure};
 
+pub const IMMUTABLE_BYTES_RUNTIME_TYPE_ID: crate::RuntimeTypeId = crate::RuntimeTypeId::new(2);
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FfiAbiLayoutId(u64);
 
@@ -19,6 +21,21 @@ impl FfiAbiLayoutId {
 pub struct FfiBufferBorrowId(u64);
 
 impl FfiBufferBorrowId {
+    #[must_use]
+    pub const fn new(raw: u64) -> Option<Self> {
+        if raw == 0 { None } else { Some(Self(raw)) }
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FfiBytesBorrowId(u64);
+
+impl FfiBytesBorrowId {
     #[must_use]
     pub const fn new(raw: u64) -> Option<Self> {
         if raw == 0 { None } else { Some(Self(raw)) }
@@ -114,6 +131,46 @@ pub struct FfiBufferBorrow {
     id: FfiBufferBorrowId,
     address: Option<ForeignAddress>,
     length: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FfiBytesBorrow {
+    id: FfiBytesBorrowId,
+    address: Option<ForeignAddress>,
+    length: u64,
+}
+
+impl FfiBytesBorrow {
+    #[must_use]
+    pub const fn new(
+        id: FfiBytesBorrowId,
+        address: Option<ForeignAddress>,
+        length: u64,
+    ) -> Option<Self> {
+        if (length == 0) != address.is_none() {
+            return None;
+        }
+        Some(Self {
+            id,
+            address,
+            length,
+        })
+    }
+
+    #[must_use]
+    pub const fn id(self) -> FfiBytesBorrowId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn address(self) -> Option<ForeignAddress> {
+        self.address
+    }
+
+    #[must_use]
+    pub const fn length(self) -> u64 {
+        self.length
+    }
 }
 
 impl FfiBufferBorrow {
