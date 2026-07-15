@@ -275,7 +275,15 @@ without forcing those conventions onto internal MIR.
 
 ## Garbage collection contract
 
-Pop GC is a precise concurrent generational collector. The compiler/runtime
+Pop uses proof-directed static reclamation before Pop GC. `Elided` and fixed
+activation-owned storage require no PLRI allocation; compiler-inferred scoped
+regions use bounded typed open/allocate/close operations and exact outward
+managed roots. Every plan and lifetime frontier is fixed in verified optimized
+MIR. PLRI exposes no machine-stack address, compiler arena object, or raw
+`malloc`/`free` spelling. See
+[Static memory management](./24-static-memory-management.md).
+
+Pop GC is the precise concurrent generational fallback. The compiler/runtime
 contract exposes:
 
 - allocation classes;
@@ -290,6 +298,11 @@ maps, safe-point/stack-map descriptors, managed handles, root and pin
 transitions, reference-store barriers, trap kinds, and panic/unwind records. It
 does not expose compiler arenas, LLVM values, C symbol names, or raw managed
 pointers.
+
+Static slots and scoped regions that contain managed references publish exact
+mutable root slots until their verified end/close. Managed objects cannot point
+into that storage. Missing retention/lifetime proof selects an ordinary managed
+allocation rather than an unchecked static path.
 
 Root publications preserve canonical sorted `RootSlot` order. A safe point
 validates all roots and either completes every root/object/handle update or

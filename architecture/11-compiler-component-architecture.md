@@ -205,6 +205,11 @@ expose compiler arenas or IDs. They also do not expose C symbols, platform entry
 types, global runtime instances, collector storage, or backend implementation
 types.
 
+ADR 0085's scoped-region operations are semantic PLRI memory operations, not an
+exposed compiler arena. Their `RegionId`, exact root map, capacity, and balanced
+close contract cross the boundary; compiler analysis graphs, native addresses,
+and backend stack layouts do not.
+
 ADR 0038 separates implementation ownership below this contract. The portable
 collector implements `RuntimeAdapter` and owns heap/trace/root/pin behavior
 without a native ABI or process-global singleton. The native-ABI crate owns the

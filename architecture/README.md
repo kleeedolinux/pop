@@ -56,6 +56,7 @@ compile-time evaluator, or portable optimizer.
 29. [Public library implementation plan](./22.6-standard-library-implementation-plan.md)
 30. [Concurrency, actors, and distribution](./23-concurrency-actors-and-distribution.md)
 31. [Scheduler runtime implementation](./23.1-scheduler-runtime-implementation.md)
+32. [Static memory management](./24-static-memory-management.md)
 
 The examples define the canonical syntax direction. The full grammar will grow
 with implementation, but `.pop`, the `pop` command, naming rules, namespace/
@@ -99,6 +100,9 @@ transplanted into a Luau-shaped file.
 - `bubble.lock` and `.poplib` control files use bounded canonical JSON; artifact
   integrity uses normalized SHA-256 file inventories under ADR 0055.
 - Pop GC uses precise roots, a moving nursery, and concurrent mature marking.
+- Proof-directed static reclamation keeps scalars and proven non-escaping
+  arrays/aggregates out of Pop GC through verified backend-neutral lifetime and
+  region plans; incomplete proof always falls back to precise tracing.
 - Collecting safe points update typed `RootSlot` publications in place; object
   identity survives relocation while stale physical reference tokens do not.
 - Source-visible built-in types and attributes use `PascalCase`, including

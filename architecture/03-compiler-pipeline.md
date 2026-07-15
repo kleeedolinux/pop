@@ -106,6 +106,8 @@ Representative HIR passes include:
 - materializing implicit numeric and subtype conversions;
 - resolving class construction and method dispatch;
 - closure capture analysis;
+- allocation-site identity plus closed argument/result retention summaries for
+  proof-directed static reclamation;
 - retaining typed result propagation and registered lexical cleanup until MIR
   can emit dominated payload extraction and explicit last-in, first-out exit
   chains;
@@ -149,10 +151,19 @@ Portable optimizations run on MIR:
 - dead-code and dead-block elimination;
 - devirtualization using valid closed-world facts;
 - escape analysis and allocation elision;
+- path-sensitive lifetime-frontier analysis, activation-owned storage, and
+  compiler-inferred scoped-region planning under ADR 0085;
 - bounds-check elimination;
 - inlining under a backend-neutral cost model;
 - specialization of generics and interface calls;
 - scalar replacement of aggregates.
+
+Construction MIR first verifies ordinary managed-capable allocation semantics.
+The storage-planning pass then derives `Elided`, `StaticSlot`, `ScopedRegion`,
+or managed plans from complete alias, call-retention, cleanup, unwind,
+cancellation, and suspension facts. Optimized MIR retains a closed proof and is
+verified again. Missing facts or deterministic analysis-budget exhaustion keep
+the allocation managed; a backend never repeats the analysis with weaker rules.
 
 Target-specific instruction selection and machine cost tuning belong below the
 backend interface. LLVM may repeat some optimizations; MIR optimizations still

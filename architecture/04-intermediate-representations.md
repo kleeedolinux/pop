@@ -21,7 +21,8 @@ Compiler entities use explicit IDs rather than pointers as public identity:
 - `SymbolId`, `TypeId`, `ClassId`, `ErrorId`, `ErrorCaseId`, `AttributeId`, and
   `FunctionId`;
 - `InterfaceId`, `InterfaceMethodId`, and `CaptureId`;
-- `BlockId`, `ValueId`, `SafePointId`, and `StackMapId` in MIR.
+- `BlockId`, `ValueId`, `SafePointId`, `StackMapId`, `AllocationSiteId`,
+  `LifetimeId`, and `RegionId` in MIR.
 
 IDs can be dense within a compilation session. Serialized caches pair them with
 stable definition/content keys rather than persisting raw session-local numbers.
@@ -140,7 +141,9 @@ Control:       branch, condBranch, switch, return, trap, panic, resumeUnwind,
 Values:        const, tupleMake, tupleGet, recordMake, fieldGet, fieldSet
 Arithmetic:    checkedAdd, wrappingAdd, floatAdd, compare, convert
 Memory:        allocateObject, allocateClosureEnvironment, allocateArray,
-               load, store, captureLoad, captureStore, retainRoot, releaseRoot
+               load, store, captureLoad, captureStore, retainRoot, releaseRoot,
+               lifetimeStart, lifetimeEnd, regionOpen, allocateInRegion,
+               regionClose
 Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
                callInterface, callIndirect
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
@@ -168,6 +171,22 @@ Debug:         debugValue, sourceScope
 `checkedDowncast` has a named static target and typed optional/result output. It
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
+
+ADR 0085 gives each managed-capable allocation one `AllocationSiteId`.
+Construction MIR uses ordinary managed-capable allocations and verifies before
+optimization. Portable storage planning may then attach one closed
+`StoragePlan`: `Elided`, `StaticSlot{LifetimeId}`,
+`ScopedRegion{RegionId, LifetimeId}`, `Managed{AllocationClass}`, or the narrow
+verified `Immortal` plan. `lifetimeStart`/`lifetimeEnd` and region operations
+make every control-flow frontier explicit. The first proof kinds are
+`NonEscapingAllocation` and `CommonLifetimeRegion`; the verifier reconstructs
+them rather than trusting a backend or source annotation.
+
+Callable HIR/MIR types and public reference metadata carry closed per-parameter
+and result lifetime summaries: `DoesNotRetain`, conservative `MayRetain`,
+`ReturnsAlias`, `StoresInto`, `Captures`, or `Publishes`. Missing metadata is
+`MayRetain` and forces managed storage; it never creates a dynamic effect or
+runtime retention query.
 
 ADR 0081 foreign operations carry one resolved foreign identity, closed ABI,
 exact parameter/result layouts, link aliases, and effect summary. They never
@@ -268,6 +287,12 @@ MIR invariants:
   contract;
 - stack maps contain exactly the live managed values at each safe point and
   logical object maps contain exactly the managed fields of allocations;
+- every static lifetime/region start dominates its uses, every applicable exit
+  crosses exactly one matching end/close, and no interior alias, borrow, root,
+  cleanup observation, or managed/shared/foreign edge survives that frontier;
+- managed references held in static slots/regions remain in exact mutable root
+  maps until end/close, while managed storage never points into static/region
+  storage;
 - cold task creation carries the exact logical object map for its captured
   dispatch environment, arguments, and retained completion slot; the map is
   derived from verified static types and never from current runtime values;
