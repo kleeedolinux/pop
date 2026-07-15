@@ -208,6 +208,10 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
     assert!(!pop_types::is_ffi_integer_abi_builtin_type(
         pop_types::FFI_POINTER_TYPE_ID
     ));
+    assert_eq!(
+        pop_types::ffi_c_integer_kind(BuiltinTypeId::from_raw(221)),
+        Some(pop_types::FfiCIntegerKind::Size)
+    );
     assert!(!is_ffi_abi_builtin_type(
         pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID
     ));

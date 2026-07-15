@@ -345,6 +345,44 @@ pub const fn is_ffi_integer_abi_builtin_type(id: BuiltinTypeId) -> bool {
     matches!(id.raw(), 210..=222)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FfiCIntegerKind {
+    Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Size,
+    PointerDifference,
+}
+
+/// Returns the closed C integer kind for its stable bootstrap identity.
+#[must_use]
+pub const fn ffi_c_integer_kind(id: BuiltinTypeId) -> Option<FfiCIntegerKind> {
+    Some(match id.raw() {
+        210 => FfiCIntegerKind::Char,
+        211 => FfiCIntegerKind::SignedChar,
+        212 => FfiCIntegerKind::UnsignedChar,
+        213 => FfiCIntegerKind::Short,
+        214 => FfiCIntegerKind::UnsignedShort,
+        215 => FfiCIntegerKind::Int,
+        216 => FfiCIntegerKind::UnsignedInt,
+        217 => FfiCIntegerKind::Long,
+        218 => FfiCIntegerKind::UnsignedLong,
+        219 => FfiCIntegerKind::LongLong,
+        220 => FfiCIntegerKind::UnsignedLongLong,
+        221 => FfiCIntegerKind::Size,
+        222 => FfiCIntegerKind::PointerDifference,
+        _ => return None,
+    })
+}
+
 /// Returns whether an identity is a mutable or read-only FFI pointer
 /// constructor, including its optional form.
 #[must_use]

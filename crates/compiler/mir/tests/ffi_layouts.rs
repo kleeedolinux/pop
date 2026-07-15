@@ -1,12 +1,17 @@
-use pop_foundation::{FieldId, TypeId};
+use pop_foundation::{BuiltinTypeId, FieldId, TypeId};
 use pop_mir::{
     MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutError, MirFfiLayoutField, MirFfiValueClass,
 };
 use pop_runtime_interface::FfiAbiLayoutId;
+use pop_target::TargetSpec;
 use pop_types::{FFI_POINTER_TYPE_ID, SemanticType, TypeArena};
 
 fn layout(raw: u64) -> FfiAbiLayoutId {
     FfiAbiLayoutId::new(raw).expect("nonzero layout")
+}
+
+fn target() -> TargetSpec {
+    TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target")
 }
 
 fn field(raw: u32, source_index: u32, layout_id: u64, offset: u64) -> MirFfiLayoutField {
@@ -46,7 +51,7 @@ fn catalog_validates_and_orders_nested_target_layouts() {
         .expect("record");
 
     let catalog = MirFfiLayoutCatalog::new(
-        "x86_64-unknown-linux-gnu",
+        &target(),
         vec![
             entry(
                 3,
@@ -87,7 +92,7 @@ fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
 
     assert_eq!(
         MirFfiLayoutCatalog::new(
-            "target",
+            &target(),
             vec![
                 entry(1, integer, 8, 8, MirFfiValueClass::Integer),
                 entry(1, integer, 8, 8, MirFfiValueClass::Integer),
@@ -98,7 +103,7 @@ fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
     );
     assert_eq!(
         MirFfiLayoutCatalog::new(
-            "target",
+            &target(),
             vec![entry(1, integer, 8, 3, MirFfiValueClass::Integer)],
             &types,
         ),
@@ -106,8 +111,34 @@ fn catalog_rejects_duplicate_invalid_geometry_and_managed_types() {
     );
     assert_eq!(
         MirFfiLayoutCatalog::new(
-            "target",
+            &target(),
             vec![entry(1, array, 8, 8, MirFfiValueClass::Pointer)],
+            &types,
+        ),
+        Err(MirFfiLayoutError::TypeClassMismatch(layout(1)))
+    );
+}
+
+#[test]
+fn catalog_rejects_unsupported_targets_and_false_target_geometry() {
+    let mut types = TypeArena::new();
+    let c_int = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(215),
+            arguments: Vec::new(),
+        })
+        .expect("C int");
+    let unsupported =
+        TargetSpec::for_triple("bpfel-unknown-none").expect("target without an accepted C ABI");
+
+    assert_eq!(
+        MirFfiLayoutCatalog::new(&unsupported, Vec::new(), &types),
+        Err(MirFfiLayoutError::UnsupportedTarget)
+    );
+    assert_eq!(
+        MirFfiLayoutCatalog::new(
+            &target(),
+            vec![entry(1, c_int, 8, 8, MirFfiValueClass::Integer)],
             &types,
         ),
         Err(MirFfiLayoutError::TypeClassMismatch(layout(1)))
@@ -141,7 +172,7 @@ fn catalog_rejects_overlapping_and_recursive_record_plans() {
 
     assert_eq!(
         MirFfiLayoutCatalog::new(
-            "target",
+            &target(),
             vec![
                 entry(1, integer32, 4, 4, MirFfiValueClass::Integer),
                 entry(
@@ -176,7 +207,7 @@ fn catalog_rejects_overlapping_and_recursive_record_plans() {
         .expect("second");
     assert_eq!(
         MirFfiLayoutCatalog::new(
-            "target",
+            &target(),
             vec![
                 entry(
                     10,

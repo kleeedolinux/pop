@@ -12,6 +12,7 @@ path = "src/lib.rs"
 pop-foundation.workspace = true
 pop-hir.workspace = true
 pop-runtime-interface.workspace = true
+pop-target.workspace = true
 pop-types.workspace = true
 
 [dev-dependencies]

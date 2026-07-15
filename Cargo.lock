@@ -396,6 +396,7 @@ dependencies = [
  "pop-hir",
  "pop-runtime-interface",
  "pop-source",
+ "pop-target",
  "pop-types",
 ]
 

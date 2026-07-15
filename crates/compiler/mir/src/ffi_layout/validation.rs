@@ -1,198 +1,20 @@
-//! Validated target-selected ABI layouts used by canonical FFI MIR.
-
 use std::collections::{BTreeMap, BTreeSet};
 
-use pop_foundation::{FieldId, TypeId};
 use pop_runtime_interface::FfiAbiLayoutId;
+use pop_target::{CAbiScalarKind, TargetSpec};
 use pop_types::{
-    FFI_HANDLE_TYPE_ID, PrimitiveType, SemanticType, TypeArena, is_ffi_function_type_constructor,
-    is_ffi_integer_abi_builtin_type, is_ffi_pointer_type_constructor,
+    FFI_HANDLE_TYPE_ID, FfiCIntegerKind, PrimitiveType, SemanticType, TypeArena,
+    ffi_c_integer_kind, is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
+    is_ffi_pointer_type_constructor,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MirFfiValueClass {
-    Integer,
-    Float,
-    Pointer,
-    FunctionPointer,
-    Handle,
-    Record(Vec<MirFfiLayoutField>),
-}
+use super::{MirFfiLayout, MirFfiLayoutError, MirFfiValueClass};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MirFfiLayoutField {
-    field: FieldId,
-    source_index: u32,
-    layout: FfiAbiLayoutId,
-    offset: u64,
-}
-
-impl MirFfiLayoutField {
-    #[must_use]
-    pub const fn new(
-        field: FieldId,
-        source_index: u32,
-        layout: FfiAbiLayoutId,
-        offset: u64,
-    ) -> Self {
-        Self {
-            field,
-            source_index,
-            layout,
-            offset,
-        }
-    }
-
-    #[must_use]
-    pub const fn field(self) -> FieldId {
-        self.field
-    }
-
-    #[must_use]
-    pub const fn source_index(self) -> u32 {
-        self.source_index
-    }
-
-    #[must_use]
-    pub const fn layout(self) -> FfiAbiLayoutId {
-        self.layout
-    }
-
-    #[must_use]
-    pub const fn offset(self) -> u64 {
-        self.offset
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MirFfiLayout {
-    id: FfiAbiLayoutId,
-    element: TypeId,
-    size: u64,
-    alignment: u64,
-    value_class: MirFfiValueClass,
-}
-
-impl MirFfiLayout {
-    #[must_use]
-    pub const fn new(
-        id: FfiAbiLayoutId,
-        element: TypeId,
-        size: u64,
-        alignment: u64,
-        value_class: MirFfiValueClass,
-    ) -> Self {
-        Self {
-            id,
-            element,
-            size,
-            alignment,
-            value_class,
-        }
-    }
-
-    #[must_use]
-    pub const fn id(&self) -> FfiAbiLayoutId {
-        self.id
-    }
-
-    #[must_use]
-    pub const fn element(&self) -> TypeId {
-        self.element
-    }
-
-    #[must_use]
-    pub const fn size(&self) -> u64 {
-        self.size
-    }
-
-    #[must_use]
-    pub const fn alignment(&self) -> u64 {
-        self.alignment
-    }
-
-    #[must_use]
-    pub const fn value_class(&self) -> &MirFfiValueClass {
-        &self.value_class
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MirFfiLayoutCatalog {
-    target: String,
-    entries: Vec<MirFfiLayout>,
-}
-
-impl MirFfiLayoutCatalog {
-    /// Validates and canonicalizes one exact target layout catalog.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first deterministic geometry, type, field-plan, or graph
-    /// violation.
-    pub fn new(
-        target: impl Into<String>,
-        mut entries: Vec<MirFfiLayout>,
-        types: &TypeArena,
-    ) -> Result<Self, MirFfiLayoutError> {
-        let target = target.into();
-        if target.trim().is_empty() {
-            return Err(MirFfiLayoutError::EmptyTarget);
-        }
-        entries.sort_by_key(MirFfiLayout::id);
-        for pair in entries.windows(2) {
-            if pair[0].id == pair[1].id {
-                return Err(MirFfiLayoutError::DuplicateLayout(pair[0].id));
-            }
-        }
-        let by_id = entries
-            .iter()
-            .map(|entry| (entry.id, entry))
-            .collect::<BTreeMap<_, _>>();
-        validate_acyclic(&entries, &by_id)?;
-        for entry in &entries {
-            validate_entry(entry, &by_id, types)?;
-        }
-        Ok(Self { target, entries })
-    }
-
-    #[must_use]
-    pub fn target(&self) -> &str {
-        &self.target
-    }
-
-    #[must_use]
-    pub fn entries(&self) -> &[MirFfiLayout] {
-        &self.entries
-    }
-
-    #[must_use]
-    pub fn get(&self, id: FfiAbiLayoutId) -> Option<&MirFfiLayout> {
-        self.entries
-            .binary_search_by_key(&id, MirFfiLayout::id)
-            .ok()
-            .map(|index| &self.entries[index])
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MirFfiLayoutError {
-    EmptyTarget,
-    DuplicateLayout(FfiAbiLayoutId),
-    InvalidGeometry(FfiAbiLayoutId),
-    TypeClassMismatch(FfiAbiLayoutId),
-    InvalidRecordFields(FfiAbiLayoutId),
-    MissingFieldLayout(FfiAbiLayoutId),
-    MisalignedField(FfiAbiLayoutId),
-    FieldOutsideLayout(FfiAbiLayoutId),
-    OverlappingFields(FfiAbiLayoutId),
-    RecursiveByValueLayout(FfiAbiLayoutId),
-}
-
-fn validate_entry(
+pub(super) fn validate_entry(
     entry: &MirFfiLayout,
     by_id: &BTreeMap<FfiAbiLayoutId, &MirFfiLayout>,
     types: &TypeArena,
+    target: &TargetSpec,
 ) -> Result<(), MirFfiLayoutError> {
     if entry.size == 0
         || entry.alignment == 0
@@ -210,6 +32,9 @@ fn validate_entry(
     if let Some(expected_size) = primitive_size(semantic)
         && entry.size != expected_size
     {
+        return Err(MirFfiLayoutError::TypeClassMismatch(entry.id));
+    }
+    if !target_geometry_matches(entry, semantic, target) {
         return Err(MirFfiLayoutError::TypeClassMismatch(entry.id));
     }
     let MirFfiValueClass::Record(fields) = &entry.value_class else {
@@ -251,6 +76,47 @@ fn validate_entry(
     Ok(())
 }
 
+fn target_geometry_matches(
+    entry: &MirFfiLayout,
+    semantic: &SemanticType,
+    target: &TargetSpec,
+) -> bool {
+    let geometry = match semantic {
+        SemanticType::Builtin { definition, .. } => match &entry.value_class {
+            MirFfiValueClass::Integer => ffi_c_integer_kind(*definition)
+                .and_then(|kind| target.c_abi_scalar_layout(target_integer_kind(kind)))
+                .map(|layout| (layout.size(), layout.alignment())),
+            MirFfiValueClass::Pointer | MirFfiValueClass::FunctionPointer => {
+                target.ffi_pointer_layout()
+            }
+            MirFfiValueClass::Handle if *definition == FFI_HANDLE_TYPE_ID => Some((8, 8)),
+            MirFfiValueClass::Float | MirFfiValueClass::Handle | MirFfiValueClass::Record(_) => {
+                None
+            }
+        },
+        _ => return true,
+    };
+    geometry.is_some_and(|(size, alignment)| entry.size == size && entry.alignment == alignment)
+}
+
+const fn target_integer_kind(kind: FfiCIntegerKind) -> CAbiScalarKind {
+    match kind {
+        FfiCIntegerKind::Char => CAbiScalarKind::Char,
+        FfiCIntegerKind::SignedChar => CAbiScalarKind::SignedChar,
+        FfiCIntegerKind::UnsignedChar => CAbiScalarKind::UnsignedChar,
+        FfiCIntegerKind::Short => CAbiScalarKind::Short,
+        FfiCIntegerKind::UnsignedShort => CAbiScalarKind::UnsignedShort,
+        FfiCIntegerKind::Int => CAbiScalarKind::Int,
+        FfiCIntegerKind::UnsignedInt => CAbiScalarKind::UnsignedInt,
+        FfiCIntegerKind::Long => CAbiScalarKind::Long,
+        FfiCIntegerKind::UnsignedLong => CAbiScalarKind::UnsignedLong,
+        FfiCIntegerKind::LongLong => CAbiScalarKind::LongLong,
+        FfiCIntegerKind::UnsignedLongLong => CAbiScalarKind::UnsignedLongLong,
+        FfiCIntegerKind::Size => CAbiScalarKind::Size,
+        FfiCIntegerKind::PointerDifference => CAbiScalarKind::PointerDifference,
+    }
+}
+
 fn primitive_size(semantic: &SemanticType) -> Option<u64> {
     match semantic {
         SemanticType::Primitive(PrimitiveType::Integer(kind)) => {
@@ -281,7 +147,7 @@ fn value_class_matches(value_class: &MirFfiValueClass, semantic: &SemanticType) 
     }
 }
 
-fn validate_acyclic(
+pub(super) fn validate_acyclic(
     entries: &[MirFfiLayout],
     by_id: &BTreeMap<FfiAbiLayoutId, &MirFfiLayout>,
 ) -> Result<(), MirFfiLayoutError> {
