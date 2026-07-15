@@ -38,6 +38,7 @@ pub enum MirValue {
     FfiBuffer(ManagedReference),
     FfiPointer(ForeignAddress),
     FfiFunction(u64),
+    FfiNullPointerError,
     FfiAllocationError,
     Enum {
         definition: SymbolId,

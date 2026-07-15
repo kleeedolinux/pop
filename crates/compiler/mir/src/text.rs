@@ -1505,6 +1505,27 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
         });
     }
+    if let Some(rest) = text.strip_prefix("ffiPointerRequire ") {
+        let parts: Vec<_> = rest.split_whitespace().collect();
+        let [
+            pointer,
+            "result",
+            result,
+            "success",
+            success,
+            "failure",
+            failure,
+        ] = parts.as_slice()
+        else {
+            return Err(error(line, "FFI pointer require"));
+        };
+        return Ok(MirInstructionKind::FfiPointerRequire {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+            result: parse_builtin_type_id(result, line)?,
+            success: ResultCaseId::from_raw(parse_hash(success, "resultCase#", line)?),
+            failure: ResultCaseId::from_raw(parse_hash(failure, "resultCase#", line)?),
+        });
+    }
     if let Some(value) = text.strip_prefix("pin ") {
         return Ok(MirInstructionKind::Pin {
             value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),

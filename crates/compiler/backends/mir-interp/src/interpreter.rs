@@ -1134,6 +1134,25 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     _ => return Err(ExecutionError::TypeMismatch),
                 }
             }
+            MirInstructionKind::FfiPointerRequire {
+                pointer,
+                result,
+                success,
+                failure,
+            } => {
+                let (case, arguments) = match &value(values, *pointer)?.visible {
+                    MirValue::FfiPointer(address) => {
+                        (*success, vec![MirValue::FfiPointer(*address)])
+                    }
+                    MirValue::Nil => (*failure, vec![MirValue::FfiNullPointerError]),
+                    _ => return Err(ExecutionError::TypeMismatch),
+                };
+                MirValue::Result {
+                    definition: *result,
+                    case,
+                    arguments,
+                }
+            }
             MirInstructionKind::OptionalIsPresent { optional } => {
                 MirValue::Boolean(!matches!(value(values, *optional)?.visible, MirValue::Nil))
             }

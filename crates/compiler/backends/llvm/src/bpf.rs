@@ -503,6 +503,7 @@ fn validate_instruction(
         | MirInstructionKind::FfiPointerToOptional { .. }
         | MirInstructionKind::FfiPointerReadOnly { .. }
         | MirInstructionKind::FfiPointerIsPresent { .. }
+        | MirInstructionKind::FfiPointerRequire { .. }
         | MirInstructionKind::Pin { .. }
         | MirInstructionKind::Unpin { .. }
         | MirInstructionKind::WriteBarrier { .. }

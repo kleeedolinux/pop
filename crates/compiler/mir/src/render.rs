@@ -838,6 +838,21 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::FfiPointerIsPresent { pointer } => {
             let _ = write!(output, "ffiPointerIsPresent v{}", pointer.raw());
         }
+        MirInstructionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffiPointerRequire v{} result bt{} success resultCase#{} failure resultCase#{}",
+                pointer.raw(),
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+        }
         MirInstructionKind::Pin { value } => {
             let _ = write!(output, "pin v{}", value.raw());
         }

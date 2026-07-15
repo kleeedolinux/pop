@@ -26,6 +26,7 @@ enum FfiPointerOperationKind {
     ToOptional,
     ReadOnly,
     IsPresent,
+    Require,
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
@@ -664,11 +665,23 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     "Boolean",
                     FfiPointerOperationKind::IsPresent,
                 ),
+                ("OptionalPointer", "require") => (
+                    crate::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    "Ffi.OptionalPointer",
+                    "Ffi.Pointer",
+                    FfiPointerOperationKind::Require,
+                ),
                 ("OptionalReadOnlyPointer", "isPresent") => (
                     crate::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
                     "Ffi.OptionalReadOnlyPointer",
                     "Boolean",
                     FfiPointerOperationKind::IsPresent,
+                ),
+                ("OptionalReadOnlyPointer", "require") => (
+                    crate::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    "Ffi.OptionalReadOnlyPointer",
+                    "Ffi.ReadOnlyPointer",
+                    FfiPointerOperationKind::Require,
                 ),
                 _ => return None,
             };
@@ -681,10 +694,17 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             ));
             return None;
         };
-        let type_id = if result_name == "Boolean" {
-            self.resolver.arena().source_type("Boolean")?
+        let (type_id, result_definition) = if matches!(kind, FfiPointerOperationKind::Require) {
+            let success = self.ffi_builtin_type(result_name, vec![element])?;
+            let error = self.ffi_builtin_type("Ffi.NullPointerError", Vec::new())?;
+            (
+                self.resolver.result_type(success, error)?,
+                Some(self.resolver.result_definition()?),
+            )
+        } else if result_name == "Boolean" {
+            (self.resolver.arena().source_type("Boolean")?, None)
         } else {
-            self.ffi_builtin_type(result_name, vec![element])?
+            (self.ffi_builtin_type(result_name, vec![element])?, None)
         };
         let pointer = Box::new(pointer);
         let kind = match kind {
@@ -697,6 +717,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             FfiPointerOperationKind::IsPresent => {
                 TypedExpressionKind::FfiPointerIsPresent { pointer }
             }
+            FfiPointerOperationKind::Require => TypedExpressionKind::FfiPointerRequire {
+                pointer,
+                result: result_definition.expect("require has one exact Result definition"),
+                success: ResultCaseId::from_raw(0),
+                failure: ResultCaseId::from_raw(1),
+            },
         };
         Some(TypedExpression {
             kind,
@@ -2515,7 +2541,7 @@ fn is_ffi_pointer_operation(path: &[String]) -> bool {
                 (owner.as_str(), operation.as_str()),
                 (
                     "OptionalPointer" | "OptionalReadOnlyPointer",
-                    "fromPointer" | "isPresent"
+                    "fromPointer" | "isPresent" | "require"
                 ) | ("Pointer", "readOnly")
             ))
 }

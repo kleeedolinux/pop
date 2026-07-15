@@ -593,6 +593,12 @@ pub enum TypedExpressionKind {
     FfiPointerIsPresent {
         pointer: Box<TypedExpression>,
     },
+    FfiPointerRequire {
+        pointer: Box<TypedExpression>,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
     OptionalNarrow {
         optional: Box<TypedExpression>,
     },

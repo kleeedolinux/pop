@@ -1512,6 +1512,12 @@ pub enum MirInstructionKind {
     FfiPointerIsPresent {
         pointer: ValueId,
     },
+    FfiPointerRequire {
+        pointer: ValueId,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
     Pin {
         value: ValueId,
     },

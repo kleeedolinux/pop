@@ -337,7 +337,10 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::FfiBufferClose { buffer: operand }
         | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
         | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
-        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
+        | TypedExpressionKind::FfiPointerRequire {
+            pointer: operand, ..
+        } => {
             finalize_expression_captures(operand, written);
         }
         TypedExpressionKind::TaskGroup { cancel, body } => {

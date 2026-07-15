@@ -2033,6 +2033,7 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiPointerToOptional { .. }
             | MirInstructionKind::FfiPointerReadOnly { .. }
             | MirInstructionKind::FfiPointerIsPresent { .. }
+            | MirInstructionKind::FfiPointerRequire { .. }
     );
     if requires_pointer_value && !instruction.has_result() {
         errors.push(MirVerificationError::InvalidFfiPointerOperation {
@@ -2253,6 +2254,43 @@ fn verify_instruction_types(
             let valid =
                 valid_source && arena.source_type("Boolean") == Some(instruction.result_type());
             verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => {
+            let expected_success = values.get(pointer).copied().and_then(|source_type| {
+                ffi_pointer_payload(arena, source_type, pop_types::FFI_OPTIONAL_POINTER_TYPE_ID)
+                    .map(|element| (pop_types::FFI_POINTER_TYPE_ID, element))
+                    .or_else(|| {
+                        ffi_pointer_payload(
+                            arena,
+                            source_type,
+                            pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                        )
+                        .map(|element| (pop_types::FFI_READ_ONLY_POINTER_TYPE_ID, element))
+                    })
+            });
+            let valid_result = matches!(arena.get(instruction.result_type()),
+            Some(SemanticType::Builtin { definition, arguments })
+                if *definition == *result
+                    && arguments.len() == 2
+                    && expected_success.is_some_and(|(pointer, element)| {
+                        ffi_pointer_payload(arena, arguments[0], pointer) == Some(element)
+                    })
+                    && is_exact_ffi_builtin(
+                        arena,
+                        arguments[1],
+                        pop_types::FFI_NULL_POINTER_ERROR_TYPE_ID,
+                        &[],
+                    ));
+            verify_ffi_pointer_operation(
+                instruction,
+                valid_result && success.raw() == 0 && failure.raw() == 1,
+                errors,
+            );
         }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
@@ -4721,6 +4759,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::FfiPointerToOptional { pointer: operand }
         | MirInstructionKind::FfiPointerReadOnly { pointer: operand }
         | MirInstructionKind::FfiPointerIsPresent { pointer: operand }
+        | MirInstructionKind::FfiPointerRequire {
+            pointer: operand, ..
+        }
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. }
         | MirInstructionKind::ConvertInteger { operand, .. }

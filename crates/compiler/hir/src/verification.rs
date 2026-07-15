@@ -2997,6 +2997,58 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiPointerRequire {
+                pointer,
+                result,
+                success,
+                failure,
+            } => {
+                self.verify_expression(pointer, visible);
+                let expected_success = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                )
+                .map(|element| (pop_types::FFI_POINTER_TYPE_ID, element))
+                .or_else(|| {
+                    ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id(),
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    )
+                    .map(|element| (pop_types::FFI_READ_ONLY_POINTER_TYPE_ID, element))
+                });
+                let valid_result = self
+                    .builtin_type_arguments(expression.type_id(), "Result")
+                    .is_some_and(|arguments| {
+                        matches!(arguments, [pointer_result, error]
+                        if expected_success.is_some_and(|(definition, element)| {
+                            ffi_exact_pointer_payload(
+                                self.arena,
+                                *pointer_result,
+                                definition,
+                            ) == Some(element)
+                        }) && self.is_builtin_type(
+                            *error,
+                            "Ffi.NullPointerError",
+                            &[],
+                        ))
+                    });
+                if self
+                    .builtin_type_arguments(expression.type_id(), "Result")
+                    .and_then(|_| embedded_bootstrap_schema().ok())
+                    .and_then(|schema| schema.type_by_source_name("Result").map(|entry| entry.id()))
+                    .is_none_or(|definition| definition != *result)
+                    || success.raw() != 0
+                    || failure.raw() != 1
+                    || !valid_result
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::TaskGroup { cancel, body } => {
                 self.verify_expression(cancel, visible);
                 self.verify_expression(body, visible);
@@ -5385,7 +5437,8 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         }
         HirExpressionKind::FfiPointerToOptional { pointer }
         | HirExpressionKind::FfiPointerReadOnly { pointer }
-        | HirExpressionKind::FfiPointerIsPresent { pointer } => {
+        | HirExpressionKind::FfiPointerIsPresent { pointer }
+        | HirExpressionKind::FfiPointerRequire { pointer, .. } => {
             collect_cell_captures(pointer, written)
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {

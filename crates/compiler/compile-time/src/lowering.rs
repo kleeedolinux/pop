@@ -533,7 +533,8 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::FfiPointerToOptional { .. }
         | TypedExpressionKind::FfiPointerReadOnly { .. }
-        | TypedExpressionKind::FfiPointerIsPresent { .. } => {
+        | TypedExpressionKind::FfiPointerIsPresent { .. }
+        | TypedExpressionKind::FfiPointerRequire { .. } => {
             UnsupportedCompileTimeConstruct::ResultlessCall
         }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,

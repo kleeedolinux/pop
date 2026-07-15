@@ -1160,6 +1160,17 @@ fn lower_expression(
                 pointer: Box::new(lower_expression(pointer, interface_slots)),
             }
         }
+        TypedExpressionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => HirExpressionKind::FfiPointerRequire {
+            pointer: Box::new(lower_expression(pointer, interface_slots)),
+            result: *result,
+            success: *success,
+            failure: *failure,
+        },
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1720,9 +1731,10 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::FfiBufferClose { buffer: operand }
         | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
         | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
-        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
-            first_unknown_interface_expression(operand, slots)
-        }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
+        | TypedExpressionKind::FfiPointerRequire {
+            pointer: operand, ..
+        } => first_unknown_interface_expression(operand, slots),
         TypedExpressionKind::FfiBufferRead { buffer, index } => {
             first_unknown_interface_expression(buffer, slots)
                 .or_else(|| first_unknown_interface_expression(index, slots))
@@ -2063,9 +2075,10 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::FfiBufferClose { buffer: operand }
         | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
         | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
-        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
-            first_compile_time_only_expression(operand)
-        }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand }
+        | TypedExpressionKind::FfiPointerRequire {
+            pointer: operand, ..
+        } => first_compile_time_only_expression(operand),
         TypedExpressionKind::FfiBufferRead { buffer, index } => {
             first_compile_time_only_expression(buffer)
                 .or_else(|| first_compile_time_only_expression(index))

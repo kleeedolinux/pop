@@ -103,6 +103,12 @@ pub(crate) fn lower_instruction(
                 pointer.raw()
             )
         }
+        MirInstructionKind::FfiPointerRequire {
+            pointer,
+            success,
+            failure,
+            ..
+        } => lower_ffi_pointer_require(&result, *pointer, *success, *failure),
         MirInstructionKind::ResultMake {
             case, arguments, ..
         } => lower_union_make(
@@ -3004,6 +3010,39 @@ pub(crate) fn lower_union_make(
         ));
     }
     Ok(lines.join("\n"))
+}
+
+fn lower_ffi_pointer_require(
+    result: &str,
+    pointer: ValueId,
+    success: pop_foundation::ResultCaseId,
+    failure: pop_foundation::ResultCaseId,
+) -> String {
+    let present = format!("{result}_present");
+    let case = format!("{result}_case");
+    let payload = format!("{result}_payload");
+    let mut lines = vec![
+        format!("{present} = icmp ne i64 %v{}, 0", pointer.raw()),
+        format!(
+            "{case} = select i1 {present}, i64 {}, i64 {}",
+            success.raw(),
+            failure.raw()
+        ),
+        format!(
+            "{payload} = select i1 {present}, i64 %v{}, i64 0",
+            pointer.raw()
+        ),
+    ];
+    lines.extend(lower_mapped_allocation(result, 2, &[]));
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 1, i64 {case})",
+        native_runtime_symbol(RuntimeOperation::FieldSet)
+    ));
+    lines.push(format!(
+        "call i8 @{}(i64 {result}, i64 2, i64 {payload})",
+        native_runtime_symbol(RuntimeOperation::FieldSet)
+    ));
+    lines.join("\n")
 }
 
 pub(crate) fn direct_function_tag(symbol: SymbolId) -> u64 {

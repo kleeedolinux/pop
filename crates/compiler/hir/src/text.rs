@@ -1204,6 +1204,22 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, pointer, arena);
             output.push(')');
         }
+        HirExpressionKind::FfiPointerRequire {
+            pointer,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffi.pointer.require result bt{} success resultCase#{} failure resultCase#{}(",
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
             type_arguments,

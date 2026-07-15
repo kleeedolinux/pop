@@ -2377,6 +2377,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::FfiPointerToOptional { pointer: base }
         | HirExpressionKind::FfiPointerReadOnly { pointer: base }
         | HirExpressionKind::FfiPointerIsPresent { pointer: base }
+        | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
@@ -2894,6 +2895,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::FfiPointerToOptional { pointer: base }
         | HirExpressionKind::FfiPointerReadOnly { pointer: base }
         | HirExpressionKind::FfiPointerIsPresent { pointer: base }
+        | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -3432,6 +3434,7 @@ fn specialize_expression(
         | HirExpressionKind::FfiPointerToOptional { pointer: base }
         | HirExpressionKind::FfiPointerReadOnly { pointer: base }
         | HirExpressionKind::FfiPointerIsPresent { pointer: base }
+        | HirExpressionKind::FfiPointerRequire { pointer: base, .. }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
@@ -4418,6 +4421,12 @@ pub enum HirExpressionKind {
     },
     FfiPointerIsPresent {
         pointer: Box<HirExpression>,
+    },
+    FfiPointerRequire {
+        pointer: Box<HirExpression>,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
     },
     Call {
         dispatch: HirCallDispatch,

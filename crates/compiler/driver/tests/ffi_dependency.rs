@@ -521,6 +521,78 @@ fn safe_ffi_pointer_operations_require_dependency_direction_and_exact_arity() {
 }
 
 #[test]
+fn checked_ffi_pointer_require_lowers_to_one_typed_result_operation() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/requirePointer.pop",
+            "namespace Pointers\n\
+             public function requireMutable(pointer: Ffi.OptionalPointer<Int>): Result<Ffi.Pointer<Int>, Ffi.NullPointerError>\n\
+                 return Ffi.OptionalPointer.require(pointer)\n\
+             end\n\
+             public function requireReadOnly(pointer: Ffi.OptionalReadOnlyPointer<Int>): Result<Ffi.ReadOnlyPointer<Int>, Ffi.NullPointerError>\n\
+                 return Ffi.OptionalReadOnlyPointer.require(pointer)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("pointer HIR"), result.types())
+        .expect("pointer MIR");
+    let dump = mir.dump();
+    assert_eq!(dump.matches("ffiPointerRequire").count(), 2, "{dump}");
+    assert!(dump.contains("success resultCase#0 failure resultCase#1"));
+    let reparsed = pop_mir::parse_mir_dump(&dump).expect("pointer require MIR text round trip");
+    assert_eq!(reparsed.dump(), dump);
+}
+
+#[test]
+fn checked_ffi_pointer_require_rejects_wrong_direction_and_arity() {
+    let ffi = BubbleId::from_raw(20);
+    for body in [
+        "public function invalid(pointer: Ffi.OptionalReadOnlyPointer<Int>)\n    Ffi.OptionalPointer.require(pointer)\nend\n",
+        "public function invalid(pointer: Ffi.OptionalPointer<Int>)\n    Ffi.OptionalReadOnlyPointer.require(pointer)\nend\n",
+        "public function invalid(pointer: Ffi.OptionalPointer<Int>)\n    Ffi.OptionalPointer.require(pointer, pointer)\nend\n",
+    ] {
+        let module = FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(
+                FileId::from_raw(0),
+                "src/invalidRequirePointer.pop",
+                format!("namespace Pointers\n{body}"),
+            )
+            .expect("source"),
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{body}");
+        assert!(!result.diagnostics().is_empty(), "{body}");
+    }
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_pointer_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(
