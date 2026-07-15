@@ -19,7 +19,7 @@ Heap storage, reachability, roots, pins, and collection policy remain in
 The native collector transition is specified by
 [ADR 0070](../../../architecture/decisions/0070-native-stable-generational-transition.md).
 Atomic initialized publication is specified by
-[ADR 0071](../../../architecture/decisions/0071-atomic-initialized-object-allocation.md).
+[ADR 0072](../../../architecture/decisions/0072-atomic-initialized-object-allocation.md).
 
 The facade is divided into `identity`, `allocation`, `storage`, `text`, `roots`,
 `failure`, `scheduler`, and private `state` modules. The scheduler provides the
@@ -34,7 +34,7 @@ contracts are specified by the
 This keeps ABI exports grouped by the runtime service they adapt while
 retaining one static library and one native ABI.
 
-[ADR 0072](../../../architecture/decisions/0072-scheduler-mutator-and-task-root-binding.md)
+[ADR 0077](../../../architecture/decisions/0077-scheduler-mutator-and-task-root-binding.md)
 defines the scheduler/collector binding. Each normal worker now owns one
 detached mutator registration for its lifetime, enters managed state only while
 polling a task, carries an exact thread-local scheduler/mutator binding through

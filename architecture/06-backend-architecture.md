@@ -90,7 +90,7 @@ Production support begins only after statepoint/relocate or equivalent writable-
 root lowering updates every live value across control-flow merges and passes
 emitted-metadata plus forced-relocation execution tests.
 
-ADR 0073 selects the first equivalent lowering: ABI 2 spills opaque managed
+ADR 0078 selects the first equivalent lowering: ABI 2 spills opaque managed
 tokens to the exact writable array, calls `pop_rt_gc_safe_point_v2`, reloads new
 backend-private SSA aliases, and rewrites all observably later uses including
 branch arguments, merges, and loop backedges. ABI 1 lowering remains unchanged.
@@ -155,7 +155,7 @@ It also has eBPF-specific validation for invalid entry signatures, recursion,
 floating point, unproven loop backedges, unsupported MIR operations, and
 backend representations that have not been implemented yet. If LLVM BPF is
 unavailable, object emission fails with a target diagnostic and no partial
-artifact. See [ADR 0070](./decisions/0070-experimental-ebpf-backend.md).
+artifact. See [ADR 0071](./decisions/0071-experimental-ebpf-backend.md).
 
 ## Future VM backend
 

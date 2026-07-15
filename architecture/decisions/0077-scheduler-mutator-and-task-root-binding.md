@@ -1,4 +1,4 @@
-# ADR 0072: Scheduler Mutator and Task-Root Binding
+# ADR 0077: Scheduler Mutator and Task-Root Binding
 
 - Status: accepted
 - Date: 2026-07-14

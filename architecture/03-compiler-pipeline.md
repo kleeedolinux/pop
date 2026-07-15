@@ -176,7 +176,7 @@ ELF eBPF object for an explicit program kind such as XDP. Missing runtime
 contracts, unsupported backend representations, floating-point behavior,
 dispatch, recursion, or unproven loop behavior are diagnosed before any object
 is written; see
-[ADR 0070](./decisions/0070-experimental-ebpf-backend.md).
+[ADR 0071](./decisions/0071-experimental-ebpf-backend.md).
 
 ## Tooling and incremental queries
 

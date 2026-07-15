@@ -1,8 +1,8 @@
-# ADR 0073: Native ABI 2 Writable-Root Coexistence
+# ADR 0078: Native ABI 2 Writable-Root Coexistence
 
 - Status: accepted
 - Date: 2026-07-14
-- Depends on: ADR 0038, ADR 0039, ADR 0070, and ADR 0072
+- Depends on: ADR 0038, ADR 0039, ADR 0070, and ADR 0077
 - Supersedes: none
 
 ## Context

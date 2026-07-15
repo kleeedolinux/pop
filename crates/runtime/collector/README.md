@@ -52,7 +52,7 @@ array/object/table access required by the native facade, and reports
 scheduler-keyed active-page index with one mutator-local authoritative cursor;
 central page metadata changes only when that active page switches or fills.
 
-ADR 0072 requires scheduler integration to retain canonical root publications
+ADR 0077 requires scheduler integration to retain canonical root publications
 for every non-running task frame and bind each managed native operation to one
 exact worker mutator and logical scheduler. The existing coordinator and
 selected-scheduler surface are foundations, not proof that this binding is

@@ -49,7 +49,7 @@ a backend with verified relocating-root support. ABI 1.x, immutable root spills,
 or a target capability alone cannot satisfy the production profile. Profile/
 ABI mismatch fails before link or load; there is no silent bootstrap fallback.
 
-[ADR 0073](./decisions/0073-native-abi-2-writable-root-coexistence.md)
+[ADR 0078](./decisions/0078-native-abi-2-writable-root-coexistence.md)
 keeps ABI 1.11 and ABI 2.0 as distinct closed descriptors. ABI 1 retains
 `pop_rt_gc_safe_point`; ABI 2 uses `pop_rt_gc_safe_point_v2` with an exact
 writable root array and reloads every returned slot before any later managed
@@ -138,7 +138,7 @@ and capacity private, grows storage without changing the list handle, and
 applies precise barriers for managed elements. MIR retains distinct typed list
 operations; no backend may reinterpret them as array or table operations.
 
-ADR 0071 advances native ABI 1 to version 1.11 with atomic initialized object
+ADR 0072 advances native ABI 1 to version 1.11 with atomic initialized object
 allocation. LLVM passes the exact pointer map and one physical initializer per
 logical slot in a single native transition. The runtime validates every managed
 initializer before publication and returns either a completely initialized
@@ -262,7 +262,7 @@ fails without exposing a partial relocation. Bootstrap adapters leave tokens
 unchanged; relocating adapters invalidate evacuated tokens after rewriting all
 live locations.
 
-Under ADR 0072, the scheduler retains the same canonical publications for every
+Under ADR 0077, the scheduler retains the same canonical publications for every
 non-running task frame, including ready frames. Collector-owned typed root
 containers keep those slots live and relocation-updatable; dispatch restores
 the current tokens before polling. Worker mutator identity and scheduler

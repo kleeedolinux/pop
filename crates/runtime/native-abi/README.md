@@ -6,7 +6,7 @@ operations to constant `pop_rt_*` symbols and records physical sentinel rules.
 ABI 1.11 includes `pop_rt_allocate_initialized_object`, whose exact map and
 initializer arrays represent one failure-atomic object publication.
 
-[ADR 0073](../../../architecture/decisions/0073-native-abi-2-writable-root-coexistence.md)
+[ADR 0078](../../../architecture/decisions/0078-native-abi-2-writable-root-coexistence.md)
 adds distinct immutable ABI 1.11 and ABI 2.0 descriptors. ABI 2 owns the
 separate `pop_rt_gc_safe_point_v2` writable-root spelling and the fixed
 `pop_rt_supports_abi` negotiation spelling; their presence never makes an
