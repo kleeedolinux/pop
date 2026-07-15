@@ -28,6 +28,8 @@ Backends advertise capabilities such as:
 - SIMD;
 - precise stack maps and relocating young-GC support;
 - shared-library or module loading;
+- supported foreign ABIs, native object formats, callback transitions, and
+  unwind boundaries;
 - debug information formats.
 
 A missing capability results in an earlier portable lowering, a runtime fallback,
@@ -83,6 +85,13 @@ and is not read by semantic compiler stages.
 
 Compile-time execution never runs through LLVM. This keeps editor analysis,
 cross-compilation, cache behavior, and the future VM deterministic and aligned.
+
+For ADR 0081 calls, LLVM declares one external symbol from the resolved foreign
+identity, applies the selected target C/system calling convention and verified
+ABI layouts, and surrounds the call with the canonical foreign/root transition.
+The driver—not LLVM semantic lowering—consumes the typed `NativeLinkPlan` to
+link system/framework/object/archive/shared/import-library inputs. LLVM never
+parses raw linker flags or reconstructs ownership, callback, or movement facts.
 
 LLVM keeps ABI 1 stable-handle lowering and separately advertises
 `RelocatingManagedReferences` for ABI 2. Its writable-root lowering spills exact

@@ -317,6 +317,17 @@ mutation, trap, panic/unwind, suspension, unsafe memory, FFI, ambient I/O, and
 compiler-query capabilities. There is no unknown/dynamic effect. At each call,
 the callee summary must be a subset of the caller summary.
 
+Under ADR 0081, a bodyless function with an exact trusted foreign attribute has
+a closed ABI signature rather than a Pop body. Its types must belong to the
+selected C/system ABI mapping. Every foreign call includes `ForeignFunction`,
+`UnsafeMemory`, and `GcSafePoint`; `Blocks` is present unless the exact reviewed
+`Ffi.Nonblocking` contract removes it, and the closed `"CUnwind"` ABI adds
+`MayUnwind`.
+
+Scoped pin pointers carry an internal lexical scope identity and cannot be
+returned, stored, captured, retained by a declaration, or kept across
+suspension. These checks never become a runtime pointer type test.
+
 ## Attribute typing
 
 An UDA constructor is type-checked like a constant constructor call. Attachment

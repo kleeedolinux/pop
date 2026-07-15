@@ -129,6 +129,14 @@ Manifest keys use `camelCase`; package and Bubble identities use `PascalCase`
 components. Dependency keys are local aliases and follow the identity casing.
 The manifest format is versioned independently from the language edition.
 
+ADR 0081 adds deterministic `[nativeLibraries]` and exact
+`[platform."<triple>".nativeLibraries]` sections. Each PascalCase alias selects
+one closed system/framework/object/archive/shared/import-library provider.
+Package-relative files require SHA-256; package-configuration discovery is
+target checked and never invokes a shell. Manifests accept no raw linker flags,
+response files, command substitutions, ambient absolute paths, or host fallback
+during cross compilation.
+
 The Package version applies to every published Bubble in the Package. A
 `BubbleIdentity` consists of the exact package identity/version/source plus the
 Bubble name, public API hash, and relevant ABI/capability facts. Bubbles do not
@@ -368,6 +376,7 @@ Core commands:
 | `pop run` | Build and run exactly one binary/example Bubble |
 | `pop test` | Build and run unit, integration, and XML documentation tests |
 | `pop benchmark` | Build/run benchmark Bubbles under an explicit profile |
+| `pop ffi generate` | Generate deterministic reviewable typed native bindings and ABI metadata for one manifest alias |
 | `pop documentation` | Check XML docs and emit documentation for public library Bubbles |
 | `pop format` | Check or apply the canonical formatter |
 | `pop lint` | Run warning/analyzer policy without changing source |

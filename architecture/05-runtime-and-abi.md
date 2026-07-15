@@ -354,22 +354,28 @@ module code. See
 
 ## Foreign-function interface
 
-The FFI is an explicit unsafe boundary. It needs a separate type mapping and
-cannot treat Pop Lang objects as stable C structs unless a type opts into a
-compatible representation.
+The stable FFI follows
+[ADR 0081](./decisions/0081-statically-bound-native-ffi.md). It is an explicit
+unsafe, statically bound boundary with a separate closed ABI type mapping.
+Ordinary namespace functions carrying the exact trusted `Ffi.Foreign` identity
+declare external symbols; namespace `Ffi.Link` attachments refer to
+typed `bubble.toml` native-library aliases. No `lib` runtime container,
+untyped linker flags, shell command substitution, runtime symbol lookup, or
+dynamic Pop Lang value exists.
 
-FFI declarations remain statically typed. Untyped external bytes, handles, and
-pointers must be decoded, wrapped, or used through explicit unsafe typed APIs;
-the FFI does not introduce dynamic Pop Lang values.
+Canonical HIR/MIR retains the resolved foreign identity, ABI, exact layout,
+effects, and ownership/rooting facts. Every call performs backend-neutral
+`enterForeign`/`leaveForeign` transitions, publishes precise roots, and is a GC
+safe point. Blocking is the safe default; native unwind and callbacks require
+exact explicit contracts.
 
-FFI declarations should state:
-
-- external ABI and symbol;
-- parameter and result layouts;
-- nullability and string encoding;
-- ownership and lifetime rules;
-- blocking, callback, and unwind behavior;
-- whether the collector may move referenced values.
+Raw pointers refer only to unmanaged storage or a compiler-verified lexical
+pin. Managed references cross longer boundaries as generation-checked handles
+or copies. Fixed-layout C records opt in through `Ffi.C.Layout`; unannotated Pop
+objects never become C structs. Strings use explicit encoding and ownership
+adapters. Generated bindings are deterministic reviewable source plus hashed
+ABI metadata, and safe public wrappers convert those declarations into normal
+typed Pop APIs.
 
 ## Versioning
 

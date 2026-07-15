@@ -229,6 +229,7 @@ Minimum traceability matrix:
 | Typed results, errors, and cleanup | syntax, resolver, type checker, docs, HIR/MIR, runtime, backends | stable Result/error identities, exact propagation, exhaustive boundaries, checked error docs, LIFO cleanup, verifier negatives, and differential tests |
 | Nominal iteration and growable lists | syntax, type checker, HIR/MIR, standard library, runtime, backends | exact protocol/step identities, tuple binding, deterministic collection order, list growth/barriers, lazy adapter calls, no implicit disposal/dynamic lookup, and differential tests |
 | Inferred portable generics | syntax, type checker, metadata, HIR/MIR, standard library, backends | exact bounds, unique inference, generic class witnesses, capsule identity/visibility, full-specialization baseline, no erased/dynamic fallback, and differential tests |
+| Statically bound native FFI | syntax, type checker, HIR/MIR, PLRI/runtime, manifests/artifacts, linker, generator, LLVM | exact ABI/layout/effect identities, canonical hashed link plans, pin/handle/callback/root proofs, native fixtures, and no raw flags/shell/runtime lookup tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Lock and `.poplib` encoding | project resolver, artifact emitter/loader, reference metadata, linker | canonical-byte, SHA-256, malformed-input, source-free round-trip tests |
@@ -298,6 +299,9 @@ Architecture CI should eventually verify:
 - native class field/method lowering without table/metatable lookup;
 - Module/Bubble behavior without `require` value tables;
 - `bubble.toml`/`bubble.lock` and monorepo selection/reproducibility tests;
+- canonical native link plans, hashed local inputs, exact ABI fingerprints, and
+  rejection of raw flags, shell execution, host fallback, or runtime symbol
+  lookup under ADR 0081;
 - cross-backend semantic conformance;
 - permanent Lua-regression test corpus;
 - no unresolved architecture gaps in release features;

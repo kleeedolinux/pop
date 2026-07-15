@@ -112,7 +112,9 @@ Representative HIR passes include:
 - async/coroutine transformation planning;
 - exhaustiveness validation;
 - monomorphization planning or generic dictionary selection;
-- validating UDA targets and normalizing metadata-retention requests.
+- validating UDA targets and normalizing metadata-retention requests;
+- validating ADR 0081 foreign declarations against exact trusted attributes,
+  ABI types/layouts, namespace link aliases, and closed effects.
 
 ## MIR lowering
 
@@ -128,6 +130,12 @@ Compile-time-only functions, symbol descriptors, and UDAs do not lower to
 runtime MIR. If explicitly retained metadata is requested, the compiler emits a
 narrow serializable projection and generated typed adapters—not its internal
 reflection objects.
+
+Statically bound foreign declarations are the exception to ordinary UDA
+erasure: their trusted ADR 0081 consequence becomes a typed foreign identity
+and exact ABI/effect contract in HIR/MIR. The original attribute value does not
+become runtime reflection. Calls lower to explicit foreign transitions with
+root publication, safe-point, cleanup, and unwind facts.
 
 MIR should use SSA form or block arguments. If mutable locals are convenient
 during construction, a mandatory canonicalization pass converts them before
@@ -157,6 +165,7 @@ A backend receives:
 - a verified canonical `MirBubble`;
 - target capabilities and data-layout facts through an abstract target query;
 - runtime ABI version and feature set;
+- the canonical target-specific native link plan and ABI fingerprints;
 - build mode and debug/optimization settings.
 
 It returns an artifact plus structured diagnostics. It cannot mutate compiler

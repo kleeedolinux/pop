@@ -44,6 +44,11 @@ HirDeclaration {
   kind, type, attributes, origin
 }
 
+HirForeignFunction {
+  symbolId, foreignId, abi, externalSymbol, linkAliases,
+  parameters, results, effects, layoutFingerprints, attributes, origin
+}
+
 HirClass {
   id, typeParameters, base, interfaces, fields, methods, attributes
 }
@@ -148,12 +153,21 @@ Results:       resultMake, resultIsOk, resultGetOk, resultGetError
 Errors:        errorMake, errorSwitch
 Cleanup:       cleanup{CleanupScopeId, exitReason}, resumeCurrentUnwind
 Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume
+Foreign:       enterForeign, callForeign{foreignId, abi, effects}, leaveForeign
 Debug:         debugValue, sourceScope
 ```
 
 `checkedDowncast` has a named static target and typed optional/result output. It
 does not create an untyped value. Collection operations carry concrete key,
 value, and collection types.
+
+ADR 0081 foreign operations carry one resolved foreign identity, closed ABI,
+exact parameter/result layouts, link aliases, and effect summary. They never
+carry a runtime library/symbol string lookup. `enterForeign` publishes the
+precise live-root map and starts the transition; every normal/unwind/cleanup
+path balances it with `leaveForeign`. A scoped pin dominates only the permitted
+foreign use and is released on every exit. Physical calling conventions,
+symbols, and object formats remain backend details selected from this contract.
 
 Optional comparison narrowing, pattern binding, lazy `??`, and postfix `?`
 remain typed HIR concepts until canonical MIR lowers them to explicit branches
@@ -234,6 +248,9 @@ MIR invariants:
   value; backends/VMs install the typed `RootSlot` updates before subsequent
   uses without adding backend relocation instructions to canonical MIR;
 - root scopes dominate their uses and are balanced on normal and unwind exits;
+- every foreign call is dominated by its exact `enterForeign`, is followed on
+  every exit by `leaveForeign`, carries the ADR 0081 mandatory effects/layouts,
+  and cannot retain or suspend with a scoped pin;
 - evaluation order matches Pop Lang semantics;
 - all target assumptions come from target queries;
 - every call and member/collection operation has statically known types;

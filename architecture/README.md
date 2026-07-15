@@ -141,6 +141,10 @@ transplanted into a Luau-shaped file.
 - Reintroducing Lua's dynamic/table-centered architecture is a release-blocking
   **Lua regression**, not a compatibility feature.
 - A future VM can consume MIR without reconstructing source-level meaning.
+- Native FFI declarations remain ordinary statically typed functions; typed
+  hashed link plans, exact ABI layouts/effects, scoped pins/handles/callbacks,
+  and generated reviewable adapters replace raw flags, shell execution,
+  runtime symbol lookup, or reflection.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 

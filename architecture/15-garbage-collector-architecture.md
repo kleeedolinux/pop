@@ -1184,6 +1184,10 @@ When implemented, they require:
 ## 17.1 Raw pointers
 
 Foreign code may not retain a raw pointer to a movable managed object across a safepoint.
+ADR 0081 additionally requires raw foreign pointers to refer to unmanaged
+storage unless the compiler creates a non-escaping lexical pin. Returning,
+storing, capturing, retaining, or suspending with that scoped pointer is a
+static error.
 
 ## 17.2 Handles
 
@@ -1218,6 +1222,9 @@ Long asynchronous native ownership should use:
 - explicit native-owned memory;
 - stable handles.
 
+The pin is released on every normal, expected-failure, panic, and cancellation
+exit. Pin cleanup is part of canonical MIR rather than backend convention.
+
 ## 17.4 Native callbacks
 
 Callbacks re-enter managed code through registered runtime transitions.
@@ -1229,6 +1236,11 @@ They must establish:
 - scheduler ownership;
 - safepoint participation;
 - exception and panic boundaries.
+
+Call-scoped callback values cannot escape their foreign call. An explicitly
+owned callback remains rooted until deterministic close and carries an exact
+thread, concurrency, blocking, reentrancy, and panic policy. Callback entry
+resolves a registered managed identity; it never looks up a function by string.
 
 ---
 
