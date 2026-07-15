@@ -35,6 +35,9 @@ pub(crate) fn dump_declaration(
                 declaration.name,
                 type_text(record.type_id, arena)
             );
+            if record.ffi_c_layout {
+                output.push_str(" ffiCLayout");
+            }
         }
         HirDeclarationKind::Union(union) => {
             let _ = write!(
@@ -1126,9 +1129,16 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, handle, arena);
             output.push(')');
         }
-        HirExpressionKind::FfiBufferOpen { length, element } => {
+        HirExpressionKind::FfiBufferOpen {
+            length,
+            element,
+            layout_record,
+        } => {
             output.push_str("ffi.buffer.open<<");
             output.push_str(&type_text(*element, arena));
+            if let Some(record) = layout_record {
+                let _ = write!(output, " layoutRecord s{}", record.raw());
+            }
             output.push_str(">>(");
             dump_expression(output, length, arena);
             output.push(')');

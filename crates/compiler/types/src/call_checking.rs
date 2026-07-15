@@ -17,6 +17,11 @@ use crate::body_checking::{
 use crate::typed_body::*;
 use crate::{NumericConversionKind, PrimitiveType, SemanticType, StringFormatKind};
 
+enum FfiBufferElementKind {
+    Scalar,
+    LayoutRecord(pop_foundation::SymbolId),
+}
+
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_call(
         &mut self,
@@ -418,7 +423,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         &mut self,
         path: &[String],
         arguments: &[ExpressionSyntax],
-        explicit_element: Option<TypeId>,
+        explicit_element: Option<(TypeId, Option<pop_foundation::SymbolId>)>,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
         let operation = path.get(2)?.as_str();
@@ -439,8 +444,8 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
         let size = self.ffi_builtin_type("Ffi.C.Size", Vec::new())?;
         if operation == "open" {
-            let element = explicit_element?;
-            if !self.ffi_buffer_element(element) {
+            let (element, record) = explicit_element?;
+            let Some(element_kind) = self.ffi_buffer_element(element, record) else {
                 self.diagnostics.push(type_diagnostics::type_mismatch(
                     span,
                     "FFI ABI storage type",
@@ -448,7 +453,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     span,
                 ));
                 return None;
-            }
+            };
+            let layout_record = match element_kind {
+                FfiBufferElementKind::Scalar => None,
+                FfiBufferElementKind::LayoutRecord(record) => Some(record),
+            };
             let length = self.check_expression_expected(
                 &arguments[0],
                 Some(ExpectedExpressionType::plain(size)),
@@ -461,6 +470,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 kind: TypedExpressionKind::FfiBufferOpen {
                     length: Box::new(length),
                     element,
+                    layout_record,
                 },
                 type_id,
                 span,
@@ -477,10 +487,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             ));
             None
         })?;
-        if explicit_element.is_some_and(|expected| expected != element) {
+        if explicit_element.is_some_and(|(expected, _)| expected != element) {
             self.diagnostics.push(type_diagnostics::type_mismatch(
                 buffer.span(),
-                self.type_name(explicit_element?),
+                self.type_name(explicit_element?.0),
                 self.type_name(element),
                 span,
             ));
@@ -557,18 +567,31 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         }
     }
 
-    fn ffi_buffer_element(&self, type_id: TypeId) -> bool {
+    fn ffi_buffer_element(
+        &self,
+        type_id: TypeId,
+        record: Option<pop_foundation::SymbolId>,
+    ) -> Option<FfiBufferElementKind> {
         match self.resolver.arena().get(type_id) {
             Some(SemanticType::Primitive(
                 PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
-            )) => true,
+            )) => Some(FfiBufferElementKind::Scalar),
             Some(SemanticType::Builtin { definition, .. }) => {
-                crate::is_ffi_integer_abi_builtin_type(*definition)
+                (crate::is_ffi_integer_abi_builtin_type(*definition)
                     || crate::is_ffi_pointer_type_constructor(*definition)
                     || crate::is_ffi_function_type_constructor(*definition)
-                    || *definition == crate::FFI_HANDLE_TYPE_ID
+                    || *definition == crate::FFI_HANDLE_TYPE_ID)
+                    .then_some(FfiBufferElementKind::Scalar)
             }
-            _ => false,
+            Some(SemanticType::Record(_)) => record
+                .and_then(|symbol| self.resolver.record_definition(symbol))
+                .filter(|definition| {
+                    definition.type_id() == type_id
+                        && definition.has_ffi_c_layout()
+                        && self.resolver.ffi_c_layout_is_valid(definition.symbol())
+                })
+                .map(|definition| FfiBufferElementKind::LayoutRecord(definition.symbol())),
+            _ => None,
         }
     }
 

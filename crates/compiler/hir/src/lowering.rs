@@ -1108,12 +1108,15 @@ fn lower_expression(
         TypedExpressionKind::FfiHandleClose { handle } => HirExpressionKind::FfiHandleClose {
             handle: Box::new(lower_expression(handle, interface_slots)),
         },
-        TypedExpressionKind::FfiBufferOpen { length, element } => {
-            HirExpressionKind::FfiBufferOpen {
-                length: Box::new(lower_expression(length, interface_slots)),
-                element: *element,
-            }
-        }
+        TypedExpressionKind::FfiBufferOpen {
+            length,
+            element,
+            layout_record,
+        } => HirExpressionKind::FfiBufferOpen {
+            length: Box::new(lower_expression(length, interface_slots)),
+            element: *element,
+            layout_record: *layout_record,
+        },
         TypedExpressionKind::FfiBufferLength { buffer } => HirExpressionKind::FfiBufferLength {
             buffer: Box::new(lower_expression(buffer, interface_slots)),
         },

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
@@ -15,7 +15,7 @@ use pop_syntax::{
 use crate::field_defaults::resolve_field_default;
 use crate::required_constants::field_default_matches_type;
 use crate::{
-    BootstrapSchema, BootstrapTypeRole, FieldDefault, PendingConstantExpression,
+    BootstrapSchema, BootstrapTypeRole, FieldDefault, PendingConstantExpression, PrimitiveType,
     RequiredConstantError, RequiredConstantTarget, SemanticType, TypeArena,
 };
 
@@ -281,6 +281,7 @@ pub struct RecordDefinition {
     symbol: SymbolId,
     type_id: TypeId,
     fields: Vec<RecordFieldDefinition>,
+    ffi_c_layout: bool,
     span: SourceSpan,
 }
 
@@ -298,6 +299,11 @@ impl RecordDefinition {
     #[must_use]
     pub fn fields(&self) -> &[RecordFieldDefinition] {
         &self.fields
+    }
+
+    #[must_use]
+    pub const fn has_ffi_c_layout(&self) -> bool {
+        self.ffi_c_layout
     }
 
     #[must_use]
@@ -1149,6 +1155,7 @@ impl<'index> SignatureResolver<'index> {
             symbol,
             type_id,
             fields,
+            ffi_c_layout: template.ffi_c_layout,
             span: template.span,
         };
         self.record_instances.insert(key, symbol);
@@ -1524,6 +1531,7 @@ impl<'index> SignatureResolver<'index> {
                     symbol,
                     type_id,
                     fields,
+                    ffi_c_layout: false,
                     span: syntax.span(),
                 }
             })
@@ -1541,6 +1549,67 @@ impl<'index> SignatureResolver<'index> {
             definition,
             diagnostics,
         }
+    }
+
+    /// Marks one record template and every existing concrete instance as a
+    /// trusted C-layout record.
+    pub fn mark_ffi_c_layout(&mut self, symbol: SymbolId) -> bool {
+        if !self.record_definitions.contains_key(&symbol) {
+            return false;
+        }
+        if let Some(definition) = self.record_definitions.get_mut(&symbol) {
+            definition.ffi_c_layout = true;
+        }
+        let instances = self
+            .record_instances
+            .iter()
+            .filter_map(|((source, _), instance)| (*source == symbol).then_some(*instance))
+            .collect::<Vec<_>>();
+        for instance in instances {
+            if let Some(definition) = self.record_definitions.get_mut(&instance) {
+                definition.ffi_c_layout = true;
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn ffi_c_layout_is_valid(&self, symbol: SymbolId) -> bool {
+        self.ffi_c_layout_is_valid_inner(symbol, &mut BTreeSet::new())
+    }
+
+    fn ffi_c_layout_is_valid_inner(
+        &self,
+        symbol: SymbolId,
+        visiting: &mut BTreeSet<SymbolId>,
+    ) -> bool {
+        let Some(definition) = self.record_definitions.get(&symbol) else {
+            return false;
+        };
+        if !definition.ffi_c_layout || definition.fields.is_empty() || !visiting.insert(symbol) {
+            return false;
+        }
+        let valid = definition
+            .fields
+            .iter()
+            .all(|field| match self.arena.get(field.field_type) {
+                Some(SemanticType::Primitive(
+                    PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
+                )) => true,
+                Some(SemanticType::Builtin { definition, .. }) => {
+                    crate::is_ffi_integer_abi_builtin_type(*definition)
+                        || crate::is_ffi_pointer_type_constructor(*definition)
+                        || crate::is_ffi_function_type_constructor(*definition)
+                        || *definition == crate::FFI_HANDLE_TYPE_ID
+                }
+                Some(SemanticType::Record(_)) => self
+                    .records_by_type
+                    .get(&field.field_type)
+                    .is_some_and(|nested| self.ffi_c_layout_is_valid_inner(*nested, visiting)),
+                _ => false,
+            });
+        visiting.remove(&symbol);
+        valid
     }
 
     /// Installs one already-evaluated record field default into a deferred schema.

@@ -35,7 +35,7 @@ use crate::verification::{
     instruction_operands, instruction_unwind_target, terminator_operands, terminator_targets,
     verify_mir_bubble,
 };
-use crate::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiValueClass};
+use crate::{MirFfiLayout, MirFfiLayoutCatalog, MirFfiLayoutField, MirFfiValueClass};
 
 type OptionalFfiLayoutFingerprint<'a> = Option<&'a dyn Fn(&[u8]) -> String>;
 
@@ -162,7 +162,7 @@ fn lower_hir_bubble_for_target_internal(
         })
         .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
-    let ffi_layouts = source_ffi_layout_catalog(arena, target, fingerprint)?;
+    let ffi_layouts = source_ffi_layout_catalog(hir, arena, target, fingerprint)?;
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let empty_function_effects = BTreeMap::new();
     let empty_method_effects = BTreeMap::new();
@@ -286,6 +286,7 @@ fn lower_hir_bubble_for_target_internal(
 }
 
 fn source_ffi_layout_catalog(
+    hir: &HirBubble,
     arena: &TypeArena,
     target: &TargetSpec,
     fingerprint: OptionalFfiLayoutFingerprint<'_>,
@@ -308,22 +309,50 @@ fn source_ffi_layout_catalog(
     let Some(fingerprint) = fingerprint else {
         return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
     };
-    let entries = elements
-        .into_iter()
-        .enumerate()
-        .map(|(index, element)| source_ffi_layout(element, index, arena, target))
-        .collect::<Option<Vec<_>>>()
+    let trusted_records = hir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            HirDeclarationKind::Record(record) if record.has_ffi_c_layout() => {
+                Some((record.type_id(), record))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut entries = Vec::new();
+    let mut by_type = BTreeMap::new();
+    let mut next_id = 1;
+    for element in elements {
+        ensure_source_ffi_layout(
+            element,
+            arena,
+            target,
+            &trusted_records,
+            &mut entries,
+            &mut by_type,
+            &mut next_id,
+        )
         .ok_or_else(|| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+    }
     MirFfiLayoutCatalog::new(target, entries, arena, fingerprint)
         .map_err(|_| vec![MirVerificationError::InvalidFfiLayoutCatalog])
 }
 
-fn source_ffi_layout(
+fn ensure_source_ffi_layout(
     element: TypeId,
-    index: usize,
     arena: &TypeArena,
     target: &TargetSpec,
-) -> Option<MirFfiLayout> {
+    trusted_records: &BTreeMap<TypeId, &pop_hir::HirRecordDeclaration>,
+    entries: &mut Vec<MirFfiLayout>,
+    by_type: &mut BTreeMap<TypeId, FfiAbiLayoutId>,
+    next_id: &mut u64,
+) -> Option<FfiAbiLayoutId> {
+    if let Some(layout) = by_type.get(&element) {
+        return Some(*layout);
+    }
+    let provisional = FfiAbiLayoutId::new(*next_id)?;
+    *next_id = next_id.checked_add(1)?;
+    by_type.insert(element, provisional);
     let (size, alignment, value_class) = match arena.get(element)? {
         SemanticType::Primitive(PrimitiveType::Integer(kind)) => {
             let size = u64::from(kind.bit_width()) / 8;
@@ -355,16 +384,58 @@ fn source_ffi_layout(
         {
             (8, 8, MirFfiValueClass::Handle)
         }
+        SemanticType::Record(semantic_fields) => {
+            let record = trusted_records.get(&element)?;
+            if semantic_fields.len() != record.fields().len() || semantic_fields.is_empty() {
+                return None;
+            }
+            let mut offset = 0_u64;
+            let mut alignment = 1_u64;
+            let mut fields = Vec::with_capacity(semantic_fields.len());
+            for (index, ((_, field_type), field)) in
+                semantic_fields.iter().zip(record.fields()).enumerate()
+            {
+                if *field_type != field.field_type() {
+                    return None;
+                }
+                let child = ensure_source_ffi_layout(
+                    *field_type,
+                    arena,
+                    target,
+                    trusted_records,
+                    entries,
+                    by_type,
+                    next_id,
+                )?;
+                let child_layout = entries.iter().find(|entry| entry.id() == child)?;
+                alignment = alignment.max(child_layout.alignment());
+                offset = align_ffi_offset(offset, child_layout.alignment())?;
+                fields.push(MirFfiLayoutField::new(
+                    field.field(),
+                    u32::try_from(index).ok()?,
+                    child,
+                    offset,
+                ));
+                offset = offset.checked_add(child_layout.size())?;
+            }
+            let size = align_ffi_offset(offset, alignment)?;
+            (size, alignment, MirFfiValueClass::Record(fields))
+        }
         _ => return None,
     };
-    let provisional = u64::try_from(index).ok()?.checked_add(1)?;
-    Some(MirFfiLayout::new(
-        FfiAbiLayoutId::new(provisional)?,
+    entries.push(MirFfiLayout::new(
+        provisional,
         element,
         size,
         alignment,
         value_class,
-    ))
+    ));
+    Some(provisional)
+}
+
+fn align_ffi_offset(offset: u64, alignment: u64) -> Option<u64> {
+    let mask = alignment.checked_sub(1)?;
+    offset.checked_add(mask).map(|value| value & !mask)
 }
 
 const fn target_ffi_integer_kind(kind: FfiCIntegerKind) -> CAbiScalarKind {
@@ -3458,7 +3529,9 @@ impl<'hir> FunctionBuilder<'hir> {
                 );
                 MirInstructionKind::NilConstant
             }
-            HirExpressionKind::FfiBufferOpen { length, element } => {
+            HirExpressionKind::FfiBufferOpen {
+                length, element, ..
+            } => {
                 let (layout, element_size, alignment) = self.ffi_layout(*element);
                 let result = match self.arena.get(expression.type_id()) {
                     Some(SemanticType::Builtin { definition, .. }) => *definition,

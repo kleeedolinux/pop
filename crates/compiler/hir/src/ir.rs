@@ -508,6 +508,7 @@ impl HirDeclaration {
                         span: field.span(),
                     })
                     .collect(),
+                ffi_c_layout: definition.has_ffi_c_layout(),
             }),
             span: definition.span(),
         }
@@ -932,6 +933,7 @@ impl HirEnumCase {
 pub struct HirRecordDeclaration {
     pub(crate) type_id: TypeId,
     pub(crate) fields: Vec<HirRecordField>,
+    pub(crate) ffi_c_layout: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1087,6 +1089,11 @@ impl HirRecordDeclaration {
     #[must_use]
     pub const fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    #[must_use]
+    pub const fn has_ffi_c_layout(&self) -> bool {
+        self.ffi_c_layout
     }
 
     #[must_use]
@@ -2371,7 +2378,9 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
         }
-        HirExpressionKind::FfiBufferOpen { length, element } => {
+        HirExpressionKind::FfiBufferOpen {
+            length, element, ..
+        } => {
             remap_aggregate_expression(length, instances);
             *element = instances.type_id(*element);
         }
@@ -3414,7 +3423,9 @@ fn specialize_expression(
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
         }
-        HirExpressionKind::FfiBufferOpen { length, element } => {
+        HirExpressionKind::FfiBufferOpen {
+            length, element, ..
+        } => {
             specialize_expression(length, substitutions, instances, arena)?;
             specialize_type(element, substitutions, arena)?;
         }
@@ -4361,6 +4372,7 @@ pub enum HirExpressionKind {
     FfiBufferOpen {
         length: Box<HirExpression>,
         element: TypeId,
+        layout_record: Option<SymbolId>,
     },
     FfiBufferLength {
         buffer: Box<HirExpression>,

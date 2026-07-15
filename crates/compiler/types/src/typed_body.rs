@@ -562,6 +562,7 @@ pub enum TypedExpressionKind {
     FfiBufferOpen {
         length: Box<TypedExpression>,
         element: TypeId,
+        layout_record: Option<SymbolId>,
     },
     FfiBufferLength {
         buffer: Box<TypedExpression>,

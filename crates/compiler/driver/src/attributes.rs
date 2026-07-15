@@ -87,6 +87,75 @@ pub(crate) fn resolve_ffi_attributes(
     }
 }
 
+pub(crate) fn resolve_ffi_layout_attributes(
+    declarations: &mut [DeclarationAttributeWork],
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+    has_ffi_dependency: bool,
+    resolver: &mut SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !has_ffi_dependency {
+        return;
+    }
+    let mut layouts = Vec::new();
+    for declaration in declarations {
+        let mut ordinary = Vec::new();
+        for attribute in std::mem::take(&mut declaration.attribute_uses) {
+            let name = attribute.path().join(".");
+            let shadowed = database
+                .resolve(
+                    declaration.module,
+                    &name,
+                    SymbolSpace::Type,
+                    attribute.span(),
+                )
+                .symbol()
+                .is_some();
+            let role = (!shadowed)
+                .then(|| bootstrap.compiler_attribute_by_source_name(&name))
+                .flatten()
+                .filter(|entry| entry.owner_bubble() == "Pop.Ffi")
+                .map(|entry| entry.role());
+            match role {
+                Some(CompilerAttributeRole::FfiCLayout)
+                    if declaration.target == AttributeTarget::Record
+                        && attribute.arguments().is_empty() =>
+                {
+                    if resolver.mark_ffi_c_layout(declaration.symbol) {
+                        layouts.push((declaration.symbol, attribute.span()));
+                    } else {
+                        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                            attribute.span(),
+                            "Ffi.C.Layout requires one resolved record declaration",
+                        ));
+                    }
+                }
+                Some(CompilerAttributeRole::FfiCLayout) => {
+                    diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                        attribute.span(),
+                        "Ffi.C.Layout requires an argument-free record attachment",
+                    ));
+                }
+                Some(_) => diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                    attribute.span(),
+                    "FFI attribute has the wrong attachment target",
+                )),
+                None => ordinary.push(attribute),
+            }
+        }
+        declaration.attribute_uses = ordinary;
+    }
+    for (symbol, span) in layouts {
+        if !resolver.ffi_c_layout_is_valid(symbol) {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                span,
+                "Ffi.C.Layout fields must use only accepted ABI storage types",
+            ));
+        }
+    }
+}
+
 fn resolve_foreign_function(
     function: &mut FunctionWork,
     link_aliases: Vec<String>,

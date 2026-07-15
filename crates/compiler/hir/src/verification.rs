@@ -44,7 +44,7 @@ fn ffi_buffer_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
     }
 }
 
-fn is_ffi_buffer_element(arena: &TypeArena, type_id: TypeId) -> bool {
+fn is_ffi_buffer_element(arena: &TypeArena, type_id: TypeId, ffi_c_layout: bool) -> bool {
     match arena.get(type_id) {
         Some(SemanticType::Primitive(
             PrimitiveType::Integer(_) | PrimitiveType::Float32 | PrimitiveType::Float64,
@@ -55,6 +55,7 @@ fn is_ffi_buffer_element(arena: &TypeArena, type_id: TypeId) -> bool {
                 || pop_types::is_ffi_function_type_constructor(*definition)
                 || *definition == pop_types::FFI_HANDLE_TYPE_ID
         }
+        Some(SemanticType::Record(_)) => ffi_c_layout,
         _ => false,
     }
 }
@@ -486,6 +487,7 @@ impl HirCallableSignature {
 struct HirAggregateSchema {
     type_id: TypeId,
     fields: BTreeMap<FieldId, TypeId>,
+    ffi_c_layout: bool,
 }
 
 #[derive(Clone)]
@@ -669,6 +671,7 @@ impl HirSchema {
                     HirAggregateSchema {
                         type_id: record.type_id,
                         fields,
+                        ffi_c_layout: record.ffi_c_layout,
                     },
                 );
             }
@@ -2777,7 +2780,11 @@ impl Verifier<'_> {
                         });
                 }
             }
-            HirExpressionKind::FfiBufferOpen { length, element } => {
+            HirExpressionKind::FfiBufferOpen {
+                length,
+                element,
+                layout_record,
+            } => {
                 self.verify_expression(length, visible);
                 self.verify_type(*element, expression.span());
                 let valid_result = self
@@ -2792,7 +2799,14 @@ impl Verifier<'_> {
                             ))
                     });
                 if !self.is_builtin_type(length.type_id(), "Ffi.C.Size", &[])
-                    || !is_ffi_buffer_element(self.arena, *element)
+                    || !is_ffi_buffer_element(self.arena, *element, layout_record.is_some())
+                    || layout_record.is_some_and(|record| {
+                        self.schema.is_some_and(|schema| {
+                            schema.records.get(&record).is_none_or(|record| {
+                                record.type_id != *element || !record.ffi_c_layout
+                            })
+                        })
+                    })
                     || !valid_result
                 {
                     self.errors

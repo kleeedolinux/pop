@@ -281,6 +281,158 @@ fn ffi_buffer_calls_require_the_dependency_abi_storage_and_exact_operands() {
 }
 
 #[test]
+fn ffi_layout_records_flow_from_trusted_source_attributes_into_the_target_catalog() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/layout.pop",
+            "namespace Layout\n\
+             @Ffi.C.Layout\n\
+             public record Pair\n\
+                 left: Ffi.C.Int\n\
+                 right: Ffi.C.Int\n\
+             end\n\
+             public function allocate(length: Ffi.C.Size): Result<Ffi.Buffer<Pair>, Ffi.AllocationError>\n\
+                 return Ffi.Buffer.open<<Pair>>(length)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty() && result.hir_build_errors().is_empty(),
+        "{}\n{:?}",
+        result.diagnostic_snapshot(),
+        result.hir_build_errors()
+    );
+    let pair = result
+        .hir()
+        .expect("layout HIR")
+        .declarations()
+        .iter()
+        .find_map(|declaration| match declaration.kind() {
+            pop_hir::HirDeclarationKind::Record(record) if declaration.name() == "Pair" => {
+                Some(record.type_id())
+            }
+            _ => None,
+        })
+        .expect("Pair");
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("layout HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("layout MIR");
+    let layout = mir
+        .ffi_layouts()
+        .entries()
+        .iter()
+        .find(|layout| layout.element() == pair)
+        .expect("record layout");
+    assert_eq!(layout.size(), 8);
+    assert_eq!(layout.alignment(), 4);
+    let pop_mir::MirFfiValueClass::Record(fields) = layout.value_class() else {
+        panic!("record value class");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].offset(), 0);
+    assert_eq!(fields[1].offset(), 4);
+    assert!(layout.descriptor().contains("\"name\":\"left\""));
+    assert!(layout.descriptor().contains("\"name\":\"right\""));
+}
+
+#[test]
+fn ffi_layout_records_reject_missing_trust_and_managed_fields() {
+    let ffi = BubbleId::from_raw(20);
+    for source in [
+        "namespace Layout\n\
+         public record Pair\n\
+             left: Ffi.C.Int\n\
+         end\n\
+         public function invalid(length: Ffi.C.Size)\n\
+             Ffi.Buffer.open<<Pair>>(length)\n\
+         end\n",
+        "namespace Layout\n\
+         @Ffi.C.Layout\n\
+         public record Managed\n\
+             value: String\n\
+         end\n\
+         public function invalid(length: Ffi.C.Size)\n\
+             Ffi.Buffer.open<<Managed>>(length)\n\
+         end\n",
+    ] {
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![FrontEndModule::new(
+                    ModuleId::from_raw(0),
+                    SourceFile::new(FileId::from_raw(0), "src/invalidLayout.pop", source)
+                        .expect("source"),
+                )],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{source}");
+        assert!(!result.diagnostics().is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn user_attributes_cannot_spoof_the_trusted_ffi_layout_identity() {
+    let ffi = BubbleId::from_raw(20);
+    let attribute = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/userLayout.pop",
+            "namespace Ffi.C\n\
+             @AttributeUsage(targets = { AttributeTarget.Record })\n\
+             public attribute Layout()\n",
+        )
+        .expect("source"),
+    );
+    let consumer = FrontEndModule::new(
+        ModuleId::from_raw(1),
+        SourceFile::new(
+            FileId::from_raw(1),
+            "src/consumer.pop",
+            "namespace Consumer\n\
+             @Ffi.C.Layout\n\
+             public record Pair\n\
+                 value: Ffi.C.Int\n\
+             end\n\
+             public function invalid(length: Ffi.C.Size)\n\
+                 Ffi.Buffer.open<<Pair>>(length)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![attribute, consumer],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(result.hir().is_none());
+    assert!(!result.diagnostics().is_empty());
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_buffer_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(

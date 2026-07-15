@@ -15,7 +15,7 @@ use crate::capture_analysis::finalize_capture_modes;
 use crate::typed_body::*;
 use crate::{
     AttributeConstant, AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue,
-    PrimitiveType, ResolvedFunctionSignature, SemanticType, SignatureResolver,
+    PrimitiveType, ResolvedFunctionSignature, ResolvedTypeKind, SemanticType, SignatureResolver,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -670,10 +670,15 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 self.resolver
                     .resolve_annotation(self.module, &type_arguments[0], &enclosing);
             self.diagnostics.extend(diagnostics);
+            let resolved = resolved?;
+            let layout_record = match resolved.kind() {
+                ResolvedTypeKind::Declaration { symbol, .. } => Some(*symbol),
+                _ => None,
+            };
             return self.check_ffi_buffer_invocation(
                 path,
                 arguments,
-                Some(resolved?.type_id()?),
+                Some((resolved.type_id()?, layout_record)),
                 span,
             );
         }

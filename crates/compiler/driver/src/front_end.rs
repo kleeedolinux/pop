@@ -35,7 +35,8 @@ use pop_types::{
 
 use crate::api::*;
 use crate::attributes::{
-    classify_function_attributes, resolve_ffi_attributes, resolve_source_attributes,
+    classify_function_attributes, resolve_ffi_attributes, resolve_ffi_layout_attributes,
+    resolve_source_attributes,
 };
 use crate::compile_time::{
     build_compile_time_context, check_compile_time_function_bodies,
@@ -145,6 +146,14 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &bootstrap,
         input.ffi_dependency.is_some(),
         resolver.arena(),
+        &mut diagnostics,
+    );
+    resolve_ffi_layout_attributes(
+        &mut declaration_attributes,
+        &database,
+        &bootstrap,
+        input.ffi_dependency.is_some(),
+        &mut resolver,
         &mut diagnostics,
     );
     let mut signatures = reference_signatures(&input.reference_metadata, &database, &mut resolver);
