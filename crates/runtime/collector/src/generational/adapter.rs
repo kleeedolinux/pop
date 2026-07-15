@@ -305,6 +305,10 @@ impl RuntimeAdapter for GenerationalRuntime {
         Ok(root)
     }
 
+    fn resolve_root(&mut self, root: RootHandle) -> Result<ManagedReference, RuntimeFailure> {
+        self.nursery.resolve_root(root)
+    }
+
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
         if self.isolation.owns_handle(root) {
             return Err(RuntimeFailure::runtime_invariant());

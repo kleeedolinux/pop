@@ -91,10 +91,14 @@ fn strong_handles_and_pins_follow_relocated_targets() {
 
     force_minor(&mut runtime, &mut no_roots);
     assert!(!runtime.contains(rooted));
+    let relocated = runtime.resolve_root(root).expect("relocated root target");
+    assert_ne!(relocated, rooted);
+    assert!(runtime.contains(relocated));
     assert_eq!(runtime.object_count(), 1);
     force_minor(&mut runtime, &mut no_roots);
     assert_eq!(runtime.object_count(), 1);
     runtime.release_root(root).expect("release updated root");
+    assert!(runtime.resolve_root(root).is_err());
     force_minor(&mut runtime, &mut no_roots);
     assert_eq!(runtime.object_count(), 1);
 

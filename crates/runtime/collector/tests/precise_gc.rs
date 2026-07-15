@@ -43,6 +43,7 @@ fn precise_tracing_preserves_transitive_cycles_and_reclaims_them_after_root_rele
         .store_reference(second, ObjectSlot::new(0), Some(first))
         .expect("second to first");
     let root = runtime.retain_root(first).expect("root");
+    assert_eq!(runtime.resolve_root(root), Ok(first));
 
     let live = runtime
         .collect(&no_stack_roots(1))
@@ -53,6 +54,7 @@ fn precise_tracing_preserves_transitive_cycles_and_reclaims_them_after_root_rele
     assert!(runtime.contains(second));
 
     runtime.release_root(root).expect("release root");
+    assert!(runtime.resolve_root(root).is_err());
     let reclaimed = runtime
         .collect(&no_stack_roots(2))
         .expect("unrooted collection");

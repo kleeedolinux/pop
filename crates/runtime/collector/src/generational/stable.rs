@@ -476,6 +476,10 @@ impl RuntimeAdapter for StableGenerationalRuntime {
         self.inner.retain_root(reference)
     }
 
+    fn resolve_root(&mut self, root: RootHandle) -> Result<ManagedReference, RuntimeFailure> {
+        self.inner.resolve_root(root)
+    }
+
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
         self.inner.release_root(root)
     }

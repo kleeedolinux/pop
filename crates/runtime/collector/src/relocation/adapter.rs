@@ -83,6 +83,13 @@ impl RuntimeAdapter for RelocationRuntime {
         Ok(handle)
     }
 
+    fn resolve_root(&mut self, root: RootHandle) -> Result<ManagedReference, RuntimeFailure> {
+        self.roots
+            .get(&root)
+            .copied()
+            .ok_or_else(RuntimeFailure::runtime_invariant)
+    }
+
     fn release_root(&mut self, root: RootHandle) -> Result<(), RuntimeFailure> {
         self.roots
             .remove(&root)

@@ -214,6 +214,10 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::RetainRoot)
         ),
         format!(
+            "declare i64 @{}(i64)",
+            native_runtime_symbol(RuntimeOperation::ResolveRoot)
+        ),
+        format!(
             "declare i8 @{}(i64)",
             native_runtime_symbol(RuntimeOperation::ReleaseRoot)
         ),

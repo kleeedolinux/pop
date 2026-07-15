@@ -8,11 +8,11 @@ use pop_runtime_native::{
     pop_rt_field_get, pop_rt_field_set, pop_rt_gc_safe_point_v2, pop_rt_gc_stage,
     pop_rt_iteration_acquire, pop_rt_iteration_next, pop_rt_list_add, pop_rt_list_create,
     pop_rt_list_get, pop_rt_list_get_checked, pop_rt_list_length, pop_rt_list_set, pop_rt_pin,
-    pop_rt_range_create, pop_rt_release_root, pop_rt_resume, pop_rt_retain_root,
-    pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read,
-    pop_rt_supports_abi, pop_rt_suspend, pop_rt_table_get, pop_rt_table_get_checked,
-    pop_rt_table_set, pop_rt_task_cancel, pop_rt_task_cancellation_requested, pop_rt_unpin,
-    request_abi_collection,
+    pop_rt_range_create, pop_rt_release_root, pop_rt_resolve_root, pop_rt_resume,
+    pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal, pop_rt_string_format,
+    pop_rt_string_read, pop_rt_supports_abi, pop_rt_suspend, pop_rt_table_get,
+    pop_rt_table_get_checked, pop_rt_table_set, pop_rt_task_cancel,
+    pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus, StringFormatTag};
 use std::ffi::CString;
@@ -29,12 +29,13 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn native_runtime_exports_the_stable_generational_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 14);
+    assert_eq!(pop_rt_abi_minor(), 15);
     assert_eq!(pop_rt_gc_stage(), 2);
     assert_eq!(pop_rt_supports_abi(1, 11), 1);
     assert_eq!(pop_rt_supports_abi(1, 12), 1);
     assert_eq!(pop_rt_supports_abi(1, 13), 1);
     assert_eq!(pop_rt_supports_abi(1, 14), 1);
+    assert_eq!(pop_rt_supports_abi(1, 15), 1);
     assert_eq!(pop_rt_supports_abi(2, 0), 0);
 }
 
@@ -165,7 +166,9 @@ fn stable_generational_safe_points_preserve_live_native_tokens() {
     assert_eq!(abi_safe_point(19, &[reference]), 1);
     let root = pop_rt_retain_root(reference);
     assert_ne!(root, 0, "ABI 1 native tokens must not relocate");
+    assert_eq!(pop_rt_resolve_root(root), reference);
     assert_eq!(pop_rt_release_root(root), 1);
+    assert_eq!(pop_rt_resolve_root(root), 0, "closed handles are stale");
 }
 
 #[test]

@@ -32,6 +32,7 @@ pub enum RuntimeOperation {
     CaptureStore,
     DispatchCall,
     RetainRoot,
+    ResolveRoot,
     ReleaseRoot,
     Pin,
     Unpin,

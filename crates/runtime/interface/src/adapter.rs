@@ -105,6 +105,17 @@ pub trait RuntimeAdapter {
     /// Returns an invariant panic when the managed reference is invalid.
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure>;
 
+    /// Resolves one live strong-root handle to its current managed reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant panic when root resolution is unavailable or the
+    /// handle is invalid, forged, stale, or already released.
+    fn resolve_root(&mut self, root: RootHandle) -> Result<ManagedReference, RuntimeFailure> {
+        let _ = root;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
     /// Releases a previously registered strong runtime root.
     ///
     /// # Errors

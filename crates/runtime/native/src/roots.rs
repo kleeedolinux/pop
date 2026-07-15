@@ -20,6 +20,19 @@ pub extern "C" fn pop_rt_retain_root(reference: u64) -> u64 {
         .map_or(0, RootHandle::raw)
 }
 
+/// Resolves one live strong-root handle to its current managed reference.
+/// Zero reports an invalid, forged, stale, or already released handle.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn pop_rt_resolve_root(root: u64) -> u64 {
+    let Ok(mut runtime) = lock_abi_runtime() else {
+        return 0;
+    };
+    runtime
+        .resolve_root(RootHandle::new(root))
+        .map_or(0, ManagedReference::raw)
+}
+
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_release_root(root: u64) -> u8 {
