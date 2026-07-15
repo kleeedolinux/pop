@@ -1183,11 +1183,12 @@ When implemented, they require:
 
 ## 17.1 Raw pointers
 
-Foreign code may not retain a raw pointer to a movable managed object across a safepoint.
-ADR 0081 additionally requires raw foreign pointers to refer to unmanaged
-storage unless the compiler creates a non-escaping lexical pin. Returning,
-storing, capturing, retaining, or suspending with that scoped pointer is a
-static error.
+Foreign code may not retain a raw pointer to a movable managed object across a
+safe point. ADR 0082 permits only unmanaged ABI storage or a non-escaping
+lexical borrow of an exact reviewed payload. The first managed payload is
+immutable `Bytes`; the runtime returns its read-only byte address, never its Pop
+object-header address. Returning, storing, capturing, address-converting,
+retaining, or suspending with that scoped pointer is a static error.
 
 ## 17.2 Handles
 
@@ -1207,12 +1208,24 @@ The collector updates handle targets after relocation.
 
 ## 17.3 Pinning
 
-Pinning is lexical where possible:
+Pinning is lexical and storage-specific:
 
 ```text
-with pin(value) as pointer {
-    nativeCall(pointer)
-}
+Ffi.withPin(bytes, function(pointer, length)
+    nativeCall(pointer, length)
+end)
+```
+
+General native arrays and structures use explicit unmanaged ownership:
+
+```text
+local buffer = try Ffi.Buffer.open<<Byte>>(length)
+defer
+    Ffi.Buffer.close(buffer)
+end
+Ffi.Buffer.withPointer(buffer, function(pointer, count)
+    nativeCall(pointer, count)
+end)
 ```
 
 Long asynchronous native ownership should use:
@@ -1222,8 +1235,11 @@ Long asynchronous native ownership should use:
 - explicit native-owned memory;
 - stable handles.
 
-The pin is released on every normal, expected-failure, panic, and cancellation
-exit. Pin cleanup is part of canonical MIR rather than backend convention.
+The pin or buffer borrow is released on every normal, expected-failure, panic,
+and cancellation exit. Cleanup is part of canonical MIR rather than backend
+convention. Arbitrary managed records, arrays, strings, classes, and closures
+never become pinnable through structural coincidence. See
+[ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
 ## 17.4 Native callbacks
 

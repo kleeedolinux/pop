@@ -122,9 +122,11 @@ the prelude. The first stable mapping contains:
   `SignedChar`, `UnsignedChar`, `Short`, `UnsignedShort`, `Int`, `UnsignedInt`,
   `Long`, `UnsignedLong`, `LongLong`, `UnsignedLongLong`, `Size`, and
   `PointerDifference`;
-- `Ffi.Pointer<T>`, `Ffi.OptionalPointer<T>`, `Ffi.Function<TSignature>`, and
-  `Ffi.OptionalFunction<TSignature>` as opaque unmanaged addresses with no
-  implicit integer conversion, arithmetic, dereference, or managed identity;
+- `Ffi.Pointer<T>`, `Ffi.OptionalPointer<T>`,
+  `Ffi.ReadOnlyPointer<T>`, `Ffi.OptionalReadOnlyPointer<T>`,
+  `Ffi.Function<TSignature>`, and `Ffi.OptionalFunction<TSignature>` as opaque
+  unmanaged addresses with no implicit integer conversion, arithmetic,
+  dereference, or managed identity;
 - `Ffi.Handle<T>` as a generation-checked runtime strong handle distinct from a
   native pointer;
 - fixed-layout records carrying the exact trusted `Ffi.C.Layout` attribute.
@@ -137,9 +139,13 @@ generic null pointer.
 
 `Ffi.C.Layout` records contain only accepted ABI fields, preserve declaration
 order, have no field defaults, and receive target-derived size, alignment, and
-offset metadata plus an ABI fingerprint. The compiler verifies those facts
-against generated metadata before use by value. Opaque or incomplete C types
-are named nominal types used only behind pointers. C bit fields, flexible array
+offset metadata plus
+[ADR 0082](./0082-ffi-abi-storage-and-lexical-borrows.md)'s canonical ABI
+fingerprint. The compiler
+verifies those facts against generated metadata before use by value. A normal
+Pop record is marshalled into separate ABI storage; its private managed object
+layout is never reinterpreted as the C record. Opaque or incomplete C types are
+named nominal types used only behind pointers. C bit fields, flexible array
 members, packed/unaligned aggregates, C unions, vector extensions, and C
 variadics require a generated C-compatible shim with an ordinary closed Pop
 signature; the compiler never guesses their layout or applies untyped default
@@ -147,18 +153,22 @@ promotions.
 
 ### Ownership, movement, and memory access
 
-Raw foreign pointers refer only to unmanaged storage or to a managed value held
-by a compiler-verified lexical pin. `Ffi.withPin(value, function(pointer) ...
-end)` creates a non-escaping scoped pointer; the checker rejects returning,
-storing, capturing, or retaining it, and suspension is forbidden in its scope.
-The pin is released on every normal, expected-failure, panic, and cancellation
-exit. A foreign declaration cannot claim that a scoped pointer is retained.
+Raw foreign pointers refer only to unmanaged ABI storage or to the payload of
+an exact managed storage type held by a compiler-verified lexical pin. ADR 0082
+closes the first pin to immutable `Bytes`, adds explicit read-only pointer
+types, and rejects arbitrary managed records, arrays, classes, strings, and
+closures. `Ffi.withPin` creates a non-escaping synchronous scoped pointer; the
+checker rejects returning, storing, capturing, address-converting, or retaining
+it, and suspension is forbidden in its scope. The pin is released on every
+normal, expected-failure, panic, and cancellation exit. A foreign declaration
+cannot claim that a scoped pointer is retained.
 
-Foreign ownership outside one call uses explicit unmanaged allocation/close
-APIs or `Ffi.Handle<T>`. Handles carry generation and ownership state and are
-updated after relocation. A stale/released handle is detected. Long-lived
-native work receives copied unmanaged buffers or handles, never an untracked
-managed address.
+Foreign ownership outside one call uses ADR 0082's bounds-checked,
+zero-initialized `Ffi.Buffer<T>` with deterministic `close`, or
+`Ffi.Handle<T>`. Handles carry generation and ownership state and are updated
+after relocation. A stale/released handle is detected. Long-lived native work
+receives copied unmanaged buffers or handles, never an untracked managed
+address.
 
 Pointer load/store, pointer arithmetic, address conversion, and arbitrary
 memory copying exist only under `Ffi.Unsafe`. They require exact element types,

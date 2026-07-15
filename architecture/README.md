@@ -145,6 +145,10 @@ transplanted into a Luau-shaped file.
   hashed link plans, exact ABI layouts/effects, scoped pins/handles/callbacks,
   and generated reviewable adapters replace raw flags, shell execution,
   runtime symbol lookup, or reflection.
+- Foreign pointers expose unmanaged ABI storage or one compiler-verified
+  lexical payload borrow, never a Pop object address. Immutable `Bytes` uses a
+  read-only pin; general native storage uses explicitly closed
+  `Ffi.Buffer<T>`; retained managed values use generation-checked handles.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 

@@ -390,13 +390,19 @@ effects, and ownership/rooting facts. Every call performs backend-neutral
 safe point. Blocking is the safe default; native unwind and callbacks require
 exact explicit contracts.
 
-Raw pointers refer only to unmanaged storage or a compiler-verified lexical
-pin. Managed references cross longer boundaries as generation-checked handles
-or copies. Fixed-layout C records opt in through `Ffi.C.Layout`; unannotated Pop
-objects never become C structs. Strings use explicit encoding and ownership
-adapters. Generated bindings are deterministic reviewable source plus hashed
-ABI metadata, and safe public wrappers convert those declarations into normal
-typed Pop APIs.
+Raw pointers refer only to unmanaged ABI storage or a compiler-verified lexical
+borrow of an exact storage payload. ADR 0082 closes the first managed pin to
+immutable `Bytes` and returns a read-only payload pointer plus exact length;
+arrays, classes, strings, closures, and ordinary records never expose object
+addresses. `Ffi.Buffer<T>` owns bounds-checked, aligned, zero-initialized
+unmanaged ABI storage with deterministic close. Managed references cross
+longer boundaries as generation-checked `Ffi.Handle<T>` tokens or copies.
+Fixed-layout C records opt in through `Ffi.C.Layout` and are marshalled to
+separate ABI storage; unannotated Pop objects never become C structs. Strings
+use explicit encoding and ownership adapters. Generated bindings are
+deterministic reviewable source plus hashed ABI metadata, and safe public
+wrappers convert those declarations into normal typed Pop APIs. See
+[ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
 ## Versioning
 

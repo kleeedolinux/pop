@@ -154,10 +154,11 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - reserved `Result`, nominal error declarations, exact `try` propagation,
   exhaustive recovery boundaries, and deterministic lexical cleanup;
 - coroutines/async model;
-- the statically bound native FFI from ADR 0081, including exact C/system ABI
-  types, typed native-link manifests/artifacts, HIR/MIR foreign transitions,
-  LLVM calls, scoped pins/handles/callbacks, generated bindings, and ordinary
-  safe wrappers;
+- the statically bound native FFI from ADR 0081 and ADR 0082, including exact
+  C/system ABI types, typed native-link manifests/artifacts, HIR/MIR foreign
+  transitions, LLVM calls, read-only byte pins, owned ABI buffers,
+  generation-checked handles, callbacks, generated bindings, and ordinary safe
+  wrappers;
 - opt-in retained metadata and generated typed adapters where justified;
 - production concurrent mature GC and latency/benchmark gates, building on the
   implemented cooperative SATB marking and ordered lazy sweeping without a

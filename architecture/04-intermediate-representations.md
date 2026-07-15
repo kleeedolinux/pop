@@ -152,7 +152,10 @@ Optionals:     optionalIsPresent, optionalGet
 Results:       resultMake, resultIsOk, resultGetOk, resultGetError
 Errors:        errorMake, errorSwitch
 Cleanup:       cleanup{CleanupScopeId, exitReason}, resumeCurrentUnwind
-Runtime:       gcSafePoint{stackMap}, writeBarrier, pin, unpin, suspend, resume
+Runtime:       gcSafePoint{stackMap}, writeBarrier,
+               pin{borrowRegion, payloadKind}, unpin{borrowRegion},
+               ffiBufferOpen, ffiBufferRead, ffiBufferWrite,
+               ffiBufferBorrow{borrowRegion}, ffiBufferClose, suspend, resume
 Foreign:       enterForeign, callForeign{foreignId, abi, effects}, leaveForeign
 Debug:         debugValue, sourceScope
 ```
@@ -165,9 +168,12 @@ ADR 0081 foreign operations carry one resolved foreign identity, closed ABI,
 exact parameter/result layouts, link aliases, and effect summary. They never
 carry a runtime library/symbol string lookup. `enterForeign` publishes the
 precise live-root map and starts the transition; every normal/unwind/cleanup
-path balances it with `leaveForeign`. A scoped pin dominates only the permitted
-foreign use and is released on every exit. Physical calling conventions,
-symbols, and object formats remain backend details selected from this contract.
+path balances it with `leaveForeign`. Under ADR 0082, a scoped `Bytes` pin or
+`Ffi.Buffer<T>` borrow carries one typed lexical region, dominates only
+permitted pointer uses, forbids suspension/escape, and is released on every
+exit. Fixed-layout records carry a backend-neutral marshalling plan rather than
+an object-layout reinterpretation. Physical calling conventions, symbols, and
+object formats remain backend details selected from this contract.
 
 Optional comparison narrowing, pattern binding, lazy `??`, and postfix `?`
 remain typed HIR concepts until canonical MIR lowers them to explicit branches
@@ -250,7 +256,7 @@ MIR invariants:
 - root scopes dominate their uses and are balanced on normal and unwind exits;
 - every foreign call is dominated by its exact `enterForeign`, is followed on
   every exit by `leaveForeign`, carries the ADR 0081 mandatory effects/layouts,
-  and cannot retain or suspend with a scoped pin;
+  and cannot retain or suspend with an ADR 0082 pin/buffer borrow;
 - evaluation order matches Pop Lang semantics;
 - all target assumptions come from target queries;
 - every call and member/collection operation has statically known types;

@@ -324,9 +324,22 @@ selected C/system ABI mapping. Every foreign call includes `ForeignFunction`,
 `Ffi.Nonblocking` contract removes it, and the closed `"CUnwind"` ABI adds
 `MayUnwind`.
 
-Scoped pin pointers carry an internal lexical scope identity and cannot be
-returned, stored, captured, retained by a declaration, or kept across
-suspension. These checks never become a runtime pointer type test.
+ADR 0082 distinguishes mutable, read-only, optional, and non-optional foreign
+pointer types. The first managed pin accepts only immutable `Bytes`; it returns
+the reviewed payload address rather than a Pop object address. Scoped pin and
+`Ffi.Buffer<T>` borrow pointers carry an internal lexical scope identity and
+cannot be returned, stored, captured, address-converted, retained by a
+declaration, or kept across suspension. Closing or moving a buffer while its
+borrow is active is rejected. These checks never become a runtime pointer type
+test.
+
+`Ffi.Buffer<T>` accepts only types with one compiler-proven ABI storage layout.
+`Ffi.Handle<T>` accepts only managed reference representations and retains the
+exact static `T` while its runtime token remains live. Neither generic falls
+back to an unknown element or payload type. `Ffi.C.Layout` records are
+marshalled field-by-field into separate ABI storage and never make the normal
+record object layout foreign-visible. See
+[ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
 
 ## Attribute typing
 
