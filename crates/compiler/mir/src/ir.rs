@@ -1502,6 +1502,16 @@ pub enum MirInstructionKind {
     FfiBufferClose {
         buffer: ValueId,
     },
+    FfiPointerNone,
+    FfiPointerToOptional {
+        pointer: ValueId,
+    },
+    FfiPointerReadOnly {
+        pointer: ValueId,
+    },
+    FfiPointerIsPresent {
+        pointer: ValueId,
+    },
     Pin {
         value: ValueId,
     },
@@ -1837,6 +1847,9 @@ pub enum MirVerificationError {
         instruction: ValueId,
     },
     InvalidFfiBufferOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiPointerOperation {
         instruction: ValueId,
     },
     InvalidFfiBufferBorrowRegion {

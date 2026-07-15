@@ -84,6 +84,25 @@ pub(crate) fn lower_instruction(
                 optional.raw()
             )
         }
+        MirInstructionKind::FfiPointerNone => {
+            let ty = llvm_type(instruction.result_type(), types)?;
+            format!("{result} = select i1 true, {ty} zeroinitializer, {ty} zeroinitializer")
+        }
+        MirInstructionKind::FfiPointerToOptional { pointer }
+        | MirInstructionKind::FfiPointerReadOnly { pointer } => {
+            let ty = llvm_value_type(value_types, *pointer, types)?;
+            format!(
+                "{result} = select i1 true, {ty} %v{}, {ty} zeroinitializer",
+                pointer.raw()
+            )
+        }
+        MirInstructionKind::FfiPointerIsPresent { pointer } => {
+            let ty = llvm_value_type(value_types, *pointer, types)?;
+            format!(
+                "{result} = icmp ne {ty} %v{}, zeroinitializer",
+                pointer.raw()
+            )
+        }
         MirInstructionKind::ResultMake {
             case, arguments, ..
         } => lower_union_make(

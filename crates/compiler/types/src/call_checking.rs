@@ -22,6 +22,12 @@ enum FfiBufferElementKind {
     LayoutRecord(pop_foundation::SymbolId),
 }
 
+enum FfiPointerOperationKind {
+    ToOptional,
+    ReadOnly,
+    IsPresent,
+}
+
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_call(
         &mut self,
@@ -137,6 +143,24 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             {
                 return self
                     .check_ffi_buffer_invocation(path, arguments, None, span)
+                    .map(CheckedInvocation::Value);
+            }
+            if is_ffi_pointer_operation(path)
+                && self.resolver.has_ffi_dependency()
+                && self
+                    .resolver
+                    .database()
+                    .resolve(
+                        self.module,
+                        &path.join("."),
+                        SymbolSpace::Value,
+                        callee.span(),
+                    )
+                    .symbol()
+                    .is_none()
+            {
+                return self
+                    .check_ffi_pointer_invocation(path, arguments, None, span)
                     .map(CheckedInvocation::Value);
             }
             if path.as_slice() == ["String"] {
@@ -563,6 +587,134 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             }) if *definition == crate::FFI_BUFFER_TYPE_ID && arguments.len() == 1 => {
                 Some(arguments[0])
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn check_ffi_pointer_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        explicit_element: Option<(TypeId, Option<pop_foundation::SymbolId>)>,
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let [_, owner, operation] = path else {
+            return None;
+        };
+        let expected_arity = usize::from(operation != "none");
+        if arguments.len() != expected_arity {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                path.join("."),
+                expected_arity,
+                arguments.len(),
+            ));
+            return None;
+        }
+        if operation == "none" {
+            let (element, record) = explicit_element?;
+            let layout_record = match self.ffi_buffer_element(element, record)? {
+                FfiBufferElementKind::Scalar => None,
+                FfiBufferElementKind::LayoutRecord(record) => Some(record),
+            };
+            let read_only = owner == "OptionalReadOnlyPointer";
+            let result = self.ffi_builtin_type(
+                if read_only {
+                    "Ffi.OptionalReadOnlyPointer"
+                } else {
+                    "Ffi.OptionalPointer"
+                },
+                vec![element],
+            )?;
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::FfiPointerNone {
+                    element,
+                    layout_record,
+                    read_only,
+                },
+                type_id: result,
+                span,
+            });
+        }
+
+        let pointer = self.check_expression(&arguments[0])?;
+        let (expected, expected_name, result_name, kind) =
+            match (owner.as_str(), operation.as_str()) {
+                ("OptionalPointer", "fromPointer") => (
+                    crate::FFI_POINTER_TYPE_ID,
+                    "Ffi.Pointer",
+                    "Ffi.OptionalPointer",
+                    FfiPointerOperationKind::ToOptional,
+                ),
+                ("OptionalReadOnlyPointer", "fromPointer") => (
+                    crate::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    "Ffi.ReadOnlyPointer",
+                    "Ffi.OptionalReadOnlyPointer",
+                    FfiPointerOperationKind::ToOptional,
+                ),
+                ("Pointer", "readOnly") => (
+                    crate::FFI_POINTER_TYPE_ID,
+                    "Ffi.Pointer",
+                    "Ffi.ReadOnlyPointer",
+                    FfiPointerOperationKind::ReadOnly,
+                ),
+                ("OptionalPointer", "isPresent") => (
+                    crate::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    "Ffi.OptionalPointer",
+                    "Boolean",
+                    FfiPointerOperationKind::IsPresent,
+                ),
+                ("OptionalReadOnlyPointer", "isPresent") => (
+                    crate::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    "Ffi.OptionalReadOnlyPointer",
+                    "Boolean",
+                    FfiPointerOperationKind::IsPresent,
+                ),
+                _ => return None,
+            };
+        let Some(element) = self.ffi_exact_builtin_payload(pointer.type_id(), expected) else {
+            self.diagnostics.push(type_diagnostics::type_mismatch(
+                pointer.span(),
+                format!("{expected_name}<T>"),
+                self.type_name(pointer.type_id()),
+                span,
+            ));
+            return None;
+        };
+        let type_id = if result_name == "Boolean" {
+            self.resolver.arena().source_type("Boolean")?
+        } else {
+            self.ffi_builtin_type(result_name, vec![element])?
+        };
+        let pointer = Box::new(pointer);
+        let kind = match kind {
+            FfiPointerOperationKind::ToOptional => {
+                TypedExpressionKind::FfiPointerToOptional { pointer }
+            }
+            FfiPointerOperationKind::ReadOnly => {
+                TypedExpressionKind::FfiPointerReadOnly { pointer }
+            }
+            FfiPointerOperationKind::IsPresent => {
+                TypedExpressionKind::FfiPointerIsPresent { pointer }
+            }
+        };
+        Some(TypedExpression {
+            kind,
+            type_id,
+            span,
+        })
+    }
+
+    fn ffi_exact_builtin_payload(
+        &self,
+        type_id: TypeId,
+        expected: BuiltinTypeId,
+    ) -> Option<TypeId> {
+        match self.resolver.arena().get(type_id) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == expected && arguments.len() == 1 => Some(arguments[0]),
             _ => None,
         }
     }
@@ -2353,6 +2505,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             span,
         })
     }
+}
+
+fn is_ffi_pointer_operation(path: &[String]) -> bool {
+    matches!(path,
+    [ffi, owner, operation]
+        if ffi == "Ffi"
+            && matches!(
+                (owner.as_str(), operation.as_str()),
+                (
+                    "OptionalPointer" | "OptionalReadOnlyPointer",
+                    "fromPointer" | "isPresent"
+                ) | ("Pointer", "readOnly")
+            ))
 }
 
 impl BodyChecker<'_, '_> {

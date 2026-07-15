@@ -579,6 +579,20 @@ pub enum TypedExpressionKind {
     FfiBufferClose {
         buffer: Box<TypedExpression>,
     },
+    FfiPointerNone {
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiPointerToOptional {
+        pointer: Box<TypedExpression>,
+    },
+    FfiPointerReadOnly {
+        pointer: Box<TypedExpression>,
+    },
+    FfiPointerIsPresent {
+        pointer: Box<TypedExpression>,
+    },
     OptionalNarrow {
         optional: Box<TypedExpression>,
     },

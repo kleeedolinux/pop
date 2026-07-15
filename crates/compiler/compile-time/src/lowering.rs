@@ -529,7 +529,11 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::FfiBufferLength { .. }
         | TypedExpressionKind::FfiBufferRead { .. }
         | TypedExpressionKind::FfiBufferWrite { .. }
-        | TypedExpressionKind::FfiBufferClose { .. } => {
+        | TypedExpressionKind::FfiBufferClose { .. }
+        | TypedExpressionKind::FfiPointerNone { .. }
+        | TypedExpressionKind::FfiPointerToOptional { .. }
+        | TypedExpressionKind::FfiPointerReadOnly { .. }
+        | TypedExpressionKind::FfiPointerIsPresent { .. } => {
             UnsupportedCompileTimeConstruct::ResultlessCall
         }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,

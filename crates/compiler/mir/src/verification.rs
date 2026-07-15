@@ -2027,6 +2027,19 @@ fn verify_instruction_types(
         });
         return;
     }
+    let requires_pointer_value = matches!(
+        instruction.kind(),
+        MirInstructionKind::FfiPointerNone
+            | MirInstructionKind::FfiPointerToOptional { .. }
+            | MirInstructionKind::FfiPointerReadOnly { .. }
+            | MirInstructionKind::FfiPointerIsPresent { .. }
+    );
+    if requires_pointer_value && !instruction.has_result() {
+        errors.push(MirVerificationError::InvalidFfiPointerOperation {
+            instruction: instruction.result(),
+        });
+        return;
+    }
     if verify_numeric_instruction(instruction, arena, values, errors) {
         return;
     }
@@ -2175,6 +2188,71 @@ fn verify_instruction_types(
                 ffi_buffer_operand_element(arena, values, *buffer).is_some(),
                 errors,
             );
+        }
+        MirInstructionKind::FfiPointerNone => {
+            let valid = ffi_pointer_payload(
+                arena,
+                instruction.result_type(),
+                pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+            )
+            .or_else(|| {
+                ffi_pointer_payload(
+                    arena,
+                    instruction.result_type(),
+                    pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                )
+            })
+            .is_some();
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerToOptional { pointer } => {
+            let valid = values.get(pointer).copied().is_some_and(|source_type| {
+                [
+                    (
+                        pop_types::FFI_POINTER_TYPE_ID,
+                        pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                    ),
+                    (
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    ),
+                ]
+                .into_iter()
+                .any(|(source, result)| {
+                    let element = ffi_pointer_payload(arena, source_type, source);
+                    element.is_some()
+                        && ffi_pointer_payload(arena, instruction.result_type(), result) == element
+                })
+            });
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerReadOnly { pointer } => {
+            let element = values.get(pointer).copied().and_then(|source_type| {
+                ffi_pointer_payload(arena, source_type, pop_types::FFI_POINTER_TYPE_ID)
+            });
+            let valid = element.is_some()
+                && ffi_pointer_payload(
+                    arena,
+                    instruction.result_type(),
+                    pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                ) == element;
+            verify_ffi_pointer_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::FfiPointerIsPresent { pointer } => {
+            let valid_source = values.get(pointer).copied().is_some_and(|source_type| {
+                ffi_pointer_payload(arena, source_type, pop_types::FFI_OPTIONAL_POINTER_TYPE_ID)
+                    .or_else(|| {
+                        ffi_pointer_payload(
+                            arena,
+                            source_type,
+                            pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                        )
+                    })
+                    .is_some()
+            });
+            let valid =
+                valid_source && arena.source_type("Boolean") == Some(instruction.result_type());
+            verify_ffi_pointer_operation(instruction, valid, errors);
         }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
@@ -2751,15 +2829,33 @@ fn ffi_buffer_operand_element(
         .and_then(|type_id| ffi_buffer_element(arena, *type_id))
 }
 
-fn ffi_optional_pointer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+fn ffi_pointer_payload(
+    arena: &TypeArena,
+    type_id: TypeId,
+    expected: BuiltinTypeId,
+) -> Option<TypeId> {
     match arena.get(type_id)? {
         SemanticType::Builtin {
             definition,
             arguments,
-        } if *definition == BuiltinTypeId::from_raw(201) && arguments.len() == 1 => {
-            Some(arguments[0])
-        }
+        } if *definition == expected && arguments.len() == 1 => Some(arguments[0]),
         _ => None,
+    }
+}
+
+fn ffi_optional_pointer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    ffi_pointer_payload(arena, type_id, pop_types::FFI_OPTIONAL_POINTER_TYPE_ID)
+}
+
+fn verify_ffi_pointer_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidFfiPointerOperation {
+            instruction: instruction.result(),
+        });
     }
 }
 
@@ -4526,6 +4622,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::FfiPointerNone
         | MirInstructionKind::EnumConstant { .. }
         | MirInstructionKind::FunctionReference(_)
         | MirInstructionKind::CancelSourceCreate
@@ -4621,6 +4718,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         MirInstructionKind::BooleanNot { operand }
         | MirInstructionKind::OptionalIsPresent { optional: operand }
         | MirInstructionKind::OptionalGet { optional: operand }
+        | MirInstructionKind::FfiPointerToOptional { pointer: operand }
+        | MirInstructionKind::FfiPointerReadOnly { pointer: operand }
+        | MirInstructionKind::FfiPointerIsPresent { pointer: operand }
         | MirInstructionKind::IntegerNegate { operand, .. }
         | MirInstructionKind::FloatNegate { operand, .. }
         | MirInstructionKind::ConvertInteger { operand, .. }

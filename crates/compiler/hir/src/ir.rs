@@ -2374,6 +2374,9 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         | HirExpressionKind::FfiHandleClose { handle: base }
         | HirExpressionKind::FfiBufferLength { buffer: base }
         | HirExpressionKind::FfiBufferClose { buffer: base }
+        | HirExpressionKind::FfiPointerToOptional { pointer: base }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: base }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             remap_aggregate_expression(base, instances)
@@ -2382,6 +2385,9 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             length, element, ..
         } => {
             remap_aggregate_expression(length, instances);
+            *element = instances.type_id(*element);
+        }
+        HirExpressionKind::FfiPointerNone { element, .. } => {
             *element = instances.type_id(*element);
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
@@ -2885,6 +2891,9 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::FfiBufferOpen { length: base, .. }
         | HirExpressionKind::FfiBufferLength { buffer: base }
         | HirExpressionKind::FfiBufferClose { buffer: base }
+        | HirExpressionKind::FfiPointerToOptional { pointer: base }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: base }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => collect_expression_calls(base, calls),
         HirExpressionKind::TaskGroup { cancel, body } => {
@@ -3055,6 +3064,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
         | HirExpressionKind::TaskCancellationSource
+        | HirExpressionKind::FfiPointerNone { .. }
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -3419,6 +3429,9 @@ fn specialize_expression(
         | HirExpressionKind::FfiHandleClose { handle: base }
         | HirExpressionKind::FfiBufferLength { buffer: base }
         | HirExpressionKind::FfiBufferClose { buffer: base }
+        | HirExpressionKind::FfiPointerToOptional { pointer: base }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: base }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: base }
         | HirExpressionKind::ArrayLength { array: base }
         | HirExpressionKind::ListLength { list: base } => {
             specialize_expression(base, substitutions, instances, arena)?;
@@ -3427,6 +3440,9 @@ fn specialize_expression(
             length, element, ..
         } => {
             specialize_expression(length, substitutions, instances, arena)?;
+            specialize_type(element, substitutions, arena)?;
+        }
+        HirExpressionKind::FfiPointerNone { element, .. } => {
             specialize_type(element, substitutions, arena)?;
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
@@ -4388,6 +4404,20 @@ pub enum HirExpressionKind {
     },
     FfiBufferClose {
         buffer: Box<HirExpression>,
+    },
+    FfiPointerNone {
+        element: TypeId,
+        layout_record: Option<SymbolId>,
+        read_only: bool,
+    },
+    FfiPointerToOptional {
+        pointer: Box<HirExpression>,
+    },
+    FfiPointerReadOnly {
+        pointer: Box<HirExpression>,
+    },
+    FfiPointerIsPresent {
+        pointer: Box<HirExpression>,
     },
     Call {
         dispatch: HirCallDispatch,

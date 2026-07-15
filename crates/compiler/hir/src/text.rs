@@ -1173,6 +1173,37 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, buffer, arena);
             output.push(')');
         }
+        HirExpressionKind::FfiPointerNone {
+            element,
+            layout_record,
+            read_only,
+        } => {
+            output.push_str(if *read_only {
+                "ffi.pointer.none.readOnly<<"
+            } else {
+                "ffi.pointer.none<<"
+            });
+            output.push_str(&type_text(*element, arena));
+            if let Some(record) = layout_record {
+                let _ = write!(output, " layoutRecord s{}", record.raw());
+            }
+            output.push_str(">>()");
+        }
+        HirExpressionKind::FfiPointerToOptional { pointer } => {
+            output.push_str("ffi.pointer.toOptional(");
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiPointerReadOnly { pointer } => {
+            output.push_str("ffi.pointer.readOnly(");
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
+        HirExpressionKind::FfiPointerIsPresent { pointer } => {
+            output.push_str("ffi.pointer.isPresent(");
+            dump_expression(output, pointer, arena);
+            output.push(')');
+        }
         HirExpressionKind::Call {
             dispatch,
             type_arguments,

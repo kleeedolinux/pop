@@ -1136,6 +1136,30 @@ fn lower_expression(
         TypedExpressionKind::FfiBufferClose { buffer } => HirExpressionKind::FfiBufferClose {
             buffer: Box::new(lower_expression(buffer, interface_slots)),
         },
+        TypedExpressionKind::FfiPointerNone {
+            element,
+            layout_record,
+            read_only,
+        } => HirExpressionKind::FfiPointerNone {
+            element: *element,
+            layout_record: *layout_record,
+            read_only: *read_only,
+        },
+        TypedExpressionKind::FfiPointerToOptional { pointer } => {
+            HirExpressionKind::FfiPointerToOptional {
+                pointer: Box::new(lower_expression(pointer, interface_slots)),
+            }
+        }
+        TypedExpressionKind::FfiPointerReadOnly { pointer } => {
+            HirExpressionKind::FfiPointerReadOnly {
+                pointer: Box::new(lower_expression(pointer, interface_slots)),
+            }
+        }
+        TypedExpressionKind::FfiPointerIsPresent { pointer } => {
+            HirExpressionKind::FfiPointerIsPresent {
+                pointer: Box::new(lower_expression(pointer, interface_slots)),
+            }
+        }
         call @ (TypedExpressionKind::StandardCall { .. }
         | TypedExpressionKind::DirectCall { .. }
         | TypedExpressionKind::ReferencedCall { .. }
@@ -1693,7 +1717,10 @@ fn first_unknown_interface_expression(
             length: operand, ..
         }
         | TypedExpressionKind::FfiBufferLength { buffer: operand }
-        | TypedExpressionKind::FfiBufferClose { buffer: operand } => {
+        | TypedExpressionKind::FfiBufferClose { buffer: operand }
+        | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
             first_unknown_interface_expression(operand, slots)
         }
         TypedExpressionKind::FfiBufferRead { buffer, index } => {
@@ -1781,6 +1808,7 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
         | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => None,
     }
 }
@@ -2032,7 +2060,10 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
             length: operand, ..
         }
         | TypedExpressionKind::FfiBufferLength { buffer: operand }
-        | TypedExpressionKind::FfiBufferClose { buffer: operand } => {
+        | TypedExpressionKind::FfiBufferClose { buffer: operand }
+        | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
             first_compile_time_only_expression(operand)
         }
         TypedExpressionKind::FfiBufferRead { buffer, index } => {
@@ -2128,6 +2159,7 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
         | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => None,
     }
 }

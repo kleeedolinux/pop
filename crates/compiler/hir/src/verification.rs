@@ -44,6 +44,20 @@ fn ffi_buffer_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
     }
 }
 
+fn ffi_exact_pointer_payload(
+    arena: &TypeArena,
+    type_id: TypeId,
+    expected: BuiltinTypeId,
+) -> Option<TypeId> {
+    match arena.get(type_id)? {
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if *definition == expected && arguments.len() == 1 => Some(arguments[0]),
+        _ => None,
+    }
+}
+
 fn is_ffi_buffer_element(arena: &TypeArena, type_id: TypeId, ffi_c_layout: bool) -> bool {
     match arena.get(type_id) {
         Some(SemanticType::Primitive(
@@ -168,6 +182,9 @@ pub enum HirVerificationError {
         span: SourceSpan,
     },
     InvalidFfiBufferOperation {
+        span: SourceSpan,
+    },
+    InvalidFfiPointerOperation {
         span: SourceSpan,
     },
     ExpressionTypeMismatch {
@@ -2869,6 +2886,117 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiPointerNone {
+                element,
+                layout_record,
+                read_only,
+            } => {
+                self.verify_type(*element, expression.span());
+                let expected = if *read_only {
+                    pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID
+                } else {
+                    pop_types::FFI_OPTIONAL_POINTER_TYPE_ID
+                };
+                if ffi_exact_pointer_payload(self.arena, expression.type_id(), expected)
+                    != Some(*element)
+                    || !is_ffi_buffer_element(self.arena, *element, layout_record.is_some())
+                    || layout_record.is_some_and(|record| {
+                        self.schema.is_some_and(|schema| {
+                            schema.records.get(&record).is_none_or(|record| {
+                                record.type_id != *element || !record.ffi_c_layout
+                            })
+                        })
+                    })
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerToOptional { pointer } => {
+                self.verify_expression(pointer, visible);
+                let constructors = match self.arena.get(pointer.type_id()) {
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if *definition == pop_types::FFI_POINTER_TYPE_ID && arguments.len() == 1 => {
+                        Some((
+                            pop_types::FFI_POINTER_TYPE_ID,
+                            pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                        ))
+                    }
+                    Some(SemanticType::Builtin {
+                        definition,
+                        arguments,
+                    }) if *definition == pop_types::FFI_READ_ONLY_POINTER_TYPE_ID
+                        && arguments.len() == 1 =>
+                    {
+                        Some((
+                            pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                            pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                        ))
+                    }
+                    _ => None,
+                };
+                let valid = constructors.is_some_and(|(source, result)| {
+                    let element = ffi_exact_pointer_payload(self.arena, pointer.type_id(), source);
+                    element.is_some()
+                        && ffi_exact_pointer_payload(self.arena, expression.type_id(), result)
+                            == element
+                });
+                if !valid {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerReadOnly { pointer } => {
+                self.verify_expression(pointer, visible);
+                let element = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_POINTER_TYPE_ID,
+                );
+                if element.is_none()
+                    || ffi_exact_pointer_payload(
+                        self.arena,
+                        expression.type_id(),
+                        pop_types::FFI_READ_ONLY_POINTER_TYPE_ID,
+                    ) != element
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiPointerIsPresent { pointer } => {
+                self.verify_expression(pointer, visible);
+                let valid_source = ffi_exact_pointer_payload(
+                    self.arena,
+                    pointer.type_id(),
+                    pop_types::FFI_OPTIONAL_POINTER_TYPE_ID,
+                )
+                .or_else(|| {
+                    ffi_exact_pointer_payload(
+                        self.arena,
+                        pointer.type_id(),
+                        pop_types::FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+                    )
+                })
+                .is_some();
+                if !valid_source
+                    || self.arena.get(expression.type_id())
+                        != Some(&SemanticType::Primitive(PrimitiveType::Boolean))
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiPointerOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::TaskGroup { cancel, body } => {
                 self.verify_expression(cancel, visible);
                 self.verify_expression(body, visible);
@@ -5255,6 +5383,11 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::FfiBufferClose { buffer: operand } => {
             collect_cell_captures(operand, written)
         }
+        HirExpressionKind::FfiPointerToOptional { pointer }
+        | HirExpressionKind::FfiPointerReadOnly { pointer }
+        | HirExpressionKind::FfiPointerIsPresent { pointer } => {
+            collect_cell_captures(pointer, written)
+        }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
             collect_cell_captures(buffer, written);
             collect_cell_captures(index, written);
@@ -5323,6 +5456,7 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
         | HirExpressionKind::TaskCancellationSource
+        | HirExpressionKind::FfiPointerNone { .. }
         | HirExpressionKind::EnumCase { .. } => {}
     }
 }

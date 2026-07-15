@@ -682,6 +682,49 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 span,
             );
         }
+        if matches!(path.as_slice(), [ffi, pointer, operation]
+            if ffi == "Ffi"
+                && matches!(pointer.as_str(), "OptionalPointer" | "OptionalReadOnlyPointer")
+                && operation == "none")
+            && self.resolver.has_ffi_dependency()
+            && self
+                .resolver
+                .database()
+                .resolve(
+                    self.module,
+                    &path.join("."),
+                    SymbolSpace::Value,
+                    callee.span(),
+                )
+                .symbol()
+                .is_none()
+        {
+            if type_arguments.len() != 1 {
+                self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                    span,
+                    path.join("."),
+                    1,
+                    type_arguments.len(),
+                ));
+                return None;
+            }
+            let enclosing = self.signature_stack.last().cloned()?;
+            let (resolved, diagnostics) =
+                self.resolver
+                    .resolve_annotation(self.module, &type_arguments[0], &enclosing);
+            self.diagnostics.extend(diagnostics);
+            let resolved = resolved?;
+            let layout_record = match resolved.kind() {
+                ResolvedTypeKind::Declaration { symbol, .. } => Some(*symbol),
+                _ => None,
+            };
+            return self.check_ffi_pointer_invocation(
+                path,
+                arguments,
+                Some((resolved.type_id()?, layout_record)),
+                span,
+            );
+        }
         if matches!(path.as_slice(), [array, create] if array == "Array" && create == "create") {
             return self.check_array_create(type_arguments, arguments, span);
         }

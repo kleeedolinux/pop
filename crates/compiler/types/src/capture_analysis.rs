@@ -231,6 +231,7 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
         | TypedExpressionKind::TaskCancellationSource
+        | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => {}
         TypedExpressionKind::Closure(closure) => {
             for capture in &mut closure.captures {
@@ -333,7 +334,10 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             length: operand, ..
         }
         | TypedExpressionKind::FfiBufferLength { buffer: operand }
-        | TypedExpressionKind::FfiBufferClose { buffer: operand } => {
+        | TypedExpressionKind::FfiBufferClose { buffer: operand }
+        | TypedExpressionKind::FfiPointerToOptional { pointer: operand }
+        | TypedExpressionKind::FfiPointerReadOnly { pointer: operand }
+        | TypedExpressionKind::FfiPointerIsPresent { pointer: operand } => {
             finalize_expression_captures(operand, written);
         }
         TypedExpressionKind::TaskGroup { cancel, body } => {

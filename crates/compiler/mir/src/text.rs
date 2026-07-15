@@ -1487,6 +1487,24 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             buffer: ValueId::from_raw(parse_prefixed(buffer, 'v', line)?),
         });
     }
+    if text == "ffiPointerNone" {
+        return Ok(MirInstructionKind::FfiPointerNone);
+    }
+    if let Some(pointer) = text.strip_prefix("ffiPointerToOptional ") {
+        return Ok(MirInstructionKind::FfiPointerToOptional {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+        });
+    }
+    if let Some(pointer) = text.strip_prefix("ffiPointerReadOnly ") {
+        return Ok(MirInstructionKind::FfiPointerReadOnly {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+        });
+    }
+    if let Some(pointer) = text.strip_prefix("ffiPointerIsPresent ") {
+        return Ok(MirInstructionKind::FfiPointerIsPresent {
+            pointer: ValueId::from_raw(parse_prefixed(pointer, 'v', line)?),
+        });
+    }
     if let Some(value) = text.strip_prefix("pin ") {
         return Ok(MirInstructionKind::Pin {
             value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),

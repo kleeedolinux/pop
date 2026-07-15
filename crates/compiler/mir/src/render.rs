@@ -828,6 +828,16 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::FfiBufferClose { buffer } => {
             let _ = write!(output, "ffiBufferClose v{}", buffer.raw());
         }
+        MirInstructionKind::FfiPointerNone => output.push_str("ffiPointerNone"),
+        MirInstructionKind::FfiPointerToOptional { pointer } => {
+            let _ = write!(output, "ffiPointerToOptional v{}", pointer.raw());
+        }
+        MirInstructionKind::FfiPointerReadOnly { pointer } => {
+            let _ = write!(output, "ffiPointerReadOnly v{}", pointer.raw());
+        }
+        MirInstructionKind::FfiPointerIsPresent { pointer } => {
+            let _ = write!(output, "ffiPointerIsPresent v{}", pointer.raw());
+        }
         MirInstructionKind::Pin { value } => {
             let _ = write!(output, "pin v{}", value.raw());
         }

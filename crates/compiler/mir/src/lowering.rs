@@ -1564,7 +1564,10 @@ fn visit_expression_closures(
         | HirExpressionKind::FfiHandleClose { handle: value }
         | HirExpressionKind::FfiBufferOpen { length: value, .. }
         | HirExpressionKind::FfiBufferLength { buffer: value }
-        | HirExpressionKind::FfiBufferClose { buffer: value } => {
+        | HirExpressionKind::FfiBufferClose { buffer: value }
+        | HirExpressionKind::FfiPointerToOptional { pointer: value }
+        | HirExpressionKind::FfiPointerReadOnly { pointer: value }
+        | HirExpressionKind::FfiPointerIsPresent { pointer: value } => {
             visit_expression_closures(value, parameters, locals);
         }
         HirExpressionKind::FfiBufferRead { buffer, index } => {
@@ -1614,7 +1617,8 @@ fn visit_expression_closures(
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
-        | HirExpressionKind::TaskCancellationSource => {}
+        | HirExpressionKind::TaskCancellationSource
+        | HirExpressionKind::FfiPointerNone { .. } => {}
         HirExpressionKind::EnumCase { .. } => {}
     }
 }
@@ -3593,6 +3597,22 @@ impl<'hir> FunctionBuilder<'hir> {
                 );
                 MirInstructionKind::NilConstant
             }
+            HirExpressionKind::FfiPointerNone { .. } => MirInstructionKind::FfiPointerNone,
+            HirExpressionKind::FfiPointerToOptional { pointer } => {
+                MirInstructionKind::FfiPointerToOptional {
+                    pointer: self.lower_expression(pointer),
+                }
+            }
+            HirExpressionKind::FfiPointerReadOnly { pointer } => {
+                MirInstructionKind::FfiPointerReadOnly {
+                    pointer: self.lower_expression(pointer),
+                }
+            }
+            HirExpressionKind::FfiPointerIsPresent { pointer } => {
+                MirInstructionKind::FfiPointerIsPresent {
+                    pointer: self.lower_expression(pointer),
+                }
+            }
             HirExpressionKind::InterfaceUpcast { value, interface } => {
                 let value = self.lower_expression(value);
                 MirInstructionKind::InterfaceUpcast {
@@ -5217,6 +5237,10 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::FfiPointerNone
+        | MirInstructionKind::FfiPointerToOptional { .. }
+        | MirInstructionKind::FfiPointerReadOnly { .. }
+        | MirInstructionKind::FfiPointerIsPresent { .. }
         | MirInstructionKind::OptionalIsPresent { .. }
         | MirInstructionKind::OptionalGet { .. }
         | MirInstructionKind::ResultMake { .. }

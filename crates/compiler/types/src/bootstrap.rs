@@ -401,6 +401,12 @@ pub const fn is_ffi_function_type_constructor(id: BuiltinTypeId) -> bool {
 pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
 /// Stable bootstrap identity of the exact `Ffi.Pointer<T>` type constructor.
 pub const FFI_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(200);
+/// Stable bootstrap identity of the exact `Ffi.OptionalPointer<T>` type constructor.
+pub const FFI_OPTIONAL_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(201);
+/// Stable bootstrap identity of the exact `Ffi.ReadOnlyPointer<T>` type constructor.
+pub const FFI_READ_ONLY_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(205);
+/// Stable bootstrap identity of the exact `Ffi.OptionalReadOnlyPointer<T>` type constructor.
+pub const FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(206);
 /// Stable bootstrap identity of the exact `Ffi.Buffer<T>` type constructor.
 pub const FFI_BUFFER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(207);
 /// Stable bootstrap identity of `Ffi.NullPointerError`.

@@ -1118,6 +1118,22 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             }
             MirInstructionKind::BooleanConstant(value) => MirValue::Boolean(*value),
             MirInstructionKind::NilConstant => MirValue::Nil,
+            MirInstructionKind::FfiPointerNone => MirValue::Nil,
+            MirInstructionKind::FfiPointerToOptional { pointer }
+            | MirInstructionKind::FfiPointerReadOnly { pointer } => {
+                let pointer = value(values, *pointer)?.visible.clone();
+                if !matches!(pointer, MirValue::FfiPointer(_)) {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+                pointer
+            }
+            MirInstructionKind::FfiPointerIsPresent { pointer } => {
+                match &value(values, *pointer)?.visible {
+                    MirValue::Nil => MirValue::Boolean(false),
+                    MirValue::FfiPointer(_) => MirValue::Boolean(true),
+                    _ => return Err(ExecutionError::TypeMismatch),
+                }
+            }
             MirInstructionKind::OptionalIsPresent { optional } => {
                 MirValue::Boolean(!matches!(value(values, *optional)?.visible, MirValue::Nil))
             }

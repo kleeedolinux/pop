@@ -433,6 +433,136 @@ fn user_attributes_cannot_spoof_the_trusted_ffi_layout_identity() {
 }
 
 #[test]
+fn safe_ffi_pointer_construction_and_presence_lower_to_typed_mir() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/pointers.pop",
+            "namespace Pointers\n\
+             public function inspect(pointer: Ffi.Pointer<Int>): Boolean\n\
+                 local optional = Ffi.OptionalPointer.fromPointer(pointer)\n\
+                 local readOnly = Ffi.Pointer.readOnly(pointer)\n\
+                 local optionalReadOnly = Ffi.OptionalReadOnlyPointer.fromPointer(readOnly)\n\
+                 local absent = Ffi.OptionalReadOnlyPointer.none<<Int>>()\n\
+                 return Ffi.OptionalPointer.isPresent(optional) and Ffi.OptionalReadOnlyPointer.isPresent(optionalReadOnly) and not Ffi.OptionalReadOnlyPointer.isPresent(absent)\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("pointer HIR"), result.types())
+        .expect("pointer MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("ffiPointerToOptional"), "{dump}");
+    assert!(dump.contains("ffiPointerReadOnly"), "{dump}");
+    assert!(dump.contains("ffiPointerNone"), "{dump}");
+    assert!(dump.contains("ffiPointerIsPresent"), "{dump}");
+}
+
+#[test]
+fn safe_ffi_pointer_operations_require_dependency_direction_and_exact_arity() {
+    let module = |body: &str| {
+        FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(
+                FileId::from_raw(0),
+                "src/invalidPointer.pop",
+                format!("namespace Pointers\n{body}"),
+            )
+            .expect("source"),
+        )
+    };
+    let without_dependency = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(10),
+        NamespaceId::from_raw(10),
+        Vec::new(),
+        vec![module(
+            "public function invalid(): Ffi.OptionalPointer<Int>\n    return Ffi.OptionalPointer.none<<Int>>()\nend\n",
+        )],
+    ));
+    assert!(without_dependency.hir().is_none());
+    assert!(!without_dependency.diagnostics().is_empty());
+
+    let ffi = BubbleId::from_raw(20);
+    for body in [
+        "public function invalid(pointer: Ffi.ReadOnlyPointer<Int>)\n    Ffi.OptionalPointer.fromPointer(pointer)\nend\n",
+        "public function invalid(pointer: Ffi.Pointer<Int>)\n    Ffi.OptionalReadOnlyPointer.fromPointer(pointer)\nend\n",
+        "public function invalid(pointer: Ffi.OptionalPointer<Int>)\n    Ffi.Pointer.readOnly(pointer)\nend\n",
+        "public function invalid()\n    Ffi.OptionalPointer.none<<Int, Int>>()\nend\n",
+        "public function invalid(pointer: Ffi.Pointer<Int>)\n    Ffi.OptionalPointer.fromPointer(pointer, pointer)\nend\n",
+    ] {
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module(body)],
+            )
+            .with_ffi_dependency(ffi),
+        );
+        assert!(result.hir().is_none(), "{body}");
+        assert!(!result.diagnostics().is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn resolved_user_calls_are_not_hijacked_by_ffi_pointer_spelling() {
+    let ffi = BubbleId::from_raw(20);
+    let declaration = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/userPointer.pop",
+            "namespace Ffi.Pointer\npublic function readOnly(value: Int): Int\n    return value\nend\n",
+        )
+        .expect("source"),
+    );
+    let caller = FrontEndModule::new(
+        ModuleId::from_raw(1),
+        SourceFile::new(
+            FileId::from_raw(1),
+            "src/caller.pop",
+            "namespace Caller\npublic function run(): Int\n    return Ffi.Pointer.readOnly(7)\nend\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![declaration, caller],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(result.hir().expect("user call HIR"), result.types())
+        .expect("user call MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("callDirect"), "{dump}");
+    assert!(!dump.contains("ffiPointerReadOnly"), "{dump}");
+}
+
+#[test]
 fn resolved_user_calls_are_not_hijacked_by_ffi_buffer_spelling() {
     let ffi = BubbleId::from_raw(20);
     let declaration = FrontEndModule::new(

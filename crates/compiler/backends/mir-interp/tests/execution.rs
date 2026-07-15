@@ -4,7 +4,9 @@ use pop_foundation::{
     BubbleId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, SymbolId, UnionCaseId,
 };
 use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
-use pop_runtime_interface::{PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason};
+use pop_runtime_interface::{
+    ForeignAddress, PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason,
+};
 use pop_source::SourceFile;
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
@@ -186,6 +188,60 @@ fn direct_calls_checked_arithmetic_and_both_cfg_branches_execute() {
             .call(choose, &[int(5), int(3)])
             .expect("else branch"),
         vec![int(3)]
+    );
+}
+
+#[test]
+fn safe_ffi_pointer_presence_executes_without_dynamic_conversion() {
+    let ffi = BubbleId::from_raw(20);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/pointers.pop",
+        "namespace Pointers\n\
+         public function inspect(pointer: Ffi.Pointer<Int>): Boolean\n\
+             local optional = Ffi.OptionalPointer.fromPointer(pointer)\n\
+             local readOnly = Ffi.Pointer.readOnly(pointer)\n\
+             local optionalReadOnly = Ffi.OptionalReadOnlyPointer.fromPointer(readOnly)\n\
+             local absent = Ffi.OptionalReadOnlyPointer.none<<Int>>()\n\
+             return Ffi.OptionalPointer.isPresent(optional) and Ffi.OptionalReadOnlyPointer.isPresent(optionalReadOnly) and not Ffi.OptionalReadOnlyPointer.isPresent(absent)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let inspect = front_end
+        .hir()
+        .expect("HIR")
+        .functions()
+        .iter()
+        .find(|function| function.name() == "inspect")
+        .expect("inspect")
+        .symbol();
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let interpreter = MirInterpreter::new(&mir, front_end.types()).expect("verified MIR");
+
+    assert_eq!(
+        interpreter
+            .call(
+                inspect,
+                &[MirValue::FfiPointer(
+                    ForeignAddress::new(0x1234).expect("non-null foreign address"),
+                )],
+            )
+            .expect("pointer inspection"),
+        vec![MirValue::Boolean(true)]
     );
 }
 
