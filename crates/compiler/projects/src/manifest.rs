@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageManifest {
@@ -90,7 +95,8 @@ impl PackageManifest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum NativeLibraryKind {
     System,
     Framework,
@@ -100,12 +106,14 @@ pub enum NativeLibraryKind {
     ImportLibrary,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum NativeLibraryDiscovery {
     PackageConfiguration,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeLibrary {
     alias: String,
     kind: NativeLibraryKind,
@@ -171,7 +179,8 @@ impl PlatformNativeLibraries {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeLinkPlan {
     platform_target: String,
     libraries: Vec<NativeLibrary>,
@@ -187,6 +196,197 @@ impl NativeLinkPlan {
     pub fn libraries(&self) -> &[NativeLibrary] {
         &self.libraries
     }
+
+    /// Validates the canonical serialized plan shape.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid targets, unsorted aliases, or provider fields that do
+    /// not match their closed input kind.
+    pub fn validate(&self) -> Result<(), NativeLinkPlanError> {
+        if !valid_platform_target(&self.platform_target)
+            || self
+                .libraries
+                .windows(2)
+                .any(|pair| pair[0].alias >= pair[1].alias)
+            || self.libraries.iter().any(|library| {
+                !valid_pascal(&library.alias)
+                    || match library.kind {
+                        NativeLibraryKind::System => {
+                            library.name.as_deref().is_none_or(|name| {
+                                !valid_native_name(name)
+                                    || library.version_requirement.as_deref().is_some_and(|value| {
+                                        library.discovery
+                                            != Some(NativeLibraryDiscovery::PackageConfiguration)
+                                            || !valid_native_version_requirement(value)
+                                    })
+                            }) || library.path.is_some()
+                                || library.sha256.is_some()
+                        }
+                        NativeLibraryKind::Framework => {
+                            library
+                                .name
+                                .as_deref()
+                                .is_none_or(|name| !valid_native_name(name))
+                                || library.path.is_some()
+                                || library.sha256.is_some()
+                                || library.discovery.is_some()
+                                || library.version_requirement.is_some()
+                        }
+                        NativeLibraryKind::Object
+                        | NativeLibraryKind::Archive
+                        | NativeLibraryKind::Shared
+                        | NativeLibraryKind::ImportLibrary => {
+                            library.name.is_some()
+                                || library
+                                    .path
+                                    .as_deref()
+                                    .is_none_or(|path| !valid_native_path(path))
+                                || library
+                                    .sha256
+                                    .as_deref()
+                                    .is_none_or(|hash| !valid_sha256(hash))
+                                || library.discovery.is_some()
+                                || library.version_requirement.is_some()
+                        }
+                    }
+            })
+        {
+            return Err(NativeLinkPlanError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Merges exact target plans into one sorted link plan.
+    ///
+    /// # Errors
+    ///
+    /// Rejects target disagreement or one alias naming incompatible providers.
+    pub fn merge(plans: &[Self]) -> Result<Self, NativeLinkPlanError> {
+        let Some(first) = plans.first() else {
+            return Err(NativeLinkPlanError::EmptyPlanSet);
+        };
+        if plans
+            .iter()
+            .any(|plan| plan.platform_target != first.platform_target)
+        {
+            return Err(NativeLinkPlanError::TargetMismatch);
+        }
+        let mut by_alias = BTreeMap::new();
+        for library in plans.iter().flat_map(|plan| &plan.libraries) {
+            match by_alias.get(&library.alias) {
+                Some(existing) if existing != library => {
+                    return Err(NativeLinkPlanError::ConflictingAlias);
+                }
+                Some(_) => {}
+                None => {
+                    by_alias.insert(library.alias.clone(), library.clone());
+                }
+            }
+        }
+        Ok(Self {
+            platform_target: first.platform_target.clone(),
+            libraries: by_alias.into_values().collect(),
+        })
+    }
+
+    /// Verifies every package-relative native input before linker invocation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing, non-regular, symlinked, escaped, or hash-mismatched
+    /// inputs. System and framework providers have no local file to verify.
+    pub fn verify_local_inputs(&self, package_root: &Path) -> Result<(), NativeLinkPlanError> {
+        self.validate()?;
+        let root_metadata =
+            fs::symlink_metadata(package_root).map_err(|_| NativeLinkPlanError::MissingInput)?;
+        if root_metadata.file_type().is_symlink() {
+            return Err(NativeLinkPlanError::SymlinkInput);
+        }
+        if !root_metadata.is_dir() {
+            return Err(NativeLinkPlanError::NonRegularInput);
+        }
+        for library in &self.libraries {
+            let Some(relative) = library.path() else {
+                continue;
+            };
+            let path = verified_regular_path(package_root, relative)?;
+            let expected = library.sha256().ok_or(NativeLinkPlanError::InvalidInput)?;
+            if file_sha256(&path)? != expected {
+                return Err(NativeLinkPlanError::HashMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeLinkPlanError {
+    EmptyPlanSet,
+    TargetMismatch,
+    ConflictingAlias,
+    InvalidInput,
+    MissingInput,
+    NonRegularInput,
+    SymlinkInput,
+    HashMismatch,
+    Io,
+}
+
+impl fmt::Display for NativeLinkPlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid native link plan: {self:?}")
+    }
+}
+
+impl Error for NativeLinkPlanError {}
+
+fn verified_regular_path(
+    root: &Path,
+    relative: &str,
+) -> Result<std::path::PathBuf, NativeLinkPlanError> {
+    let mut path = root.to_path_buf();
+    let mut components = Path::new(relative).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            return Err(NativeLinkPlanError::InvalidInput);
+        };
+        path.push(component);
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| NativeLinkPlanError::MissingInput)?;
+        if metadata.file_type().is_symlink() {
+            return Err(NativeLinkPlanError::SymlinkInput);
+        }
+        if components.peek().is_some() && !metadata.is_dir() {
+            return Err(NativeLinkPlanError::NonRegularInput);
+        }
+        if components.peek().is_none() && !metadata.is_file() {
+            return Err(NativeLinkPlanError::NonRegularInput);
+        }
+    }
+    Ok(path)
+}
+
+fn file_sha256(path: &Path) -> Result<String, NativeLinkPlanError> {
+    let mut file = fs::File::open(path).map_err(|_| NativeLinkPlanError::Io)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| NativeLinkPlanError::Io)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -716,15 +916,18 @@ fn take_native_name(fields: &mut BTreeMap<String, String>) -> Result<String, Man
         .and_then(|value| {
             parse_string(&value).map_err(|_| ManifestError::InvalidNativeLibraryName)
         })?;
-    if name.is_empty()
-        || name.starts_with(['-', '@'])
-        || !name.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
-        })
-    {
+    if !valid_native_name(&name) {
         return Err(ManifestError::InvalidNativeLibraryName);
     }
     Ok(name)
+}
+
+fn valid_native_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '@'])
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
+        })
 }
 
 fn valid_native_path(path: &str) -> bool {

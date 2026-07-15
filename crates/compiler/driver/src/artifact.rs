@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use pop_foundation::SymbolIdentity;
 use pop_hir::{HirDeclaration, HirFunction, HirMethod};
-use pop_projects::BubbleKind;
+use pop_projects::{BubbleKind, NativeLinkPlan};
 use pop_types::TypeArena;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,7 +18,7 @@ use crate::reference::invalid_reference_capsule;
 
 const REFERENCE_SCHEMA_VERSION: u16 = 1;
 const MAX_REFERENCE_BYTES: usize = 16 * 1024 * 1024;
-const POPLIB_MANIFEST_SCHEMA_VERSION: u16 = 1;
+const POPLIB_MANIFEST_SCHEMA_VERSION: u16 = 2;
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARTIFACT_FILE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ARTIFACT_FILES: usize = 256;
@@ -187,6 +187,7 @@ pub struct PoplibEmission {
     reference_metadata: ReferenceMetadata,
     dependencies: Vec<PoplibDependency>,
     required_capabilities: Vec<String>,
+    native_link_plans: Vec<NativeLinkPlan>,
     documentation: Option<Vec<u8>>,
     target: Option<(String, Vec<u8>)>,
 }
@@ -212,6 +213,7 @@ impl PoplibEmission {
             reference_metadata,
             dependencies: Vec::new(),
             required_capabilities: Vec::new(),
+            native_link_plans: Vec::new(),
             documentation: None,
             target: None,
         }
@@ -228,6 +230,13 @@ impl PoplibEmission {
     pub fn with_required_capabilities(mut self, mut capabilities: Vec<String>) -> Self {
         capabilities.sort();
         self.required_capabilities = capabilities;
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_link_plan(mut self, plan: NativeLinkPlan) -> Self {
+        self.native_link_plans.push(plan);
+        self.native_link_plans.sort();
         self
     }
 
@@ -298,6 +307,11 @@ impl LoadedPoplib {
             .as_ref()
             .map(|(target, bytes)| (target.as_str(), bytes.as_slice()))
     }
+
+    #[must_use]
+    pub fn native_link_plans(&self) -> &[NativeLinkPlan] {
+        &self.manifest.native_link_plans
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -318,6 +332,7 @@ struct PoplibManifest {
     public_namespaces: Vec<String>,
     initialization_order: Vec<String>,
     required_capabilities: Vec<String>,
+    native_link_plans: Vec<NativeLinkPlan>,
     reference_only: bool,
     documentation: Option<PoplibFileReference>,
     targets: Vec<PoplibTarget>,
@@ -442,6 +457,7 @@ pub fn emit_poplib(path: &Path, emission: &PoplibEmission) -> Result<(), PoplibE
         public_namespaces,
         initialization_order: Vec::new(),
         required_capabilities: emission.required_capabilities.clone(),
+        native_link_plans: emission.native_link_plans.clone(),
         reference_only: targets.is_empty(),
         documentation,
         targets,
@@ -550,6 +566,11 @@ fn validate_emission(emission: &PoplibEmission) -> Result<(), PoplibError> {
         || !valid_sha256(&emission.source_sha256)
         || !is_sorted_unique(&emission.dependencies)
         || !is_sorted_unique(&emission.required_capabilities)
+        || !is_sorted_unique(&emission.native_link_plans)
+        || emission
+            .native_link_plans
+            .iter()
+            .any(|plan| plan.validate().is_err())
         || emission
             .target
             .as_ref()
@@ -592,6 +613,11 @@ fn validate_manifest(manifest: &PoplibManifest) -> Result<(), PoplibError> {
         || !is_sorted_unique(&manifest.dependencies)
         || !is_sorted_unique(&manifest.public_namespaces)
         || !is_sorted_unique(&manifest.required_capabilities)
+        || !is_sorted_unique(&manifest.native_link_plans)
+        || manifest
+            .native_link_plans
+            .iter()
+            .any(|plan| plan.validate().is_err())
         || !is_sorted_unique(&manifest.files)
         || !is_sorted_unique(&manifest.targets)
         || manifest.files.len() > MAX_ARTIFACT_FILES
@@ -617,6 +643,12 @@ fn validate_manifest(manifest: &PoplibManifest) -> Result<(), PoplibError> {
         || manifest.targets.iter().any(|target| {
             !valid_component(&target.platform_target)
                 || !paths.contains(target.implementation.path.as_str())
+        })
+        || manifest.native_link_plans.iter().any(|plan| {
+            !manifest
+                .targets
+                .iter()
+                .any(|target| target.platform_target == plan.platform_target())
         })
     {
         return Err(PoplibError::InvalidManifest);

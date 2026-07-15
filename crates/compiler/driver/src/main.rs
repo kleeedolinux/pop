@@ -22,9 +22,10 @@ use pop_backend_llvm::{
 };
 use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
-    CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, PoplibDependency, PoplibEmission,
-    ReferenceFunction, ReferenceMetadata, ReferenceType, analyze_bubble, emit_poplib,
-    encode_reference_metadata, load_poplib,
+    CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, NativeLinkInput,
+    NativeLinkPlanSource, PoplibDependency, PoplibEmission, ReferenceFunction, ReferenceMetadata,
+    ReferenceType, analyze_bubble, emit_poplib, encode_reference_metadata, load_poplib,
+    resolve_native_link_inputs, validate_foreign_link_aliases,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_mir::{lower_hir_bubble, optimize_mir};
@@ -644,6 +645,7 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     }
     let result = link_native_executable(
         &[object_path.clone(), standard_object_path.clone()],
+        &[],
         output_path,
     );
     let _ = fs::remove_file(object_path);
@@ -735,6 +737,7 @@ fn run_source(source_path: &Path, arguments: &[OsString]) -> ExitCode {
 struct LoweredPackage {
     root: PathBuf,
     bubbles: Vec<LoweredPackageBubble>,
+    native_link_sources: Vec<NativeLinkPlanSource>,
 }
 
 struct LoweredPackageBubble {
@@ -747,6 +750,7 @@ struct LoweredPackageBubble {
     kind: BubbleKind,
     root_package: bool,
     dependencies: Vec<PoplibDependency>,
+    native_link_plan: pop_projects::NativeLinkPlan,
     program: NativeProgram,
 }
 
@@ -766,12 +770,14 @@ fn lower_package(manifest_path: &Path) -> Option<LoweredPackage> {
         visiting: BTreeSet::new(),
         resolved: BTreeMap::new(),
         bubbles: vec![standard_bubble],
+        native_link_sources: Vec::new(),
         standard,
     };
     lower_package_recursive(&manifest_path, true, &mut state)?;
     Some(LoweredPackage {
         root: package_root.to_path_buf(),
         bubbles: state.bubbles,
+        native_link_sources: state.native_link_sources,
     })
 }
 
@@ -803,6 +809,7 @@ struct PackageLoweringState {
     visiting: BTreeSet<PathBuf>,
     resolved: BTreeMap<PathBuf, Option<ResolvedPackageLibrary>>,
     bubbles: Vec<LoweredPackageBubble>,
+    native_link_sources: Vec<NativeLinkPlanSource>,
     standard: ResolvedPackageLibrary,
 }
 
@@ -840,6 +847,14 @@ fn lower_package_recursive(
         );
         return None;
     }
+    let native_link_plan = manifest
+        .native_link_plan(native_target().triple())
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
+    state.native_link_sources.push(NativeLinkPlanSource::new(
+        package_root,
+        native_link_plan.clone(),
+    ));
 
     let mut external_libraries = vec![state.standard.clone()];
     for requirement in manifest.dependencies() {
@@ -972,6 +987,9 @@ fn lower_package_recursive(
             Vec::new(),
             ffi_dependency,
         )?;
+        validate_foreign_link_aliases(&program.mir, &native_link_plan)
+            .map_err(|error| eprintln!("pop: {error}"))
+            .ok()?;
         if bubble.kind() == BubbleKind::Library {
             let reference = encode_reference_metadata(&program.reference_metadata)
                 .map_err(|error| eprintln!("pop: reference metadata encoding failed: {error}"))
@@ -995,6 +1013,7 @@ fn lower_package_recursive(
             kind: bubble.kind(),
             root_package,
             dependencies: artifact_dependencies.clone(),
+            native_link_plan: native_link_plan.clone(),
             program,
         });
     }
@@ -1013,15 +1032,17 @@ fn check_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
     if prepare_lock(&selection, lock_mode).is_none() {
         return ExitCode::FAILURE;
     }
-    if selection
-        .packages
-        .iter()
-        .all(|manifest| lower_package(manifest).is_some())
-    {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    let target = native_target();
+    for manifest in &selection.packages {
+        let Some(package) = lower_package(manifest) else {
+            return ExitCode::FAILURE;
+        };
+        if let Err(error) = resolve_native_link_inputs(&package.native_link_sources, &target) {
+            eprintln!("pop: {error}");
+            return ExitCode::FAILURE;
+        }
     }
+    ExitCode::SUCCESS
 }
 
 fn build_manifest(manifest_path: &Path, lock_mode: LockMode) -> Option<Vec<PathBuf>> {
@@ -1209,6 +1230,11 @@ fn build_package_to(
     selected_output_root: Option<&Path>,
 ) -> Option<Vec<PathBuf>> {
     let package = lower_package(manifest_path)?;
+    let selected_target = native_target();
+    let native_link_inputs =
+        resolve_native_link_inputs(&package.native_link_sources, &selected_target)
+            .map_err(|error| eprintln!("pop: {error}"))
+            .ok()?;
 
     let output_root = selected_output_root
         .map(Path::to_path_buf)
@@ -1261,6 +1287,7 @@ fn build_package_to(
                 bubble.program.reference_metadata.clone(),
             )
             .with_dependencies(bubble.dependencies.clone())
+            .with_native_link_plan(bubble.native_link_plan.clone())
             .with_documentation(documentation.into_bytes())
             .with_target_implementation(target.triple(), implementation);
             let artifact = dependency_root.join(format!("{}.poplib", bubble.name));
@@ -1297,7 +1324,7 @@ fn build_package_to(
         let mut objects = vec![object];
         objects.extend(library_objects.iter().cloned());
         let executable = output_root.join(&bubble.name);
-        if link_native_executable(&objects, &executable) != ExitCode::SUCCESS {
+        if link_native_executable(&objects, &native_link_inputs, &executable) != ExitCode::SUCCESS {
             return None;
         }
         executables.push(executable);
@@ -1807,6 +1834,10 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         kind: BubbleKind::Library,
         root_package: false,
         dependencies: Vec::new(),
+        native_link_plan: manifest
+            .native_link_plan(native_target().triple())
+            .map_err(|error| eprintln!("pop: invalid Standard native link plan: {error}"))
+            .ok()?,
         program,
     };
     Some((library, lowered))
@@ -1942,7 +1973,11 @@ fn write_invalid_entry() {
     );
 }
 
-fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitCode {
+fn link_native_executable(
+    object_paths: &[PathBuf],
+    native_inputs: &[NativeLinkInput],
+    output_path: &Path,
+) -> ExitCode {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)
@@ -1998,6 +2033,9 @@ fn link_native_executable(object_paths: &[PathBuf], output_path: &Path) -> ExitC
         // Both Rust static libraries include identical copies of their shared
         // runtime-interface dependency from the same Cargo build.
         .arg("-Wl,--allow-multiple-definition");
+    for input in native_inputs {
+        input.append_to(&mut command);
+    }
 
     let link = command.arg("-o").arg(output_path).output();
 

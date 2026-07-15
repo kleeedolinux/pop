@@ -15,8 +15,8 @@ pub use lock::{
 };
 pub use manifest::{
     BubbleKind, DependencyRequirement, DependencySource, DiscoveredBubble, ManifestError,
-    NativeLibrary, NativeLibraryDiscovery, NativeLibraryKind, NativeLinkPlan, PackageManifest,
-    PlatformDependencies, PlatformNativeLibraries, WorkspaceManifest,
+    NativeLibrary, NativeLibraryDiscovery, NativeLibraryKind, NativeLinkPlan, NativeLinkPlanError,
+    PackageManifest, PlatformDependencies, PlatformNativeLibraries, WorkspaceManifest,
     discover_conventional_bubbles, discover_workspace_members, parse_package_manifest,
     parse_workspace_manifest,
 };

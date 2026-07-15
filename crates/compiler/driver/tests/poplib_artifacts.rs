@@ -5,7 +5,7 @@ use pop_driver::{
     load_poplib,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_projects::BubbleKind;
+use pop_projects::{BubbleKind, parse_package_manifest};
 use pop_source::SourceFile;
 
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -68,6 +68,14 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
             .expect("reference metadata")
             .clone(),
     )
+    .with_native_link_plan(
+        parse_package_manifest(
+            "[package]\nname = \"Pop.Standard\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nZlib = { kind = \"system\", name = \"z\" }\n",
+        )
+        .expect("native requirements")
+        .native_link_plan("x86_64-linux")
+        .expect("native link plan"),
+    )
     .with_documentation(b"<?xml version=\"1.0\"?><doc/>\n".to_vec())
     .with_target_implementation("x86_64-linux", b"opaque-native-object".to_vec());
     let root = temporary_root();
@@ -90,6 +98,8 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
         Some(("x86_64-linux", b"opaque-native-object".as_slice()))
     );
     assert_eq!(loaded.public_api_sha256().len(), 64);
+    assert_eq!(loaded.native_link_plans().len(), 1);
+    assert_eq!(loaded.native_link_plans()[0].libraries()[0].alias(), "Zlib");
 
     emit_poplib(&artifact, &emission).expect("deterministic replacement");
     assert_eq!(bytes(&artifact.join("bubble.manifest")), manifest);

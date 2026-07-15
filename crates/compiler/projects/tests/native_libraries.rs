@@ -1,5 +1,6 @@
 use pop_projects::{
-    ManifestError, NativeLibraryDiscovery, NativeLibraryKind, parse_package_manifest,
+    ManifestError, NativeLibraryDiscovery, NativeLibraryKind, NativeLinkPlan, NativeLinkPlanError,
+    parse_package_manifest, sha256_hex,
 };
 
 const ARCHIVE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -187,5 +188,108 @@ fn adr_0081_native_input_shapes_and_target_conflicts_fail_closed() {
     assert_eq!(
         manifest.native_link_plan("x86_64-unknown-linux-gnu"),
         Err(ManifestError::DuplicateNativeLibrary)
+    );
+}
+
+#[test]
+fn native_link_plan_verifies_exact_regular_local_inputs() {
+    let root = std::env::temp_dir().join(format!(
+        "pop-native-link-inputs-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("remove prior native-link fixture");
+    }
+    std::fs::create_dir_all(root.join("native")).expect("create native-link fixture");
+    let bytes = b"deterministic native archive";
+    std::fs::write(root.join("native/libcodec.a"), bytes).expect("write native input");
+    let manifest = parse_package_manifest(&format!(
+        "[package]\nname = \"Example.Bindings\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nCodec = {{ kind = \"archive\", path = \"native/libcodec.a\", sha256 = \"{}\" }}\n",
+        sha256_hex(bytes)
+    ))
+    .expect("hashed native input");
+    let plan = manifest
+        .native_link_plan("x86_64-unknown-linux-gnu")
+        .expect("native link plan");
+
+    plan.verify_local_inputs(&root)
+        .expect("exact regular input verifies");
+    std::fs::write(root.join("native/libcodec.a"), b"changed").expect("mutate native input");
+    assert_eq!(
+        plan.verify_local_inputs(&root),
+        Err(NativeLinkPlanError::HashMismatch)
+    );
+
+    std::fs::remove_dir_all(root).expect("remove native-link fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn native_link_plan_rejects_symlinked_inputs() {
+    use std::os::unix::fs::symlink;
+
+    let root = std::env::temp_dir().join(format!(
+        "pop-native-link-symlink-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).expect("remove prior symlink fixture");
+    }
+    std::fs::create_dir_all(root.join("native")).expect("create symlink fixture");
+    let bytes = b"external native archive";
+    std::fs::write(root.join("external.a"), bytes).expect("write external input");
+    symlink(root.join("external.a"), root.join("native/libcodec.a")).expect("link native input");
+    let manifest = parse_package_manifest(&format!(
+        "[package]\nname = \"Example.Bindings\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nCodec = {{ kind = \"archive\", path = \"native/libcodec.a\", sha256 = \"{}\" }}\n",
+        sha256_hex(bytes)
+    ))
+    .expect("symlinked native input manifest");
+    let plan = manifest
+        .native_link_plan("x86_64-unknown-linux-gnu")
+        .expect("native link plan");
+
+    assert_eq!(
+        plan.verify_local_inputs(&root),
+        Err(NativeLinkPlanError::SymlinkInput)
+    );
+    std::fs::remove_dir_all(root).expect("remove symlink fixture");
+}
+
+#[test]
+fn native_link_plan_merge_is_sorted_and_rejects_conflicting_aliases() {
+    let left = parse_package_manifest(
+        "[package]\nname = \"Example.Left\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nCodec = { kind = \"system\", name = \"codec\" }\n",
+    )
+    .expect("left manifest")
+    .native_link_plan("x86_64-unknown-linux-gnu")
+    .expect("left plan");
+    let same = left.clone();
+    let right = parse_package_manifest(
+        "[package]\nname = \"Example.Right\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nZlib = { kind = \"system\", name = \"z\" }\n",
+    )
+    .expect("right manifest")
+    .native_link_plan("x86_64-unknown-linux-gnu")
+    .expect("right plan");
+    let conflict = parse_package_manifest(
+        "[package]\nname = \"Example.Conflict\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nCodec = { kind = \"system\", name = \"otherCodec\" }\n",
+    )
+    .expect("conflicting manifest")
+    .native_link_plan("x86_64-unknown-linux-gnu")
+    .expect("conflicting plan");
+
+    let merged = NativeLinkPlan::merge(&[right, same, left.clone()]).expect("canonical merge");
+    assert_eq!(
+        merged
+            .libraries()
+            .iter()
+            .map(pop_projects::NativeLibrary::alias)
+            .collect::<Vec<_>>(),
+        ["Codec", "Zlib"]
+    );
+    assert_eq!(
+        NativeLinkPlan::merge(&[left, conflict]),
+        Err(NativeLinkPlanError::ConflictingAlias)
     );
 }
