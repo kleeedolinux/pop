@@ -12,7 +12,7 @@ use pop_mir::{
     verify_mir_bubble,
 };
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
-use pop_target::{PointerWidth, TargetSpec};
+use pop_target::{CAbiScalarKind, CAbiSignedness, TargetSpec};
 use pop_types::{
     ForeignAbi, IntegerKind, PrimitiveType, SemanticType, TypeArena, embedded_bootstrap_schema,
 };
@@ -758,17 +758,7 @@ fn foreign_physical_type(
 }
 
 fn foreign_builtin_physical_type(name: &str, target: &TargetSpec) -> Option<ForeignPhysicalType> {
-    let width = match name {
-        "Ffi.C.Char" | "Ffi.C.SignedChar" | "Ffi.C.UnsignedChar" => 8,
-        "Ffi.C.Short" | "Ffi.C.UnsignedShort" => 16,
-        "Ffi.C.Int" | "Ffi.C.UnsignedInt" => 32,
-        "Ffi.C.Long" | "Ffi.C.UnsignedLong" | "Ffi.C.Size" | "Ffi.C.PointerDifference" => {
-            match target.pointer_width() {
-                PointerWidth::Bits32 => 32,
-                PointerWidth::Bits64 => 64,
-            }
-        }
-        "Ffi.C.LongLong" | "Ffi.C.UnsignedLongLong" => 64,
+    match name {
         "Ffi.Handle" => {
             return Some(ForeignPhysicalType {
                 llvm: "i64".to_owned(),
@@ -786,23 +776,30 @@ fn foreign_builtin_physical_type(name: &str, target: &TargetSpec) -> Option<Fore
                 conversion: ForeignConversion::Pointer,
             });
         }
+        _ => {}
+    }
+    let kind = match name {
+        "Ffi.C.Char" => CAbiScalarKind::Char,
+        "Ffi.C.SignedChar" => CAbiScalarKind::SignedChar,
+        "Ffi.C.UnsignedChar" => CAbiScalarKind::UnsignedChar,
+        "Ffi.C.Short" => CAbiScalarKind::Short,
+        "Ffi.C.UnsignedShort" => CAbiScalarKind::UnsignedShort,
+        "Ffi.C.Int" => CAbiScalarKind::Int,
+        "Ffi.C.UnsignedInt" => CAbiScalarKind::UnsignedInt,
+        "Ffi.C.Long" => CAbiScalarKind::Long,
+        "Ffi.C.UnsignedLong" => CAbiScalarKind::UnsignedLong,
+        "Ffi.C.LongLong" => CAbiScalarKind::LongLong,
+        "Ffi.C.UnsignedLongLong" => CAbiScalarKind::UnsignedLongLong,
+        "Ffi.C.Size" => CAbiScalarKind::Size,
+        "Ffi.C.PointerDifference" => CAbiScalarKind::PointerDifference,
         _ => return None,
     };
-    let unsigned = matches!(
-        name,
-        "Ffi.C.UnsignedChar"
-            | "Ffi.C.UnsignedShort"
-            | "Ffi.C.UnsignedInt"
-            | "Ffi.C.UnsignedLong"
-            | "Ffi.C.UnsignedLongLong"
-            | "Ffi.C.Size"
-    );
+    let layout = target.c_abi_scalar_layout(kind)?;
     Some(ForeignPhysicalType {
-        llvm: format!("i{width}"),
-        conversion: if unsigned {
-            ForeignConversion::UnsignedInteger
-        } else {
-            ForeignConversion::SignedInteger
+        llvm: format!("i{}", layout.size() * 8),
+        conversion: match layout.signedness() {
+            CAbiSignedness::Signed => ForeignConversion::SignedInteger,
+            CAbiSignedness::Unsigned => ForeignConversion::UnsignedInteger,
         },
     })
 }

@@ -42,6 +42,53 @@ pub enum OperatingSystem {
     Linux,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CAbiScalarKind {
+    Char,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Size,
+    PointerDifference,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CAbiSignedness {
+    Signed,
+    Unsigned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CAbiScalarLayout {
+    size: u64,
+    alignment: u64,
+    signedness: CAbiSignedness,
+}
+
+impl CAbiScalarLayout {
+    #[must_use]
+    pub const fn size(self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn alignment(self) -> u64 {
+        self.alignment
+    }
+
+    #[must_use]
+    pub const fn signedness(self) -> CAbiSignedness {
+        self.signedness
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetSpec {
     triple: String,
@@ -128,6 +175,44 @@ impl TargetSpec {
     #[must_use]
     pub fn supports(&self, capability: TargetCapability) -> bool {
         self.capabilities.contains(&capability)
+    }
+
+    /// Returns the closed C scalar layout for a target that supports native
+    /// FFI, or `None` when the target has no accepted C ABI.
+    #[must_use]
+    pub fn c_abi_scalar_layout(&self, kind: CAbiScalarKind) -> Option<CAbiScalarLayout> {
+        if self.triple != "x86_64-unknown-linux-gnu" || self.pointer_width != PointerWidth::Bits64 {
+            return None;
+        }
+        let (size, signedness) = match kind {
+            CAbiScalarKind::Char | CAbiScalarKind::SignedChar => (1, CAbiSignedness::Signed),
+            CAbiScalarKind::UnsignedChar => (1, CAbiSignedness::Unsigned),
+            CAbiScalarKind::Short => (2, CAbiSignedness::Signed),
+            CAbiScalarKind::UnsignedShort => (2, CAbiSignedness::Unsigned),
+            CAbiScalarKind::Int => (4, CAbiSignedness::Signed),
+            CAbiScalarKind::UnsignedInt => (4, CAbiSignedness::Unsigned),
+            CAbiScalarKind::Long | CAbiScalarKind::LongLong | CAbiScalarKind::PointerDifference => {
+                (8, CAbiSignedness::Signed)
+            }
+            CAbiScalarKind::UnsignedLong
+            | CAbiScalarKind::UnsignedLongLong
+            | CAbiScalarKind::Size => (8, CAbiSignedness::Unsigned),
+        };
+        Some(CAbiScalarLayout {
+            size,
+            alignment: size,
+            signedness,
+        })
+    }
+
+    /// Returns native pointer size and alignment for an accepted FFI target.
+    #[must_use]
+    pub fn ffi_pointer_layout(&self) -> Option<(u64, u64)> {
+        if self.triple == "x86_64-unknown-linux-gnu" && self.pointer_width == PointerWidth::Bits64 {
+            Some((8, 8))
+        } else {
+            None
+        }
     }
 }
 
