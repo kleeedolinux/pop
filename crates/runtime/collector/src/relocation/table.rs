@@ -29,6 +29,10 @@ impl<Value> ObjectTable<Value> {
         self.length
     }
 
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn contains_key(&self, reference: &ManagedReference) -> bool {
         self.get(reference).is_some()
