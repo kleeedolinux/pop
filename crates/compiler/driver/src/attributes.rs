@@ -245,7 +245,11 @@ fn parse_foreign_contract(attribute: &AttributeUseSyntax) -> Option<(String, For
     let ExpressionSyntaxKind::String(symbol) = arguments[0].value().kind() else {
         return None;
     };
-    if symbol.is_empty() || symbol.chars().any(char::is_control) {
+    if symbol.is_empty()
+        || !symbol.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '$' | '@' | '?')
+        })
+    {
         return None;
     }
     let abi = if let Some(argument) = arguments.get(1) {

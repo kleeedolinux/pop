@@ -15,8 +15,8 @@ use pop_foundation::{
     BubbleId, Diagnostic, DiagnosticSeverity, MethodId, ModuleId, SourceSpan, SymbolId,
 };
 use pop_hir::{
-    HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirFunction,
-    HirFunctionContext, HirKnownCallables, HirMethod,
+    HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirForeignFunction,
+    HirFunction, HirFunctionContext, HirKnownCallables, HirMethod, build_hir_foreign_function,
     build_hir_function_with_known_callables_and_attributes, build_hir_method,
     specialize_hir_method,
 };
@@ -216,7 +216,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             })
         })
         .collect();
-    let (hir_functions, hir_methods, hir_build_errors) = build_runtime_hir(
+    let (hir_functions, hir_foreign_functions, hir_methods, hir_build_errors) = build_runtime_hir(
         input.bubble,
         &mut functions,
         &methods,
@@ -248,6 +248,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             hir_functions,
             hir_methods,
         )
+        .and_then(|bubble| bubble.with_foreign_functions(hir_foreign_functions))
         .and_then(|bubble| {
             bubble.with_function_references(hir_function_references(
                 &input.reference_metadata,
@@ -720,6 +721,7 @@ fn build_runtime_hir(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (
     Vec<HirFunction>,
+    Vec<HirForeignFunction>,
     Vec<HirMethod>,
     Vec<pop_hir::HirBuildError>,
 ) {
@@ -730,6 +732,25 @@ fn build_runtime_hir(
         .collect();
     let interfaces: Vec<_> = resolver.interface_definitions().cloned().collect();
     let mut hir_build_errors = Vec::new();
+    let mut hir_foreign_functions = Vec::new();
+    for function in functions
+        .iter()
+        .filter(|function| function.foreign.is_some())
+    {
+        let foreign = function
+            .foreign
+            .as_ref()
+            .expect("filtered foreign function");
+        match build_hir_foreign_function(
+            HirFunctionContext::new(function.module, bubble, function.visibility),
+            &function.signature,
+            foreign,
+            &function.attributes,
+        ) {
+            Ok(function) => hir_foreign_functions.push(function),
+            Err(errors) => hir_build_errors.extend(errors),
+        }
+    }
     let mut typed_functions = Vec::new();
     for (index, function) in functions.iter().enumerate() {
         if function.is_compile_time || function.foreign.is_some() {
@@ -874,7 +895,12 @@ fn build_runtime_hir(
         }
     }
     hir_methods.sort_by_key(HirMethod::method);
-    (hir_functions, hir_methods, hir_build_errors)
+    (
+        hir_functions,
+        hir_foreign_functions,
+        hir_methods,
+        hir_build_errors,
+    )
 }
 
 fn define_declarations(

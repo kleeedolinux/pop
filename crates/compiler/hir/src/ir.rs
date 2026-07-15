@@ -35,6 +35,7 @@ pub struct HirBubble {
     pub(crate) dependencies: Vec<BubbleId>,
     pub(crate) declarations: Vec<HirDeclaration>,
     pub(crate) functions: Vec<HirFunction>,
+    pub(crate) foreign_functions: Vec<HirForeignFunction>,
     pub(crate) methods: Vec<HirMethod>,
     pub(crate) public_symbols: Vec<SymbolId>,
     pub(crate) function_references: Vec<HirFunctionReference>,
@@ -157,10 +158,45 @@ impl HirBubble {
             dependencies,
             declarations,
             functions,
+            foreign_functions: Vec::new(),
             methods,
             public_symbols,
             function_references: Vec::new(),
         })
+    }
+
+    /// Attaches verified bodyless foreign declarations to this Bubble.
+    ///
+    /// # Errors
+    ///
+    /// Rejects wrong Bubble ownership or a symbol duplicated by another local
+    /// function.
+    pub fn with_foreign_functions(
+        mut self,
+        mut functions: Vec<HirForeignFunction>,
+    ) -> Result<Self, HirBubbleError> {
+        functions.sort_by_key(HirForeignFunction::symbol);
+        let mut symbols: std::collections::BTreeSet<_> =
+            self.functions.iter().map(HirFunction::symbol).collect();
+        for function in &functions {
+            if function.bubble() != self.bubble {
+                return Err(HirBubbleError::WrongOwner {
+                    symbol: function.symbol(),
+                    expected: self.bubble,
+                    found: function.bubble(),
+                });
+            }
+            if !symbols.insert(function.symbol()) {
+                return Err(HirBubbleError::DuplicateFunction(function.symbol()));
+            }
+            if function.visibility() == Visibility::Public {
+                self.public_symbols.push(function.symbol());
+            }
+        }
+        self.public_symbols.sort_unstable();
+        self.public_symbols.dedup();
+        self.foreign_functions = functions;
+        Ok(self)
     }
 
     /// Attaches verified direct-dependency function signatures.
@@ -216,6 +252,11 @@ impl HirBubble {
     }
 
     #[must_use]
+    pub fn foreign_functions(&self) -> &[HirForeignFunction] {
+        &self.foreign_functions
+    }
+
+    #[must_use]
     pub fn methods(&self) -> &[HirMethod] {
         &self.methods
     }
@@ -264,6 +305,9 @@ impl HirBubble {
         }
         for function in &self.functions {
             dump_function(&mut output, function, arena);
+        }
+        for function in &self.foreign_functions {
+            crate::text::dump_foreign_function(&mut output, function, arena);
         }
         for method in &self.methods {
             dump_method(&mut output, method, arena);
@@ -1424,6 +1468,77 @@ pub struct HirFunction {
     pub(crate) body: Vec<HirStatement>,
     pub(crate) attributes: Vec<HirAttribute>,
     pub(crate) effects: pop_types::EffectSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirForeignFunction {
+    pub(crate) function: FunctionId,
+    pub(crate) symbol: SymbolId,
+    pub(crate) module: ModuleId,
+    pub(crate) bubble: BubbleId,
+    pub(crate) visibility: Visibility,
+    pub(crate) name: String,
+    pub(crate) parameters: Vec<HirParameter>,
+    pub(crate) results: Vec<TypeId>,
+    pub(crate) attributes: Vec<HirAttribute>,
+    pub(crate) declaration: pop_types::ForeignFunctionDeclaration,
+}
+
+impl HirForeignFunction {
+    #[must_use]
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub const fn bubble(&self) -> BubbleId {
+        self.bubble
+    }
+
+    #[must_use]
+    pub const fn visibility(&self) -> Visibility {
+        self.visibility
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[HirParameter] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub fn attributes(&self) -> &[HirAttribute] {
+        &self.attributes
+    }
+
+    #[must_use]
+    pub const fn declaration(&self) -> &pop_types::ForeignFunctionDeclaration {
+        &self.declaration
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> pop_types::EffectSummary {
+        self.declaration.effects()
+    }
 }
 
 impl HirFunction {

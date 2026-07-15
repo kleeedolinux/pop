@@ -324,6 +324,7 @@ pub struct ForeignFunctionDeclaration {
     external_symbol: String,
     abi: ForeignAbi,
     link_aliases: Vec<String>,
+    nonblocking: bool,
     effects: EffectSummary,
     span: SourceSpan,
 }
@@ -340,6 +341,19 @@ impl ForeignFunctionDeclaration {
     ) -> Self {
         link_aliases.sort();
         link_aliases.dedup();
+        let effects = Self::expected_effects(abi, nonblocking);
+        Self {
+            symbol,
+            external_symbol: external_symbol.into(),
+            abi,
+            link_aliases,
+            nonblocking,
+            effects,
+            span,
+        }
+    }
+
+    const fn expected_effects(abi: ForeignAbi, nonblocking: bool) -> EffectSummary {
         let mut effects = EffectSummary::empty()
             .with(Effect::ForeignFunction)
             .with(Effect::UnsafeMemory)
@@ -347,17 +361,10 @@ impl ForeignFunctionDeclaration {
         if !nonblocking {
             effects = effects.with(Effect::Blocks);
         }
-        if abi == ForeignAbi::CUnwind {
+        if let ForeignAbi::CUnwind = abi {
             effects = effects.with(Effect::MayUnwind);
         }
-        Self {
-            symbol,
-            external_symbol: external_symbol.into(),
-            abi,
-            link_aliases,
-            effects,
-            span,
-        }
+        effects
     }
 
     #[must_use]
@@ -378,6 +385,16 @@ impl ForeignFunctionDeclaration {
     #[must_use]
     pub fn link_aliases(&self) -> &[String] {
         &self.link_aliases
+    }
+
+    #[must_use]
+    pub const fn is_nonblocking(&self) -> bool {
+        self.nonblocking
+    }
+
+    #[must_use]
+    pub fn has_valid_effects(&self) -> bool {
+        self.effects == Self::expected_effects(self.abi, self.nonblocking)
     }
 
     #[must_use]

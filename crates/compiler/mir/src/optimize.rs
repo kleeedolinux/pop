@@ -112,10 +112,16 @@ fn elide_unpublished_owner_barriers(function: &mut super::MirFunction) {
 
 fn refresh_transitive_call_effects(bubble: &mut MirBubble) {
     let mut function_effects = bubble
-        .functions
+        .foreign_functions
         .iter()
-        .map(|function| (function.symbol, super::MirEffectSummary::empty()))
+        .map(|function| (function.symbol(), function.effects()))
         .collect::<BTreeMap<SymbolId, _>>();
+    function_effects.extend(
+        bubble
+            .functions
+            .iter()
+            .map(|function| (function.symbol, super::MirEffectSummary::empty())),
+    );
     let mut method_effects = bubble
         .methods
         .iter()

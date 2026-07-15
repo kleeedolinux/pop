@@ -140,6 +140,52 @@ pub(crate) fn emit_reference_metadata(
             specialization_capsule: specialization_capsule(hir, function, arena),
         });
     }
+    for function in hir
+        .foreign_functions()
+        .iter()
+        .filter(|function| function.visibility() == pop_resolve::Visibility::Public)
+    {
+        let identity = SymbolIdentity::new(hir.bubble(), function.symbol());
+        let declaration = index
+            .declaration(function.symbol())
+            .ok_or(ReferenceMetadataError::MissingDeclaration(identity))?;
+        let parameters = function
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                reference_type_with_parameters(
+                    identity,
+                    parameter.type_id(),
+                    arena,
+                    &BTreeMap::new(),
+                )
+                .map(|parameter_type| ReferenceFunctionParameter {
+                    name: parameter.name().to_owned(),
+                    parameter_type,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let results = function
+            .results()
+            .iter()
+            .map(|type_id| {
+                reference_type_with_parameters(identity, *type_id, arena, &BTreeMap::new())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        functions.push(ReferenceFunction {
+            identity,
+            module: function.module(),
+            namespace: declaration.namespace().to_owned(),
+            name: function.name().to_owned(),
+            is_async: false,
+            type_parameters: Vec::new(),
+            parameters,
+            results,
+            effects: function.effects(),
+            span: function.declaration().span(),
+            specialization_capsule: None,
+        });
+    }
     functions.sort_by_key(ReferenceFunction::identity);
     Ok(ReferenceMetadata {
         bubble: hir.bubble(),

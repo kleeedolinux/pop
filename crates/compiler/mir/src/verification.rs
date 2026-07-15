@@ -30,7 +30,7 @@ pub fn verify_mir_bubble(
     bubble: &MirBubble,
     arena: &TypeArena,
 ) -> Result<(), Vec<MirVerificationError>> {
-    let signatures: BTreeMap<_, _> = bubble
+    let mut signatures: BTreeMap<_, _> = bubble
         .functions
         .iter()
         .map(|function| {
@@ -44,6 +44,36 @@ pub fn verify_mir_bubble(
             )
         })
         .collect();
+    let mut errors = Vec::new();
+    for function in &bubble.foreign_functions {
+        let declaration = function.declaration();
+        let valid = declaration.symbol() == function.symbol()
+            && declaration.has_valid_effects()
+            && function.effects() == lower_effect_summary(declaration.effects())
+            && function
+                .parameters()
+                .iter()
+                .chain(function.results())
+                .all(|type_id| arena.is_valid_hir_type(*type_id));
+        if !valid {
+            errors.push(MirVerificationError::InvalidForeignFunction(
+                function.symbol(),
+            ));
+        }
+        if signatures
+            .insert(
+                function.symbol(),
+                (
+                    function.parameters().to_vec(),
+                    function.results().to_vec(),
+                    function.effects(),
+                ),
+            )
+            .is_some()
+        {
+            errors.push(MirVerificationError::DuplicateFunction(function.symbol()));
+        }
+    }
     let method_signatures: BTreeMap<_, _> = bubble
         .methods
         .iter()
@@ -64,7 +94,6 @@ pub fn verify_mir_bubble(
         .filter(|function| function.is_async())
         .map(MirFunction::symbol)
         .collect();
-    let mut errors = Vec::new();
     let mut reference_signatures = BTreeMap::new();
     for reference in &bubble.function_references {
         let signature = (

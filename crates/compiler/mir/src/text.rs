@@ -12,15 +12,17 @@ use pop_runtime_interface::{
     ArrayElementMap, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot, SafePointId,
     StackMap, Trap, TrapKind, UnwindReason,
 };
-use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
+use pop_types::{
+    FloatKind, FloatValue, ForeignAbi, ForeignFunctionDeclaration, IntegerKind, IntegerValue,
+};
 
 use super::{
     BarrierElisionProof, MirBlock, MirBlockArgument, MirBubble, MirBuiltinInterfaceImplementation,
     MirBuiltinInterfaceMethodImplementation, MirCancellationMode, MirCapture, MirCaptureMode,
     MirClassDeclaration, MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration,
     MirDeclarationKind, MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
-    MirErrorDeclaration, MirErrorSwitchArm, MirField, MirFrameSlot, MirFunction,
-    MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
+    MirErrorDeclaration, MirErrorSwitchArm, MirField, MirForeignFunction, MirFrameSlot,
+    MirFunction, MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
     MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirLiveFrame,
     MirMethod, MirNestedFunction, MirRecordDeclaration, MirSuspendOperation, MirTaskDispatch,
     MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
@@ -76,6 +78,7 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
     let mut position = 2;
     let mut declarations = Vec::new();
     let mut functions = Vec::new();
+    let mut foreign_functions = Vec::new();
     let mut methods = Vec::new();
     let mut nested_functions = Vec::new();
     let mut function_references = Vec::new();
@@ -87,6 +90,9 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
             position += 1;
         } else if lines[position].starts_with("type.") {
             declarations.push(parse_declaration(lines[position], position + 1)?);
+            position += 1;
+        } else if lines[position].starts_with("foreign ") {
+            foreign_functions.push(parse_foreign_function(lines[position], position + 1)?);
             position += 1;
         } else if lines[position].starts_with("method ") {
             let components: Vec<_> = lines[position].split_whitespace().collect();
@@ -120,9 +126,74 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
         dependencies,
         declarations,
         functions,
+        foreign_functions,
         methods,
         nested_functions,
         function_references,
+    })
+}
+
+fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunction, MirParseError> {
+    let parts: Vec<_> = line.split_whitespace().collect();
+    let [
+        "foreign",
+        symbol,
+        function,
+        parameters,
+        results,
+        external_symbol,
+        abi,
+        links,
+        effects,
+    ] = parts.as_slice()
+    else {
+        return Err(error(number, "malformed foreign function"));
+    };
+    let symbol = SymbolId::from_raw(parse_prefixed(symbol, 's', number)?);
+    let function = FunctionId::from_raw(parse_prefixed(function, 'f', number)?);
+    let external_symbol = external_symbol
+        .strip_prefix("symbol(")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| error(number, "foreign external symbol"))?;
+    let abi = abi
+        .strip_prefix("abi(")
+        .and_then(|value| value.strip_suffix(')'))
+        .and_then(|value| match value {
+            "C" => Some(ForeignAbi::C),
+            "System" => Some(ForeignAbi::System),
+            "CUnwind" => Some(ForeignAbi::CUnwind),
+            _ => None,
+        })
+        .ok_or_else(|| error(number, "foreign ABI"))?;
+    let links = links
+        .strip_prefix("links(")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| error(number, "foreign link aliases"))?;
+    let links = if links == "-" {
+        Vec::new()
+    } else {
+        links.split(';').map(str::to_owned).collect()
+    };
+    let effects = effects
+        .strip_prefix("effects[")
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| error(number, "foreign effects"))?;
+    let effects = parse_effects(effects, number)?;
+    let declaration = ForeignFunctionDeclaration::new(
+        symbol,
+        external_symbol,
+        abi,
+        links,
+        !effects.contains(MirEffect::Blocks),
+        SourceSpan::new(FileId::from_raw(0), TextRange::empty(TextSize::from_u32(0))),
+    );
+    Ok(MirForeignFunction {
+        function,
+        symbol,
+        parameters: parse_wrapped_types(parameters, "params(", number)?,
+        results: parse_wrapped_types(results, "results(", number)?,
+        effects,
+        declaration,
     })
 }
 

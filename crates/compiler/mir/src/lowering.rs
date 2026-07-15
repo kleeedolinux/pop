@@ -72,6 +72,22 @@ pub fn lower_hir_bubble(
         })
         .filter_map(lower_declaration)
         .collect();
+    let foreign_functions: Vec<_> = hir
+        .foreign_functions()
+        .iter()
+        .map(|function| MirForeignFunction {
+            function: function.function(),
+            symbol: function.symbol(),
+            parameters: function
+                .parameters()
+                .iter()
+                .map(pop_hir::HirParameter::type_id)
+                .collect(),
+            results: function.results().to_vec(),
+            effects: lower_effect_summary(function.effects()),
+            declaration: function.declaration().clone(),
+        })
+        .collect();
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let empty_function_effects = BTreeMap::new();
@@ -108,11 +124,20 @@ pub fn lower_hir_bubble(
             .0,
         })
         .collect();
-    recompute_callable_effects(&mut provisional_functions, &mut provisional_methods);
-    let function_effects: BTreeMap<_, _> = provisional_functions
+    recompute_callable_effects(
+        &mut provisional_functions,
+        &mut provisional_methods,
+        &BTreeMap::new(),
+    );
+    let mut function_effects: BTreeMap<_, _> = provisional_functions
         .iter()
         .map(|function| (function.symbol(), function.effects()))
         .collect();
+    function_effects.extend(
+        foreign_functions
+            .iter()
+            .map(|function| (function.symbol(), function.effects())),
+    );
     let method_effects: BTreeMap<_, _> = provisional_methods
         .iter()
         .map(|method| (method.method(), method.function().effects()))
@@ -162,6 +187,7 @@ pub fn lower_hir_bubble(
         dependencies: hir.dependencies().to_vec(),
         declarations,
         functions,
+        foreign_functions,
         methods,
         nested_functions,
         function_references,
@@ -4775,14 +4801,25 @@ fn conservative_indirect_effects() -> MirEffectSummary {
 }
 
 fn recompute_effects(bubble: &mut MirBubble) {
-    recompute_callable_effects(&mut bubble.functions, &mut bubble.methods);
+    let foreign_effects = bubble
+        .foreign_functions
+        .iter()
+        .map(|function| (function.symbol(), function.effects()))
+        .collect();
+    recompute_callable_effects(&mut bubble.functions, &mut bubble.methods, &foreign_effects);
 }
 
-fn recompute_callable_effects(functions: &mut [MirFunction], methods: &mut [MirMethod]) {
-    let mut function_effects: BTreeMap<_, _> = functions
-        .iter()
-        .map(|function| (function.symbol, function.effects))
-        .collect();
+fn recompute_callable_effects(
+    functions: &mut [MirFunction],
+    methods: &mut [MirMethod],
+    foreign_effects: &BTreeMap<SymbolId, MirEffectSummary>,
+) {
+    let mut function_effects = foreign_effects.clone();
+    function_effects.extend(
+        functions
+            .iter()
+            .map(|function| (function.symbol, function.effects)),
+    );
     let mut method_effects: BTreeMap<_, _> = methods
         .iter()
         .map(|method| (method.method, method.function.effects))

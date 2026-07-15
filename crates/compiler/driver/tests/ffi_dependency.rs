@@ -77,6 +77,9 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
              @Ffi.Foreign(\"native_poll\")\n\
              @Ffi.Nonblocking\n\
              internal function poll(): Ffi.C.Int\n\
+             end\n\
+             internal function pollWrapper(): Ffi.C.Int\n\
+                 return poll()\n\
              end\n",
         )
         .expect("source"),
@@ -112,6 +115,43 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
     assert_eq!(poll.abi(), ForeignAbi::C);
     assert_eq!(poll.link_aliases(), ["SystemC"]);
     assert!(!poll.effects().contains(Effect::Blocks));
+
+    let hir = result.hir().expect("verified HIR");
+    assert_eq!(hir.foreign_functions().len(), 2);
+    assert!(
+        hir.functions()
+            .iter()
+            .any(|function| function.name() == "pollWrapper")
+    );
+    assert!(hir.verify(result.types()).is_ok());
+    let dump = hir.dump(result.types());
+    assert!(dump.contains("foreign s0"));
+    assert!(dump.contains("symbol=\"native_close\""));
+
+    let mir = pop_mir::lower_hir_bubble(hir, result.types()).expect("verified canonical MIR");
+    assert_eq!(mir.foreign_functions().len(), 2);
+    let mir_close = &mir.foreign_functions()[0];
+    assert!(
+        mir_close
+            .effects()
+            .contains(pop_mir::MirEffect::ForeignFunction)
+    );
+    assert!(
+        mir_close
+            .effects()
+            .contains(pop_mir::MirEffect::UnsafeMemory)
+    );
+    assert!(
+        mir_close
+            .effects()
+            .contains(pop_mir::MirEffect::GcSafePoint)
+    );
+    assert!(mir_close.effects().contains(pop_mir::MirEffect::Blocks));
+    let mir_dump = mir.dump();
+    assert!(mir_dump.contains("foreign s0"));
+    let reparsed = pop_mir::parse_mir_dump(&mir_dump).expect("foreign MIR text round trip");
+    assert_eq!(reparsed.dump(), mir_dump);
+    pop_mir::verify_mir_bubble(&reparsed, result.types()).expect("reparsed foreign MIR verifies");
 }
 
 #[test]

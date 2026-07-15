@@ -22,6 +22,10 @@ use crate::ir::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirVerificationError {
+    InvalidForeignDeclaration {
+        function: SymbolId,
+        span: SourceSpan,
+    },
     InvalidGenericBounds {
         function: SymbolId,
         span: SourceSpan,
@@ -398,6 +402,20 @@ impl HirCallableSignature {
             results: function.results().to_vec(),
         }
     }
+
+    fn from_foreign(function: &HirForeignFunction) -> Self {
+        Self {
+            is_async: false,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            parameters: function
+                .parameters()
+                .iter()
+                .map(HirParameter::type_id)
+                .collect(),
+            results: function.results().to_vec(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -504,6 +522,37 @@ impl HirSchema {
             schema.functions.insert(
                 function.symbol(),
                 HirCallableSignature::from_function(function),
+            );
+        }
+        for function in bubble.foreign_functions() {
+            if !symbols.insert(function.symbol()) {
+                errors.push(HirVerificationError::DuplicateSymbol(function.symbol()));
+            }
+            let declaration = function.declaration();
+            let valid_identity = declaration.symbol() == function.symbol()
+                && !declaration.external_symbol().is_empty()
+                && !declaration.external_symbol().chars().any(char::is_control)
+                && declaration.has_valid_effects();
+            if !valid_identity {
+                errors.push(HirVerificationError::InvalidForeignDeclaration {
+                    function: function.symbol(),
+                    span: declaration.span(),
+                });
+            }
+            for parameter in function.parameters() {
+                verify_schema_type(arena, parameter.type_id(), parameter.span(), errors);
+            }
+            for result in function.results() {
+                verify_schema_type(arena, *result, declaration.span(), errors);
+            }
+            for attribute in function.attributes() {
+                for argument in attribute.arguments() {
+                    verify_schema_type(arena, argument.value_type(), argument.origin(), errors);
+                }
+            }
+            schema.functions.insert(
+                function.symbol(),
+                HirCallableSignature::from_foreign(function),
             );
         }
         for reference in bubble.function_references() {

@@ -273,6 +273,38 @@ pub(crate) fn dump_function(output: &mut String, function: &MirFunction) {
     dump_blocks(output, &function.blocks);
 }
 
+pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFunction) {
+    let declaration = function.declaration();
+    let _ = write!(
+        output,
+        "foreign s{} f{} params(",
+        function.symbol().raw(),
+        function.function().raw()
+    );
+    dump_type_ids(output, function.parameters());
+    output.push_str(") results(");
+    dump_type_ids(output, function.results());
+    let _ = write!(
+        output,
+        ") symbol({}) abi({:?}) links(",
+        declaration.external_symbol(),
+        declaration.abi()
+    );
+    if declaration.link_aliases().is_empty() {
+        output.push('-');
+    } else {
+        for (index, alias) in declaration.link_aliases().iter().enumerate() {
+            if index != 0 {
+                output.push(';');
+            }
+            output.push_str(alias);
+        }
+    }
+    output.push_str(") effects[");
+    dump_effects(output, function.effects());
+    output.push_str("]\n");
+}
+
 pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFunctionReference) {
     if reference.is_async {
         output.push_str("async ");

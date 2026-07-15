@@ -13,10 +13,11 @@ use pop_foundation::{
 use pop_resolve::Visibility;
 use pop_types::{
     CaptureMode, CaptureSource, ClassDefinition, ClassInterfaceImplementation,
-    ClassMethodDefinition, InterfaceDefinition, ResolvedAttribute, ResolvedFunctionSignature,
-    TypeArena, TypedAssignmentTarget, TypedBody, TypedCall, TypedCallDispatch, TypedCapture,
-    TypedClosure, TypedExpression, TypedExpressionKind, TypedFieldValue, TypedIterationSource,
-    TypedMatchArm, TypedMatchBinding, TypedStatement, TypedStatementKind, TypedTableEntry,
+    ClassMethodDefinition, ForeignFunctionDeclaration, InterfaceDefinition, ResolvedAttribute,
+    ResolvedFunctionSignature, TypeArena, TypedAssignmentTarget, TypedBody, TypedCall,
+    TypedCallDispatch, TypedCapture, TypedClosure, TypedExpression, TypedExpressionKind,
+    TypedFieldValue, TypedIterationSource, TypedMatchArm, TypedMatchBinding, TypedStatement,
+    TypedStatementKind, TypedTableEntry,
 };
 
 use crate::ir::*;
@@ -64,6 +65,63 @@ impl HirFunctionContext {
             visibility,
         }
     }
+}
+
+/// Constructs one bodyless backend-neutral HIR foreign declaration.
+///
+/// # Errors
+///
+/// Returns a deterministic error when the signature lacks canonical types or
+/// disagrees with the typed foreign declaration identity.
+pub fn build_hir_foreign_function(
+    context: HirFunctionContext,
+    signature: &ResolvedFunctionSignature,
+    declaration: &ForeignFunctionDeclaration,
+    attributes: &[ResolvedAttribute],
+) -> Result<HirForeignFunction, Vec<HirBuildError>> {
+    if signature.symbol() != declaration.symbol()
+        || signature.is_async()
+        || !signature.type_parameters().is_empty()
+    {
+        return Err(vec![HirVerificationError::InvalidGenericBounds {
+            function: signature.symbol(),
+            span: declaration.span(),
+        }]);
+    }
+    let parameters: Option<Vec<_>> = signature
+        .parameters()
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            Some(HirParameter {
+                binding: BindingId::from_raw(u32::try_from(index).ok()?),
+                parameter: ValueParameterId::from_raw(u32::try_from(index).ok()?),
+                name: parameter.name().to_owned(),
+                type_id: parameter.parameter_type().type_id()?,
+                span: parameter.span(),
+            })
+        })
+        .collect();
+    let results: Option<Vec<_>> = signature
+        .results()
+        .iter()
+        .map(pop_types::ResolvedType::type_id)
+        .collect();
+    let Some((parameters, results)) = parameters.zip(results) else {
+        return Err(vec![HirVerificationError::MissingCanonicalType]);
+    };
+    Ok(HirForeignFunction {
+        function: FunctionId::from_raw(signature.symbol().raw()),
+        symbol: signature.symbol(),
+        module: context.module,
+        bubble: context.bubble,
+        visibility: context.visibility,
+        name: signature.name().to_owned(),
+        parameters,
+        results,
+        attributes: attributes.iter().map(lower_attribute).collect(),
+        declaration: declaration.clone(),
+    })
 }
 
 /// Constructs HIR from an accepted typed body, then verifies the result.

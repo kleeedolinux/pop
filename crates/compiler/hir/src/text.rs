@@ -227,6 +227,53 @@ pub(crate) fn dump_function(output: &mut String, function: &HirFunction, arena: 
     dump_statements(output, &function.body, arena, 1);
 }
 
+pub(crate) fn dump_foreign_function(
+    output: &mut String,
+    function: &HirForeignFunction,
+    arena: &TypeArena,
+) {
+    let declaration = function.declaration();
+    let _ = write!(
+        output,
+        "foreign s{} f{} {} m{} b{} {}(",
+        function.symbol().raw(),
+        function.function().raw(),
+        visibility_text(function.visibility()),
+        function.module().raw(),
+        function.bubble().raw(),
+        function.name()
+    );
+    for (index, parameter) in function.parameters().iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        let _ = write!(
+            output,
+            "p{}:{}:{}",
+            parameter.parameter().raw(),
+            parameter.name(),
+            type_text(parameter.type_id(), arena)
+        );
+    }
+    output.push_str(") -> (");
+    for (index, result) in function.results().iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&type_text(*result, arena));
+    }
+    let _ = write!(
+        output,
+        ") symbol=\"{}\" abi={:?}",
+        declaration.external_symbol(),
+        declaration.abi()
+    );
+    for alias in declaration.link_aliases() {
+        let _ = write!(output, " link={alias}");
+    }
+    output.push('\n');
+}
+
 pub(crate) fn dump_method(output: &mut String, method: &HirMethod, arena: &TypeArena) {
     let _ = writeln!(
         output,

@@ -151,6 +151,7 @@ pub struct MirBubble {
     pub(crate) dependencies: Vec<BubbleId>,
     pub(crate) declarations: Vec<MirDeclaration>,
     pub(crate) functions: Vec<MirFunction>,
+    pub(crate) foreign_functions: Vec<MirForeignFunction>,
     pub(crate) methods: Vec<MirMethod>,
     pub(crate) nested_functions: Vec<MirNestedFunction>,
     pub(crate) function_references: Vec<MirFunctionReference>,
@@ -170,6 +171,11 @@ impl MirBubble {
     #[must_use]
     pub fn functions(&self) -> &[MirFunction] {
         &self.functions
+    }
+
+    #[must_use]
+    pub fn foreign_functions(&self) -> &[MirForeignFunction] {
+        &self.foreign_functions
     }
 
     #[must_use]
@@ -208,6 +214,9 @@ impl MirBubble {
         for function in &self.functions {
             dump_function(&mut output, function);
         }
+        for function in &self.foreign_functions {
+            crate::render::dump_foreign_function(&mut output, function);
+        }
         for method in &self.methods {
             let _ = writeln!(
                 output,
@@ -221,6 +230,48 @@ impl MirBubble {
             dump_nested_function(&mut output, function);
         }
         output
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirForeignFunction {
+    pub(crate) function: FunctionId,
+    pub(crate) symbol: SymbolId,
+    pub(crate) parameters: Vec<TypeId>,
+    pub(crate) results: Vec<TypeId>,
+    pub(crate) effects: MirEffectSummary,
+    pub(crate) declaration: pop_types::ForeignFunctionDeclaration,
+}
+
+impl MirForeignFunction {
+    #[must_use]
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> &[TypeId] {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub fn results(&self) -> &[TypeId] {
+        &self.results
+    }
+
+    #[must_use]
+    pub const fn effects(&self) -> MirEffectSummary {
+        self.effects
+    }
+
+    #[must_use]
+    pub const fn declaration(&self) -> &pop_types::ForeignFunctionDeclaration {
+        &self.declaration
     }
 }
 
@@ -1608,6 +1659,8 @@ impl MirUnionSwitchArm {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirVerificationError {
+    DuplicateFunction(SymbolId),
+    InvalidForeignFunction(SymbolId),
     GenericSpecializationBudgetExceeded {
         limit: usize,
     },
