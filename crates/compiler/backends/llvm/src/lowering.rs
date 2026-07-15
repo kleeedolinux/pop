@@ -743,7 +743,12 @@ fn foreign_builtin_physical_type(name: &str, target: &TargetSpec) -> Option<Fore
                 conversion: ForeignConversion::Direct,
             });
         }
-        "Ffi.Pointer" | "Ffi.OptionalPointer" | "Ffi.Function" | "Ffi.OptionalFunction" => {
+        "Ffi.Pointer"
+        | "Ffi.OptionalPointer"
+        | "Ffi.ReadOnlyPointer"
+        | "Ffi.OptionalReadOnlyPointer"
+        | "Ffi.Function"
+        | "Ffi.OptionalFunction" => {
             return Some(ForeignPhysicalType {
                 llvm: "ptr".to_owned(),
                 conversion: ForeignConversion::Pointer,

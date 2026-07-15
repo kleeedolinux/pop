@@ -165,6 +165,102 @@ fn llvm_lowers_foreign_calls_with_exact_abi_and_balanced_transitions() {
 }
 
 #[test]
+fn llvm_executes_read_only_and_optional_read_only_foreign_pointers() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nativePointers.pop",
+        "namespace Native.Pointer\n\
+         @Ffi.Foreign(\"native_data\")\n\
+         internal function data(): Ffi.ReadOnlyPointer<Byte>\n\
+         end\n\
+         @Ffi.Foreign(\"native_first\")\n\
+         internal function first(pointer: Ffi.ReadOnlyPointer<Byte>): UInt8\n\
+         end\n\
+         @Ffi.Foreign(\"native_optional_data\")\n\
+         internal function optionalData(): Ffi.OptionalReadOnlyPointer<Byte>\n\
+         end\n\
+         @Ffi.Foreign(\"native_optional_first\")\n\
+         internal function optionalFirst(pointer: Ffi.OptionalReadOnlyPointer<Byte>): UInt8\n\
+         end\n\
+         private function main(): Int\n\
+             return Int(first(data())) + Int(optionalFirst(optionalData()))\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("foreign pointer LLVM lowering");
+    let text = module.to_string();
+    assert!(text.contains("declare ptr @native_data()"), "{text}");
+    assert!(text.contains("declare i8 @native_first(ptr)"), "{text}");
+    assert!(
+        text.contains("declare ptr @native_optional_data()"),
+        "{text}"
+    );
+    assert!(
+        text.contains("declare i8 @native_optional_first(ptr)"),
+        "{text}"
+    );
+
+    let native = concat!(
+        "@native_pointer_bytes = private constant [1 x i8] c\"\\15\"\n",
+        "define ptr @native_data() {\n",
+        "entry:\n",
+        "  ret ptr @native_pointer_bytes\n",
+        "}\n",
+        "define i8 @native_first(ptr %pointer) {\n",
+        "entry:\n",
+        "  %value = load i8, ptr %pointer, align 1\n",
+        "  ret i8 %value\n",
+        "}\n",
+        "define ptr @native_optional_data() {\n",
+        "entry:\n",
+        "  ret ptr @native_pointer_bytes\n",
+        "}\n",
+        "define i8 @native_optional_first(ptr %pointer) {\n",
+        "entry:\n",
+        "  %value = load i8, ptr %pointer, align 1\n",
+        "  ret i8 %value\n",
+        "}\n",
+    )
+    .to_owned();
+    let result = link_llvm_modules_with_runtime_and_run(&[text, native], "read-only-pointers");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native read-only pointer call failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn relocating_foreign_transition_reloads_roots_before_managed_code_resumes() {
     let ffi = BubbleId::from_raw(9);
     let source = SourceFile::new(

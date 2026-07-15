@@ -336,7 +336,7 @@ impl BootstrapTypeEntry {
 /// never managed-reference tokens.
 #[must_use]
 pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
-    matches!(id.raw(), 200..=204 | 210..=222)
+    matches!(id.raw(), 200..=206 | 210..=222)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -856,6 +856,9 @@ fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaE
         (202, "Ffi.Function", 1),
         (203, "Ffi.OptionalFunction", 1),
         (204, "Ffi.Handle", 1),
+        (205, "Ffi.ReadOnlyPointer", 1),
+        (206, "Ffi.OptionalReadOnlyPointer", 1),
+        (207, "Ffi.Buffer", 1),
         (210, "Ffi.C.Char", 0),
         (211, "Ffi.C.SignedChar", 0),
         (212, "Ffi.C.UnsignedChar", 0),

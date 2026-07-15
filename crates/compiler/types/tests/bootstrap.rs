@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
-use pop_foundation::AttributeId;
+use pop_foundation::{AttributeId, BuiltinTypeId};
 use pop_types::{
     AttributeIdentity, BootstrapTypeRole, CompilerAttributeRole, CompilerAttributeTarget,
-    PrimitiveType, embedded_bootstrap_schema,
+    PrimitiveType, embedded_bootstrap_schema, is_ffi_abi_builtin_type,
 };
 
 #[test]
@@ -141,6 +141,9 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
         (202, "Ffi.Function", 1),
         (203, "Ffi.OptionalFunction", 1),
         (204, "Ffi.Handle", 1),
+        (205, "Ffi.ReadOnlyPointer", 1),
+        (206, "Ffi.OptionalReadOnlyPointer", 1),
+        (207, "Ffi.Buffer", 1),
         (210, "Ffi.C.Char", 0),
         (211, "Ffi.C.SignedChar", 0),
         (212, "Ffi.C.UnsignedChar", 0),
@@ -173,11 +176,17 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
         "Function",
         "OptionalFunction",
         "Handle",
+        "ReadOnlyPointer",
+        "OptionalReadOnlyPointer",
+        "Buffer",
         "Char",
         "Size",
     ] {
         assert!(schema.type_by_source_name(unqualified).is_none());
     }
+    assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(205)));
+    assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(206)));
+    assert!(!is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(207)));
 }
 
 #[test]

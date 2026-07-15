@@ -284,7 +284,10 @@ fn valid_foreign_abi_type(type_id: TypeId, types: &TypeArena, bootstrap: &Bootst
                 return false;
             };
             match entry.source_name() {
-                "Ffi.Pointer" | "Ffi.OptionalPointer" => {
+                "Ffi.Pointer"
+                | "Ffi.OptionalPointer"
+                | "Ffi.ReadOnlyPointer"
+                | "Ffi.OptionalReadOnlyPointer" => {
                     let [pointee] = arguments.as_slice() else {
                         return false;
                     };
@@ -323,7 +326,13 @@ fn valid_foreign_pointer_target(
         }) => bootstrap.type_by_id(*definition).is_some_and(|entry| {
             if entry.source_name().starts_with("Ffi.C.") {
                 arguments.is_empty()
-            } else if matches!(entry.source_name(), "Ffi.Pointer" | "Ffi.OptionalPointer") {
+            } else if matches!(
+                entry.source_name(),
+                "Ffi.Pointer"
+                    | "Ffi.OptionalPointer"
+                    | "Ffi.ReadOnlyPointer"
+                    | "Ffi.OptionalReadOnlyPointer"
+            ) {
                 let [pointee] = arguments.as_slice() else {
                     return false;
                 };

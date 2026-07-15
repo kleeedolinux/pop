@@ -107,7 +107,7 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
             "@Ffi.Link(\"SystemC\")\n\
              namespace Native\n\
              @Ffi.Foreign(\"native_close\", abi = \"System\")\n\
-             internal function close(pointer: Ffi.Pointer<Byte>)\n\
+             internal function close(pointer: Ffi.ReadOnlyPointer<Byte>)\n\
              end\n\
              @Ffi.Foreign(\"native_poll\")\n\
              @Ffi.Nonblocking\n\
@@ -230,6 +230,18 @@ fn front_end_rejects_invalid_foreign_declaration_contracts() {
             "managedStringPointer",
             "@Ffi.Foreign(\"native_string_pointer\")\n\
              internal function invalid(value: Ffi.Pointer<String>)\n\
+             end\n",
+        ),
+        (
+            "managedStringReadOnlyPointer",
+            "@Ffi.Foreign(\"native_string_pointer\")\n\
+             internal function invalid(value: Ffi.ReadOnlyPointer<String>)\n\
+             end\n",
+        ),
+        (
+            "ownedBuffer",
+            "@Ffi.Foreign(\"native_buffer\")\n\
+             internal function invalid(value: Ffi.Buffer<Byte>)\n\
              end\n",
         ),
         (
