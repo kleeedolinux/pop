@@ -169,6 +169,19 @@ existing `pop_rt_retain_root` and `pop_rt_release_root` entries. PLRI names the
 backend-neutral operation `resolveRoot`; MIR carries the exact static managed
 result type and never treats the returned token as a pointer.
 
+Canonical MIR represents the public operations as typed `ffiHandleOpen`,
+`ffiHandleGet`, and `ffiHandleClose` instructions. `ffiHandleOpen` accepts the
+exact managed `T` and produces `Ffi.Handle<T>`; `ffiHandleGet` accepts that
+handle type and produces the same exact `T`; `ffiHandleClose` accepts the
+handle and produces no value. The verifier rejects scalar payloads, mismatched
+type arguments, non-handle operands, and non-managed `get` results. These
+public tokens are ordinary statically typed values that may cross calls and
+foreign boundaries, so they are distinct from MIR's compiler-private
+`retainRoot`/`releaseRoot` temporary tokens and their lexical balance proof.
+Every public handle instruction carries `Roots` and `MayTrap`; each backend
+must check the nonzero/status result of its exact PLRI operation before
+continuing.
+
 ### Fixed-layout record marshalling
 
 An `Ffi.C.Layout` record remains an ordinary Pop record, not an exposed object
@@ -253,6 +266,9 @@ the finalization/resurrection obligations excluded by the GC architecture.
 - forced relocation while bytes are pinned and after unpin, with no object
   header exposed;
 - handle relocation, forged/zero/stale/wrong-generation/double-close tests;
+- typed handle open/get/close MIR success plus scalar payload, mismatched type,
+  non-handle operand, ignored runtime failure, and private-root conflation
+  negatives;
 - exact layout scalar/nested/pointer facts, canonical fingerprints, generated
   metadata mismatch, by-value call/return, and buffer marshalling tests;
 - MIR-interpreter capability behavior and LLVM native fixtures using the same

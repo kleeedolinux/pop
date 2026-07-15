@@ -154,6 +154,8 @@ Errors:        errorMake, errorSwitch
 Cleanup:       cleanup{CleanupScopeId, exitReason}, resumeCurrentUnwind
 Runtime:       gcSafePoint{stackMap}, writeBarrier,
                pin{borrowRegion, payloadKind}, unpin{borrowRegion},
+               ffiHandleOpen{managedType}, ffiHandleGet{managedType},
+               ffiHandleClose{managedType},
                ffiBufferOpen, ffiBufferRead, ffiBufferWrite,
                ffiBufferBorrow{borrowRegion}, ffiBufferClose, suspend, resume
 Foreign:       enterForeign, callForeign{foreignId, abi, effects}, leaveForeign
@@ -174,6 +176,14 @@ permitted pointer uses, forbids suspension/escape, and is released on every
 exit. Fixed-layout records carry a backend-neutral marshalling plan rather than
 an object-layout reinterpretation. Physical calling conventions, symbols, and
 object formats remain backend details selected from this contract.
+
+Public `Ffi.Handle<T>` operations remain typed ordinary MIR values:
+`ffiHandleOpen` maps exact managed `T` to `Ffi.Handle<T>`, `ffiHandleGet` maps
+that exact handle back to `T`, and `ffiHandleClose` consumes the runtime
+generation. They lower to PLRI retain-root, resolve-root, and release-root
+operations with mandatory failure checks. They do not reuse the opaque,
+lexically balanced `retainRoot`/`releaseRoot` temporary tokens used internally
+by compiler-generated runtime transitions.
 
 Optional comparison narrowing, pattern binding, lazy `??`, and postfix `?`
 remain typed HIR concepts until canonical MIR lowers them to explicit branches
