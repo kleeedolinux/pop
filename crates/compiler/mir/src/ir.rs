@@ -1255,9 +1255,6 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
-    Await {
-        task: ValueId,
-    },
     RecordMake {
         record: SymbolId,
         fields: Vec<(FieldId, ValueId)>,

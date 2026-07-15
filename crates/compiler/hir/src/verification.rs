@@ -1829,7 +1829,7 @@ impl Verifier<'_> {
                     statement.span(),
                     &visible,
                 ),
-                HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
+                HirStatementKind::Defer { body } => {
                     if self.cleanup_depth != 0 {
                         self.errors
                             .push(HirVerificationError::InvalidCleanupControl {
@@ -2474,32 +2474,6 @@ impl Verifier<'_> {
                         .push(HirVerificationError::InvalidResultPropagation {
                             span: expression.span(),
                         });
-                }
-            }
-            HirExpressionKind::Await { task } => {
-                self.verify_expression(task, visible);
-                let Some(task_definition) = pop_types::embedded_bootstrap_schema()
-                    .ok()
-                    .and_then(|schema| schema.type_by_source_name("Task").copied())
-                    .map(pop_types::BootstrapTypeEntry::id)
-                else {
-                    self.errors.push(HirVerificationError::InvalidType {
-                        type_id: task.type_id(),
-                        span: expression.span(),
-                    });
-                    return;
-                };
-                let valid = matches!(
-                    self.arena.get(task.type_id()),
-                    Some(SemanticType::Builtin { definition, arguments })
-                        if *definition == task_definition
-                            && arguments.as_slice() == [expression.type_id()]
-                );
-                if !valid {
-                    self.errors.push(HirVerificationError::InvalidType {
-                        type_id: task.type_id(),
-                        span: expression.span(),
-                    });
                 }
             }
             HirExpressionKind::OptionalNarrow { optional } => {
@@ -4508,9 +4482,7 @@ fn collect_local_binding_map(
                     collect_local_binding_map(&arm.body, local_bindings);
                 }
             }
-            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
-                collect_local_binding_map(body, local_bindings);
-            }
+            HirStatementKind::Defer { body } => collect_local_binding_map(body, local_bindings),
             HirStatementKind::LocalSet { .. }
             | HirStatementKind::ParameterSet { .. }
             | HirStatementKind::CaptureSet { .. }
@@ -4717,15 +4689,13 @@ fn collect_written_bindings(
                     );
                 }
             }
-            HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
-                collect_written_bindings(
-                    body,
-                    parameter_bindings,
-                    capture_bindings,
-                    local_bindings,
-                    written,
-                )
-            }
+            HirStatementKind::Defer { body } => collect_written_bindings(
+                body,
+                parameter_bindings,
+                capture_bindings,
+                local_bindings,
+                written,
+            ),
             HirStatementKind::FieldSet { base, value, .. } => {
                 collect_cell_captures(base, written);
                 collect_cell_captures(value, written);
@@ -4909,9 +4879,6 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         }
         HirExpressionKind::ResultPropagate { result, .. } => {
             collect_cell_captures(result, written);
-        }
-        HirExpressionKind::Await { task } => {
-            collect_cell_captures(task, written);
         }
         HirExpressionKind::Conditional {
             condition,

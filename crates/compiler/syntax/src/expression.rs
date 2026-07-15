@@ -17,7 +17,6 @@ use crate::{Token, TokenKind, TypeSyntax};
 impl BodyParser<'_> {
     pub(crate) fn parse_capture_function(
         &mut self,
-        is_async: bool,
         start: TextSize,
         is_async: bool,
     ) -> Result<CaptureFunctionSyntax, FunctionBodyError> {

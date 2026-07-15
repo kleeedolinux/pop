@@ -302,7 +302,7 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
 }
 
 #[test]
-fn async_await_lowers_to_explicit_suspending_mir_instruction() {
+fn additional_await_lowers_to_explicit_suspend_state_machine() {
     let source = SourceFile::new(
         FileId::from_raw(0),
         "src/async.pop",
@@ -310,13 +310,7 @@ fn async_await_lowers_to_explicit_suspending_mir_instruction() {
          public async function load(): Int\n\
              return 42\n\
          end\n\
-         public async function close(): Int\n\
-             return 0\n\
-         end\n\
          public async function useTask(): Int\n\
-             async defer\n\
-                 local ignored = await close()\n\
-             end\n\
              local pending = load()\n\
              return await pending\n\
          end\n",
@@ -359,17 +353,20 @@ fn async_await_lowers_to_explicit_suspending_mir_instruction() {
         .iter()
         .find(|function| function.symbol() == use_task_symbol)
         .expect("useTask MIR");
-    let await_instruction = use_task
-        .blocks()
-        .iter()
-        .flat_map(|block| block.instructions())
-        .find(|instruction| matches!(instruction.kind(), MirInstructionKind::Await { .. }))
-        .expect("await MIR instruction");
     assert!(
-        await_instruction
-            .effects()
-            .contains(pop_mir::MirEffect::Suspends)
+        use_task
+            .blocks()
+            .iter()
+            .flat_map(|block| block.instructions())
+            .any(|instruction| matches!(instruction.kind(), MirInstructionKind::TaskCreate { .. }))
     );
+    assert!(use_task.blocks().iter().any(|block| matches!(
+        block.terminator(),
+        MirTerminator::Suspend {
+            operation: MirSuspendOperation::Task { .. },
+            ..
+        }
+    )));
 }
 
 #[test]

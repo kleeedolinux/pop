@@ -493,7 +493,7 @@ fn validate_instruction(
         | MirInstructionKind::Unpin { .. }
         | MirInstructionKind::WriteBarrier { .. }
         | MirInstructionKind::CallStandard { .. }
-        | MirInstructionKind::Await { .. }
+        | MirInstructionKind::TaskCreate { .. }
         | MirInstructionKind::CallBuiltinInterface { .. } => {
             BpfUnsupportedReason::BackendImplementation
         }

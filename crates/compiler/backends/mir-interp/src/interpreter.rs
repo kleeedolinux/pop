@@ -1385,7 +1385,6 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CallInterface { .. }
             | MirInstructionKind::CallBuiltinInterface { .. }
             | MirInstructionKind::CallIndirect { .. }
-            | MirInstructionKind::Await { .. }
             | MirInstructionKind::RecordMake { .. }
             | MirInstructionKind::ClassMake { .. }
             | MirInstructionKind::RecordUpdate { .. }
@@ -1624,7 +1623,6 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         values: &BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<Option<RuntimeValue>, ExecutionError> {
         let result = match instruction.kind() {
-            MirInstructionKind::Await { task } => Ok(value(values, *task)?.clone()),
             MirInstructionKind::CallDirect {
                 function,
                 arguments,

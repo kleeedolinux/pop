@@ -150,7 +150,6 @@ pub struct ResolvedFunctionSignature {
     parameters: Vec<ResolvedFunctionParameter>,
     results: Vec<ResolvedType>,
     effects: crate::EffectSummary,
-    is_async: bool,
 }
 
 impl ResolvedFunctionSignature {
@@ -160,7 +159,7 @@ impl ResolvedFunctionSignature {
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
     ) -> Self {
-        Self::canonical_with_async(symbol, name, Vec::new(), parameters, results, false)
+        Self::canonical_generic(symbol, name, Vec::new(), parameters, results)
     }
 
     pub(crate) fn canonical_generic(
@@ -169,17 +168,6 @@ impl ResolvedFunctionSignature {
         type_parameters: Vec<ResolvedTypeParameter>,
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
-    ) -> Self {
-        Self::canonical_with_async(symbol, name, type_parameters, parameters, results, false)
-    }
-
-    pub(crate) fn canonical_with_async(
-        symbol: SymbolId,
-        name: String,
-        type_parameters: Vec<ResolvedTypeParameter>,
-        parameters: Vec<(String, TypeId, SourceSpan)>,
-        results: Vec<(TypeId, SourceSpan)>,
-        is_async: bool,
     ) -> Self {
         Self {
             symbol,
@@ -199,7 +187,6 @@ impl ResolvedFunctionSignature {
                 .map(|(type_id, span)| ResolvedType::canonical(type_id, span))
                 .collect(),
             effects: crate::EffectSummary::empty(),
-            is_async,
         }
     }
 
@@ -274,11 +261,6 @@ impl ResolvedFunctionSignature {
     #[must_use]
     pub const fn effects(&self) -> crate::EffectSummary {
         self.effects
-    }
-
-    #[must_use]
-    pub const fn is_async(&self) -> bool {
-        self.is_async
     }
 }
 
@@ -848,33 +830,6 @@ impl<'index> SignatureResolver<'index> {
                 arguments: vec![success, error],
             })
             .ok()
-    }
-
-    #[must_use]
-    pub fn task_definition(&self) -> Option<BuiltinTypeId> {
-        Some(self.schema.type_by_source_name("Task")?.id())
-    }
-
-    pub(crate) fn task_type(&mut self, completion: TypeId) -> Option<TypeId> {
-        let definition = self.task_definition()?;
-        self.arena
-            .intern(SemanticType::Builtin {
-                definition,
-                arguments: vec![completion],
-            })
-            .ok()
-    }
-
-    #[must_use]
-    pub fn task_completion_type(&self, type_id: TypeId) -> Option<TypeId> {
-        let task = self.task_definition()?;
-        match self.arena.get(type_id)? {
-            SemanticType::Builtin {
-                definition,
-                arguments,
-            } if *definition == task && arguments.len() == 1 => Some(arguments[0]),
-            _ => None,
-        }
     }
 
     #[must_use]
@@ -1849,7 +1804,6 @@ impl<'index> SignatureResolver<'index> {
             parameters,
             results,
             effects: crate::EffectSummary::empty(),
-            is_async: syntax.is_async(),
         });
         ResolvedSignatureResult {
             signature,

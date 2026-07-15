@@ -7,7 +7,6 @@ use crate::{NodeKind, SyntaxNode, SyntaxTree, Token, TokenKind};
 pub struct FunctionSignatureSyntax {
     is_async: bool,
     name: String,
-    is_async: bool,
     type_parameters: Vec<GenericParameterSyntax>,
     parameters: Vec<FunctionParameterSyntax>,
     results: Vec<TypeSyntax>,
@@ -15,11 +14,6 @@ pub struct FunctionSignatureSyntax {
 }
 
 impl FunctionSignatureSyntax {
-    #[must_use]
-    pub const fn is_async(&self) -> bool {
-        self.is_async
-    }
-
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -267,7 +261,6 @@ impl SignatureParser<'_> {
         Ok(FunctionSignatureSyntax {
             is_async: async_token.is_some(),
             name,
-            is_async,
             type_parameters,
             parameters,
             results,
@@ -486,12 +479,6 @@ impl SignatureParser<'_> {
 
     fn current_kind(&self) -> Option<TokenKind> {
         self.tokens.get(self.position).map(|token| token.kind())
-    }
-
-    fn peek_kind(&self) -> Option<TokenKind> {
-        self.tokens
-            .get(self.position.saturating_add(1))
-            .map(|token| token.kind())
     }
 
     fn advance(&mut self) -> Option<Token> {

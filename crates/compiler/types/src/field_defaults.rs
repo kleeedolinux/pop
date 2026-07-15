@@ -131,7 +131,6 @@ fn evaluate_constant(
         | ExpressionSyntaxKind::Await { .. }
         | ExpressionSyntaxKind::OptionalPropagate { .. }
         | ExpressionSyntaxKind::ResultPropagate { .. }
-        | ExpressionSyntaxKind::Await { .. }
         | ExpressionSyntaxKind::Name(_)
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }

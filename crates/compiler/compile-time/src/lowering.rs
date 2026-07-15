@@ -437,9 +437,7 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         TypedStatementKind::ErrorMatch { .. } | TypedStatementKind::ResultMatch { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
-        TypedStatementKind::Defer { .. } | TypedStatementKind::AsyncDefer { .. } => {
-            UnsupportedCompileTimeConstruct::TypedFailure
-        }
+        TypedStatementKind::Defer { .. } => UnsupportedCompileTimeConstruct::TypedFailure,
         TypedStatementKind::OptionalIf { .. } => UnsupportedCompileTimeConstruct::OptionalFlow,
         TypedStatementKind::Call(call) => match call.dispatch() {
             TypedCallDispatch::Standard { .. } | TypedCallDispatch::Direct { .. } => {

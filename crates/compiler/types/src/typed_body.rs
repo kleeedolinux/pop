@@ -145,9 +145,6 @@ pub enum TypedStatementKind {
     Defer {
         body: Vec<TypedStatement>,
     },
-    AsyncDefer {
-        body: Vec<TypedStatement>,
-    },
     FieldSet {
         base: TypedExpression,
         field: FieldId,
@@ -542,9 +539,6 @@ pub enum TypedExpressionKind {
         condition: Box<TypedExpression>,
         when_true: Box<TypedExpression>,
         when_false: Box<TypedExpression>,
-    },
-    Await {
-        task: Box<TypedExpression>,
     },
     DirectCall {
         function: SymbolId,

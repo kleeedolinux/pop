@@ -105,9 +105,6 @@ pub enum StatementSyntaxKind {
     Defer {
         body: Vec<StatementSyntax>,
     },
-    AsyncDefer {
-        body: Vec<StatementSyntax>,
-    },
     Assignment {
         target: ExpressionSyntax,
         operator: Option<BinaryOperator>,
@@ -214,9 +211,6 @@ pub enum ExpressionSyntaxKind {
         operand: Box<ExpressionSyntax>,
     },
     ResultPropagate {
-        operand: Box<ExpressionSyntax>,
-    },
-    Await {
         operand: Box<ExpressionSyntax>,
     },
     Binary {
@@ -561,9 +555,6 @@ impl BodyParser<'_> {
             Some(TokenKind::Continue) => self.parse_loop_control(StatementSyntaxKind::Continue),
             Some(TokenKind::Match) => self.parse_match(),
             Some(TokenKind::Defer) => self.parse_defer(),
-            Some(TokenKind::Async) if self.peek_kind() == Some(TokenKind::Defer) => {
-                self.parse_async_defer()
-            }
             _ => {
                 let expression = self.parse_expression(0)?;
                 if self.current_kind() == Some(TokenKind::Comma) {
@@ -643,21 +634,6 @@ impl BodyParser<'_> {
         let end = self.expect(TokenKind::End, "cleanup `end`")?.range().end();
         Ok(StatementSyntax {
             kind: StatementSyntaxKind::Defer { body },
-            span: SourceSpan::new(self.file, ordered_range(start, end)),
-        })
-    }
-
-    fn parse_async_defer(&mut self) -> Result<StatementSyntax, FunctionBodyError> {
-        let start = self.expect(TokenKind::Async, "`async`")?.range().start();
-        self.expect(TokenKind::Defer, "`defer`")?;
-        self.expect(TokenKind::Newline, "line break after `async defer`")?;
-        let body = self.parse_statement_list(&[TokenKind::End])?;
-        let end = self
-            .expect(TokenKind::End, "async cleanup `end`")?
-            .range()
-            .end();
-        Ok(StatementSyntax {
-            kind: StatementSyntaxKind::AsyncDefer { body },
             span: SourceSpan::new(self.file, ordered_range(start, end)),
         })
     }

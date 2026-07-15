@@ -358,13 +358,6 @@ pub(crate) fn lower_instruction(
                 }
             }
         }
-        MirInstructionKind::Await { task } => lower_await(
-            &result,
-            instruction.result(),
-            instruction.result_type(),
-            *task,
-            types,
-        )?,
         MirInstructionKind::GcSafePoint {
             safe_point, roots, ..
         } => lower_gc_safe_point(
@@ -3262,32 +3255,6 @@ fn optional_inner_type(types: &TypeArena, optional: TypeId) -> Option<TypeId> {
         [inner] => Some(*inner),
         [] => None,
         _ => types.find(&SemanticType::Union(present)),
-    }
-}
-
-fn lower_await(
-    result: &str,
-    value: ValueId,
-    result_type: TypeId,
-    task: ValueId,
-    types: &TypeArena,
-) -> Result<String, LlvmLoweringError> {
-    let raw = format!("{result}_raw");
-    let call = format!(
-        "{raw} = call i64 @{}(i64 %v{})",
-        native_runtime_symbol(RuntimeOperation::Suspend),
-        task.raw()
-    );
-    match llvm_type(result_type, types)?.as_str() {
-        "i64" => Ok(format!("{call}\n{result} = add i64 0, {raw}")),
-        "i32" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i32")),
-        "i16" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i16")),
-        "i8" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i8")),
-        "i1" => Ok(format!("{call}\n{result} = trunc i64 {raw} to i1")),
-        _ => Err(LlvmLoweringError::UnsupportedInstruction {
-            function: FunctionId::from_raw(u32::MAX),
-            value,
-        }),
     }
 }
 
