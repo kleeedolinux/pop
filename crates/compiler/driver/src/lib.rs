@@ -39,6 +39,6 @@ pub use api::*;
 pub use artifact::*;
 pub use front_end::*;
 pub use native_link::{
-    NativeLinkInput, NativeLinkPlanSource, NativeLinkResolutionError, resolve_native_link_inputs,
-    validate_foreign_link_aliases,
+    NativeLinkInput, NativeLinkPlanSource, NativeLinkResolution, NativeLinkResolutionError,
+    ResolvedNativeProvider, resolve_native_link_inputs, validate_foreign_link_aliases,
 };

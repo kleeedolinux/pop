@@ -1231,7 +1231,7 @@ fn build_package_to(
 ) -> Option<Vec<PathBuf>> {
     let package = lower_package(manifest_path)?;
     let selected_target = native_target();
-    let native_link_inputs =
+    let native_link_resolution =
         resolve_native_link_inputs(&package.native_link_sources, &selected_target)
             .map_err(|error| eprintln!("pop: {error}"))
             .ok()?;
@@ -1277,6 +1277,18 @@ fn build_package_to(
                 .map_err(|error| eprintln!("pop: could not read native object: {error}"))
                 .ok()?;
             let target = native_target();
+            let provider_aliases = bubble
+                .native_link_plan
+                .libraries()
+                .iter()
+                .map(pop_projects::NativeLibrary::alias)
+                .collect::<BTreeSet<_>>();
+            let resolved_native_providers = native_link_resolution
+                .providers()
+                .iter()
+                .filter(|provider| provider_aliases.contains(provider.alias()))
+                .cloned()
+                .collect();
             let emission = PoplibEmission::new(
                 &bubble.package,
                 &bubble.version,
@@ -1288,6 +1300,7 @@ fn build_package_to(
             )
             .with_dependencies(bubble.dependencies.clone())
             .with_native_link_plan(bubble.native_link_plan.clone())
+            .with_resolved_native_providers(resolved_native_providers)
             .with_documentation(documentation.into_bytes())
             .with_target_implementation(target.triple(), implementation);
             let artifact = dependency_root.join(format!("{}.poplib", bubble.name));
@@ -1324,7 +1337,9 @@ fn build_package_to(
         let mut objects = vec![object];
         objects.extend(library_objects.iter().cloned());
         let executable = output_root.join(&bubble.name);
-        if link_native_executable(&objects, &native_link_inputs, &executable) != ExitCode::SUCCESS {
+        if link_native_executable(&objects, native_link_resolution.inputs(), &executable)
+            != ExitCode::SUCCESS
+        {
             return None;
         }
         executables.push(executable);

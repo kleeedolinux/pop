@@ -27,26 +27,49 @@ fn temporary_root(name: &str) -> PathBuf {
 fn driver_resolves_only_typed_verified_native_link_inputs() {
     let root = temporary_root("typed-inputs");
     let archive = b"verified archive";
+    let archive_hash = sha256_hex(archive);
     std::fs::write(root.join("native/libanswer.a"), archive).expect("write native archive");
     let manifest = parse_package_manifest(&format!(
-        "[package]\nname = \"Example.Native\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nAnswer = {{ kind = \"archive\", path = \"native/libanswer.a\", sha256 = \"{}\" }}\nSystemC = {{ kind = \"system\", name = \"c\" }}\n",
-        sha256_hex(archive)
+        "[package]\nname = \"Example.Native\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nAnswer = {{ kind = \"archive\", path = \"native/libanswer.a\", sha256 = \"{archive_hash}\" }}\nSystemC = {{ kind = \"system\", name = \"c\" }}\n"
     ))
     .expect("native manifest");
     let plan = manifest
         .native_link_plan("x86_64-unknown-linux-gnu")
         .expect("native link plan");
-    let inputs = resolve_native_link_inputs(
+    let resolution = resolve_native_link_inputs(
         &[NativeLinkPlanSource::new(&root, plan)],
         &TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target"),
     )
     .expect("typed native inputs");
 
     assert_eq!(
-        inputs,
+        resolution.inputs(),
         [
             NativeLinkInput::File(root.join("native/libanswer.a")),
             NativeLinkInput::SystemLibrary("c".to_owned()),
+        ]
+    );
+    assert_eq!(
+        resolution
+            .providers()
+            .iter()
+            .map(|provider| {
+                (
+                    provider.alias(),
+                    provider.identity(),
+                    provider.version(),
+                    provider.sha256(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [
+            (
+                "Answer",
+                "native/libanswer.a",
+                None,
+                Some(archive_hash.as_str()),
+            ),
+            ("SystemC", "c", None, None),
         ]
     );
     std::fs::remove_dir_all(root).expect("remove native-link fixture");

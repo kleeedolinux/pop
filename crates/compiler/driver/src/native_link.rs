@@ -11,6 +11,7 @@ use pop_projects::{
     NativeLibrary, NativeLibraryDiscovery, NativeLibraryKind, NativeLinkPlan, NativeLinkPlanError,
 };
 use pop_target::{OperatingSystem, TargetSpec};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeLinkPlanSource {
@@ -44,6 +45,119 @@ pub enum NativeLinkInput {
     SystemLibrary(String),
     Framework(String),
     File(PathBuf),
+}
+
+/// Canonical provider facts retained in `.poplib` without ambient host search
+/// paths.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedNativeProvider {
+    platform_target: String,
+    alias: String,
+    kind: NativeLibraryKind,
+    identity: String,
+    version: Option<String>,
+    link_libraries: Vec<String>,
+    sha256: Option<String>,
+}
+
+impl ResolvedNativeProvider {
+    #[must_use]
+    pub fn platform_target(&self) -> &str {
+        &self.platform_target
+    }
+
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> NativeLibraryKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    #[must_use]
+    pub fn link_libraries(&self) -> &[String] {
+        &self.link_libraries
+    }
+
+    #[must_use]
+    pub fn sha256(&self) -> Option<&str> {
+        self.sha256.as_deref()
+    }
+
+    pub(crate) fn matches_library(&self, library: &NativeLibrary, target: &str) -> bool {
+        self.platform_target == target
+            && self.alias == library.alias()
+            && self.kind == library.kind()
+            && match library.kind() {
+                NativeLibraryKind::System => {
+                    library.name() == Some(self.identity.as_str())
+                        && self.sha256.is_none()
+                        && if library.discovery()
+                            == Some(NativeLibraryDiscovery::PackageConfiguration)
+                        {
+                            self.version.as_deref().is_some_and(|version| {
+                                valid_provider_version(version)
+                                    && library.version_requirement().is_none_or(|requirement| {
+                                        version_satisfies(version, requirement)
+                                    })
+                            }) && !self.link_libraries.is_empty()
+                                && self
+                                    .link_libraries
+                                    .iter()
+                                    .all(|name| valid_provider_library_name(name))
+                        } else {
+                            self.version.is_none()
+                                && self.link_libraries == [self.identity.as_str()]
+                        }
+                }
+                NativeLibraryKind::Framework => {
+                    library.name() == Some(self.identity.as_str())
+                        && self.version.is_none()
+                        && self.sha256.is_none()
+                        && self.link_libraries.is_empty()
+                }
+                NativeLibraryKind::Object
+                | NativeLibraryKind::Archive
+                | NativeLibraryKind::Shared
+                | NativeLibraryKind::ImportLibrary => {
+                    library.path() == Some(self.identity.as_str())
+                        && library.sha256() == self.sha256.as_deref()
+                        && self.version.is_none()
+                        && self.link_libraries.is_empty()
+                }
+            }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeLinkResolution {
+    inputs: Vec<NativeLinkInput>,
+    providers: Vec<ResolvedNativeProvider>,
+}
+
+impl NativeLinkResolution {
+    #[must_use]
+    pub fn inputs(&self) -> &[NativeLinkInput] {
+        &self.inputs
+    }
+
+    #[must_use]
+    pub fn providers(&self) -> &[ResolvedNativeProvider] {
+        &self.providers
+    }
 }
 
 impl NativeLinkInput {
@@ -103,7 +217,7 @@ impl From<NativeLinkPlanError> for NativeLinkResolutionError {
 pub fn resolve_native_link_inputs(
     sources: &[NativeLinkPlanSource],
     target: &TargetSpec,
-) -> Result<Vec<NativeLinkInput>, NativeLinkResolutionError> {
+) -> Result<NativeLinkResolution, NativeLinkResolutionError> {
     if target.operating_system() != OperatingSystem::Linux
         && sources
             .iter()
@@ -131,6 +245,7 @@ pub fn resolve_native_link_inputs(
     }
 
     let mut inputs = Vec::new();
+    let mut providers = Vec::new();
     for (library, package_root) in libraries.into_values() {
         match library.kind() {
             NativeLibraryKind::System => {
@@ -138,12 +253,34 @@ pub fn resolve_native_link_inputs(
                     .name()
                     .ok_or(NativeLinkResolutionError::InvalidPlan)?;
                 if library.discovery() == Some(NativeLibraryDiscovery::PackageConfiguration) {
-                    inputs.extend(resolve_package_configuration(
+                    let resolved =
+                        resolve_package_configuration(name, library.version_requirement())?;
+                    providers.push(resolved_provider(
+                        target,
+                        library,
                         name,
-                        library.version_requirement(),
-                    )?);
+                        Some(resolved.version),
+                        resolved
+                            .inputs
+                            .iter()
+                            .filter_map(|input| match input {
+                                NativeLinkInput::SystemLibrary(name) => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        None,
+                    ));
+                    inputs.extend(resolved.inputs);
                 } else {
                     inputs.push(NativeLinkInput::SystemLibrary(name.to_owned()));
+                    providers.push(resolved_provider(
+                        target,
+                        library,
+                        name,
+                        None,
+                        vec![name.to_owned()],
+                        None,
+                    ));
                 }
             }
             NativeLibraryKind::Framework => {
@@ -154,17 +291,41 @@ pub fn resolve_native_link_inputs(
                 return Err(NativeLinkResolutionError::UnsupportedProvider);
             }
             NativeLibraryKind::Object | NativeLibraryKind::Archive | NativeLibraryKind::Shared => {
-                inputs.push(NativeLinkInput::File(
-                    package_root.join(
-                        library
-                            .path()
-                            .ok_or(NativeLinkResolutionError::InvalidPlan)?,
-                    ),
+                let path = library
+                    .path()
+                    .ok_or(NativeLinkResolutionError::InvalidPlan)?;
+                inputs.push(NativeLinkInput::File(package_root.join(path)));
+                providers.push(resolved_provider(
+                    target,
+                    library,
+                    path,
+                    None,
+                    Vec::new(),
+                    library.sha256().map(str::to_owned),
                 ));
             }
         }
     }
-    Ok(inputs)
+    Ok(NativeLinkResolution { inputs, providers })
+}
+
+fn resolved_provider(
+    target: &TargetSpec,
+    library: &NativeLibrary,
+    identity: &str,
+    version: Option<String>,
+    link_libraries: Vec<String>,
+    sha256: Option<String>,
+) -> ResolvedNativeProvider {
+    ResolvedNativeProvider {
+        platform_target: target.triple().to_owned(),
+        alias: library.alias().to_owned(),
+        kind: library.kind(),
+        identity: identity.to_owned(),
+        version,
+        link_libraries,
+        sha256,
+    }
 }
 
 /// Verifies that every exact `Ffi.Link` alias used by MIR resolves in its
@@ -200,33 +361,50 @@ pub fn validate_foreign_link_aliases(
 fn resolve_package_configuration(
     package: &str,
     requirement: Option<&str>,
-) -> Result<Vec<NativeLinkInput>, NativeLinkResolutionError> {
-    let version = package_configuration_output("--modversion", package)?;
-    if requirement.is_some_and(|requirement| !version_satisfies(version.trim(), requirement)) {
+) -> Result<PackageConfigurationResolution, NativeLinkResolutionError> {
+    resolve_package_configuration_with(package, requirement, package_configuration_output)
+}
+
+fn resolve_package_configuration_with(
+    package: &str,
+    requirement: Option<&str>,
+    output: impl Fn(&str, &str) -> Result<String, NativeLinkResolutionError>,
+) -> Result<PackageConfigurationResolution, NativeLinkResolutionError> {
+    let version = output("--modversion", package)?;
+    let version = version.trim();
+    if !valid_provider_version(version) {
+        return Err(NativeLinkResolutionError::InvalidProviderOutput);
+    }
+    if requirement.is_some_and(|requirement| !version_satisfies(version, requirement)) {
         return Err(NativeLinkResolutionError::ProviderVersionMismatch);
     }
-    if !package_configuration_output("--libs-only-other", package)?
-        .trim()
-        .is_empty()
-    {
+    if !output("--libs-only-other", package)?.trim().is_empty() {
         return Err(NativeLinkResolutionError::UnsupportedProvider);
     }
     let mut inputs = Vec::new();
-    for token in package_configuration_output("--libs-only-L", package)?.split_ascii_whitespace() {
+    for token in output("--libs-only-L", package)?.split_ascii_whitespace() {
         let path = token
             .strip_prefix("-L")
-            .filter(|path| !path.is_empty() && !path.chars().any(char::is_control))
+            .filter(|path| valid_provider_search_path(Path::new(path)))
             .ok_or(NativeLinkResolutionError::InvalidProviderOutput)?;
         inputs.push(NativeLinkInput::SearchPath(PathBuf::from(path)));
     }
-    for token in package_configuration_output("--libs-only-l", package)?.split_ascii_whitespace() {
+    for token in output("--libs-only-l", package)?.split_ascii_whitespace() {
         let name = token
             .strip_prefix("-l")
             .filter(|name| valid_provider_library_name(name))
             .ok_or(NativeLinkResolutionError::InvalidProviderOutput)?;
         inputs.push(NativeLinkInput::SystemLibrary(name.to_owned()));
     }
-    Ok(inputs)
+    Ok(PackageConfigurationResolution {
+        version: version.to_owned(),
+        inputs,
+    })
+}
+
+struct PackageConfigurationResolution {
+    version: String,
+    inputs: Vec<NativeLinkInput>,
 }
 
 fn package_configuration_output(
@@ -248,6 +426,24 @@ fn valid_provider_library_name(name: &str) -> bool {
         && !name.starts_with(['-', '@'])
         && name.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
+        })
+}
+
+fn valid_provider_search_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+fn valid_provider_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 256
+        && version.chars().all(|character| {
+            character.is_ascii_graphic() && !matches!(character, '`' | '$' | '"' | '\'')
         })
 }
 
@@ -279,4 +475,66 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
             .collect::<Vec<_>>()
     };
     components(left).cmp(&components(right))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_output(option: &str, _package: &str) -> Result<String, NativeLinkResolutionError> {
+        Ok(match option {
+            "--modversion" => "1.2.3\n",
+            "--libs-only-other" => "",
+            "--libs-only-L" => "-L/opt/example/lib\n",
+            "--libs-only-l" => "-lexample -ldependency\n",
+            _ => return Err(NativeLinkResolutionError::ProviderFailure),
+        }
+        .to_owned())
+    }
+
+    #[test]
+    fn package_configuration_output_becomes_typed_inputs_and_exact_provider_facts() {
+        let resolved =
+            resolve_package_configuration_with("example", Some(">=1.2,<2"), provider_output)
+                .expect("bounded provider resolves");
+
+        assert_eq!(resolved.version, "1.2.3");
+        assert_eq!(
+            resolved.inputs,
+            [
+                NativeLinkInput::SearchPath(PathBuf::from("/opt/example/lib")),
+                NativeLinkInput::SystemLibrary("example".to_owned()),
+                NativeLinkInput::SystemLibrary("dependency".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn package_configuration_rejects_relative_search_paths_and_raw_flags() {
+        let relative = |option: &str, package: &str| {
+            if option == "--libs-only-L" {
+                Ok("-Lrelative/lib".to_owned())
+            } else {
+                provider_output(option, package)
+            }
+        };
+        assert_eq!(
+            resolve_package_configuration_with("example", None, relative)
+                .map(|resolved| resolved.inputs),
+            Err(NativeLinkResolutionError::InvalidProviderOutput)
+        );
+
+        let raw_flag = |option: &str, package: &str| {
+            if option == "--libs-only-other" {
+                Ok("-Wl,--as-needed".to_owned())
+            } else {
+                provider_output(option, package)
+            }
+        };
+        assert_eq!(
+            resolve_package_configuration_with("example", None, raw_flag)
+                .map(|resolved| resolved.inputs),
+            Err(NativeLinkResolutionError::UnsupportedProvider)
+        );
+    }
 }

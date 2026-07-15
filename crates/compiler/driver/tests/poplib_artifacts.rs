@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use pop_driver::{
-    FrontEndBubbleInput, FrontEndModule, PoplibEmission, PoplibError, analyze_bubble, emit_poplib,
-    load_poplib,
+    FrontEndBubbleInput, FrontEndModule, NativeLinkPlanSource, PoplibEmission, PoplibError,
+    analyze_bubble, emit_poplib, load_poplib, resolve_native_link_inputs,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_projects::{BubbleKind, parse_package_manifest};
 use pop_source::SourceFile;
+use pop_target::TargetSpec;
 
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -56,6 +57,18 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
         "{}",
         library.diagnostic_snapshot()
     );
+    let root = temporary_root();
+    let native_link_plan = parse_package_manifest(
+        "[package]\nname = \"Pop.Standard\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nZlib = { kind = \"system\", name = \"z\" }\n",
+    )
+    .expect("native requirements")
+    .native_link_plan("x86_64-unknown-linux-gnu")
+    .expect("native link plan");
+    let native_link_resolution = resolve_native_link_inputs(
+        &[NativeLinkPlanSource::new(&root, native_link_plan.clone())],
+        &TargetSpec::for_triple("x86_64-unknown-linux-gnu").expect("native target"),
+    )
+    .expect("resolved native provider");
     let emission = PoplibEmission::new(
         "Pop.Standard",
         "0.1.0",
@@ -68,17 +81,10 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
             .expect("reference metadata")
             .clone(),
     )
-    .with_native_link_plan(
-        parse_package_manifest(
-            "[package]\nname = \"Pop.Standard\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[nativeLibraries]\nZlib = { kind = \"system\", name = \"z\" }\n",
-        )
-        .expect("native requirements")
-        .native_link_plan("x86_64-linux")
-        .expect("native link plan"),
-    )
+    .with_native_link_plan(native_link_plan)
+    .with_resolved_native_providers(native_link_resolution.providers().to_vec())
     .with_documentation(b"<?xml version=\"1.0\"?><doc/>\n".to_vec())
-    .with_target_implementation("x86_64-linux", b"opaque-native-object".to_vec());
-    let root = temporary_root();
+    .with_target_implementation("x86_64-unknown-linux-gnu", b"opaque-native-object".to_vec());
     let artifact = root.join("Pop.Standard.poplib");
 
     emit_poplib(&artifact, &emission).expect("verified artifact emission");
@@ -95,18 +101,28 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
     );
     assert_eq!(
         loaded.target_implementation(),
-        Some(("x86_64-linux", b"opaque-native-object".as_slice()))
+        Some((
+            "x86_64-unknown-linux-gnu",
+            b"opaque-native-object".as_slice()
+        ))
     );
     assert_eq!(loaded.public_api_sha256().len(), 64);
     assert_eq!(loaded.native_link_plans().len(), 1);
     assert_eq!(loaded.native_link_plans()[0].libraries()[0].alias(), "Zlib");
+    assert_eq!(loaded.resolved_native_providers().len(), 1);
+    assert_eq!(loaded.resolved_native_providers()[0].identity(), "z");
+    assert_eq!(loaded.resolved_native_providers()[0].version(), None);
+    assert_eq!(
+        loaded.resolved_native_providers()[0].link_libraries(),
+        ["z"]
+    );
 
     emit_poplib(&artifact, &emission).expect("deterministic replacement");
     assert_eq!(bytes(&artifact.join("bubble.manifest")), manifest);
     assert_eq!(bytes(&artifact.join("reference.metadata")), reference);
 
     std::fs::write(
-        artifact.join("targets/x86_64-linux/native.object"),
+        artifact.join("targets/x86_64-unknown-linux-gnu/native.object"),
         b"corrupt",
     )
     .expect("corrupt target");

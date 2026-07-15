@@ -778,6 +778,16 @@ fn package_build_links_a_hashed_native_archive_and_records_its_plan() {
         artifact.native_link_plans()[0].libraries()[0].alias(),
         "Answer"
     );
+    assert_eq!(artifact.resolved_native_providers().len(), 1);
+    assert_eq!(artifact.resolved_native_providers()[0].alias(), "Answer");
+    assert_eq!(
+        artifact.resolved_native_providers()[0].identity(),
+        "native/libanswer.a"
+    );
+    assert_eq!(
+        artifact.resolved_native_providers()[0].sha256(),
+        Some(archive_hash.as_str())
+    );
     std::fs::write(package.join("native/libanswer.a"), b"tampered archive")
         .expect("tamper native archive");
     let rejected = Command::new(env!("CARGO_BIN_EXE_pop"))
@@ -870,6 +880,8 @@ fn package_build_merges_a_transitive_native_link_plan() {
         artifact.native_link_plans()[0].libraries()[0].alias(),
         "Answer"
     );
+    assert_eq!(artifact.resolved_native_providers().len(), 1);
+    assert_eq!(artifact.resolved_native_providers()[0].alias(), "Answer");
 
     std::fs::remove_dir_all(workspace).expect("remove transitive FFI fixture");
 }

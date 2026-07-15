@@ -13,12 +13,13 @@ use pop_types::TypeArena;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::ResolvedNativeProvider;
 use crate::api::ReferenceMetadata;
 use crate::reference::invalid_reference_capsule;
 
 const REFERENCE_SCHEMA_VERSION: u16 = 1;
 const MAX_REFERENCE_BYTES: usize = 16 * 1024 * 1024;
-const POPLIB_MANIFEST_SCHEMA_VERSION: u16 = 2;
+const POPLIB_MANIFEST_SCHEMA_VERSION: u16 = 3;
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ARTIFACT_FILE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ARTIFACT_FILES: usize = 256;
@@ -188,6 +189,7 @@ pub struct PoplibEmission {
     dependencies: Vec<PoplibDependency>,
     required_capabilities: Vec<String>,
     native_link_plans: Vec<NativeLinkPlan>,
+    resolved_native_providers: Vec<ResolvedNativeProvider>,
     documentation: Option<Vec<u8>>,
     target: Option<(String, Vec<u8>)>,
 }
@@ -214,6 +216,7 @@ impl PoplibEmission {
             dependencies: Vec::new(),
             required_capabilities: Vec::new(),
             native_link_plans: Vec::new(),
+            resolved_native_providers: Vec::new(),
             documentation: None,
             target: None,
         }
@@ -237,6 +240,16 @@ impl PoplibEmission {
     pub fn with_native_link_plan(mut self, plan: NativeLinkPlan) -> Self {
         self.native_link_plans.push(plan);
         self.native_link_plans.sort();
+        self
+    }
+
+    #[must_use]
+    pub fn with_resolved_native_providers(
+        mut self,
+        providers: Vec<ResolvedNativeProvider>,
+    ) -> Self {
+        self.resolved_native_providers = providers;
+        self.resolved_native_providers.sort();
         self
     }
 
@@ -312,6 +325,11 @@ impl LoadedPoplib {
     pub fn native_link_plans(&self) -> &[NativeLinkPlan] {
         &self.manifest.native_link_plans
     }
+
+    #[must_use]
+    pub fn resolved_native_providers(&self) -> &[ResolvedNativeProvider] {
+        &self.manifest.resolved_native_providers
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -333,6 +351,7 @@ struct PoplibManifest {
     initialization_order: Vec<String>,
     required_capabilities: Vec<String>,
     native_link_plans: Vec<NativeLinkPlan>,
+    resolved_native_providers: Vec<ResolvedNativeProvider>,
     reference_only: bool,
     documentation: Option<PoplibFileReference>,
     targets: Vec<PoplibTarget>,
@@ -458,6 +477,7 @@ pub fn emit_poplib(path: &Path, emission: &PoplibEmission) -> Result<(), PoplibE
         initialization_order: Vec::new(),
         required_capabilities: emission.required_capabilities.clone(),
         native_link_plans: emission.native_link_plans.clone(),
+        resolved_native_providers: emission.resolved_native_providers.clone(),
         reference_only: targets.is_empty(),
         documentation,
         targets,
@@ -571,10 +591,20 @@ fn validate_emission(emission: &PoplibEmission) -> Result<(), PoplibError> {
             .native_link_plans
             .iter()
             .any(|plan| plan.validate().is_err())
+        || !native_providers_match(
+            &emission.native_link_plans,
+            &emission.resolved_native_providers,
+        )
         || emission
             .target
             .as_ref()
             .is_some_and(|(target, _)| !valid_component(target))
+        || emission.native_link_plans.iter().any(|plan| {
+            emission
+                .target
+                .as_ref()
+                .is_none_or(|(target, _)| target != plan.platform_target())
+        })
     {
         return Err(PoplibError::InvalidInput);
     }
@@ -618,6 +648,10 @@ fn validate_manifest(manifest: &PoplibManifest) -> Result<(), PoplibError> {
             .native_link_plans
             .iter()
             .any(|plan| plan.validate().is_err())
+        || !native_providers_match(
+            &manifest.native_link_plans,
+            &manifest.resolved_native_providers,
+        )
         || !is_sorted_unique(&manifest.files)
         || !is_sorted_unique(&manifest.targets)
         || manifest.files.len() > MAX_ARTIFACT_FILES
@@ -654,6 +688,26 @@ fn validate_manifest(manifest: &PoplibManifest) -> Result<(), PoplibError> {
         return Err(PoplibError::InvalidManifest);
     }
     Ok(())
+}
+
+fn native_providers_match(plans: &[NativeLinkPlan], providers: &[ResolvedNativeProvider]) -> bool {
+    if !is_sorted_unique(providers) {
+        return false;
+    }
+    let libraries = plans
+        .iter()
+        .flat_map(|plan| {
+            plan.libraries()
+                .iter()
+                .map(move |library| (plan.platform_target(), library))
+        })
+        .collect::<Vec<_>>();
+    libraries.len() == providers.len()
+        && libraries.iter().all(|(target, library)| {
+            providers
+                .iter()
+                .any(|provider| provider.matches_library(library, target))
+        })
 }
 
 fn encode_manifest(manifest: &PoplibManifest) -> Result<Vec<u8>, PoplibError> {
