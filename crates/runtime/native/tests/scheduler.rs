@@ -614,6 +614,44 @@ fn wait_until_scheduler_closed(scheduler: &NativeScheduler, failure: &str) {
     }
 }
 
+fn deterministic_stress_order(seed: u64, count: usize) -> Vec<usize> {
+    let mut order = (0..count).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|index| {
+        let mut mixed = seed
+            ^ u64::try_from(*index)
+                .unwrap_or(u64::MAX)
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
+    });
+    order
+}
+
+fn wait_until_all_workers_parked(
+    scheduler: &NativeScheduler,
+    workers: usize,
+    seed: u64,
+    round: usize,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let telemetry = scheduler.telemetry();
+        if telemetry
+            .worker_parks()
+            .saturating_sub(telemetry.worker_unparks())
+            == u64::try_from(workers).unwrap_or(u64::MAX)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "seed={seed:#x} round={round} workers did not all park: {telemetry:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn native_task_frames_restore_before_poll_and_retain_after_nonterminal_poll() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -2134,6 +2172,99 @@ fn concurrent_wake_and_cancellation_races_do_not_lose_or_duplicate_tasks() {
     assert_eq!(telemetry.local_queue_depth(), 0);
     assert_eq!(telemetry.injection_queue_depth(), 0);
     assert_eq!(telemetry.stale_ready_entries(), 0);
+}
+
+#[test]
+fn seeded_park_and_publication_races_do_not_lose_ready_work() {
+    const WORKERS: usize = 4;
+    const TASKS: usize = 32;
+    const ROUNDS: usize = 8;
+    const SEEDS: [u64; 4] = [
+        0x243f_6a88_85a3_08d3,
+        0x1319_8a2e_0370_7344,
+        0xa409_3822_299f_31d0,
+        0x082e_fa98_ec4e_6c89,
+    ];
+
+    for seed in SEEDS {
+        let scheduler = NativeScheduler::new_with_runtime_transitions(
+            configuration(WORKERS, TASKS),
+            Arc::new(PermitRuntimeTransitions),
+        )
+        .expect("park/publication stress scheduler");
+        for round in 0..ROUNDS {
+            wait_until_all_workers_parked(&scheduler, WORKERS, seed, round);
+            let order = deterministic_stress_order(seed ^ u64::try_from(round).unwrap(), TASKS);
+            let completions = Arc::new(Mutex::new(0));
+            let (reported, observed) = mpsc::channel();
+            std::thread::scope(|scope| {
+                for producer in 0..WORKERS {
+                    let scheduler = &scheduler;
+                    let completions = Arc::clone(&completions);
+                    let reported = reported.clone();
+                    let order = &order;
+                    scope.spawn(move || {
+                        for position in (producer..TASKS).step_by(WORKERS) {
+                            let logical = order[position];
+                            let result = scheduler.schedule(CompleteTask {
+                                completions: Arc::clone(&completions),
+                            });
+                            reported
+                                .send((logical, result))
+                                .expect("report concurrent admission");
+                        }
+                    });
+                }
+            });
+            drop(reported);
+            let mut admissions = observed.into_iter().collect::<Vec<_>>();
+            admissions.sort_unstable_by_key(|(logical, _)| *logical);
+            let tasks = admissions
+                .into_iter()
+                .map(|(logical, result)| {
+                    result.unwrap_or_else(|error| {
+                        panic!(
+                            "seed={seed:#x} round={round} task={logical} admission failed: \
+                             {error:?}; {:?}",
+                            scheduler.telemetry()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            scheduler
+                .wait_until_idle(Duration::from_secs(1))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "seed={seed:#x} round={round} ready work was lost: {error:?}; {:?}",
+                        scheduler.telemetry()
+                    )
+                });
+            assert_eq!(
+                *completions.lock().expect("stress completion count"),
+                TASKS,
+                "seed={seed:#x} round={round} duplicate or lost completion; {:?}",
+                scheduler.telemetry()
+            );
+            for task in tasks {
+                assert_eq!(
+                    scheduler.task_state(task),
+                    Ok(SchedulerTaskState::Completed),
+                    "seed={seed:#x} round={round} task={task:?}; {:?}",
+                    scheduler.telemetry()
+                );
+                scheduler
+                    .release_terminal_task(task)
+                    .expect("release stress terminal task");
+            }
+        }
+        let telemetry = scheduler.telemetry();
+        assert_eq!(telemetry.stale_ready_entries(), 0, "seed={seed:#x}");
+        assert_eq!(telemetry.local_queue_depth(), 0, "seed={seed:#x}");
+        assert_eq!(telemetry.injection_queue_depth(), 0, "seed={seed:#x}");
+        scheduler
+            .shutdown()
+            .expect("park/publication stress shutdown");
+    }
 }
 
 #[test]

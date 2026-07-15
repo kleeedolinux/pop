@@ -312,6 +312,9 @@ Post-baseline library work has begun without widening the release foundation:
       typed collector-state incident, propagate migration errors instead of
       treating them as ordinary migration refusal, and reject later task
       admission while preserving ordinary task-panic isolation.
+    - [x] Add replay-seeded concurrent admission stress that publishes work
+      only after every worker is observably parked, then proves exact terminal
+      counts, queue drainage, terminal release, and no stale ready entries.
 - [ ] Stabilize the versioned PLRI and native ABI required by `0.1.0`, including
   safe points, stack maps, barriers, pin/root transitions, panic/unwind paths,
   process arguments, and standard adapters.
