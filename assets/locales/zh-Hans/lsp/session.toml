@@ -18,3 +18,6 @@ text = "语言服务器请求已取消"
 
 [messages."lsp.tooManyDocuments"]
 text = "语言服务器的文档标识符空间已耗尽"
+
+[messages."lsp.documentTooLarge"]
+text = "文档 `{uri}` 的大小为 {length} 字节；语言服务器限制为 {limit} 字节"

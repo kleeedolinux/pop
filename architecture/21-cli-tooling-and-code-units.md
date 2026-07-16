@@ -536,10 +536,25 @@ application APIs with YAML authoring and do not participate in tool bootstrap.
 The bootstrap language server owns versioned open-document snapshots with
 stable session-local `FileId` values, rejects stale versions, honors query
 cancellation before publishing results, converts source spans to UTF-16 protocol
-positions, and publishes structured syntax diagnostics. Semantic analysis and
-the public `Pop.Lsp` transport expand only after their public schemas are
-authorized; the bootstrap does not expose private syntax nodes or compiler
-query handles.
+positions, and publishes structured syntax diagnostics.
+
+The toolchain may expose this private engine through a bounded LSP 3.17 JSON-RPC
+stdio adapter so official editors can use implemented behavior before the
+public `Pop.Lsp` Package is stabilized. The bootstrap adapter implements only
+`initialize`, `initialized`, `textDocument/didOpen`, full-text
+`textDocument/didChange`, `textDocument/didClose`, `shutdown`, and `exit`.
+It advertises only those capabilities, limits frame and document sizes, rejects
+invalid lifecycle transitions, and never returns compiler-private syntax or
+query values. Protocol method names, JSON fields, codes, and severities are
+locale invariant; only diagnostic display text uses the session render context.
+
+The adapter is a private executable protocol boundary, not the public
+`Pop.Lsp` API and not a re-export of `Pop.Rpc`. Semantic analysis, hover,
+completion, navigation, rename, formatting, code actions, incremental text
+edits, and public transport types require their separately reviewed schemas.
+Editor extensions launch the server directly and consume structured LSP data;
+they may invoke `pop` commands for explicit user actions but never scrape CLI
+human output to synthesize language-server results.
 
 ## Profiles, cache, and reproducibility
 

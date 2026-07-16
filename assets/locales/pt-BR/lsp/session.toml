@@ -18,3 +18,6 @@ text = "a solicitação do servidor de linguagem foi cancelada"
 
 [messages."lsp.tooManyDocuments"]
 text = "o espaço de identificadores de documentos do servidor de linguagem foi esgotado"
+
+[messages."lsp.documentTooLarge"]
+text = "o documento `{uri}` tem {length} bytes; o limite do servidor de linguagem é {limit} bytes"

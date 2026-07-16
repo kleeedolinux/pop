@@ -520,13 +520,20 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                     );
                 let localization_dependency = *member == "crates/tools/localization"
                     && matches!(line, "serde.workspace = true" | "toml.workspace = true");
+                let language_server_transport_dependency = *member
+                    == "crates/tools/language-server"
+                    && matches!(
+                        line,
+                        "serde.workspace = true" | "serde_json.workspace = true"
+                    );
                 assert!(
                     inherited_local
                         || inherited_inkwell
                         || serde_projection
                         || project_artifact_dependency
                         || driver_artifact_dependency
-                        || localization_dependency,
+                        || localization_dependency
+                        || language_server_transport_dependency,
                     "{} {table} entry is not inherited from the workspace: {line}",
                     manifest_path.display(),
                 );
@@ -1293,7 +1300,16 @@ fn official_language_server_uses_the_pop_lsp_protocol_boundary() {
     let source = fs::read_to_string(root.join("crates/tools/language-server/src/lib.rs"))
         .expect("read language-server source");
     assert!(manifest.contains("pop-extension-lsp.workspace = true"));
+    assert!(manifest.contains("serde.workspace = true"));
+    assert!(manifest.contains("serde_json.workspace = true"));
+    assert!(manifest.contains("[[bin]]"));
+    assert!(manifest.contains("name = \"pop-language-server\""));
     assert!(source.contains("pop_extension_lsp::PACKAGE"));
+
+    let tooling = fs::read_to_string(root.join("architecture/21-cli-tooling-and-code-units.md"))
+        .expect("read tooling architecture");
+    assert!(tooling.contains("bounded LSP 3.17 JSON-RPC"));
+    assert!(tooling.contains("private executable protocol boundary"));
 }
 
 #[test]

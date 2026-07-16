@@ -8,9 +8,15 @@ use std::fmt;
 use std::sync::Arc;
 
 use pop_foundation::{Diagnostic, DiagnosticSeverity, FileId, TextSize};
-use pop_localization::{Argument, Language, LocalizationError, RenderContext};
+use pop_localization::{
+    Argument, Language, LocalizationError, RenderContext, select_process_language,
+};
 use pop_query::CancellationToken;
 use pop_source::SourceFile;
+
+mod transport;
+
+pub use transport::{ExitStatus, TransportError, TransportLimits, serve};
 
 pub const PUBLIC_PROTOCOL_PACKAGE: &str = pop_extension_lsp::PACKAGE;
 
@@ -29,7 +35,7 @@ impl LanguageServerSession {
         let language = match locale {
             Some(tag) => Language::from_tag(tag)
                 .ok_or_else(|| LocalizationError::UnsupportedLanguage(tag.to_owned()))?,
-            None => Language::English,
+            None => select_process_language(None)?,
         };
         Ok(Self {
             rendering: RenderContext::new(language),
@@ -218,6 +224,11 @@ pub enum LanguageServerError {
     Cancelled,
     Localization(String),
     TooManyDocuments,
+    DocumentTooLarge {
+        uri: DocumentUri,
+        length: u64,
+        limit: u64,
+    },
 }
 
 struct OpenDocument {
@@ -391,6 +402,14 @@ impl LanguageServer {
                 Err(LocalizationError::InvalidArguments(detail.clone()))
             }
             LanguageServerError::TooManyDocuments => context.message("lsp.tooManyDocuments", &[]),
+            LanguageServerError::DocumentTooLarge { uri, length, limit } => context.message(
+                "lsp.documentTooLarge",
+                &[
+                    Argument::text("uri", uri.as_str()),
+                    Argument::unsigned("length", *length),
+                    Argument::unsigned("limit", *limit),
+                ],
+            ),
         }
     }
 }

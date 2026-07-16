@@ -32,3 +32,8 @@ kinds = []
 text = "language-server document identifier space is exhausted"
 arguments = []
 kinds = []
+
+[messages."lsp.documentTooLarge"]
+text = "document `{uri}` has {length} bytes; the language-server limit is {limit} bytes"
+arguments = ["uri", "length", "limit"]
+kinds = ["Text", "Unsigned", "Unsigned"]

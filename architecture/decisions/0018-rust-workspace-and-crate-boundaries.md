@@ -59,6 +59,11 @@ The parser does not enter compiler semantic crates, the runtime, or either base
 library. Catalog tests reject malformed input and enforce exact key,
 placeholder, and argument-kind parity before release.
 
+The private `pop-language-server` LSP 3.17 stdio adapter may use the already
+approved `serde` and `serde_json` dependencies at its closed machine-protocol
+boundary. JSON protocol values do not cross into source, syntax, resolution,
+typing, HIR, MIR, runtime, base-library, or public-extension contracts.
+
 Repository architecture tests validate the member inventory, manifest
 inheritance, required source targets, and forbidden dependency directions. New
 feature work follows architecture, then failing tests, then implementation.

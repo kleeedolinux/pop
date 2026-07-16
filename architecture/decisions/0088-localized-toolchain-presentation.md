@@ -100,6 +100,12 @@ consumers never need it to recover semantic facts. LSP selects a locale from the
 standard initialization locale while continuing to transport stable codes and
 typed data.
 
+The private bootstrap LSP 3.17 stdio adapter may serialize those facts with
+Serde and JSON. This closed wire boundary does not stabilize Rust protocol
+types, define the public `Pop.Lsp` Package, or permit JSON values to enter
+compiler semantic layers. Initialization chooses the immutable session locale;
+later ambient environment changes cannot alter diagnostic presentation.
+
 User program output is never translated by the toolchain. Operating-system,
 linker, and third-party text may be preserved verbatim as a nested external
 detail; the Pop-owned context around it is localized.
@@ -153,6 +159,8 @@ protocol identities.
 - explicit-language CLI help and usage errors in all five languages;
 - compiler diagnostic message, label, note, and fix rendering in all languages;
 - language-server sessions with independent locales;
+- bounded LSP framing, lifecycle, full-text synchronization, diagnostic
+  publication, locale, and malformed-message tests;
 - machine-code, argument, path, and source preservation across locales;
 - malformed configuration and catalog rejection;
 - architecture regression checks preventing new direct human presentation text

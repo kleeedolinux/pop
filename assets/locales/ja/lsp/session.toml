@@ -18,3 +18,6 @@ text = "言語サーバーのリクエストはキャンセルされました"
 
 [messages."lsp.tooManyDocuments"]
 text = "言語サーバーのドキュメント識別子を使い切りました"
+
+[messages."lsp.documentTooLarge"]
+text = "ドキュメント `{uri}` は {length} バイトです。言語サーバーの上限は {limit} バイトです"
