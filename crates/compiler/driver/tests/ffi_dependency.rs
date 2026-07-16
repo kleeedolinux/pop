@@ -1418,7 +1418,7 @@ fn front_end_resolves_foreign_attributes_to_one_closed_typed_contract() {
 }
 
 #[test]
-fn foreign_declarations_accept_only_closed_layout_pointer_callback_and_handle_types() {
+fn foreign_declarations_accept_only_closed_layout_pointer_and_handle_types_without_metadata() {
     let ffi = BubbleId::from_raw(20);
     let module = FrontEndModule::new(
         ModuleId::from_raw(0),
@@ -1431,7 +1431,6 @@ fn foreign_declarations_accept_only_closed_layout_pointer_callback_and_handle_ty
                  left: Int32\n\
                  right: Ffi.C.Int\n\
              end\n\
-             private type Callback = function(input: Int32): Int32\n\
              @Ffi.Foreign(\"accept_pair\")\n\
              internal function acceptPair(value: Pair): Pair\n\
              end\n\
@@ -1440,9 +1439,6 @@ fn foreign_declarations_accept_only_closed_layout_pointer_callback_and_handle_ty
              end\n\
              @Ffi.Foreign(\"accept_handle\")\n\
              internal function acceptHandle(value: Ffi.Handle<String>)\n\
-             end\n\
-             @Ffi.Foreign(\"accept_callback\")\n\
-             internal function acceptCallback(value: Ffi.Function<Callback>)\n\
              end\n",
         )
         .expect("source"),
@@ -1462,7 +1458,7 @@ fn foreign_declarations_accept_only_closed_layout_pointer_callback_and_handle_ty
         "{}",
         result.diagnostic_snapshot()
     );
-    assert_eq!(result.foreign_declarations().len(), 4);
+    assert_eq!(result.foreign_declarations().len(), 3);
     assert!(result.hir().is_some());
 }
 
@@ -1717,6 +1713,17 @@ fn front_end_rejects_invalid_foreign_declaration_contracts() {
     }
 }
 
+#[test]
+fn front_end_rejects_an_unattached_callback_pair_declaration() {
+    assert_invalid_foreign_contract(
+        "unattachedCallbackPair",
+        "private type Callback = function(input: Int32, context: Ffi.CallbackContext): Int32\n\
+         @Ffi.Foreign(\"native_callback\")\n\
+         internal function invalid(callback: Ffi.Function<Callback>, context: Ffi.CallbackContext): Int32\n\
+         end\n",
+    );
+}
+
 fn assert_invalid_foreign_contract(name: &str, declaration: &str) {
     let ffi = BubbleId::from_raw(20);
     let source = format!("namespace Native\n{declaration}");
@@ -1744,7 +1751,7 @@ fn assert_invalid_foreign_contract(name: &str, declaration: &str) {
 }
 
 #[test]
-fn ffi_callbacks_type_check_as_scoped_and_shared_lifecycle_operations() {
+fn ffi_callbacks_reject_pair_scopes_without_generated_contract_use() {
     let ffi = BubbleId::from_raw(20);
     let module = FrontEndModule::new(
         ModuleId::from_raw(0),
@@ -1755,31 +1762,31 @@ fn ffi_callbacks_type_check_as_scoped_and_shared_lifecycle_operations() {
              private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
              public function scoped(): Int\n\
                  return Ffi.withCallback(\n\
-                     function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                     function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
                          return value\n\
                      end,\n\
-                     function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Int\n\
+                     function(callbackFunction: Ffi.Function<CallbackSignature>, _: Ffi.CallbackContext): Int\n\
                          return 17\n\
                      end\n\
                  )\n\
              end\n\
-             public function open(): Result<Ffi.RegisteredCallback<CallbackSignature>, Ffi.CallbackOpenError>\n\
+             public function openCallback(): Result<Ffi.RegisteredCallback<CallbackSignature>, Ffi.CallbackOpenError>\n\
                  return Ffi.Callback.open(\n\
-                     function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                     function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
                          return value\n\
                      end,\n\
-                     Ffi.CallbackThread.CallingThread\n\
+                     Ffi.CallbackThread.AttachedThread\n\
                  )\n\
              end\n\
-             public function use(callback: Ffi.RegisteredCallback<CallbackSignature>): Result<Int, Ffi.CallbackClosedError>\n\
+             public function useCallback(callback: Ffi.RegisteredCallback<CallbackSignature>): Result<Int, Ffi.CallbackClosedError>\n\
                  return Ffi.Callback.withPair(\n\
                      callback,\n\
-                     function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Int\n\
+                     function(callbackFunction: Ffi.Function<CallbackSignature>, _: Ffi.CallbackContext): Int\n\
                          return 19\n\
                      end\n\
                  )\n\
              end\n\
-             public function close(callback: Ffi.RegisteredCallback<CallbackSignature>)\n\
+             public function closeCallback(callback: Ffi.RegisteredCallback<CallbackSignature>)\n\
                  Ffi.Callback.close(callback)\n\
              end\n",
         )
@@ -1795,37 +1802,112 @@ fn ffi_callbacks_type_check_as_scoped_and_shared_lifecycle_operations() {
         .with_ffi_dependency(ffi),
     );
 
+    assert!(result.hir().is_none());
     assert!(
-        result.diagnostics().is_empty(),
+        result.diagnostic_snapshot().contains("POP2003"),
         "{}",
         result.diagnostic_snapshot()
     );
-    let mir = pop_mir::lower_hir_bubble(
-        result.hir().expect("callback source reaches HIR"),
-        result.types(),
-    )
-    .expect("callback source lowers to MIR");
-    let operations: Vec<_> = mir
-        .functions()
-        .iter()
-        .flat_map(|function| function.blocks())
-        .flat_map(|block| block.instructions())
-        .map(pop_mir::MirInstruction::kind)
-        .collect();
-    assert!(operations.iter().any(|operation| matches!(
-        operation,
-        pop_mir::MirInstructionKind::FfiCallbackOpenScoped { .. }
-    )));
-    assert!(operations.iter().any(|operation| matches!(
-        operation,
-        pop_mir::MirInstructionKind::FfiCallbackOpenOwned { .. }
-    )));
-    assert!(operations.iter().any(|operation| matches!(
-        operation,
-        pop_mir::MirInstructionKind::CallCallbackPair { .. }
-    )));
-    assert!(operations.iter().any(|operation| matches!(
-        operation,
-        pop_mir::MirInstructionKind::FfiCallbackCloseOwned { .. }
-    )));
+}
+
+#[test]
+fn ffi_callbacks_reject_invalid_contexts_suspension_and_runtime_thread_selection() {
+    let cases = [
+        (
+            "callingThreadOwned",
+            "public function run()\n\
+                 Ffi.Callback.open(\n\
+                     function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                         return value\n\
+                     end,\n\
+                     Ffi.CallbackThread.CallingThread\n\
+                 )\n\
+             end\n",
+        ),
+        (
+            "duplicateContext",
+            "public function run()\n\
+                 Ffi.Callback.open(\n\
+                     function(first: Ffi.CallbackContext, second: Ffi.CallbackContext): Ffi.C.Int\n\
+                         return 0\n\
+                     end,\n\
+                     Ffi.CallbackThread.AttachedThread\n\
+                 )\n\
+             end\n",
+        ),
+        (
+            "contextResult",
+            "public function run()\n\
+                 Ffi.Callback.open(\n\
+                     function(context: Ffi.CallbackContext): Ffi.CallbackContext\n\
+                         return context\n\
+                     end,\n\
+                     Ffi.CallbackThread.AttachedThread\n\
+                 )\n\
+             end\n",
+        ),
+        (
+            "asyncCallback",
+            "public function run()\n\
+                 Ffi.Callback.open(\n\
+                     async function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                         return value\n\
+                     end,\n\
+                     Ffi.CallbackThread.AttachedThread\n\
+                 )\n\
+             end\n",
+        ),
+        (
+            "suspendingCallback",
+            "private async function suspend(): Int\n\
+                 return 1\n\
+             end\n\
+             public function run()\n\
+                 Ffi.Callback.open(\n\
+                     function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                         suspend()\n\
+                         return value\n\
+                     end,\n\
+                     Ffi.CallbackThread.AttachedThread\n\
+                 )\n\
+             end\n",
+        ),
+        (
+            "runtimeThread",
+            "public function run(thread: Ffi.CallbackThread)\n\
+                 Ffi.Callback.open(\n\
+                     function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                         return value\n\
+                     end,\n\
+                     thread\n\
+                 )\n\
+             end\n",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let ffi = BubbleId::from_raw(20);
+        let source = format!("namespace CallbackInvalid\n{body}");
+        let module = FrontEndModule::new(
+            ModuleId::from_raw(0),
+            SourceFile::new(FileId::from_raw(0), format!("src/{name}.pop"), source)
+                .expect("callback source"),
+        );
+        let result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(10),
+                NamespaceId::from_raw(10),
+                vec![ffi],
+                vec![module],
+            )
+            .with_ffi_dependency(ffi),
+        );
+
+        assert!(result.hir().is_none(), "{name} must not reach HIR");
+        assert!(
+            result.diagnostic_snapshot().contains("POP2003"),
+            "{name} must produce the callback contract diagnostic: {}",
+            result.diagnostic_snapshot()
+        );
+    }
 }

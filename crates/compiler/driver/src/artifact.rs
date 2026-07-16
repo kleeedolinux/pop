@@ -39,6 +39,7 @@ pub enum ReferenceMetadataDecodeError {
     TooLarge,
     InvalidCapsule(SymbolIdentity),
     InvalidForeignDeclaration(SymbolIdentity),
+    InvalidFfiLayout,
 }
 
 impl fmt::Display for ReferenceMetadataDecodeError {
@@ -104,6 +105,8 @@ fn validate_metadata(metadata: &ReferenceMetadata) -> Result<(), ReferenceMetada
             identity,
         ));
     }
+    crate::reference::validate_reference_ffi_layouts(metadata)
+        .map_err(|()| ReferenceMetadataDecodeError::InvalidFfiLayout)?;
     Ok(())
 }
 

@@ -25,9 +25,9 @@ use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, NativeLinkInput,
     NativeLinkPlanSource, PoplibDependency, PoplibEmission, ReferenceFunction, ReferenceMetadata,
-    ReferenceType, analyze_bubble, artifact_sha256_hex, emit_poplib, encode_reference_metadata,
-    generate_ffi_bindings, load_poplib, resolve_native_link_inputs, validate_foreign_link_aliases,
-    verify_ffi_generated_bindings,
+    ReferenceType, VerifiedFfiGeneratedBindings, analyze_bubble, artifact_sha256_hex, emit_poplib,
+    encode_reference_metadata, generate_ffi_bindings, load_poplib, resolve_native_link_inputs,
+    validate_foreign_link_aliases, verify_ffi_generated_bindings,
 };
 use pop_foundation::{BubbleId, Diagnostic, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_localization::{
@@ -1451,9 +1451,10 @@ fn lower_package_recursive(
         );
         return None;
     }
-    verify_ffi_generated_bindings(package_root, &manifest, native_target().triple())
-        .map_err(|error| eprintln!("pop: {error}"))
-        .ok()?;
+    let verified_ffi_bindings =
+        verify_ffi_generated_bindings(package_root, &manifest, native_target().triple())
+            .map_err(|error| eprintln!("pop: {error}"))
+            .ok()?;
     let native_link_plan = manifest
         .native_link_plan(native_target().triple())
         .map_err(|error| tool_failure!("pop: {error}"))
@@ -1550,6 +1551,17 @@ fn lower_package_recursive(
     let bubbles = discover_conventional_bubbles(&manifest, &relative_paths)
         .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
+    if verified_ffi_bindings.iter().any(|bindings| {
+        !bubbles.iter().any(|bubble| {
+            bubble
+                .modules()
+                .iter()
+                .any(|module| module == bindings.source_path())
+        })
+    }) {
+        eprintln!("pop: generated FFI callback metadata does not name a discovered Module");
+        return None;
+    }
     let selected: Vec<_> = bubbles
         .iter()
         .filter(|bubble| {
@@ -1593,6 +1605,16 @@ fn lower_package_recursive(
             dependency_metadata,
             Vec::new(),
             ffi_dependency,
+            verified_ffi_bindings
+                .iter()
+                .filter(|bindings| {
+                    bubble
+                        .modules()
+                        .iter()
+                        .any(|module| module == bindings.source_path())
+                })
+                .cloned()
+                .collect(),
         )?;
         validate_foreign_link_aliases(&program.mir, &native_link_plan)
             .map_err(|error| tool_failure!("pop: {error}"))
@@ -1775,6 +1797,11 @@ fn reference_type_text(reference: &ReferenceType, type_parameters: &[&str]) -> S
         ReferenceType::TypeParameter(index) => type_parameters
             .get(usize::from(*index))
             .map_or_else(|| format!("T{index}"), |name| (*name).to_owned()),
+        ReferenceType::Record(identity) => format!(
+            "record:b{}:s{}",
+            identity.bubble().raw(),
+            identity.symbol().raw()
+        ),
         ReferenceType::Tuple(elements) => format!(
             "({})",
             elements
@@ -2389,6 +2416,7 @@ fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
         vec![standard.metadata],
         Vec::new(),
         None,
+        Vec::new(),
     )
 }
 
@@ -2443,6 +2471,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         Vec::new(),
         vec![INTERNAL_BUBBLE],
         None,
+        Vec::new(),
     )?;
     let reference = encode_reference_metadata(&program.reference_metadata)
         .map_err(|error| tool_failure!("pop: Standard metadata encoding failed: {error}"))
@@ -2482,6 +2511,7 @@ fn lower_native_bubble(
     dependency_metadata: Vec<ReferenceMetadata>,
     additional_dependencies: Vec<BubbleId>,
     ffi_dependency: Option<BubbleId>,
+    verified_ffi_bindings: Vec<VerifiedFfiGeneratedBindings>,
 ) -> Option<NativeProgram> {
     let modules = modules
         .iter()
@@ -2536,6 +2566,7 @@ fn lower_native_bubble(
     } else {
         input
     };
+    let input = input.with_verified_ffi_generated_bindings(verified_ffi_bindings);
     let input = if requires_entry {
         input.with_implicit_main_entry(ModuleId::from_raw(0))
     } else {

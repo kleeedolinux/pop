@@ -16,6 +16,7 @@ use crate::lowering::*;
 
 pub(crate) fn lower_instruction(
     bubble: BubbleId,
+    owner: SymbolId,
     instruction: &pop_mir::MirInstruction,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
@@ -30,6 +31,11 @@ pub(crate) fn lower_instruction(
     direct_scalar_arrays: &DirectScalarArrays,
     options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
+    if let Some(lowered) =
+        crate::ffi_callback::lower_instruction(bubble, owner, instruction, value_types, types)?
+    {
+        return Ok(lowered);
+    }
     if let Some(lowered) = crate::ffi_bytes::lower(instruction) {
         return Ok(lowered);
     }
@@ -476,7 +482,6 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
             ffi_layouts,
-            field_layout,
             matches!(
                 options.runtime_profile,
                 pop_backend_api::RuntimeProfile::ProductionGenerational
@@ -1100,6 +1105,11 @@ pub(crate) fn lower_instruction(
         | MirInstructionKind::FfiUnsafePointerFromAddress { .. } => {
             unreachable!("lowered above")
         }
+        MirInstructionKind::FfiCallbackOpenScoped { .. }
+        | MirInstructionKind::FfiCallbackOpenOwned { .. }
+        | MirInstructionKind::CallCallbackPair { .. }
+        | MirInstructionKind::FfiCallbackCloseScoped { .. }
+        | MirInstructionKind::FfiCallbackCloseOwned { .. } => unreachable!("lowered above"),
     };
     Ok(line)
 }
@@ -1850,7 +1860,6 @@ fn lower_foreign_call(
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     layouts: &MirFfiLayoutCatalog,
-    field_layout: &BTreeMap<FieldId, u32>,
     writable_roots: bool,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", result_id.raw());
@@ -1907,7 +1916,6 @@ fn lower_foreign_call(
                     layout,
                     layouts,
                     types,
-                    field_layout,
                     &storage,
                     &format!("{result}_foreign_arg_{index}_marshal"),
                 )?);
@@ -2108,12 +2116,7 @@ fn lower_foreign_call(
                     ),
                 ]);
                 lines.extend(crate::ffi_buffer::marshalling::unmarshal(
-                    &result,
-                    layout,
-                    layouts,
-                    types,
-                    field_layout,
-                    &storage,
+                    &result, layout, layouts, types, &storage,
                 )?);
             }
             ForeignConversion::Pointer => lines.push(format!(

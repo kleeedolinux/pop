@@ -55,6 +55,7 @@ pub(crate) fn direct_scalar_array_fill_function(bubble: BubbleId) -> PrivateFunc
             },
         ],
         attributes: vec!["nounwind"],
+        internal: false,
     }
 }
 
@@ -520,6 +521,7 @@ fn lower_builtin_interface_dispatcher(
         result: "i64".to_owned(),
         blocks,
         attributes: Vec::new(),
+        internal: false,
     })
 }
 
@@ -607,6 +609,7 @@ pub(crate) fn lower_interface_dispatcher(
         result: result_type,
         blocks,
         attributes: Vec::new(),
+        internal: false,
     })
 }
 
@@ -844,6 +847,7 @@ fn lower_async_indirect_create_dispatcher(
         result: "i64".to_owned(),
         blocks,
         attributes: Vec::new(),
+        internal: false,
     })
 }
 
@@ -1000,6 +1004,7 @@ pub(crate) fn lower_indirect_dispatcher(
         result: result_type,
         blocks,
         attributes: Vec::new(),
+        internal: false,
     })
 }
 

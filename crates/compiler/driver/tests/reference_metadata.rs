@@ -6,7 +6,9 @@ use pop_driver::{
     analyze_bubble, decode_reference_metadata, encode_reference_metadata,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolIdentity};
-use pop_mir::{lower_hir_bubble, parse_mir_dump, verify_mir_bubble};
+use pop_mir::{
+    lower_hir_bubble, lower_hir_bubble_with_fingerprint, parse_mir_dump, verify_mir_bubble,
+};
 use pop_source::SourceFile;
 use pop_target::TargetSpec;
 use pop_types::{Effect, ForeignAbi};
@@ -96,6 +98,21 @@ fn foreign_contract_and_transitive_effects_survive_public_reference_metadata() {
         Err(ReferenceMetadataDecodeError::InvalidForeignDeclaration(
             foreign.identity()
         ))
+    );
+    let callback_pair = format!(
+        "\"callback_pairs\":[{{\"callback_parameter_index\":0,\"context_parameter_index\":1,\"lifetime\":\"CallScoped\",\"callback_abi\":\"C\",\"signature_fingerprint\":\"{}\",\"thread\":\"CallingThread\",\"concurrency\":\"Serialized\",\"reentrancy\":\"Forbidden\",\"panic_policy\":\"AbortProcess\"}}],\"span\":",
+        "0".repeat(64)
+    );
+    let public_callback = String::from_utf8(encoded.clone())
+        .expect("canonical metadata is UTF-8")
+        .replacen("\"span\":", &callback_pair, 1)
+        .into_bytes();
+    assert_eq!(
+        decode_reference_metadata(&public_callback),
+        Err(ReferenceMetadataDecodeError::InvalidForeignDeclaration(
+            foreign.identity()
+        )),
+        "first-release public reference metadata must reject callback-pair contracts"
     );
     let decoded = decode_reference_metadata(&encoded).expect("decode FFI reference metadata");
     let decoded_foreign = decoded
@@ -268,11 +285,12 @@ fn foreign_contract_and_transitive_effects_survive_public_reference_metadata() {
 }
 
 #[test]
-fn public_foreign_layout_records_fail_closed_before_reference_layout_metadata_exists() {
+fn public_foreign_layout_records_round_trip_into_consumer_mir() {
     let ffi_bubble = BubbleId::from_raw(20);
+    let producer_bubble = BubbleId::from_raw(21);
     let producer = analyze_bubble(
         FrontEndBubbleInput::new(
-            BubbleId::from_raw(21),
+            producer_bubble,
             NamespaceId::from_raw(21),
             vec![ffi_bubble],
             vec![module(
@@ -280,12 +298,17 @@ fn public_foreign_layout_records_fail_closed_before_reference_layout_metadata_ex
                 "src/layout.pop",
                 "namespace Native.Unsafe\n\
                  @Ffi.C.Layout\n\
-                 public record Pair\n\
-                     left: Int32\n\
-                     right: Int32\n\
+                 public record Inner\n\
+                     zed: Int16\n\
+                     aye: Int16\n\
+                 end\n\
+                 @Ffi.C.Layout\n\
+                 public record Outer\n\
+                     beta: Int32\n\
+                     alpha: Inner\n\
                  end\n\
                  @Ffi.Foreign(\"transform_pair\")\n\
-                 public function transform(value: Pair): Pair\n\
+                 public function transform(value: Outer): Outer\n\
                  end\n",
             )],
         )
@@ -296,10 +319,131 @@ fn public_foreign_layout_records_fail_closed_before_reference_layout_metadata_ex
         "{}",
         producer.diagnostic_snapshot()
     );
+    let metadata = producer
+        .reference_metadata()
+        .expect("public trusted record metadata");
+    assert_eq!(metadata.records().len(), 2);
+    assert_eq!(
+        metadata.records()[0]
+            .fields()
+            .iter()
+            .map(pop_driver::ReferenceRecordField::name)
+            .collect::<Vec<_>>(),
+        ["zed", "aye"]
+    );
+    assert_eq!(
+        metadata.records()[1]
+            .fields()
+            .iter()
+            .map(pop_driver::ReferenceRecordField::name)
+            .collect::<Vec<_>>(),
+        ["beta", "alpha"]
+    );
+    let catalog = metadata
+        .ffi_layout_catalog()
+        .expect("exact public FFI layout catalog");
+    assert_eq!(catalog.target(), "x86_64-unknown-linux-gnu");
+    assert!(catalog.entries().len() >= 4, "record and scalar closure");
+    assert!(catalog.entries().iter().all(|layout| {
+        layout
+            .descriptor()
+            .contains("\"target\":\"x86_64-unknown-linux-gnu\"")
+            && layout.fingerprint().len() == 64
+    }));
+
+    let encoded = encode_reference_metadata(metadata).expect("encode public layout metadata");
+    let decoded = decode_reference_metadata(&encoded).expect("verify public layout metadata");
+    assert_eq!(decoded, *metadata);
+    let fingerprint = catalog.entries()[0].fingerprint();
+    let corrupted = String::from_utf8(encoded.clone())
+        .expect("canonical UTF-8 metadata")
+        .replacen(fingerprint, &"0".repeat(64), 1)
+        .into_bytes();
     assert!(matches!(
-        producer.reference_metadata(),
-        Err(ReferenceMetadataError::UnsupportedPublicType { .. })
+        decode_reference_metadata(&corrupted),
+        Err(ReferenceMetadataDecodeError::InvalidFfiLayout)
     ));
+    let reordered = String::from_utf8(encoded.clone())
+        .expect("canonical UTF-8 metadata")
+        .replacen("\"source_index\":0", "\"source_index\":1", 1)
+        .into_bytes();
+    assert!(matches!(
+        decode_reference_metadata(&reordered),
+        Err(ReferenceMetadataDecodeError::InvalidFfiLayout)
+    ));
+    let wrong_target = String::from_utf8(encoded)
+        .expect("canonical UTF-8 metadata")
+        .replacen(
+            "\"target\":\"x86_64-unknown-linux-gnu\"",
+            "\"target\":\"aarch64-unknown-linux-gnu\"",
+            1,
+        )
+        .into_bytes();
+    assert!(matches!(
+        decode_reference_metadata(&wrong_target),
+        Err(ReferenceMetadataDecodeError::InvalidFfiLayout)
+    ));
+
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(22),
+            NamespaceId::from_raw(22),
+            vec![ffi_bubble, producer_bubble],
+            vec![module(
+                0,
+                "src/main.pop",
+                "namespace Application\n\
+                 using Native.Unsafe\n\
+                 public function call(value: Outer): Outer\n\
+                     return Native.Unsafe.transform(value)\n\
+                 end\n",
+            )],
+        )
+        .with_ffi_dependency(ffi_bubble)
+        .with_reference_metadata(vec![decoded]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble_with_fingerprint(
+        consumer.hir().expect("consumer HIR"),
+        consumer.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("consumer imports the exact layout catalog");
+    let imported = mir
+        .foreign_functions()
+        .iter()
+        .find(|function| function.reference_identity().is_some())
+        .expect("imported foreign function");
+    let root = imported.parameter_layouts()[0].expect("by-value parameter layout");
+    assert_eq!(imported.result_layouts(), [Some(root)]);
+    let fields = match mir
+        .ffi_layouts()
+        .get(root)
+        .expect("root layout")
+        .value_class()
+    {
+        pop_mir::MirFfiValueClass::Record(fields) => fields,
+        other => panic!("expected record layout, got {other:?}"),
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(pop_mir::MirFfiLayoutField::source_index)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    let target = TargetSpec::for_triple(mir.ffi_layouts().target()).expect("catalog target");
+    lower_mir_to_llvm_ir(
+        &mir,
+        consumer.types(),
+        &target,
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM marshals the imported declaration-order layout");
 }
 
 #[test]

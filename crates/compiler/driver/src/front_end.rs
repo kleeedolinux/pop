@@ -37,16 +37,16 @@ use pop_types::{
 
 use crate::api::*;
 use crate::attributes::{
-    classify_function_attributes, resolve_ffi_attributes, resolve_ffi_layout_attributes,
-    resolve_source_attributes,
+    FfiAttributeInputs, classify_function_attributes, resolve_ffi_attributes,
+    resolve_ffi_layout_attributes, resolve_source_attributes,
 };
 use crate::compile_time::{
     build_compile_time_context, check_compile_time_function_bodies,
     compile_time_attribute_constant, evaluate_declaration_defaults, evaluate_source_constants,
 };
 use crate::reference::{
-    emit_reference_metadata, hir_function_references, invalid_reference_capsule,
-    reference_signatures,
+    define_reference_records, emit_reference_metadata, hir_function_references,
+    hir_reference_ffi_layout_catalog, invalid_reference_capsule, reference_signatures,
 };
 use crate::work::*;
 
@@ -62,6 +62,18 @@ use crate::work::*;
 pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let invalid_capsule = invalid_reference_capsule(&input.reference_metadata);
     let parsed = parse_modules(input.modules);
+    let module_origins = parsed
+        .iter()
+        .map(|module| {
+            (
+                module.module,
+                (
+                    module.source.path().to_owned(),
+                    SourceSpan::new(module.source.id(), module.syntax.root().range()),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let module_inputs: Vec<_> = parsed
         .iter()
         .map(|module| {
@@ -82,15 +94,28 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let referenced_declarations = input
         .reference_metadata
         .iter()
-        .flat_map(ReferenceMetadata::functions)
-        .map(|function| {
-            pop_resolve::ReferencedDeclaration::function(
-                function.identity(),
-                function.module(),
-                function.namespace(),
-                function.name(),
-                function.span(),
-            )
+        .flat_map(|metadata| {
+            metadata
+                .records()
+                .iter()
+                .map(|record| {
+                    pop_resolve::ReferencedDeclaration::record(
+                        record.identity(),
+                        record.module(),
+                        record.namespace(),
+                        record.name(),
+                        record.span(),
+                    )
+                })
+                .chain(metadata.functions().iter().map(|function| {
+                    pop_resolve::ReferencedDeclaration::function(
+                        function.identity(),
+                        function.module(),
+                        function.namespace(),
+                        function.name(),
+                        function.span(),
+                    )
+                }))
         })
         .collect::<Vec<_>>();
     for metadata in &input.reference_metadata {
@@ -124,6 +149,8 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     if input.ffi_dependency.is_some() {
         resolver = resolver.with_ffi_dependency();
     }
+    let reference_record_types =
+        define_reference_records(&input.reference_metadata, &database, &mut resolver);
     define_type_aliases(&parsed, &database, &mut resolver, &mut diagnostics);
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,
@@ -156,16 +183,55 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut functions,
         &database,
         &bootstrap,
-        input.ffi_dependency.is_some(),
+        FfiAttributeInputs {
+            has_ffi_dependency: input.ffi_dependency.is_some(),
+            generated_bindings: &input.generated_ffi_bindings,
+            module_origins: &module_origins,
+        },
         &resolver,
         &mut diagnostics,
     );
-    let mut signatures = reference_signatures(&input.reference_metadata, &database, &mut resolver);
+    let mut signatures = reference_signatures(
+        &input.reference_metadata,
+        &database,
+        &mut resolver,
+        &reference_record_types,
+    );
+    let reference_ffi_layout_catalog = hir_reference_ffi_layout_catalog(
+        &input.reference_metadata,
+        &database,
+        &mut resolver,
+        &reference_record_types,
+    );
     signatures.extend(
         functions
             .iter()
             .map(|function| (function.signature.symbol(), function.signature.clone())),
     );
+    let mut foreign_declarations = functions
+        .iter()
+        .filter_map(|function| {
+            function
+                .foreign
+                .clone()
+                .map(|declaration| (function.signature.symbol(), declaration))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for function in input
+        .reference_metadata
+        .iter()
+        .flat_map(ReferenceMetadata::functions)
+    {
+        let Some(declaration) = function.foreign_declaration().cloned() else {
+            continue;
+        };
+        if let Some(local) = database
+            .index()
+            .declaration_by_reference_identity(function.identity())
+        {
+            foreign_declarations.insert(local.symbol(), declaration);
+        }
+    }
     let checked_documentation = validate_documentation(
         input.bubble,
         &parsed,
@@ -234,7 +300,10 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut functions,
         &methods,
         &signatures,
-        &runtime_constants,
+        RuntimeBodyContracts {
+            foreign_declarations: &foreign_declarations,
+            constants: &runtime_constants,
+        },
         &mut resolver,
         &mut diagnostics,
     );
@@ -271,6 +340,10 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
                 &mut resolver,
                 &referenced_call_instances,
             ))
+        })
+        .and_then(|bubble| {
+            reference_ffi_layout_catalog
+                .map(|catalog| bubble.with_reference_ffi_layout_catalog(catalog))
         })
         .map(Some)
     } else {
@@ -842,12 +915,18 @@ fn define_constants(
     (constants, attribute_work)
 }
 
+#[derive(Clone, Copy)]
+struct RuntimeBodyContracts<'a> {
+    foreign_declarations: &'a BTreeMap<SymbolId, pop_types::ForeignFunctionDeclaration>,
+    constants: &'a BTreeMap<SymbolId, pop_types::RuntimeConstant>,
+}
+
 fn build_runtime_hir(
     bubble: BubbleId,
     functions: &mut [FunctionWork],
     methods: &[MethodWork],
     signatures: &BTreeMap<SymbolId, ResolvedFunctionSignature>,
-    constants: &BTreeMap<SymbolId, pop_types::RuntimeConstant>,
+    contracts: RuntimeBodyContracts<'_>,
     resolver: &mut SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (
@@ -888,7 +967,8 @@ fn build_runtime_hir(
             continue;
         }
         let typed = BodyChecker::new(function.module, resolver, signatures)
-            .with_runtime_constants(constants)
+            .with_runtime_constants(contracts.constants)
+            .with_foreign_declarations(contracts.foreign_declarations)
             .check(&function.signature, &function.body);
         diagnostics.extend(typed.diagnostics().iter().cloned());
         let Some(body) = typed.body() else {
@@ -919,7 +999,8 @@ fn build_runtime_hir(
     let mut hir_methods = Vec::new();
     for method in methods {
         let typed = BodyChecker::new(method.module, resolver, signatures)
-            .with_runtime_constants(constants)
+            .with_runtime_constants(contracts.constants)
+            .with_foreign_declarations(contracts.foreign_declarations)
             .check(&method.signature, &method.body);
         diagnostics.extend(typed.diagnostics().iter().cloned());
         let Some(body) = typed.body() else {

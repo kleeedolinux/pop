@@ -1,26 +1,62 @@
 use pop_backend_api::RuntimeProfile;
 use pop_backend_llvm::{LlvmLoweringOptions, lower_mir_to_llvm_ir};
 use pop_backend_mir_interp::{ExecutionError, MirInterpreter, MirValue};
-use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
+use pop_driver::{
+    FrontEndBubbleInput, FrontEndModule, VerifiedFfiGeneratedBindings, analyze_bubble,
+    generate_ffi_bindings, verify_ffi_generated_bindings,
+};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
 use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
+use pop_projects::{parse_package_manifest, sha256_hex};
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind, UnwindReason};
 use pop_source::SourceFile;
-use pop_target::{Endianness, PointerWidth, TargetCapability, TargetSpec};
+use pop_target::{Endianness, OperatingSystem, PointerWidth, TargetCapability, TargetSpec};
 use pop_types::{IntegerKind, IntegerValue};
 use std::fmt::Write as _;
 use std::fs;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn target() -> TargetSpec {
     TargetSpec::builder("x86_64-unknown-linux-gnu")
         .pointer_width(PointerWidth::Bits64)
         .endianness(Endianness::Little)
+        .operating_system(OperatingSystem::Linux)
         .capability(TargetCapability::PreciseStackMaps)
         .capability(TargetCapability::RelocatingNursery)
         .build()
         .expect("complete target")
+}
+
+fn generated_llvm_callback_bindings() -> (PathBuf, SourceFile, Vec<VerifiedFfiGeneratedBindings>) {
+    let descriptor = include_str!("fixtures/ffi_callbacks.popc");
+    let root = std::env::temp_dir().join(format!(
+        "pop-llvm-callbacks-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("remove prior LLVM callback fixture");
+    }
+    fs::create_dir_all(root.join("native")).expect("create callback descriptor directory");
+    fs::write(root.join("native/callbacks.popc"), descriptor).expect("write callback descriptor");
+    let manifest_text = format!(
+        "[package]\nname = \"Callback.Fixture\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[platform.\"x86_64-unknown-linux-gnu\".ffiGenerators]\nCallbacks = {{ descriptor = \"native/callbacks.popc\", descriptorSha256 = \"{}\", outputDirectory = \"src/generated/callbacks\" }}\n",
+        sha256_hex(descriptor.as_bytes())
+    );
+    let manifest_path = root.join("bubble.toml");
+    fs::write(&manifest_path, &manifest_text).expect("write callback manifest");
+    generate_ffi_bindings(&manifest_path, "x86_64-unknown-linux-gnu", "Callbacks")
+        .expect("generate LLVM callbacks");
+    let manifest = parse_package_manifest(&manifest_text).expect("parse callback manifest");
+    let verified = verify_ffi_generated_bindings(&root, &manifest, "x86_64-unknown-linux-gnu")
+        .expect("verify generated LLVM callbacks");
+    let source_path = "src/generated/callbacks/bindings.pop";
+    let source_text = fs::read_to_string(root.join(source_path)).expect("read callback source");
+    let source = SourceFile::new(FileId::from_raw(0), source_path, source_text)
+        .expect("generated callback source");
+    (root, source, verified)
 }
 
 #[test]
@@ -168,6 +204,110 @@ fn llvm_lowers_foreign_calls_with_exact_abi_and_balanced_transitions() {
         "native foreign call failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+fn assert_typed_callback_ir(text: &str) {
+    assert_eq!(
+        text.matches("define internal i32 @pop_b10_ffi_callback_thunk_")
+            .count(),
+        2
+    );
+    assert_eq!(
+        text.matches("define internal ptr @pop_b10_ffi_callback_thunk_")
+            .count(),
+        1
+    );
+    assert_eq!(
+        text.matches("define internal { i32, i32 } @pop_b10_ffi_callback_thunk_")
+            .count(),
+        1
+    );
+    assert_eq!(
+        text.matches("define internal i64 @pop_b10_ffi_callback_thunk_")
+            .count(),
+        1
+    );
+    assert_eq!(
+        text.matches("call i64 @pop_rt_ffi_callback_enter").count(),
+        5
+    );
+    assert!(text.matches("call i8 @pop_rt_ffi_callback_leave").count() >= 10);
+    assert!(text.contains("invoke i64 @pop_b10_nested_"));
+    assert!(text.contains("ptrtoint ptr %callback_arg1 to i64"));
+    assert!(text.contains("ptrtoint ptr %callback_arg0 to i64"));
+    assert!(text.contains("inttoptr i64"));
+    assert!(text.contains("%callback_managed_arg0_storage = alloca [8 x i8], align 4"));
+    assert!(text.contains("%callback_physical_result_storage = alloca [8 x i8], align 4"));
+    assert!(!text.contains("callback_lookup"));
+}
+
+#[test]
+fn llvm_emits_fixed_typed_callback_thunks_and_balanced_lifecycle_calls() {
+    let ffi = BubbleId::from_raw(20);
+    let (fixture_root, generated, verified) = generated_llvm_callback_bindings();
+    let source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/callbacks.pop",
+        include_str!("fixtures/ffi_callbacks.pop"),
+    )
+    .expect("callback source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![
+                FrontEndModule::new(ModuleId::from_raw(0), generated),
+                FrontEndModule::new(ModuleId::from_raw(1), source),
+            ],
+        )
+        .with_ffi_dependency(ffi)
+        .with_verified_ffi_generated_bindings(verified),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("callback HIR");
+    let symbol = |name: &str| {
+        hir.functions()
+            .iter()
+            .find(|function| function.name() == name)
+            .expect("callback fixture function")
+            .symbol()
+    };
+    let open = symbol("openCallback");
+    let use_callback = symbol("useCallback");
+    let close = symbol("closeCallback");
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        hir,
+        front_end.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("verified callback MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("callback LLVM lowering");
+    let text = module.to_string();
+    assert_typed_callback_ir(&text);
+    module.verify().expect("typed callback LLVM verifies");
+    let fixture = include_str!("fixtures/ffi_callbacks.c")
+        .replace("OPEN", &open.raw().to_string())
+        .replace("USE", &use_callback.raw().to_string())
+        .replace("CLOSE", &close.raw().to_string());
+    let result = link_llvm_with_c_fixture_and_runtime(&text, &fixture, "typed-callback");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "native callback fixture failed: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::remove_dir_all(fixture_root).expect("remove LLVM callback fixture");
 }
 
 #[test]
@@ -4530,6 +4670,48 @@ fn link_llvm_modules_with_runtime_and_run(texts: &[String], name: &str) -> Outpu
     for input in inputs {
         let _ = fs::remove_file(input);
     }
+    let _ = fs::remove_file(executable);
+    result
+}
+
+fn link_llvm_with_c_fixture_and_runtime(llvm: &str, fixture: &str, name: &str) -> Output {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let build = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-p", "pop-runtime-native"])
+        .output()
+        .expect("cargo must be available");
+    assert!(
+        build.status.success(),
+        "runtime build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
+    let fixture_path = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.c"));
+    let executable = std::env::temp_dir().join(format!("pop-backend-llvm-{name}"));
+    fs::write(&input, llvm).expect("write callback LLVM input");
+    fs::write(&fixture_path, fixture).expect("write callback C fixture");
+    let link = Command::new("clang")
+        .arg(&input)
+        .arg(&fixture_path)
+        .arg(root.join("target/debug/libpop_runtime_native.a"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang must be installed");
+    assert!(
+        link.status.success(),
+        "clang rejected callback fixture: {}\n{llvm}\n{fixture}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let result = Command::new(&executable)
+        .output()
+        .expect("native callback fixture runs");
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(fixture_path);
     let _ = fs::remove_file(executable);
     result
 }

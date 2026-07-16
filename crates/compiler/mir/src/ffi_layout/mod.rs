@@ -24,9 +24,10 @@ pub enum MirFfiValueClass {
     Record(Vec<MirFfiLayoutField>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirFfiLayoutField {
     field: FieldId,
+    name: Option<String>,
     source_index: u32,
     layout: FfiAbiLayoutId,
     offset: u64,
@@ -42,6 +43,25 @@ impl MirFfiLayoutField {
     ) -> Self {
         Self {
             field,
+            name: None,
+            source_index,
+            layout,
+            offset,
+        }
+    }
+
+    /// Constructs a source-derived field with its exact declaration spelling.
+    #[must_use]
+    pub fn new_named(
+        field: FieldId,
+        name: impl Into<String>,
+        source_index: u32,
+        layout: FfiAbiLayoutId,
+        offset: u64,
+    ) -> Self {
+        Self {
+            field,
+            name: Some(name.into()),
             source_index,
             layout,
             offset,
@@ -49,22 +69,27 @@ impl MirFfiLayoutField {
     }
 
     #[must_use]
-    pub const fn field(self) -> FieldId {
+    pub const fn field(&self) -> FieldId {
         self.field
     }
 
     #[must_use]
-    pub const fn source_index(self) -> u32 {
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub const fn source_index(&self) -> u32 {
         self.source_index
     }
 
     #[must_use]
-    pub const fn layout(self) -> FfiAbiLayoutId {
+    pub const fn layout(&self) -> FfiAbiLayoutId {
         self.layout
     }
 
     #[must_use]
-    pub const fn offset(self) -> u64 {
+    pub const fn offset(&self) -> u64 {
         self.offset
     }
 }

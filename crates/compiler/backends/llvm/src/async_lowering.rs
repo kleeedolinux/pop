@@ -130,6 +130,7 @@ pub(crate) fn lower_async_function(
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     lower_async_parts(
         bubble,
+        function.symbol(),
         &async_function_poll_name(bubble, function.symbol()),
         async_function_create_name(bubble, function.symbol()),
         function.results(),
@@ -163,6 +164,7 @@ pub(crate) fn lower_async_nested(
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     lower_async_parts(
         bubble,
+        function.owner(),
         &async_nested_poll_name(bubble, function.owner(), function.function()),
         async_nested_create_name(bubble, function.owner(), function.function()),
         function.results(),
@@ -183,6 +185,7 @@ pub(crate) fn lower_async_nested(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn lower_async_parts(
     bubble: BubbleId,
+    owner: SymbolId,
     poll_name: &str,
     create_name: String,
     result_types: &[TypeId],
@@ -265,6 +268,7 @@ fn lower_async_parts(
             }
             let mut lowered = lower_instruction(
                 bubble,
+                owner,
                 instruction,
                 &value_types,
                 types,
@@ -322,6 +326,7 @@ fn lower_async_parts(
         result: "i8".to_owned(),
         blocks: poll_blocks,
         attributes: Vec::new(),
+        internal: false,
     };
     let create = lower_create_helper(
         create_name,
@@ -1177,5 +1182,6 @@ fn lower_create_helper(
             terminator: "ret i64 %pop_created_task".to_owned(),
         }],
         attributes: Vec::new(),
+        internal: false,
     })
 }

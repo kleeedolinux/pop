@@ -176,12 +176,15 @@ impl BodyParser<'_> {
                 let method = method.text(self.source).to_owned();
                 self.expect(TokenKind::LeftParenthesis, "`(`")?;
                 let mut arguments = Vec::new();
+                self.consume_call_line_breaks();
                 if self.current_kind() != Some(TokenKind::RightParenthesis) {
                     loop {
                         arguments.push(self.parse_expression(0)?);
+                        self.consume_call_line_breaks();
                         if self.consume(TokenKind::Comma).is_none() {
                             break;
                         }
+                        self.consume_call_line_breaks();
                     }
                 }
                 let right = self.expect(TokenKind::RightParenthesis, "`)`")?;
@@ -198,12 +201,15 @@ impl BodyParser<'_> {
             }
             if self.consume(TokenKind::LeftParenthesis).is_some() {
                 let mut arguments = Vec::new();
+                self.consume_call_line_breaks();
                 if self.current_kind() != Some(TokenKind::RightParenthesis) {
                     loop {
                         arguments.push(self.parse_expression(0)?);
+                        self.consume_call_line_breaks();
                         if self.consume(TokenKind::Comma).is_none() {
                             break;
                         }
+                        self.consume_call_line_breaks();
                     }
                 }
                 let right = self.expect(TokenKind::RightParenthesis, "`)`")?;
@@ -234,12 +240,15 @@ impl BodyParser<'_> {
                 self.expect(TokenKind::GreaterThan, "second `>` in `>>`")?;
                 self.expect(TokenKind::LeftParenthesis, "`(` after generic arguments")?;
                 let mut arguments = Vec::new();
+                self.consume_call_line_breaks();
                 if self.current_kind() != Some(TokenKind::RightParenthesis) {
                     loop {
                         arguments.push(self.parse_expression(0)?);
+                        self.consume_call_line_breaks();
                         if self.consume(TokenKind::Comma).is_none() {
                             break;
                         }
+                        self.consume_call_line_breaks();
                     }
                 }
                 let right = self.expect(TokenKind::RightParenthesis, "`)`")?;
@@ -285,6 +294,10 @@ impl BodyParser<'_> {
             break;
         }
         Ok(expression)
+    }
+
+    fn consume_call_line_breaks(&mut self) {
+        while self.consume(TokenKind::Newline).is_some() {}
     }
 
     fn parse_primary(&mut self) -> Result<ExpressionSyntax, FunctionBodyError> {

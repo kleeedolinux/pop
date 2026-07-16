@@ -11,9 +11,10 @@ use pop_foundation::{
     NestedFunctionId, NominalInterfaceId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot};
-use pop_types::{FloatKind, IntegerKind, SemanticType, TypeArena, embedded_bootstrap_schema};
+use pop_types::{
+    FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena, embedded_bootstrap_schema,
+};
 
-use crate::MirFfiLayoutCatalog;
 use crate::ir::*;
 use crate::lowering::{
     array_element_map, expected_safe_point_roots, expected_suspend_frame_slots,
@@ -21,6 +22,9 @@ use crate::lowering::{
     task_group_object_map, task_object_map, terminator_effects,
 };
 use crate::render::{float_kind_text, integer_kind_text};
+use crate::{
+    MirFfiCallbackAbi, MirFfiCallbackFingerprint, MirFfiCallbackSignature, MirFfiLayoutCatalog,
+};
 
 /// Verifies canonical MIR block, value, type, call, and return invariants.
 ///
@@ -51,6 +55,8 @@ pub fn verify_mir_bubble(
         let declaration = function.declaration();
         let valid = declaration.symbol() == function.symbol()
             && declaration.has_valid_effects()
+            && declaration.has_valid_callback_pairs()
+            && (function.reference_identity().is_none() || declaration.callback_pairs().is_empty())
             && function.effects() == lower_effect_summary(declaration.effects())
             && function.parameter_layouts().len() == function.parameters().len()
             && function.result_layouts().len() == function.results().len()
@@ -130,6 +136,7 @@ pub fn verify_mir_bubble(
         .iter()
         .map(MirForeignFunction::symbol)
         .collect();
+    let callback_signatures = verified_callback_signatures(bubble, arena);
     let mut reference_signatures = BTreeMap::new();
     for reference in &bubble.function_references {
         let signature = (
@@ -170,6 +177,7 @@ pub fn verify_mir_bubble(
             &async_functions,
             &async_references,
             &foreign_functions,
+            &callback_signatures,
             bubble.ffi_layouts(),
             &mut errors,
         );
@@ -186,6 +194,7 @@ pub fn verify_mir_bubble(
             &async_functions,
             &async_references,
             &foreign_functions,
+            &callback_signatures,
             bubble.ffi_layouts(),
             &mut errors,
         );
@@ -195,6 +204,92 @@ pub fn verify_mir_bubble(
     } else {
         Err(errors)
     }
+}
+
+fn verified_callback_signatures(
+    bubble: &MirBubble,
+    arena: &TypeArena,
+) -> BTreeSet<MirFfiCallbackSignature> {
+    bubble
+        .foreign_functions()
+        .iter()
+        .flat_map(|function| {
+            function
+                .declaration()
+                .callback_pairs()
+                .iter()
+                .filter_map(move |contract| {
+                    let callback_parameter = function
+                        .parameters()
+                        .get(usize::from(contract.callback_parameter_index()))?;
+                    let callback_type = match arena.get(*callback_parameter) {
+                        Some(SemanticType::Builtin {
+                            definition,
+                            arguments,
+                        }) if pop_types::is_ffi_function_type_constructor(*definition)
+                            && arguments.len() == 1 =>
+                        {
+                            arguments[0]
+                        }
+                        _ => return None,
+                    };
+                    callback_signature_from_contract(
+                        callback_type,
+                        contract.callback_abi(),
+                        contract.signature_fingerprint(),
+                        bubble.ffi_layouts(),
+                        arena,
+                    )
+                })
+        })
+        .collect()
+}
+
+fn callback_signature_from_contract(
+    callback_type: TypeId,
+    abi: pop_types::FfiCallbackAbi,
+    fingerprint: &str,
+    layouts: &MirFfiLayoutCatalog,
+    arena: &TypeArena,
+) -> Option<MirFfiCallbackSignature> {
+    let mir_abi = MirFfiCallbackAbi::from(abi);
+    let foreign_abi = match abi {
+        pop_types::FfiCallbackAbi::C => pop_types::ForeignAbi::C,
+        pop_types::FfiCallbackAbi::System => pop_types::ForeignAbi::System,
+    };
+    let SemanticType::Function {
+        parameters,
+        results,
+        ..
+    } = arena.get(callback_type)?
+    else {
+        return None;
+    };
+    let binding = |type_id: TypeId| match arena.get(type_id) {
+        Some(SemanticType::Record(_)) => layouts
+            .entries()
+            .iter()
+            .find(|entry| entry.element() == type_id && entry.abi() == foreign_abi)
+            .map(|entry| Some(entry.id())),
+        Some(_) => Some(None),
+        None => None,
+    };
+    let parameter_layouts = parameters
+        .iter()
+        .copied()
+        .map(binding)
+        .collect::<Option<Vec<_>>>()?;
+    let result_layout = match results.first().copied() {
+        Some(type_id) => binding(type_id)?,
+        None => None,
+    };
+    Some(MirFfiCallbackSignature::new(
+        callback_type,
+        mir_abi,
+        parameter_layouts,
+        result_layout,
+        MirFfiCallbackFingerprint::from_lower_hex(fingerprint)?,
+    ))
 }
 
 fn foreign_layout_bindings_are_valid(
@@ -548,6 +643,7 @@ fn verify_function(
     async_functions: &BTreeSet<SymbolId>,
     async_references: &BTreeSet<SymbolIdentity>,
     foreign_functions: &BTreeSet<SymbolId>,
+    callback_signatures: &BTreeSet<MirFfiCallbackSignature>,
     ffi_layouts: &MirFfiLayoutCatalog,
     errors: &mut Vec<MirVerificationError>,
 ) {
@@ -761,6 +857,7 @@ fn verify_function(
                     nested: nested_signatures,
                     async_functions,
                     async_references,
+                    callback_signatures,
                 },
                 ffi_layouts,
                 errors,
@@ -2143,6 +2240,122 @@ struct CallableSignatures<'a> {
     nested: &'a BTreeMap<(SymbolId, NestedFunctionId), &'a MirNestedFunction>,
     async_functions: &'a BTreeSet<SymbolId>,
     async_references: &'a BTreeSet<SymbolIdentity>,
+    callback_signatures: &'a BTreeSet<MirFfiCallbackSignature>,
+}
+
+fn registered_callback_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
+    match arena.get(type_id) {
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) if *definition == pop_types::FFI_REGISTERED_CALLBACK_TYPE_ID && arguments.len() == 1 => {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+fn callback_signature_is_valid(arena: &TypeArena, type_id: TypeId) -> bool {
+    let Some(SemanticType::Function {
+        is_async,
+        parameters,
+        results,
+        effects,
+    }) = arena.get(type_id)
+    else {
+        return false;
+    };
+    !is_async
+        && !effects.contains(pop_types::Effect::Suspends)
+        && results.len() <= 1
+        && parameters
+            .iter()
+            .filter(|parameter| {
+                is_exact_ffi_builtin(
+                    arena,
+                    **parameter,
+                    pop_types::FFI_CALLBACK_CONTEXT_TYPE_ID,
+                    &[],
+                )
+            })
+            .count()
+            == 1
+        && parameters
+            .iter()
+            .chain(results)
+            .filter(|type_id| {
+                is_exact_ffi_builtin(
+                    arena,
+                    **type_id,
+                    pop_types::FFI_CALLBACK_CONTEXT_TYPE_ID,
+                    &[],
+                )
+            })
+            .count()
+            == 1
+}
+
+fn callback_nested_matches(
+    nested: &MirNestedFunction,
+    arena: &TypeArena,
+    callback_type: TypeId,
+) -> bool {
+    matches!(arena.get(callback_type), Some(SemanticType::Function {
+        is_async: false,
+        parameters,
+        results,
+        ..
+    }) if !nested.is_async()
+        && nested.parameters() == parameters
+        && nested.results() == results
+        && !nested.effects().contains(MirEffect::Suspends))
+}
+
+fn callback_pair_nested_matches(
+    nested: &MirNestedFunction,
+    arena: &TypeArena,
+    callback_type: TypeId,
+) -> bool {
+    let [function, context] = nested.parameters() else {
+        return false;
+    };
+    let Some(function_definition) = embedded_bootstrap_schema()
+        .ok()
+        .and_then(|schema| schema.type_by_source_name("Ffi.Function").copied())
+        .map(|entry| entry.id())
+    else {
+        return false;
+    };
+    !nested.is_async()
+        && nested.results().len() == 1
+        && !nested.effects().contains(MirEffect::Suspends)
+        && is_exact_ffi_builtin(arena, *function, function_definition, &[callback_type])
+        && is_exact_ffi_builtin(
+            arena,
+            *context,
+            pop_types::FFI_CALLBACK_CONTEXT_TYPE_ID,
+            &[],
+        )
+}
+
+fn callback_captures_match(
+    captures: &[MirClosureCapture],
+    nested: &MirNestedFunction,
+    values: &BTreeMap<ValueId, TypeId>,
+) -> bool {
+    captures.len() == nested.captures().len()
+        && captures
+            .iter()
+            .zip(nested.captures())
+            .all(|(found, expected)| {
+                !found.self_reference()
+                    && found.capture() == expected.capture()
+                    && found.binding() == expected.binding()
+                    && found.slot() == expected.slot()
+                    && found.type_id() == expected.type_id()
+                    && found.mode() == expected.mode()
+                    && values.get(&found.value()) == Some(&found.type_id())
+            })
 }
 
 fn verify_instruction_types(
@@ -2164,6 +2377,7 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiBufferEndBorrow { .. }
             | MirInstructionKind::FfiBufferClose { .. }
             | MirInstructionKind::FfiBytesEndBorrow { .. }
+            | MirInstructionKind::FfiCallbackCloseScoped { .. }
             | MirInstructionKind::FfiUnsafeStore { .. }
             | MirInstructionKind::FfiUnsafeCopy { .. }
             | MirInstructionKind::Pin { .. }
@@ -2185,6 +2399,10 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiBufferBorrow { .. }
             | MirInstructionKind::FfiBytesBorrow { .. }
             | MirInstructionKind::FfiBytesBorrowLength { .. }
+            | MirInstructionKind::FfiCallbackOpenScoped { .. }
+            | MirInstructionKind::FfiCallbackOpenOwned { .. }
+            | MirInstructionKind::CallCallbackPair { .. }
+            | MirInstructionKind::FfiCallbackCloseOwned { .. }
     );
     if requires_value_form && !instruction.has_result() {
         let error = if matches!(
@@ -2277,6 +2495,148 @@ fn verify_instruction_types(
                 .is_some_and(|payload| is_managed_reference_type_id(payload, Some(arena)));
             if !valid {
                 errors.push(MirVerificationError::InvalidFfiHandleOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiCallbackOpenScoped {
+            callback,
+            callback_type,
+            owner,
+            function,
+            site,
+            ..
+        } => {
+            let operand_type = values.get(callback).copied();
+            let nested = signatures.nested.get(&(*owner, *function)).copied();
+            let valid = operand_type == Some(*callback_type)
+                && callback_signature_is_valid(arena, *callback_type)
+                && nested
+                    .is_some_and(|nested| callback_nested_matches(nested, arena, *callback_type))
+                && registered_callback_payload(arena, instruction.result_type())
+                    == Some(*callback_type)
+                && site.raw() != 0;
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiCallbackOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiCallbackOpenOwned {
+            callback,
+            callback_type,
+            owner,
+            function,
+            site,
+            thread,
+            result,
+            success,
+            failure,
+        } => {
+            let operand_type = values.get(callback).copied();
+            let nested = signatures.nested.get(&(*owner, *function)).copied();
+            let valid_result = matches!(arena.get(instruction.result_type()), Some(SemanticType::Builtin { definition, arguments })
+                    if *definition == *result
+                        && arguments.len() == 2
+                        && registered_callback_payload(arena, arguments[0]) == Some(*callback_type)
+                        && is_exact_ffi_builtin(arena, arguments[1], pop_types::FFI_CALLBACK_OPEN_ERROR_TYPE_ID, &[]));
+            let valid = operand_type == Some(*callback_type)
+                && callback_signature_is_valid(arena, *callback_type)
+                && nested
+                    .is_some_and(|nested| callback_nested_matches(nested, arena, *callback_type))
+                && valid_result
+                && *thread == pop_runtime_interface::FfiCallbackThread::AttachedThread
+                && site.raw() != 0
+                && success.raw() == 0
+                && failure.raw() == 1;
+            if !valid {
+                errors.push(MirVerificationError::InvalidFfiCallbackOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::CallCallbackPair {
+            callback,
+            signature,
+            owner,
+            function,
+            captures,
+            lifetime,
+            result,
+            success,
+            failure,
+            declared_effects,
+            ..
+        } => {
+            let callback_type = values
+                .get(callback)
+                .copied()
+                .and_then(|type_id| registered_callback_payload(arena, type_id));
+            let nested = signatures.nested.get(&(*owner, *function)).copied();
+            let valid_nested = callback_type == Some(signature.callback_type())
+                && signatures.callback_signatures.contains(signature)
+                && callback_type.is_some_and(|callback_type| {
+                    nested.is_some_and(|nested| {
+                        callback_pair_nested_matches(nested, arena, callback_type)
+                            && *declared_effects == nested.effects()
+                            && callback_captures_match(captures, nested, values)
+                    })
+                });
+            let valid_result = match (lifetime, nested) {
+                (pop_runtime_interface::FfiCallbackLifetime::CallScoped, Some(nested)) => {
+                    result.is_none()
+                        && success.is_none()
+                        && failure.is_none()
+                        && nested.results() == [instruction.result_type()]
+                }
+                (pop_runtime_interface::FfiCallbackLifetime::Registered, Some(nested)) => {
+                    matches!((result, success, failure, arena.get(instruction.result_type())),
+                        (Some(result), Some(success), Some(failure), Some(SemanticType::Builtin { definition, arguments }))
+                            if *definition == *result
+                                && success.raw() == 0
+                                && failure.raw() == 1
+                                && arguments.len() == 2
+                                && nested.results() == [arguments[0]]
+                                && is_exact_ffi_builtin(arena, arguments[1], pop_types::FFI_CALLBACK_CLOSED_ERROR_TYPE_ID, &[]))
+                }
+                _ => false,
+            };
+            if !valid_nested || !valid_result {
+                errors.push(MirVerificationError::InvalidFfiCallbackOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiCallbackCloseScoped { callback, .. } => {
+            if values
+                .get(callback)
+                .copied()
+                .and_then(|type_id| registered_callback_payload(arena, type_id))
+                .is_none()
+            {
+                errors.push(MirVerificationError::InvalidFfiCallbackOperation {
+                    instruction: instruction.result(),
+                });
+            }
+        }
+        MirInstructionKind::FfiCallbackCloseOwned {
+            callback,
+            result,
+            success,
+            failure,
+        } => {
+            let valid_callback = values
+                .get(callback)
+                .copied()
+                .and_then(|type_id| registered_callback_payload(arena, type_id))
+                .is_some();
+            let valid_result = matches!(arena.get(instruction.result_type()), Some(SemanticType::Builtin { definition, arguments })
+                if *definition == *result
+                    && arguments.len() == 2
+                    && arena.get(arguments[0]) == Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                    && is_exact_ffi_builtin(arena, arguments[1], pop_types::FFI_CALLBACK_IN_USE_ERROR_TYPE_ID, &[]));
+            if !valid_callback || !valid_result || success.raw() != 0 || failure.raw() != 1 {
+                errors.push(MirVerificationError::InvalidFfiCallbackOperation {
                     instruction: instruction.result(),
                 });
             }
@@ -5216,6 +5576,20 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             callee, arguments, ..
         } => std::iter::once(*callee)
             .chain(arguments.iter().copied())
+            .collect(),
+        MirInstructionKind::FfiCallbackOpenScoped { callback, .. }
+        | MirInstructionKind::FfiCallbackOpenOwned { callback, .. }
+        | MirInstructionKind::FfiCallbackCloseScoped { callback, .. }
+        | MirInstructionKind::FfiCallbackCloseOwned { callback, .. } => vec![*callback],
+        MirInstructionKind::CallCallbackPair {
+            callback, captures, ..
+        } => std::iter::once(*callback)
+            .chain(
+                captures
+                    .iter()
+                    .filter(|capture| !capture.self_reference())
+                    .map(|capture| capture.value()),
+            )
             .collect(),
         MirInstructionKind::CallScopedBorrow {
             captures,

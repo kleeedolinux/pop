@@ -204,6 +204,9 @@ pub enum HirVerificationError {
     InvalidFfiBytesBorrow {
         span: SourceSpan,
     },
+    InvalidFfiCallbackOperation {
+        span: SourceSpan,
+    },
     InvalidFfiPointerOperation {
         span: SourceSpan,
     },
@@ -638,7 +641,10 @@ impl HirSchema {
             let valid_identity = declaration.symbol() == function.symbol()
                 && !declaration.external_symbol().is_empty()
                 && !declaration.external_symbol().chars().any(char::is_control)
-                && declaration.has_valid_effects();
+                && declaration.has_valid_effects()
+                && declaration.has_valid_callback_pairs()
+                && (declaration.callback_pairs().is_empty()
+                    || function.visibility() == pop_resolve::Visibility::Internal);
             if !valid_identity {
                 errors.push(HirVerificationError::InvalidForeignDeclaration {
                     function: function.symbol(),
@@ -670,6 +676,8 @@ impl HirSchema {
                     && reference.type_parameters().is_empty()
                     && declaration.symbol() == reference.identity().symbol()
                     && declaration.has_valid_effects()
+                    && declaration.has_valid_callback_pairs()
+                    && declaration.callback_pairs().is_empty()
                     && declaration.effects() == reference.effects()
                     && !declaration.external_symbol().is_empty()
                     && !declaration.external_symbol().chars().any(char::is_control);
@@ -2990,6 +2998,87 @@ impl Verifier<'_> {
                         });
                 }
             }
+            HirExpressionKind::FfiWithCallback {
+                callback,
+                callback_type,
+                binding_contract,
+                body,
+                body_type,
+                site: _,
+                region: _,
+            } => {
+                let callback_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *callback_type,
+                    span: callback.span,
+                };
+                self.verify_closure(callback, &callback_expression, visible);
+                let body_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *body_type,
+                    span: body.span,
+                };
+                self.verify_closure(body, &body_expression, visible);
+                if callback.is_async
+                    || body.is_async
+                    || !binding_contract.has_valid_shape()
+                    || binding_contract.lifetime() != pop_types::FfiCallbackLifetime::CallScoped
+                    || body.results.as_slice() != [expression.type_id()]
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiCallbackOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiCallbackOpen {
+                callback,
+                callback_type,
+                thread: _,
+                site: _,
+            } => {
+                let callback_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *callback_type,
+                    span: callback.span,
+                };
+                self.verify_closure(callback, &callback_expression, visible);
+                if callback.is_async {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiCallbackOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiCallbackWithPair {
+                callback,
+                callback_type: _,
+                binding_contract,
+                body,
+                body_type,
+                region: _,
+            } => {
+                self.verify_expression(callback, visible);
+                let body_expression = HirExpression {
+                    kind: HirExpressionKind::Nil,
+                    type_id: *body_type,
+                    span: body.span,
+                };
+                self.verify_closure(body, &body_expression, visible);
+                if body.is_async
+                    || !binding_contract.has_valid_shape()
+                    || binding_contract.lifetime() != pop_types::FfiCallbackLifetime::Registered
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidFfiCallbackOperation {
+                            span: expression.span(),
+                        });
+                }
+            }
+            HirExpressionKind::FfiCallbackClose {
+                callback,
+                callback_type: _,
+            } => self.verify_expression(callback, visible),
             HirExpressionKind::FfiPointerNone {
                 element,
                 layout_record,
@@ -5610,6 +5699,33 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
                     written.insert(capture.binding);
                 }
             }
+        }
+        HirExpressionKind::FfiWithCallback { callback, body, .. } => {
+            for closure in [callback, body] {
+                for capture in &closure.captures {
+                    if capture.mode == HirCaptureMode::Cell {
+                        written.insert(capture.binding);
+                    }
+                }
+            }
+        }
+        HirExpressionKind::FfiCallbackOpen { callback, .. } => {
+            for capture in &callback.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
+        HirExpressionKind::FfiCallbackWithPair { callback, body, .. } => {
+            collect_cell_captures(callback, written);
+            for capture in &body.captures {
+                if capture.mode == HirCaptureMode::Cell {
+                    written.insert(capture.binding);
+                }
+            }
+        }
+        HirExpressionKind::FfiCallbackClose { callback, .. } => {
+            collect_cell_captures(callback, written);
         }
         HirExpressionKind::Field { base, .. } => collect_cell_captures(base, written),
         HirExpressionKind::TupleGet { tuple, .. } => collect_cell_captures(tuple, written),

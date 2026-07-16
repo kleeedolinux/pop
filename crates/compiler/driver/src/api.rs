@@ -52,6 +52,7 @@ pub struct FrontEndBubbleInput {
     pub(crate) modules: Vec<FrontEndModule>,
     pub(crate) implicit_main_module: Option<ModuleId>,
     pub(crate) reference_metadata: Vec<ReferenceMetadata>,
+    pub(crate) generated_ffi_bindings: Vec<crate::ffi_generate::VerifiedFfiGeneratedBindings>,
 }
 
 impl FrontEndBubbleInput {
@@ -73,6 +74,7 @@ impl FrontEndBubbleInput {
             modules,
             implicit_main_module: None,
             reference_metadata: Vec::new(),
+            generated_ffi_bindings: Vec::new(),
         }
     }
 
@@ -105,6 +107,18 @@ impl FrontEndBubbleInput {
     pub fn with_reference_metadata(mut self, mut metadata: Vec<ReferenceMetadata>) -> Self {
         metadata.sort_by_key(ReferenceMetadata::bubble);
         self.reference_metadata = metadata;
+        self
+    }
+
+    /// Supplies callback contracts returned by manifest-selected generated
+    /// `.popc` preflight. Ordinary source cannot construct these values.
+    #[must_use]
+    pub fn with_verified_ffi_generated_bindings(
+        mut self,
+        mut bindings: Vec<crate::ffi_generate::VerifiedFfiGeneratedBindings>,
+    ) -> Self {
+        bindings.sort_by(|left, right| left.source_path().cmp(right.source_path()));
+        self.generated_ffi_bindings = bindings;
         self
     }
 }
@@ -258,6 +272,8 @@ impl CheckedDocumentation {
 pub enum ReferenceType {
     Primitive(PrimitiveType),
     TypeParameter(u16),
+    /// One public nominal record declaration in the producer Bubble.
+    Record(SymbolIdentity),
     Tuple(Vec<ReferenceType>),
     Function {
         is_async: bool,
@@ -276,6 +292,178 @@ pub enum ReferenceType {
         arguments: Vec<ReferenceType>,
     },
     Union(Vec<ReferenceType>),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceRecordField {
+    pub(crate) name: String,
+    pub(crate) field_type: ReferenceType,
+}
+
+impl ReferenceRecordField {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn field_type(&self) -> &ReferenceType {
+        &self.field_type
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceRecord {
+    pub(crate) identity: SymbolIdentity,
+    pub(crate) module: ModuleId,
+    pub(crate) namespace: String,
+    pub(crate) name: String,
+    pub(crate) fields: Vec<ReferenceRecordField>,
+    pub(crate) span: SourceSpan,
+}
+
+impl ReferenceRecord {
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn fields(&self) -> &[ReferenceRecordField] {
+        &self.fields
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceFfiLayoutField {
+    pub(crate) name: String,
+    pub(crate) source_index: u32,
+    pub(crate) layout: u64,
+    pub(crate) offset: u64,
+}
+
+impl ReferenceFfiLayoutField {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn source_index(&self) -> u32 {
+        self.source_index
+    }
+
+    #[must_use]
+    pub const fn layout(&self) -> u64 {
+        self.layout
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ReferenceFfiValueClass {
+    Integer,
+    Float,
+    Pointer,
+    FunctionPointer,
+    Handle,
+    Record(Vec<ReferenceFfiLayoutField>),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceFfiLayout {
+    pub(crate) id: u64,
+    pub(crate) element: ReferenceType,
+    pub(crate) size: u64,
+    pub(crate) alignment: u64,
+    pub(crate) value_class: ReferenceFfiValueClass,
+    pub(crate) abi: pop_types::ForeignAbi,
+    pub(crate) descriptor: String,
+    pub(crate) fingerprint: String,
+}
+
+impl ReferenceFfiLayout {
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn element(&self) -> &ReferenceType {
+        &self.element
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn alignment(&self) -> u64 {
+        self.alignment
+    }
+
+    #[must_use]
+    pub const fn value_class(&self) -> &ReferenceFfiValueClass {
+        &self.value_class
+    }
+
+    #[must_use]
+    pub const fn abi(&self) -> pop_types::ForeignAbi {
+        self.abi
+    }
+
+    #[must_use]
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReferenceFfiLayoutCatalog {
+    pub(crate) target: String,
+    pub(crate) entries: Vec<ReferenceFfiLayout>,
+}
+
+impl ReferenceFfiLayoutCatalog {
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[ReferenceFfiLayout] {
+        &self.entries
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -444,7 +632,11 @@ impl ReferenceSpecializationCapsule {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReferenceMetadata {
     pub(crate) bubble: BubbleId,
+    #[serde(default)]
+    pub(crate) records: Vec<ReferenceRecord>,
     pub(crate) functions: Vec<ReferenceFunction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ffi_layout_catalog: Option<ReferenceFfiLayoutCatalog>,
 }
 
 impl ReferenceMetadata {
@@ -457,6 +649,16 @@ impl ReferenceMetadata {
     pub fn functions(&self) -> &[ReferenceFunction] {
         &self.functions
     }
+
+    #[must_use]
+    pub fn records(&self) -> &[ReferenceRecord] {
+        &self.records
+    }
+
+    #[must_use]
+    pub const fn ffi_layout_catalog(&self) -> Option<&ReferenceFfiLayoutCatalog> {
+        self.ffi_layout_catalog.as_ref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -467,6 +669,7 @@ pub enum ReferenceMetadataError {
         function: SymbolIdentity,
         type_id: TypeId,
     },
+    InvalidFfiLayout,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

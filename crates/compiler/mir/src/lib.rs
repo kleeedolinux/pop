@@ -23,6 +23,7 @@
     clippy::wildcard_imports
 )]
 
+mod ffi_callback;
 mod ffi_layout;
 mod ir;
 mod lowering;
@@ -31,6 +32,7 @@ mod render;
 mod text;
 mod verification;
 
+pub use ffi_callback::*;
 pub use ffi_layout::*;
 pub use ir::*;
 pub(crate) use lowering::local_instruction_effects;

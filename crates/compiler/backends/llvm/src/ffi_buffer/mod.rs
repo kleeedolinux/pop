@@ -16,7 +16,7 @@ pub(crate) fn lower(
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     layouts: &MirFfiLayoutCatalog,
-    field_layout: &BTreeMap<FieldId, u32>,
+    _field_layout: &BTreeMap<FieldId, u32>,
 ) -> Result<Option<String>, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let lines = match instruction.kind() {
@@ -69,7 +69,6 @@ pub(crate) fn lower(
                 entry,
                 layouts,
                 types,
-                field_layout,
                 &format!("{result}_storage"),
             )?);
             lines
@@ -102,7 +101,6 @@ pub(crate) fn lower(
                 entry,
                 layouts,
                 types,
-                field_layout,
                 &format!("{result}_storage"),
                 &format!("{result}_marshal"),
             )?);

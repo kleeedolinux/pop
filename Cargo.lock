@@ -210,6 +210,7 @@ dependencies = [
  "pop-driver",
  "pop-foundation",
  "pop-mir",
+ "pop-projects",
  "pop-runtime-interface",
  "pop-runtime-native",
  "pop-runtime-native-abi",

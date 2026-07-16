@@ -9,18 +9,18 @@ use std::fmt::Write;
 
 use pop_foundation::{
     AttributeId, BindingId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
-    EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId, InterfaceId, InterfaceMethodId,
-    IterationCaseId, IterationProtocolMethodId, LocalId, MethodId, ModuleId, NamespaceId,
-    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId,
-    SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
+    EnumCaseId, ErrorCaseId, ErrorId, FfiCallbackSiteId, FieldId, FunctionId, InterfaceId,
+    InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, LocalId, MethodId, ModuleId,
+    NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
+    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
     AttributeConstant, AttributeDefinition, ClassDefinition, ClassFieldDefault,
-    ClassMethodDefinition, ClassMethodDispatch, EnumDefinition, ErrorDefinition, FieldDefault,
-    FloatValue, IntegerValue, InterfaceDefinition, NumericConversionKind, RecordDefinition,
-    StringFormatKind, TypeArena, TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator,
-    UnionDefinition,
+    ClassMethodDefinition, ClassMethodDispatch, EnumDefinition, ErrorDefinition,
+    FfiCallbackBindingContract, FfiCallbackThreadPolicy, FieldDefault, FloatValue, IntegerValue,
+    InterfaceDefinition, NumericConversionKind, RecordDefinition, StringFormatKind, TypeArena,
+    TypedBinaryOperator, TypedCompoundOperator, TypedUnaryOperator, UnionDefinition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,8 @@ pub struct HirBubble {
     pub(crate) methods: Vec<HirMethod>,
     pub(crate) public_symbols: Vec<SymbolId>,
     pub(crate) function_references: Vec<HirFunctionReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference_ffi_layout_catalog: Option<HirFfiLayoutCatalog>,
 }
 
 impl HirBubble {
@@ -162,6 +164,7 @@ impl HirBubble {
             methods,
             public_symbols,
             function_references: Vec::new(),
+            reference_ffi_layout_catalog: None,
         })
     }
 
@@ -226,6 +229,16 @@ impl HirBubble {
         self.function_references = references;
         self.recompute_call_effects();
         Ok(self)
+    }
+
+    /// Attaches the already artifact-verified public dependency FFI layouts.
+    #[must_use]
+    pub fn with_reference_ffi_layout_catalog(
+        mut self,
+        catalog: Option<HirFfiLayoutCatalog>,
+    ) -> Self {
+        self.reference_ffi_layout_catalog = catalog;
+        self
     }
 
     fn recompute_call_effects(&mut self) {
@@ -316,6 +329,11 @@ impl HirBubble {
         &self.function_references
     }
 
+    #[must_use]
+    pub const fn reference_ffi_layout_catalog(&self) -> Option<&HirFfiLayoutCatalog> {
+        self.reference_ffi_layout_catalog.as_ref()
+    }
+
     /// Independently verifies this complete HIR Bubble against its semantic
     /// type arena and the declaration/callable schema carried by the Bubble.
     ///
@@ -374,6 +392,175 @@ pub enum HirBubbleError {
     DuplicateReference(SymbolIdentity),
     UnknownReferenceBubble(BubbleId),
     InvalidSpecializationCapsule(SymbolIdentity),
+    InvalidReferenceFfiLayout,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirFfiLayoutField {
+    field: FieldId,
+    name: String,
+    source_index: u32,
+    layout: u64,
+    offset: u64,
+}
+
+impl HirFfiLayoutField {
+    #[must_use]
+    pub fn new(
+        field: FieldId,
+        name: impl Into<String>,
+        source_index: u32,
+        layout: u64,
+        offset: u64,
+    ) -> Self {
+        Self {
+            field,
+            name: name.into(),
+            source_index,
+            layout,
+            offset,
+        }
+    }
+
+    #[must_use]
+    pub const fn field(&self) -> FieldId {
+        self.field
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn source_index(&self) -> u32 {
+        self.source_index
+    }
+
+    #[must_use]
+    pub const fn layout(&self) -> u64 {
+        self.layout
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum HirFfiValueClass {
+    Integer,
+    Float,
+    Pointer,
+    FunctionPointer,
+    Handle,
+    Record(Vec<HirFfiLayoutField>),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirFfiLayout {
+    id: u64,
+    element: TypeId,
+    size: u64,
+    alignment: u64,
+    value_class: HirFfiValueClass,
+    abi: pop_types::ForeignAbi,
+    descriptor: String,
+    fingerprint: String,
+}
+
+impl HirFfiLayout {
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        element: TypeId,
+        size: u64,
+        alignment: u64,
+        value_class: HirFfiValueClass,
+        abi: pop_types::ForeignAbi,
+        descriptor: impl Into<String>,
+        fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            element,
+            size,
+            alignment,
+            value_class,
+            abi,
+            descriptor: descriptor.into(),
+            fingerprint: fingerprint.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn element(&self) -> TypeId {
+        self.element
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn alignment(&self) -> u64 {
+        self.alignment
+    }
+
+    #[must_use]
+    pub const fn value_class(&self) -> &HirFfiValueClass {
+        &self.value_class
+    }
+
+    #[must_use]
+    pub const fn abi(&self) -> pop_types::ForeignAbi {
+        self.abi
+    }
+
+    #[must_use]
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HirFfiLayoutCatalog {
+    target: String,
+    entries: Vec<HirFfiLayout>,
+}
+
+impl HirFfiLayoutCatalog {
+    #[must_use]
+    pub fn new(target: impl Into<String>, mut entries: Vec<HirFfiLayout>) -> Self {
+        entries.sort_by_key(HirFfiLayout::id);
+        Self {
+            target: target.into(),
+            entries,
+        }
+    }
+
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[HirFfiLayout] {
+        &self.entries
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2459,6 +2646,73 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             }
             remap_aggregate_statements(&mut body.body, instances);
         }
+        HirExpressionKind::FfiWithCallback {
+            callback,
+            callback_type,
+            body,
+            body_type,
+            ..
+        } => {
+            *callback_type = instances.type_id(*callback_type);
+            *body_type = instances.type_id(*body_type);
+            for closure in [callback, body] {
+                for parameter in &mut closure.parameters {
+                    parameter.type_id = instances.type_id(parameter.type_id);
+                }
+                for result in &mut closure.results {
+                    *result = instances.type_id(*result);
+                }
+                for capture in &mut closure.captures {
+                    capture.type_id = instances.type_id(capture.type_id);
+                }
+                remap_aggregate_statements(&mut closure.body, instances);
+            }
+        }
+        HirExpressionKind::FfiCallbackOpen {
+            callback,
+            callback_type,
+            ..
+        } => {
+            *callback_type = instances.type_id(*callback_type);
+            for parameter in &mut callback.parameters {
+                parameter.type_id = instances.type_id(parameter.type_id);
+            }
+            for result in &mut callback.results {
+                *result = instances.type_id(*result);
+            }
+            for capture in &mut callback.captures {
+                capture.type_id = instances.type_id(capture.type_id);
+            }
+            remap_aggregate_statements(&mut callback.body, instances);
+        }
+        HirExpressionKind::FfiCallbackWithPair {
+            callback,
+            callback_type,
+            body,
+            body_type,
+            ..
+        } => {
+            remap_aggregate_expression(callback, instances);
+            *callback_type = instances.type_id(*callback_type);
+            *body_type = instances.type_id(*body_type);
+            for parameter in &mut body.parameters {
+                parameter.type_id = instances.type_id(parameter.type_id);
+            }
+            for result in &mut body.results {
+                *result = instances.type_id(*result);
+            }
+            for capture in &mut body.captures {
+                capture.type_id = instances.type_id(capture.type_id);
+            }
+            remap_aggregate_statements(&mut body.body, instances);
+        }
+        HirExpressionKind::FfiCallbackClose {
+            callback,
+            callback_type,
+        } => {
+            remap_aggregate_expression(callback, instances);
+            *callback_type = instances.type_id(*callback_type);
+        }
         HirExpressionKind::Field { base, field } => {
             remap_aggregate_expression(base, instances);
             *field = instances.field(base.type_id(), *field);
@@ -3070,6 +3324,20 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             collect_expression_calls(bytes, calls);
             collect_statement_calls(body.body(), calls);
         }
+        HirExpressionKind::FfiWithCallback { callback, body, .. } => {
+            collect_statement_calls(callback.body(), calls);
+            collect_statement_calls(body.body(), calls);
+        }
+        HirExpressionKind::FfiCallbackOpen { callback, .. } => {
+            collect_statement_calls(callback.body(), calls);
+        }
+        HirExpressionKind::FfiCallbackWithPair { callback, body, .. } => {
+            collect_expression_calls(callback, calls);
+            collect_statement_calls(body.body(), calls);
+        }
+        HirExpressionKind::FfiCallbackClose { callback, .. } => {
+            collect_expression_calls(callback, calls);
+        }
         HirExpressionKind::Field { base, .. }
         | HirExpressionKind::TupleGet { tuple: base, .. }
         | HirExpressionKind::InterfaceUpcast { value: base, .. }
@@ -3673,6 +3941,73 @@ fn specialize_expression(
                 specialize_type(&mut capture.type_id, substitutions, arena)?;
             }
             specialize_statements(&mut body.body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiWithCallback {
+            callback,
+            callback_type,
+            body,
+            body_type,
+            ..
+        } => {
+            specialize_type(callback_type, substitutions, arena)?;
+            specialize_type(body_type, substitutions, arena)?;
+            for closure in [callback, body] {
+                for parameter in &mut closure.parameters {
+                    specialize_type(&mut parameter.type_id, substitutions, arena)?;
+                }
+                for result in &mut closure.results {
+                    specialize_type(result, substitutions, arena)?;
+                }
+                for capture in &mut closure.captures {
+                    specialize_type(&mut capture.type_id, substitutions, arena)?;
+                }
+                specialize_statements(&mut closure.body, substitutions, instances, arena)?;
+            }
+        }
+        HirExpressionKind::FfiCallbackOpen {
+            callback,
+            callback_type,
+            ..
+        } => {
+            specialize_type(callback_type, substitutions, arena)?;
+            for parameter in &mut callback.parameters {
+                specialize_type(&mut parameter.type_id, substitutions, arena)?;
+            }
+            for result in &mut callback.results {
+                specialize_type(result, substitutions, arena)?;
+            }
+            for capture in &mut callback.captures {
+                specialize_type(&mut capture.type_id, substitutions, arena)?;
+            }
+            specialize_statements(&mut callback.body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiCallbackWithPair {
+            callback,
+            callback_type,
+            body,
+            body_type,
+            ..
+        } => {
+            specialize_expression(callback, substitutions, instances, arena)?;
+            specialize_type(callback_type, substitutions, arena)?;
+            specialize_type(body_type, substitutions, arena)?;
+            for parameter in &mut body.parameters {
+                specialize_type(&mut parameter.type_id, substitutions, arena)?;
+            }
+            for result in &mut body.results {
+                specialize_type(result, substitutions, arena)?;
+            }
+            for capture in &mut body.captures {
+                specialize_type(&mut capture.type_id, substitutions, arena)?;
+            }
+            specialize_statements(&mut body.body, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::FfiCallbackClose {
+            callback,
+            callback_type,
+        } => {
+            specialize_expression(callback, substitutions, instances, arena)?;
+            specialize_type(callback_type, substitutions, arena)?;
         }
         HirExpressionKind::Field { base, .. }
         | HirExpressionKind::TupleGet { tuple: base, .. }
@@ -4720,6 +5055,33 @@ pub enum HirExpressionKind {
         body: HirClosure,
         body_type: TypeId,
         region: BorrowRegionId,
+    },
+    FfiWithCallback {
+        callback: HirClosure,
+        callback_type: TypeId,
+        binding_contract: FfiCallbackBindingContract,
+        body: HirClosure,
+        body_type: TypeId,
+        site: FfiCallbackSiteId,
+        region: BorrowRegionId,
+    },
+    FfiCallbackOpen {
+        callback: HirClosure,
+        callback_type: TypeId,
+        thread: FfiCallbackThreadPolicy,
+        site: FfiCallbackSiteId,
+    },
+    FfiCallbackWithPair {
+        callback: Box<HirExpression>,
+        callback_type: TypeId,
+        binding_contract: FfiCallbackBindingContract,
+        body: HirClosure,
+        body_type: TypeId,
+        region: BorrowRegionId,
+    },
+    FfiCallbackClose {
+        callback: Box<HirExpression>,
+        callback_type: TypeId,
     },
     FfiPointerNone {
         element: TypeId,

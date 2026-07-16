@@ -1162,6 +1162,56 @@ fn lower_expression(
             body_type: *body_type,
             region: *region,
         },
+        TypedExpressionKind::FfiWithCallback {
+            callback,
+            callback_type,
+            binding_contract,
+            body,
+            body_type,
+            site,
+            region,
+        } => HirExpressionKind::FfiWithCallback {
+            callback: lower_closure(callback, interface_slots),
+            callback_type: *callback_type,
+            binding_contract: binding_contract.as_ref().clone(),
+            body: lower_closure(body, interface_slots),
+            body_type: *body_type,
+            site: *site,
+            region: *region,
+        },
+        TypedExpressionKind::FfiCallbackOpen {
+            callback,
+            callback_type,
+            thread,
+            site,
+        } => HirExpressionKind::FfiCallbackOpen {
+            callback: lower_closure(callback, interface_slots),
+            callback_type: *callback_type,
+            thread: *thread,
+            site: *site,
+        },
+        TypedExpressionKind::FfiCallbackWithPair {
+            callback,
+            callback_type,
+            binding_contract,
+            body,
+            body_type,
+            region,
+        } => HirExpressionKind::FfiCallbackWithPair {
+            callback: Box::new(lower_expression(callback, interface_slots)),
+            callback_type: *callback_type,
+            binding_contract: binding_contract.as_ref().clone(),
+            body: lower_closure(body, interface_slots),
+            body_type: *body_type,
+            region: *region,
+        },
+        TypedExpressionKind::FfiCallbackClose {
+            callback,
+            callback_type,
+        } => HirExpressionKind::FfiCallbackClose {
+            callback: Box::new(lower_expression(callback, interface_slots)),
+            callback_type: *callback_type,
+        },
         TypedExpressionKind::FfiPointerNone {
             element,
             layout_record,
@@ -1743,6 +1793,20 @@ fn first_unknown_interface_expression(
             first_unknown_interface_expression(bytes, slots)
                 .or_else(|| first_unknown_interface_call(body.body().statements(), slots))
         }
+        TypedExpressionKind::FfiWithCallback { callback, body, .. } => {
+            first_unknown_interface_call(callback.body().statements(), slots)
+                .or_else(|| first_unknown_interface_call(body.body().statements(), slots))
+        }
+        TypedExpressionKind::FfiCallbackOpen { callback, .. } => {
+            first_unknown_interface_call(callback.body().statements(), slots)
+        }
+        TypedExpressionKind::FfiCallbackWithPair { callback, body, .. } => {
+            first_unknown_interface_expression(callback, slots)
+                .or_else(|| first_unknown_interface_call(body.body().statements(), slots))
+        }
+        TypedExpressionKind::FfiCallbackClose { callback, .. } => {
+            first_unknown_interface_expression(callback, slots)
+        }
         TypedExpressionKind::Field { base, .. } => first_unknown_interface_expression(base, slots),
         TypedExpressionKind::ClassConstruct { fields, .. }
         | TypedExpressionKind::Record { fields, .. } => fields
@@ -2126,6 +2190,20 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         TypedExpressionKind::FfiBytesWithPin { bytes, body, .. } => {
             first_compile_time_only_expression(bytes)
                 .or_else(|| first_compile_time_only_statement(body.body().statements()))
+        }
+        TypedExpressionKind::FfiWithCallback { callback, body, .. } => {
+            first_compile_time_only_statement(callback.body().statements())
+                .or_else(|| first_compile_time_only_statement(body.body().statements()))
+        }
+        TypedExpressionKind::FfiCallbackOpen { callback, .. } => {
+            first_compile_time_only_statement(callback.body().statements())
+        }
+        TypedExpressionKind::FfiCallbackWithPair { callback, body, .. } => {
+            first_compile_time_only_expression(callback)
+                .or_else(|| first_compile_time_only_statement(body.body().statements()))
+        }
+        TypedExpressionKind::FfiCallbackClose { callback, .. } => {
+            first_compile_time_only_expression(callback)
         }
         TypedExpressionKind::Field { base, .. } => first_compile_time_only_expression(base),
         TypedExpressionKind::ClassConstruct { fields, .. }

@@ -20,7 +20,9 @@ use inkwell::targets::TargetTriple;
 use pop_backend_api::{
     BackendCapabilities, BackendGcCapability, RuntimeProfile, RuntimeProfileError,
 };
-use pop_foundation::{FieldId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_foundation::{
+    FfiCallbackSiteId, FieldId, FunctionId, NestedFunctionId, SymbolId, TypeId, ValueId,
+};
 use pop_runtime_native_abi::NativeAbiVersion;
 use pop_target::TargetSpec;
 
@@ -244,6 +246,15 @@ pub enum LlvmLoweringError {
     InvalidEntryPoint(SymbolId),
     UnsupportedEntryPointSignature(SymbolId),
     UnsupportedForeignFunction(SymbolId),
+    UnsupportedFfiCallbackTarget(String),
+    UnsupportedFfiCallbackSignature {
+        owner: SymbolId,
+        function: NestedFunctionId,
+    },
+    InvalidFfiCallbackSite {
+        owner: SymbolId,
+        site: FfiCallbackSiteId,
+    },
     UnsupportedAsync,
 }
 
@@ -292,6 +303,24 @@ impl fmt::Display for LlvmLoweringError {
                 formatter,
                 "LLVM backend does not support foreign function s{} on this target",
                 symbol.raw()
+            ),
+            Self::UnsupportedFfiCallbackTarget(target) => {
+                write!(
+                    formatter,
+                    "FFI callbacks require a 64-bit pointer target, got {target}"
+                )
+            }
+            Self::UnsupportedFfiCallbackSignature { owner, function } => write!(
+                formatter,
+                "FFI callback s{} nested {} has no supported exact ABI/layout signature",
+                owner.raw(),
+                function.raw()
+            ),
+            Self::InvalidFfiCallbackSite { owner, site } => write!(
+                formatter,
+                "invalid or colliding FFI callback site s{}:{}",
+                owner.raw(),
+                site.raw()
             ),
             Self::UnsupportedAsync => write!(
                 formatter,

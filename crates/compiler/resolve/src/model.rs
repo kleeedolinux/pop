@@ -519,6 +519,24 @@ impl ReferencedDeclaration {
             span,
         }
     }
+
+    #[must_use]
+    pub fn record(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::Record,
+            span,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

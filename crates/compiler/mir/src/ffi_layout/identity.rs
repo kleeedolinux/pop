@@ -138,9 +138,13 @@ fn descriptor(
             if index != 0 {
                 output.push(',');
             }
-            let name = semantic_fields
-                .get(field.source_index() as usize)
-                .map(|(name, _)| name)
+            let name = field
+                .name()
+                .or_else(|| {
+                    semantic_fields
+                        .get(field.source_index() as usize)
+                        .map(|(name, _)| name.as_str())
+                })
                 .ok_or(MirFfiLayoutError::UnstableTypeIdentity(entry.id()))?;
             let child = entries
                 .get(&field.layout())

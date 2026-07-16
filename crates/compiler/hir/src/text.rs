@@ -1183,6 +1183,43 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             dump_expression(output, bytes, arena);
             let _ = write!(output, ", scoped nested#{})", body.function.raw());
         }
+        HirExpressionKind::FfiWithCallback {
+            callback,
+            body,
+            site,
+            ..
+        } => {
+            let _ = write!(
+                output,
+                "ffi.withCallback(site#{}, callback nested#{}, scoped nested#{})",
+                site.raw(),
+                callback.function.raw(),
+                body.function.raw()
+            );
+        }
+        HirExpressionKind::FfiCallbackOpen {
+            callback,
+            thread,
+            site,
+            ..
+        } => {
+            let _ = write!(
+                output,
+                "ffi.callback.open(site#{}, callback nested#{}, {thread:?})",
+                site.raw(),
+                callback.function.raw()
+            );
+        }
+        HirExpressionKind::FfiCallbackWithPair { callback, body, .. } => {
+            output.push_str("ffi.callback.withPair(");
+            dump_expression(output, callback, arena);
+            let _ = write!(output, ", scoped nested#{})", body.function.raw());
+        }
+        HirExpressionKind::FfiCallbackClose { callback, .. } => {
+            output.push_str("ffi.callback.close(");
+            dump_expression(output, callback, arena);
+            output.push(')');
+        }
         HirExpressionKind::FfiPointerNone {
             element,
             layout_record,

@@ -13,9 +13,10 @@ use pop_resolve::{ResolutionDatabase, SymbolSpace, Visibility};
 use pop_syntax::{AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind};
 use pop_types::{
     AttributeAttachmentError, AttributeConstant, AttributeQueryIndex, AttributeTarget,
-    AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole, ForeignAbi,
-    ForeignFunctionDeclaration, ResolvedAttribute, ResolvedFunctionSignature, SignatureResolver,
-    TypeArena,
+    AttributeUsage, AttributeValidator, BootstrapSchema, CompilerAttributeRole,
+    FFI_CALLBACK_CONTEXT_TYPE_ID, FFI_FUNCTION_TYPE_ID, FfiCallbackPairContract, ForeignAbi,
+    ForeignFunctionDeclaration, ResolvedAttribute, ResolvedFunctionSignature, SemanticType,
+    SignatureResolver, TypeArena,
 };
 
 use crate::api::FrontEndCompileTimeEvaluation;
@@ -23,21 +24,29 @@ use crate::compile_time::{
     compile_time_attribute_constant, compile_time_function_name, evaluate_compile_time_function,
     evaluate_required_expression,
 };
+use crate::ffi_generate::VerifiedFfiGeneratedFunction;
 use crate::work::{
     AttributeResolutionContext, CompileTimeContext, DeclarationAttributeWork, FunctionWork,
     NamespaceAttributeWork,
 };
+
+#[derive(Clone, Copy)]
+pub(crate) struct FfiAttributeInputs<'a> {
+    pub(crate) has_ffi_dependency: bool,
+    pub(crate) generated_bindings: &'a [crate::ffi_generate::VerifiedFfiGeneratedBindings],
+    pub(crate) module_origins: &'a BTreeMap<ModuleId, (String, pop_foundation::SourceSpan)>,
+}
 
 pub(crate) fn resolve_ffi_attributes(
     namespaces: &mut [NamespaceAttributeWork],
     functions: &mut [FunctionWork],
     database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
-    has_ffi_dependency: bool,
+    inputs: FfiAttributeInputs<'_>,
     resolver: &SignatureResolver<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if !has_ffi_dependency {
+    if !inputs.has_ffi_dependency {
         return;
     }
     for namespace in namespaces.iter_mut() {
@@ -74,8 +83,52 @@ pub(crate) fn resolve_ffi_attributes(
         .iter()
         .map(|namespace| (namespace.module, namespace.ffi_link_aliases.clone()))
         .collect();
+    let generated_callbacks = inputs
+        .generated_bindings
+        .iter()
+        .flat_map(|bindings| {
+            bindings.functions().iter().map(move |function| {
+                (
+                    bindings.source_path(),
+                    bindings.output_namespace(),
+                    function,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut used_generated_callbacks = BTreeSet::new();
     for function in functions {
-        resolve_foreign_function(
+        let namespace = database
+            .index()
+            .module(function.module)
+            .map(pop_resolve::ModuleIndex::namespace);
+        let source_path = inputs
+            .module_origins
+            .get(&function.module)
+            .map(|(path, _)| path.as_str());
+        let matches = generated_callbacks
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, (generated_path, generated_namespace, generated_function))| {
+                    source_path == Some(*generated_path)
+                        && namespace == Some(*generated_namespace)
+                        && function.signature.name() == generated_function.name()
+                },
+            )
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                function.span,
+                "duplicate generated FFI callback attachment",
+            ));
+        }
+        let generated = matches
+            .first()
+            .and_then(|index| generated_callbacks.get(*index))
+            .map(|(_, _, function)| *function);
+        if resolve_foreign_function(
             function,
             aliases_by_module
                 .get(&function.module)
@@ -84,9 +137,37 @@ pub(crate) fn resolve_ffi_attributes(
             database,
             bootstrap,
             resolver,
+            generated,
             diagnostics,
-        );
+        ) && let Some(index) = matches.first()
+        {
+            used_generated_callbacks.insert(*index);
+        }
     }
+    for (index, (source_path, _, function)) in generated_callbacks.iter().enumerate() {
+        if used_generated_callbacks.contains(&index) {
+            continue;
+        }
+        let span = inputs
+            .module_origins
+            .values()
+            .find(|(path, _)| path == source_path)
+            .map_or_else(empty_generated_span, |(_, span)| *span);
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            span,
+            format!(
+                "generated FFI callback attachment for `{}` has no exact resolved declaration",
+                function.name()
+            ),
+        ));
+    }
+}
+
+fn empty_generated_span() -> pop_foundation::SourceSpan {
+    pop_foundation::SourceSpan::new(
+        pop_foundation::FileId::from_raw(0),
+        pop_foundation::TextRange::empty(pop_foundation::TextSize::from_u32(0)),
+    )
 }
 
 pub(crate) fn resolve_ffi_layout_attributes(
@@ -161,8 +242,9 @@ fn resolve_foreign_function(
     database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
     resolver: &SignatureResolver<'_>,
+    generated: Option<&VerifiedFfiGeneratedFunction>,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+) -> bool {
     let mut ordinary = Vec::new();
     let mut foreign = None;
     let mut nonblocking = None;
@@ -200,7 +282,14 @@ fn resolve_foreign_function(
                 "Ffi.Nonblocking requires Ffi.Foreign",
             ));
         }
-        return;
+        if generated.is_some() {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                function.span,
+                "generated FFI callback metadata requires Ffi.Foreign",
+            ));
+            return true;
+        }
+        return false;
     };
     let initial_error_count = diagnostics.len();
     let parsed = parse_foreign_contract(&foreign_syntax).or_else(|| {
@@ -267,11 +356,24 @@ fn resolve_foreign_function(
         ));
     }
     if malformed || diagnostics.len() != initial_error_count {
-        return;
+        return generated.is_some();
     }
     let Some((external_symbol, abi)) = parsed else {
-        return;
+        return generated.is_some();
     };
+    let callback_pairs = validate_generated_callback_attachment(
+        &function.signature,
+        &external_symbol,
+        abi,
+        nonblocking.is_some(),
+        generated,
+        resolver,
+        function.span,
+        diagnostics,
+    );
+    if callback_pairs.is_none() {
+        return generated.is_some();
+    }
     let declaration = ForeignFunctionDeclaration::new(
         function.signature.symbol(),
         external_symbol,
@@ -279,12 +381,174 @@ fn resolve_foreign_function(
         link_aliases,
         nonblocking.is_some(),
         foreign_syntax.span(),
-    );
+    )
+    .with_callback_pairs(callback_pairs.unwrap_or_default());
     function.signature = function
         .signature
         .clone()
         .with_effects(declaration.effects());
     function.foreign = Some(declaration);
+    generated.is_some()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_generated_callback_attachment(
+    signature: &ResolvedFunctionSignature,
+    external_symbol: &str,
+    abi: ForeignAbi,
+    nonblocking: bool,
+    generated: Option<&VerifiedFfiGeneratedFunction>,
+    resolver: &SignatureResolver<'_>,
+    span: pop_foundation::SourceSpan,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Vec<FfiCallbackPairContract>> {
+    let parameters = signature
+        .parameters()
+        .iter()
+        .filter_map(|parameter| parameter.parameter_type().type_id())
+        .collect::<Vec<_>>();
+    let results = signature
+        .results()
+        .iter()
+        .filter_map(pop_types::ResolvedType::type_id)
+        .collect::<Vec<_>>();
+    let has_callback_type = parameters.iter().chain(&results).any(|type_id| {
+        ffi_type_contains_callback(*type_id, resolver.arena(), &mut BTreeSet::new())
+    });
+    if !has_callback_type {
+        if generated.is_some() {
+            diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+                span,
+                "generated FFI callback metadata does not match the resolved signature",
+            ));
+            return None;
+        }
+        return Some(Vec::new());
+    }
+    let Some(generated) = generated else {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            span,
+            "FFI function/context parameters require selected generated callback metadata",
+        ));
+        return None;
+    };
+    let exact_header = generated.external_symbol() == external_symbol
+        && generated.abi() == abi
+        && !nonblocking
+        && usize::from(generated.parameter_count()) == parameters.len();
+    let mut callback_indices = BTreeSet::new();
+    let mut context_indices = BTreeSet::new();
+    let exact_pairs = generated.callback_pairs().iter().all(|pair| {
+        let callback_index = usize::from(pair.callback_parameter_index());
+        let context_index = usize::from(pair.context_parameter_index());
+        let Some(callback) = parameters.get(callback_index).copied() else {
+            return false;
+        };
+        let Some(context) = parameters.get(context_index).copied() else {
+            return false;
+        };
+        pair.has_valid_shape()
+            && callback_indices.insert(callback_index)
+            && context_indices.insert(context_index)
+            && exact_ffi_callback_signature(callback, resolver.arena())
+            && exact_ffi_callback_context(context, resolver.arena())
+    });
+    let exact_coverage = parameters.iter().enumerate().all(|(index, type_id)| {
+        exact_ffi_callback_signature(*type_id, resolver.arena())
+            == callback_indices.contains(&index)
+            && exact_ffi_callback_context(*type_id, resolver.arena())
+                == context_indices.contains(&index)
+    }) && results.iter().all(|type_id| {
+        !ffi_type_contains_callback(*type_id, resolver.arena(), &mut BTreeSet::new())
+    });
+    if !exact_header || !exact_pairs || !exact_coverage {
+        diagnostics.push(pop_diagnostics::ffi::invalid_foreign_contract(
+            span,
+            "generated FFI callback metadata does not exactly match the resolved declaration",
+        ));
+        return None;
+    }
+    Some(generated.callback_pairs().to_vec())
+}
+
+fn exact_ffi_callback_context(type_id: TypeId, arena: &TypeArena) -> bool {
+    matches!(
+        arena.get(type_id),
+        Some(SemanticType::Builtin { definition, arguments })
+            if *definition == FFI_CALLBACK_CONTEXT_TYPE_ID && arguments.is_empty()
+    )
+}
+
+fn exact_ffi_callback_signature(type_id: TypeId, arena: &TypeArena) -> bool {
+    let Some(SemanticType::Builtin {
+        definition,
+        arguments,
+    }) = arena.get(type_id)
+    else {
+        return false;
+    };
+    let [signature] = arguments.as_slice() else {
+        return false;
+    };
+    if *definition != FFI_FUNCTION_TYPE_ID {
+        return false;
+    }
+    matches!(
+        arena.get(*signature),
+        Some(SemanticType::Function {
+            is_async: false,
+            parameters,
+            results,
+            ..
+        }) if results.len() <= 1
+            && parameters
+                .iter()
+                .filter(|type_id| exact_ffi_callback_context(**type_id, arena))
+                .count() == 1
+    )
+}
+
+fn ffi_type_contains_callback(
+    type_id: TypeId,
+    arena: &TypeArena,
+    visiting: &mut BTreeSet<TypeId>,
+) -> bool {
+    if !visiting.insert(type_id) {
+        return false;
+    }
+    let contains = match arena.get(type_id) {
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) => {
+            *definition == FFI_CALLBACK_CONTEXT_TYPE_ID
+                || pop_types::is_ffi_function_type_constructor(*definition)
+                || arguments
+                    .iter()
+                    .any(|type_id| ffi_type_contains_callback(*type_id, arena, visiting))
+        }
+        Some(SemanticType::Function {
+            parameters,
+            results,
+            ..
+        }) => parameters
+            .iter()
+            .chain(results)
+            .any(|type_id| ffi_type_contains_callback(*type_id, arena, visiting)),
+        Some(SemanticType::Tuple(elements) | SemanticType::Union(elements)) => elements
+            .iter()
+            .any(|type_id| ffi_type_contains_callback(*type_id, arena, visiting)),
+        Some(SemanticType::Array(element) | SemanticType::Optional(element)) => {
+            ffi_type_contains_callback(*element, arena, visiting)
+        }
+        Some(SemanticType::Table { key, value }) => {
+            ffi_type_contains_callback(*key, arena, visiting)
+                || ffi_type_contains_callback(*value, arena, visiting)
+        }
+        _ => false,
+    };
+    visiting.remove(&type_id);
+    contains
 }
 
 fn ffi_attribute_role(

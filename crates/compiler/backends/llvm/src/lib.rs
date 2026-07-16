@@ -23,6 +23,7 @@ mod async_lowering;
 mod bpf;
 mod ffi_buffer;
 mod ffi_bytes;
+mod ffi_callback;
 mod ffi_unsafe;
 mod instruction_lowering;
 mod lowering;

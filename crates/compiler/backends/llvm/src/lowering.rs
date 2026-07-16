@@ -103,6 +103,8 @@ pub fn lower_mir_to_llvm_ir(
     let string_literals = collect_string_literals(bubble);
     let self_capture_slots = collect_self_capture_slots(bubble);
     let memory_none_functions = analyze_memory_none_functions(bubble);
+    let callback_thunks = crate::ffi_callback::lower_thunks(bubble, types, target)?;
+    let has_callback_thunks = !callback_thunks.is_empty();
     let foreign_functions = bubble
         .foreign_functions()
         .iter()
@@ -176,6 +178,9 @@ pub fn lower_mir_to_llvm_ir(
         .filter_map(|instruction| match instruction.kind() {
             MirInstructionKind::CallScopedBorrow {
                 owner, function, ..
+            }
+            | MirInstructionKind::CallCallbackPair {
+                owner, function, ..
             } => Some((*owner, *function)),
             _ => None,
         })
@@ -212,6 +217,7 @@ pub fn lower_mir_to_llvm_ir(
         };
         functions.push(lower_function_parts(
             bubble.bubble(),
+            nested.owner(),
             nested_name(bubble.bubble(), nested.owner(), nested.function()),
             nested.parameters(),
             nested.results(),
@@ -239,6 +245,7 @@ pub fn lower_mir_to_llvm_ir(
         )?);
     }
     functions.push(direct_scalar_array_fill_function(bubble.bubble()));
+    functions.extend(callback_thunks);
     functions.extend(lower_interface_dispatchers(bubble, types)?);
     functions.extend(lower_builtin_interface_dispatchers(bubble, types)?);
     functions.extend(lower_indirect_dispatchers(bubble, types)?);
@@ -353,6 +360,22 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::LeaveForeign)
         ),
         format!(
+            "declare i64 @{}(i64, i64, i32, i8, i8, ptr) nounwind",
+            native_runtime_symbol(RuntimeOperation::FfiCallbackOpen)
+        ),
+        format!(
+            "declare i64 @{}(i64, i64, ptr) nounwind",
+            native_runtime_symbol(RuntimeOperation::FfiCallbackEnter)
+        ),
+        format!(
+            "declare i8 @{}(i64) nounwind",
+            native_runtime_symbol(RuntimeOperation::FfiCallbackLeave)
+        ),
+        format!(
+            "declare i8 @{}(i64, i64, i64) nounwind",
+            native_runtime_symbol(RuntimeOperation::FfiCallbackClose)
+        ),
+        format!(
             "declare void @{}(i64)",
             native_runtime_symbol(RuntimeOperation::SatbWriteBarrier)
         ),
@@ -463,6 +486,9 @@ pub fn lower_mir_to_llvm_ir(
     if c_unwind.is_some() {
         declarations.push("declare i32 @__gcc_personality_v0(...)".to_owned());
     }
+    if has_callback_thunks && c_unwind.is_none() {
+        declarations.push("declare i32 @__gcc_personality_v0(...)".to_owned());
+    }
     declarations.extend(foreign_declarations);
     declarations.push("declare void @pop_std_print_int(i64)".to_owned());
     declarations.push("declare void @pop_std_print_string(i64)".to_owned());
@@ -530,6 +556,7 @@ pub(crate) struct PrivateFunction {
     pub(crate) result: String,
     pub(crate) blocks: Vec<PrivateBlock>,
     pub(crate) attributes: Vec<&'static str>,
+    pub(crate) internal: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -758,7 +785,8 @@ fn foreign_builtin_physical_type(name: &str, target: &TargetSpec) -> Option<Fore
         | "Ffi.ReadOnlyPointer"
         | "Ffi.OptionalReadOnlyPointer"
         | "Ffi.Function"
-        | "Ffi.OptionalFunction" => {
+        | "Ffi.OptionalFunction"
+        | "Ffi.CallbackContext" => {
             return Some(ForeignPhysicalType {
                 llvm: "ptr".to_owned(),
                 conversion: ForeignConversion::Pointer,
@@ -911,8 +939,12 @@ pub(crate) fn direct_scalar_array_fill_name(bubble: BubbleId) -> String {
 }
 
 impl PrivateFunction {
-    fn render(&self, formatter: &mut fmt::Formatter<'_>, internal: bool) -> fmt::Result {
-        let linkage = if internal { "internal " } else { "" };
+    fn render(&self, formatter: &mut fmt::Formatter<'_>, module_internal: bool) -> fmt::Result {
+        let linkage = if module_internal || self.internal {
+            "internal "
+        } else {
+            ""
+        };
         let attributes = if self.attributes.is_empty() {
             String::new()
         } else {
@@ -952,6 +984,7 @@ pub(crate) fn lower_function(
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     lower_function_parts(
         bubble,
+        function.symbol(),
         function_name(bubble, function.symbol()),
         function.parameters(),
         function.results(),
@@ -1227,6 +1260,7 @@ pub(crate) fn is_direct_scalar_element(type_id: TypeId, types: &TypeArena) -> bo
 #[allow(clippy::too_many_lines)]
 pub(crate) fn lower_function_parts(
     bubble: BubbleId,
+    owner: SymbolId,
     name: String,
     parameter_types: &[TypeId],
     result_types: &[TypeId],
@@ -1354,6 +1388,7 @@ pub(crate) fn lower_function_parts(
             );
             let lowered = lower_instruction(
                 bubble,
+                owner,
                 instruction,
                 &value_types,
                 types,
@@ -1480,6 +1515,7 @@ pub(crate) fn lower_function_parts(
         result: llvm_results(result_types, types)?,
         blocks,
         attributes,
+        internal: false,
     })
 }
 

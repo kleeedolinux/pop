@@ -64,6 +64,7 @@ typed_id!(
     FunctionId,
     CleanupScopeId,
     BorrowRegionId,
+    FfiCallbackSiteId,
     CoroutineStateId,
     BlockId,
     ValueId,

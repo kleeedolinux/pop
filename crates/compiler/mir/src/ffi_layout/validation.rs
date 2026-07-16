@@ -51,9 +51,18 @@ pub(super) fn validate_entry(
     let mut source_indices = BTreeSet::new();
     for field in fields {
         let source_index = field.source_index as usize;
+        let semantic_field = field.name().map_or_else(
+            || source_fields.get(source_index),
+            |name| {
+                source_fields
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+            },
+        );
         if source_index >= source_fields.len()
             || !source_indices.insert(source_index)
             || !identities.insert(field.field)
+            || semantic_field.is_none()
         {
             return Err(MirFfiLayoutError::InvalidRecordFields(entry.id));
         }
@@ -64,7 +73,7 @@ pub(super) fn validate_entry(
         if child.abi != entry.abi {
             return Err(MirFfiLayoutError::RecordAbiMismatch(entry.id));
         }
-        if source_fields[source_index].1 != child.element {
+        if semantic_field.map(|(_, field_type)| *field_type) != Some(child.element) {
             return Err(MirFfiLayoutError::InvalidRecordFields(entry.id));
         }
         if child.alignment > entry.alignment || field.offset % child.alignment != 0 {

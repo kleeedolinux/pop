@@ -22,6 +22,7 @@ pop-types.workspace = true
 pop-backend-mir-interp.workspace = true
 pop-driver.workspace = true
 pop-foundation.workspace = true
+pop-projects.workspace = true
 pop-source.workspace = true
 pop-runtime-native.workspace = true
 pop-types.workspace = true

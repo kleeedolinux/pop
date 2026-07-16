@@ -1,0 +1,113 @@
+@Ffi.Binding(
+    schemaVersion = 2,
+    platformTarget = "x86_64-unknown-linux-gnu",
+    producerName = "llvm-callback-fixture",
+    producerVersion = "1.0.0",
+    outputNamespace = Native.Callbacks.Unsafe,
+)
+namespace Native.Callbacks.Binding
+
+@Ffi.C.Layout(size = 8, alignment = 4)
+internal record Pair
+    @Ffi.C.Offset(0)
+    left: Ffi.C.Int
+    @Ffi.C.Offset(4)
+    right: Ffi.C.Int
+end
+
+@Ffi.Foreign("visit_scalar_scoped", abi = "C")
+@Ffi.Binding.CallPolicy(nonblocking = false)
+@Ffi.Binding.CallbackPair(
+    callbackParameterIndex = 0,
+    contextParameterIndex = 2,
+    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,
+    callbackAbi = Ffi.Binding.CallbackAbi.C,
+    signatureFingerprint = "b95f44146facefea58f2e5d6153fef8e19173a14436501921a3381285e105788",
+    thread = Ffi.Binding.CallbackThread.CallingThread,
+    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,
+    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
+    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
+)
+internal function visitAScalarScoped(
+    callback: Ffi.Function<function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int>,
+    value: Ffi.C.Int,
+    context: Ffi.CallbackContext,
+): Ffi.C.Int
+end
+
+@Ffi.Foreign("visit_pointer_scoped", abi = "C")
+@Ffi.Binding.CallPolicy(nonblocking = false)
+@Ffi.Binding.CallbackPair(
+    callbackParameterIndex = 0,
+    contextParameterIndex = 1,
+    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,
+    callbackAbi = Ffi.Binding.CallbackAbi.C,
+    signatureFingerprint = "dc5bf0ddbbd52752339f677dd91c9d9ba4182c8e5f026acdc3856283997f84a7",
+    thread = Ffi.Binding.CallbackThread.CallingThread,
+    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,
+    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
+    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
+)
+internal function visitBPointerScoped(
+    callback: Ffi.Function<function(value: Ffi.ReadOnlyPointer<Ffi.C.Int>, context: Ffi.CallbackContext): Ffi.ReadOnlyPointer<Ffi.C.Int>>,
+    context: Ffi.CallbackContext,
+): Ffi.C.Int
+end
+
+@Ffi.Foreign("visit_registered", abi = "C")
+@Ffi.Binding.CallPolicy(nonblocking = false)
+@Ffi.Binding.CallbackPair(
+    callbackParameterIndex = 0,
+    contextParameterIndex = 2,
+    lifetime = Ffi.Binding.CallbackLifetime.Registered,
+    callbackAbi = Ffi.Binding.CallbackAbi.C,
+    signatureFingerprint = "b95f44146facefea58f2e5d6153fef8e19173a14436501921a3381285e105788",
+    thread = Ffi.Binding.CallbackThread.AttachedThread,
+    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,
+    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
+    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
+)
+internal function visitCRegistered(
+    callback: Ffi.Function<function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int>,
+    value: Ffi.C.Int,
+    context: Ffi.CallbackContext,
+): Ffi.C.Int
+end
+
+@Ffi.Foreign("visit_record_scoped", abi = "C")
+@Ffi.Binding.CallPolicy(nonblocking = false)
+@Ffi.Binding.CallbackPair(
+    callbackParameterIndex = 0,
+    contextParameterIndex = 1,
+    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,
+    callbackAbi = Ffi.Binding.CallbackAbi.C,
+    signatureFingerprint = "53fdcf4126ba2cd0e77fecccb11f8524d2ee03811c89f432e3d34af71a84f03e",
+    thread = Ffi.Binding.CallbackThread.CallingThread,
+    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,
+    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
+    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
+)
+internal function visitDRecordScoped(
+    callback: Ffi.Function<function(value: Pair, context: Ffi.CallbackContext): Pair>,
+    context: Ffi.CallbackContext,
+): Ffi.C.Int
+end
+
+@Ffi.Foreign("visit_system_scoped", abi = "System")
+@Ffi.Binding.CallPolicy(nonblocking = false)
+@Ffi.Binding.CallbackPair(
+    callbackParameterIndex = 0,
+    contextParameterIndex = 1,
+    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,
+    callbackAbi = Ffi.Binding.CallbackAbi.System,
+    signatureFingerprint = "38ce542ee6109c91ed1aa202d88b102e2cd68e318696d5db2b5fd41a25b18c6a",
+    thread = Ffi.Binding.CallbackThread.CallingThread,
+    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,
+    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
+    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
+)
+internal function visitESystemScoped(
+    callback: Ffi.Function<function(value: Ffi.C.Long, context: Ffi.CallbackContext): Ffi.C.Long>,
+    context: Ffi.CallbackContext,
+): Ffi.C.Int
+end

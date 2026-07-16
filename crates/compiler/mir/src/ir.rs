@@ -9,22 +9,22 @@ use std::fmt::Write;
 
 use pop_foundation::{
     BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
-    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FunctionId,
-    InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, MethodId,
-    NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
+    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FfiCallbackSiteId, FieldId,
+    FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId,
+    MethodId, NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
     StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, PanicPayload, SafePointId, StackMap,
-    Trap, UnwindReason,
+    ArrayElementMap, FfiAbiLayoutId, FfiCallbackLifetime, FfiCallbackThread, ObjectMap, ObjectSlot,
+    PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
 };
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
 
-use crate::MirFfiLayoutCatalog;
 use crate::render::{
     dump_declaration, dump_function, dump_function_reference, dump_nested_function,
 };
 use crate::verification::instruction_operands;
+use crate::{MirFfiCallbackSignature, MirFfiLayoutCatalog};
 
 pub(crate) const MAX_STRAIGHT_LINE_WORK_BETWEEN_SAFE_POINTS: usize = 256;
 
@@ -1402,6 +1402,49 @@ pub enum MirInstructionKind {
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
+    FfiCallbackOpenScoped {
+        callback: ValueId,
+        callback_type: TypeId,
+        owner: SymbolId,
+        function: NestedFunctionId,
+        site: FfiCallbackSiteId,
+        region: BorrowRegionId,
+    },
+    FfiCallbackOpenOwned {
+        callback: ValueId,
+        callback_type: TypeId,
+        owner: SymbolId,
+        function: NestedFunctionId,
+        site: FfiCallbackSiteId,
+        thread: FfiCallbackThread,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    CallCallbackPair {
+        callback: ValueId,
+        signature: MirFfiCallbackSignature,
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: Vec<MirClosureCapture>,
+        region: BorrowRegionId,
+        lifetime: FfiCallbackLifetime,
+        result: Option<BuiltinTypeId>,
+        success: Option<ResultCaseId>,
+        failure: Option<ResultCaseId>,
+        declared_effects: MirEffectSummary,
+        unwind: MirUnwindAction,
+    },
+    FfiCallbackCloseScoped {
+        callback: ValueId,
+        region: BorrowRegionId,
+    },
+    FfiCallbackCloseOwned {
+        callback: ValueId,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
     RecordMake {
         record: SymbolId,
         fields: Vec<(FieldId, ValueId)>,
@@ -1931,6 +1974,9 @@ pub enum MirVerificationError {
         instruction: ValueId,
     },
     InvalidFfiBytesOperation {
+        instruction: ValueId,
+    },
+    InvalidFfiCallbackOperation {
         instruction: ValueId,
     },
     InvalidFfiPointerOperation {

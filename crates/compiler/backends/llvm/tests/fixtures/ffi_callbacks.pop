@@ -1,0 +1,71 @@
+namespace CallbackDemo
+private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int
+private type PointerCallbackSignature = function(value: Ffi.ReadOnlyPointer<Ffi.C.Int>, context: Ffi.CallbackContext): Ffi.ReadOnlyPointer<Ffi.C.Int>
+private type RecordCallbackSignature = function(value: Native.Callbacks.Unsafe.Pair, context: Ffi.CallbackContext): Native.Callbacks.Unsafe.Pair
+private type SystemCallbackSignature = function(value: Ffi.C.Long, context: Ffi.CallbackContext): Ffi.C.Long
+
+public function scoped(captured: Ffi.C.Int): Ffi.C.Int
+    return Ffi.withCallback(
+        function(ignoredValue: Ffi.C.Int, ignoredContext: Ffi.CallbackContext): Ffi.C.Int
+            return captured
+        end,
+        function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
+            return Native.Callbacks.Unsafe.visitAScalarScoped(callbackFunction, captured, context)
+        end
+    )
+end
+
+public function scopedPointer(): Ffi.C.Int
+    return Ffi.withCallback(
+        function(value: Ffi.ReadOnlyPointer<Ffi.C.Int>, ignoredContext: Ffi.CallbackContext): Ffi.ReadOnlyPointer<Ffi.C.Int>
+            return value
+        end,
+        function(callbackFunction: Ffi.Function<PointerCallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
+            return Native.Callbacks.Unsafe.visitBPointerScoped(callbackFunction, context)
+        end
+    )
+end
+
+public function scopedRecord(): Ffi.C.Int
+    return Ffi.withCallback(
+        function(value: Native.Callbacks.Unsafe.Pair, ignoredContext: Ffi.CallbackContext): Native.Callbacks.Unsafe.Pair
+            return value
+        end,
+        function(callbackFunction: Ffi.Function<RecordCallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
+            return Native.Callbacks.Unsafe.visitDRecordScoped(callbackFunction, context)
+        end
+    )
+end
+
+public function scopedSystem(captured: Ffi.C.Long): Ffi.C.Int
+    return Ffi.withCallback(
+        function(ignoredValue: Ffi.C.Long, ignoredContext: Ffi.CallbackContext): Ffi.C.Long
+            return captured
+        end,
+        function(callbackFunction: Ffi.Function<SystemCallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
+            return Native.Callbacks.Unsafe.visitESystemScoped(callbackFunction, context)
+        end
+    )
+end
+
+public function openCallback(captured: Ffi.C.Int): Result<Ffi.RegisteredCallback<CallbackSignature>, Ffi.CallbackOpenError>
+    return Ffi.Callback.open(
+        function(ignoredValue: Ffi.C.Int, ignoredContext: Ffi.CallbackContext): Ffi.C.Int
+            return captured
+        end,
+        Ffi.CallbackThread.AttachedThread
+    )
+end
+
+public function useCallback(callback: Ffi.RegisteredCallback<CallbackSignature>, value: Ffi.C.Int): Result<Ffi.C.Int, Ffi.CallbackClosedError>
+    return Ffi.Callback.withPair(
+        callback,
+        function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
+            return Native.Callbacks.Unsafe.visitCRegistered(callbackFunction, value, context)
+        end
+    )
+end
+
+public function closeCallback(callback: Ffi.RegisteredCallback<CallbackSignature>): Result<nil, Ffi.CallbackInUseError>
+    return Ffi.Callback.close(callback)
+end
