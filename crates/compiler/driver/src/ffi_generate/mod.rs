@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use pop_projects::{ManifestError, parse_package_manifest};
+use pop_projects::{ManifestError, PackageManifest, parse_package_manifest};
 use pop_target::TargetSpec;
 use sha2::{Digest, Sha256};
 
@@ -123,6 +123,91 @@ pub fn generate_ffi_bindings(
         )
     })?;
     let manifest = parse_package_manifest(manifest_text).map_err(manifest_error)?;
+    let generation = load_expected_generation(package_root, &manifest, platform_target, alias)?;
+    let outputs = generation.outputs();
+    if generation.output_path.exists() {
+        return verify_existing_generation(
+            &generation.output_path,
+            &outputs,
+            &generation.descriptor,
+            &generation.target,
+        );
+    }
+    publish_generation(
+        &generation.output_path,
+        &outputs,
+        &generation.descriptor,
+        &generation.target,
+    )
+}
+
+/// Verifies every selected ADR 0089 generated directory before Package source
+/// discovery or compilation.
+///
+/// # Errors
+///
+/// Rejects missing, extra, symlinked, malformed, noncanonical, target-mismatched,
+/// or hash-mismatched generated output without modifying the Package.
+pub fn verify_ffi_generated_bindings(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    platform_target: &str,
+) -> Result<(), FfiGenerationError> {
+    verify_directory(package_root, FfiGenerationErrorKind::InvalidInput)?;
+    let Some(platform) = manifest
+        .platform_ffi_generators()
+        .iter()
+        .find(|platform| platform.platform_target() == platform_target)
+    else {
+        return Ok(());
+    };
+    for generator in platform.generators() {
+        let generation =
+            load_expected_generation(package_root, manifest, platform_target, generator.alias())?;
+        if !generation.output_path.exists() {
+            return Err(FfiGenerationError::new(
+                FfiGenerationErrorKind::OutputConflict,
+                format!(
+                    "generated output for alias `{}` and target `{platform_target}` is missing",
+                    generator.alias(),
+                ),
+            ));
+        }
+        verify_existing_generation(
+            &generation.output_path,
+            &generation.outputs(),
+            &generation.descriptor,
+            &generation.target,
+        )?;
+    }
+    Ok(())
+}
+
+struct ExpectedGeneration {
+    output_path: PathBuf,
+    descriptor: Descriptor,
+    target: TargetSpec,
+    source: String,
+    shim: String,
+    metadata: String,
+}
+
+impl ExpectedGeneration {
+    fn outputs(&self) -> [(&'static str, &[u8]); 3] {
+        [
+            (GENERATED_SOURCE, self.source.as_bytes()),
+            (GENERATED_SHIM, self.shim.as_bytes()),
+            (GENERATED_METADATA, self.metadata.as_bytes()),
+        ]
+    }
+}
+
+fn load_expected_generation(
+    package_root: &Path,
+    manifest: &PackageManifest,
+    platform_target: &str,
+    alias: &str,
+) -> Result<ExpectedGeneration, FfiGenerationError> {
     let generator = manifest
         .ffi_generator(platform_target, alias)
         .map_err(manifest_error)?;
@@ -132,7 +217,6 @@ pub fn generate_ffi_bindings(
             format!("unsupported platform target: {error}"),
         )
     })?;
-
     let descriptor_path = verified_relative_file(package_root, generator.descriptor())?;
     let descriptor_bytes = read_regular_file(&descriptor_path, 4 * 1024 * 1024, true)?;
     let descriptor_hash = sha256_hex(&descriptor_bytes);
@@ -143,7 +227,6 @@ pub fn generate_ffi_bindings(
         ));
     }
     let descriptor = parse_descriptor(&descriptor_bytes, &target)?;
-
     let source = render_source(&descriptor, generator.native_library());
     let shim = NO_SHIM_SOURCE.to_owned();
     let metadata = render_metadata(
@@ -158,17 +241,15 @@ pub fn generate_ffi_bindings(
         &shim,
     );
     verify_metadata(&metadata, &descriptor, &source, &shim, &target)?;
-
     let output_path = verified_relative_output(package_root, generator.output_directory())?;
-    let outputs = [
-        (GENERATED_SOURCE, source.as_bytes()),
-        (GENERATED_SHIM, shim.as_bytes()),
-        (GENERATED_METADATA, metadata.as_bytes()),
-    ];
-    if output_path.exists() {
-        return verify_existing_generation(&output_path, &outputs);
-    }
-    publish_generation(&output_path, &outputs, &descriptor, &target)
+    Ok(ExpectedGeneration {
+        output_path,
+        descriptor,
+        target,
+        source,
+        shim,
+        metadata,
+    })
 }
 
 fn manifest_error(error: ManifestError) -> FfiGenerationError {
@@ -185,6 +266,7 @@ fn render_source(descriptor: &Descriptor, native_library: Option<&str>) -> Strin
     output
 }
 
+#[derive(Clone, Copy)]
 struct GenerationIdentity<'a> {
     alias: &'a str,
     native_library: Option<&'a str>,
@@ -269,7 +351,7 @@ fn render_metadata(
         descriptor.output_namespace
     )
     .expect("String write");
-    writeln!(output, ")\nnamespace {}", descriptor.descriptor_namespace).expect("String write");
+    writeln!(output, ")\nnamespace {}", descriptor.binding_namespace).expect("String write");
     render_declarations(descriptor, &mut output, true);
     output
 }
@@ -345,14 +427,51 @@ fn verified_relative_file(root: &Path, relative: &str) -> Result<PathBuf, FfiGen
 }
 
 fn verified_relative_output(root: &Path, relative: &str) -> Result<PathBuf, FfiGenerationError> {
-    let path = root.join(relative);
-    if let Ok(metadata) = fs::symlink_metadata(&path)
-        && metadata.file_type().is_symlink()
-    {
+    let mut path = root.to_path_buf();
+    let mut components = Path::new(relative).components().peekable();
+    if components.peek().is_none() {
         return Err(FfiGenerationError::new(
             FfiGenerationErrorKind::InvalidInput,
-            "output directory cannot be a symlink",
+            "output directory must be Package-relative",
         ));
+    }
+    let mut prefix_exists = true;
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            return Err(FfiGenerationError::new(
+                FfiGenerationErrorKind::InvalidInput,
+                "output directory must be a normalized Package-relative path",
+            ));
+        };
+        path.push(component);
+        if !prefix_exists {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(FfiGenerationError::new(
+                    FfiGenerationErrorKind::InvalidInput,
+                    "output path cannot contain a symlink",
+                ));
+            }
+            Ok(metadata) if components.peek().is_some() && !metadata.is_dir() => {
+                return Err(FfiGenerationError::new(
+                    FfiGenerationErrorKind::InvalidInput,
+                    "output parent must contain only directories",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                prefix_exists = false;
+            }
+            Err(error) => {
+                return Err(io_error(
+                    FfiGenerationErrorKind::InvalidInput,
+                    "could not inspect output path",
+                    error,
+                ));
+            }
+        }
     }
     Ok(path)
 }
@@ -589,6 +708,8 @@ fn publish_generation(
 fn verify_existing_generation(
     output: &Path,
     files: &[(&str, &[u8])],
+    descriptor: &Descriptor,
+    target: &TargetSpec,
 ) -> Result<(), FfiGenerationError> {
     let metadata = fs::symlink_metadata(output).map_err(|error| {
         io_error(
@@ -632,6 +753,21 @@ fn verify_existing_generation(
             "existing output is not the same complete generated file set",
         ));
     }
+    let metadata_path = output.join(GENERATED_METADATA);
+    let metadata_bytes =
+        read_regular_file(&metadata_path, 4 * 1024 * 1024, true).map_err(|_| {
+            FfiGenerationError::new(
+                FfiGenerationErrorKind::OutputConflict,
+                "generated metadata is missing, symlinked, or unreadable",
+            )
+        })?;
+    let parsed = parse_generated_metadata(&metadata_bytes, target)?;
+    if parsed.descriptor != *descriptor {
+        return Err(FfiGenerationError::new(
+            FfiGenerationErrorKind::PolicyMismatch,
+            "generated metadata descriptor does not match the selected manifest input",
+        ));
+    }
     for (name, expected) in files {
         let path = output.join(name);
         let actual = read_regular_file(&path, expected.len(), true).map_err(|_| {
@@ -647,6 +783,10 @@ fn verify_existing_generation(
             ));
         }
     }
+    let source = std::str::from_utf8(files[0].1).expect("generated source is canonical UTF-8");
+    let shim = std::str::from_utf8(files[1].1).expect("generated shim is canonical UTF-8");
+    let metadata = std::str::from_utf8(files[2].1).expect("generated metadata is canonical UTF-8");
+    verify_metadata(metadata, descriptor, source, shim, target)?;
     Ok(())
 }
 
@@ -659,6 +799,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         })
 }
 
+#[allow(clippy::needless_pass_by_value)] // Own the source error at the typed diagnostic boundary.
 fn io_error(
     kind: FfiGenerationErrorKind,
     context: &str,

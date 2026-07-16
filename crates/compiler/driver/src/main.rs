@@ -27,6 +27,7 @@ use pop_driver::{
     NativeLinkPlanSource, PoplibDependency, PoplibEmission, ReferenceFunction, ReferenceMetadata,
     ReferenceType, analyze_bubble, artifact_sha256_hex, emit_poplib, encode_reference_metadata,
     generate_ffi_bindings, load_poplib, resolve_native_link_inputs, validate_foreign_link_aliases,
+    verify_ffi_generated_bindings,
 };
 use pop_foundation::{BubbleId, Diagnostic, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_localization::{
@@ -1450,6 +1451,9 @@ fn lower_package_recursive(
         );
         return None;
     }
+    verify_ffi_generated_bindings(package_root, &manifest, native_target().triple())
+        .map_err(|error| eprintln!("pop: {error}"))
+        .ok()?;
     let native_link_plan = manifest
         .native_link_plan(native_target().triple())
         .map_err(|error| tool_failure!("pop: {error}"))

@@ -38,7 +38,10 @@ mod work;
 
 pub use api::*;
 pub use artifact::*;
-pub use ffi_generate::{FfiGenerationError, FfiGenerationErrorKind, generate_ffi_bindings};
+pub use ffi_generate::{
+    FfiGenerationError, FfiGenerationErrorKind, generate_ffi_bindings,
+    verify_ffi_generated_bindings,
+};
 pub use front_end::*;
 pub use native_link::{
     NativeLinkInput, NativeLinkPlanSource, NativeLinkResolution, NativeLinkResolutionError,

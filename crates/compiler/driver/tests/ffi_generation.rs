@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -6,8 +7,10 @@ use sha2::{Digest, Sha256};
 fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        })
 }
 
 fn fixture_root(name: &str) -> PathBuf {
@@ -98,6 +101,67 @@ fn run_generate(root: &Path, target: &str) -> Output {
         .expect("pop ffi generate runs")
 }
 
+fn run_package_check(root: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(root.join("bubble.toml"))
+        .output()
+        .expect("pop check generated Package")
+}
+
+fn run_package_build(root: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(root.join("bubble.toml"))
+        .output()
+        .expect("pop build generated Package")
+}
+
+fn write_checked_fixture(name: &str) -> (PathBuf, &'static str) {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("driver crate is under repository root")
+        .to_path_buf();
+    let target = "x86_64-unknown-linux-gnu";
+    let input = descriptor(target);
+    let root = write_fixture_at(
+        repository.join("target").join(format!(
+            "pop-ffi-generated-{name}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        )),
+        &input,
+        target,
+        true,
+    );
+    let manifest = std::fs::read_to_string(root.join("bubble.toml")).expect("manifest");
+    std::fs::write(
+        root.join("bubble.toml"),
+        manifest.replace(
+            "[nativeLibraries]",
+            "[dependencies]\nPopFfi = { path = \"../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }\n[nativeLibraries]",
+        ),
+    )
+    .expect("add exact Pop.Ffi dependency");
+    std::fs::create_dir_all(root.join("src")).expect("create source root");
+    std::fs::write(
+        root.join("src/lib.pop"),
+        "namespace Example.Bindings\n\
+         public function bindingMarker(): Int\n\
+             return 1\n\
+         end\n",
+    )
+    .expect("write library root");
+    let generate = run_generate(&root, target);
+    assert!(
+        generate.status.success(),
+        "generation failed: {}",
+        String::from_utf8_lossy(&generate.stderr)
+    );
+    (root, target)
+}
+
 #[test]
 fn adr_0093_generates_deterministic_typed_popc_bindings_without_process_input() {
     let target = "x86_64-unknown-linux-gnu";
@@ -183,51 +247,8 @@ fn adr_0093_default_c_binding_omits_link_attribute() {
 
 #[test]
 fn adr_0093_generated_pop_source_parses_and_type_checks_with_pop_ffi() {
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("driver crate is under repository root")
-        .to_path_buf();
-    let target = "x86_64-unknown-linux-gnu";
-    let input = descriptor(target);
-    let root = write_fixture_at(
-        repository
-            .join("target")
-            .join(format!("pop-ffi-generated-check-{}", std::process::id())),
-        &input,
-        target,
-        true,
-    );
-    let manifest = std::fs::read_to_string(root.join("bubble.toml")).expect("manifest");
-    std::fs::write(
-        root.join("bubble.toml"),
-        manifest.replace(
-            "[nativeLibraries]",
-            "[dependencies]\nPopFfi = { path = \"../../crates/extensions/ffi\", version = \"0.1.0\", bubble = \"Pop.Ffi\" }\n[nativeLibraries]",
-        ),
-    )
-    .expect("add exact Pop.Ffi dependency");
-    std::fs::create_dir_all(root.join("src")).expect("create source root");
-    std::fs::write(
-        root.join("src/lib.pop"),
-        "namespace Example.Bindings\n\
-         public function bindingMarker(): Int\n\
-             return 1\n\
-         end\n",
-    )
-    .expect("write library root");
-
-    let generate = run_generate(&root, target);
-    assert!(
-        generate.status.success(),
-        "generation failed: {}",
-        String::from_utf8_lossy(&generate.stderr)
-    );
-    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
-        .args(["check", "--manifestPath"])
-        .arg(root.join("bubble.toml"))
-        .output()
-        .expect("pop check generated Package");
+    let (root, _) = write_checked_fixture("check");
+    let check = run_package_check(&root);
     assert!(
         check.status.success(),
         "generated bindings did not type-check: {}",
@@ -235,6 +256,125 @@ fn adr_0093_generated_pop_source_parses_and_type_checks_with_pop_ffi() {
     );
 
     clean_root(&root);
+}
+
+#[test]
+fn adr_0093_package_preflight_rejects_tampered_generated_source_and_metadata_hash() {
+    let (source_root, _) = write_checked_fixture("tampered-source");
+    let source = source_root.join("src/generated/zlib/bindings.pop");
+    let source_text = std::fs::read_to_string(&source).expect("source");
+    std::fs::write(&source, format!("{source_text}\n")).expect("tamper generated source");
+    let rejected = run_package_check(&source_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+    clean_root(&source_root);
+
+    let (metadata_root, _) = write_checked_fixture("tampered-metadata");
+    let metadata = metadata_root.join("src/generated/zlib/native-bindings.popc");
+    let text = std::fs::read_to_string(&metadata).expect("metadata");
+    let source_hash = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("sourceSha256 ="))
+        .and_then(|line| line.split('"').nth(1))
+        .expect("source hash");
+    std::fs::write(&metadata, text.replace(source_hash, &"0".repeat(64)))
+        .expect("tamper metadata inventory hash");
+    let rejected = run_package_check(&metadata_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+    clean_root(&metadata_root);
+}
+
+#[test]
+fn adr_0093_package_preflight_rejects_missing_and_extra_generated_files() {
+    let (missing_root, _) = write_checked_fixture("missing-output");
+    std::fs::remove_file(missing_root.join("src/generated/zlib/bindings.c"))
+        .expect("remove generated shim");
+    let rejected = run_package_build(&missing_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+    clean_root(&missing_root);
+
+    let (directory_root, _) = write_checked_fixture("missing-directory");
+    std::fs::remove_dir_all(directory_root.join("src/generated/zlib"))
+        .expect("remove generated directory");
+    let rejected = run_package_check(&directory_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+    clean_root(&directory_root);
+
+    let (extra_root, _) = write_checked_fixture("extra-output");
+    std::fs::write(
+        extra_root.join("src/generated/zlib/untracked.pop"),
+        "namespace Injected\n",
+    )
+    .expect("write unexpected generated file");
+    let rejected = run_package_check(&extra_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+    clean_root(&extra_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn adr_0093_package_preflight_rejects_symlinked_generated_files() {
+    use std::os::unix::fs::symlink;
+
+    let (root, _) = write_checked_fixture("symlinked-output");
+    let source = root.join("src/generated/zlib/bindings.pop");
+    let actual = root.join("native/generated-source.pop");
+    std::fs::rename(&source, &actual).expect("move generated source outside generated output");
+    symlink("../../../native/generated-source.pop", &source).expect("symlink generated source");
+    let rejected = run_package_check(&root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+    clean_root(&root);
+
+    let (parent_root, _) = write_checked_fixture("symlinked-parent");
+    std::fs::rename(
+        parent_root.join("src/generated"),
+        parent_root.join("native/generated-root"),
+    )
+    .expect("move generated parent outside the source tree");
+    symlink(
+        "../native/generated-root",
+        parent_root.join("src/generated"),
+    )
+    .expect("symlink generated parent");
+    let rejected = run_package_check(&parent_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5081"));
+    clean_root(&parent_root);
+}
+
+#[test]
+fn adr_0093_package_preflight_rejects_metadata_target_and_descriptor_hash_mismatch() {
+    let (target_root, _) = write_checked_fixture("metadata-target");
+    let metadata = target_root.join("src/generated/zlib/native-bindings.popc");
+    let text = std::fs::read_to_string(&metadata).expect("metadata");
+    std::fs::write(
+        &metadata,
+        text.replace(
+            "platformTarget = \"x86_64-unknown-linux-gnu\"",
+            "platformTarget = \"bpfel-unknown-none\"",
+        ),
+    )
+    .expect("change metadata target");
+    let rejected = run_package_check(&target_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5084"));
+    clean_root(&target_root);
+
+    let (hash_root, _) = write_checked_fixture("descriptor-hash");
+    let manifest = hash_root.join("bubble.toml");
+    let text = std::fs::read_to_string(&manifest).expect("manifest");
+    let descriptor_hash = sha256(descriptor("x86_64-unknown-linux-gnu").as_bytes());
+    std::fs::write(&manifest, text.replace(&descriptor_hash, &"0".repeat(64)))
+        .expect("change manifest descriptor hash");
+    let rejected = run_package_check(&hash_root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5081"));
+    clean_root(&hash_root);
 }
 
 #[test]

@@ -18,7 +18,7 @@ pub(super) struct Descriptor {
     pub producer_name: String,
     pub producer_version: String,
     pub output_namespace: String,
-    pub descriptor_namespace: String,
+    pub binding_namespace: String,
     pub records: Vec<Record>,
     pub functions: Vec<Function>,
 }
@@ -289,7 +289,7 @@ pub(super) fn parse_generated_metadata(
     parser.expect(Token::Comma)?;
     parser.expect(Token::RightParenthesis)?;
     parser.expect_name("namespace")?;
-    let descriptor_namespace = parser.path()?;
+    let binding_namespace = parser.path()?;
     let (records, functions) = parser.parse_declarations()?;
     parser.expect(Token::End)?;
     let descriptor = Descriptor {
@@ -298,7 +298,7 @@ pub(super) fn parse_generated_metadata(
         producer_name,
         producer_version,
         output_namespace,
-        descriptor_namespace,
+        binding_namespace,
         records,
         functions,
     };
@@ -464,7 +464,7 @@ impl Parser {
         self.expect(Token::Comma)?;
         self.expect(Token::RightParenthesis)?;
         self.expect_name("namespace")?;
-        let descriptor_namespace = self.path()?;
+        let binding_namespace = self.path()?;
 
         let (records, functions) = self.parse_declarations()?;
         Ok(Descriptor {
@@ -473,7 +473,7 @@ impl Parser {
             producer_name,
             producer_version,
             output_namespace,
-            descriptor_namespace,
+            binding_namespace,
             records,
             functions,
         })
@@ -798,6 +798,7 @@ impl Parser {
         matches!(self.peek(), Token::Identifier(value) if value == expected)
     }
 
+    #[allow(clippy::needless_pass_by_value)] // Keeps closed-grammar call sites token-shaped.
     fn expect(&mut self, expected: Token) -> Result<(), FfiGenerationError> {
         let actual = self.next();
         if actual == expected {
@@ -839,7 +840,7 @@ fn validate_descriptor(
     }
     if !valid_qualified_pascal(&descriptor.output_namespace)
         || !descriptor.output_namespace.ends_with(".Unsafe")
-        || !valid_qualified_pascal(&descriptor.descriptor_namespace)
+        || !valid_qualified_pascal(&descriptor.binding_namespace)
         || !valid_producer(&descriptor.producer_name)
         || !valid_producer(&descriptor.producer_version)
     {
@@ -1077,7 +1078,7 @@ pub(super) fn render_descriptor(descriptor: &Descriptor) -> String {
         descriptor.output_namespace
     )
     .expect("String write");
-    writeln!(output, ")\nnamespace {}", descriptor.descriptor_namespace).expect("String write");
+    writeln!(output, ")\nnamespace {}", descriptor.binding_namespace).expect("String write");
     render_declarations(descriptor, &mut output, true);
     output
 }
