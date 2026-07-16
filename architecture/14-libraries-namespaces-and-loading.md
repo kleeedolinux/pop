@@ -213,6 +213,15 @@ identities, and reserved built-in identities. Unsupported public signature or
 capsule types reject metadata emission rather than becoming erased or dynamic.
 HIR/MIR retain complete identities after any session-local metadata remapping.
 
+For ADR 0091 checked casts, a public class reference additionally retains its
+stable specialized direct-base identity, open/sealed fact, and exact specialized
+interface witnesses. A consumer can therefore validate a visible
+interface-to-class cast without loading source or discovering private types.
+The linked implementation may retain private descendant ancestry for execution,
+but it never enters consumer lookup or a runtime reflection surface. Matching is
+by verified `SymbolIdentity` plus canonical arguments; session-local typed ID
+remapping cannot replace the owning Bubble identity with a source name or path.
+
 Portable capsule loading verifies the owner, schema, hash, type graph, effects,
 dependencies, HIR invariants, visibility closure, and specialization budget.
 Specialized identity derives from the source `SymbolIdentity` plus canonical

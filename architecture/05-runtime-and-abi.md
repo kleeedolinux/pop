@@ -225,6 +225,13 @@ An ordinary class instance has a backend-selected header followed by declared
 storage. Its semantic descriptor includes class identity, field descriptors,
 implemented interfaces, and method dispatch information.
 
+ADR 0091 additionally requires the private descriptor facts needed for checked
+interface-to-class casts: one stable Bubble-scoped specialized class identity
+and the exact specialized parent chain. A checked cast compares those verified
+identities, succeeds for the named target or a descendant, and preserves the
+same managed object identity. These ancestry facts are not enumerable type
+objects and do not enable name-selected casts or runtime reflection.
+
 The language specifies observable behavior, not a fixed header layout. A native
 backend might use a type-information pointer and GC bits; a VM might use an
 internal object handle. Both must agree on field initialization, identity,

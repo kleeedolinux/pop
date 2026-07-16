@@ -229,6 +229,7 @@ Minimum traceability matrix:
 | Typed results, errors, and cleanup | syntax, resolver, type checker, docs, HIR/MIR, runtime, backends | stable Result/error identities, exact propagation, exhaustive boundaries, checked error docs, LIFO cleanup, verifier negatives, and differential tests |
 | Nominal iteration and growable lists | syntax, type checker, HIR/MIR, standard library, runtime, backends | exact protocol/step identities, tuple binding, deterministic collection order, list growth/barriers, lazy adapter calls, no implicit disposal/dynamic lookup, and differential tests |
 | Inferred portable generics | syntax, type checker, metadata, HIR/MIR, standard library, backends | exact bounds, unique inference, generic class witnesses, capsule identity/visibility, full-specialization baseline, no erased/dynamic fallback, and differential tests |
+| Checked interface-to-class casts | syntax, type checker, metadata, HIR/MIR, runtime, backends | explicit visible named target, exact/descendant specialized identity, typed optional absence, preserved object identity, no reflection/name lookup/unchecked projection, verifier negatives, C fail-closed behavior, and interpreter/LLVM differential tests |
 | Statically bound native FFI | syntax, type checker, HIR/MIR, PLRI/runtime, manifests/artifacts, linker, generator, LLVM | exact ABI/layout/effect identities, canonical hashed link plans, immediate scoped-body and read-only pin/buffer-borrow region proofs, handle/callback/root proofs, native fixtures, and no raw flags/shell/runtime lookup/object-address tests |
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
@@ -301,6 +302,9 @@ Architecture CI should eventually verify:
   contract checks;
 - compile-time/reflection capability negative tests;
 - native class field/method lowering without table/metatable lookup;
+- checked nominal-cast exact/descendant identity, visibility, optional absence,
+  metadata round trips, verifier negatives, interpreter/LLVM differentials, and
+  fail-closed unsupported backends under ADR 0091;
 - Module/Bubble behavior without `require` value tables;
 - `bubble.toml`/`bubble.lock` and monorepo selection/reproducibility tests;
 - canonical native link plans, hashed local inputs, exact ABI fingerprints, and

@@ -82,8 +82,8 @@ and does not define the work remaining for `0.1.0`.
     implement LLVM execution, structured task ownership, explicit token
     propagation, cancellation masking, and cross-backend differential proof.
 - [ ] Close the remaining accepted first-release gaps for FFI, view lifetimes,
-  checked casts, effects, and generated typed metadata adapters before exposing
-  those surfaces as stable.
+  checked nominal casts, effects, and generated typed metadata adapters before
+  exposing those surfaces as stable.
 
 ### 2. Finish the standard foundation
 

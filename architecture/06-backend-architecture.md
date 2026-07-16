@@ -153,6 +153,12 @@ closures, panic and unwinding, coroutines, unsafe memory, and FFI are rejected
 during backend validation. The backend does not invent a placeholder runtime or
 expose a raw pointer fallback.
 
+ADR 0091's `checkedDowncast` is also rejected during C capability validation:
+the experimental backend has neither managed interface values nor verified
+class-ancestry descriptors. It cannot substitute a C pointer cast, `void *`,
+name comparison, or partial RTTI. LLVM and the MIR interpreter remain the
+required first-release checked-cast conformance pair.
+
 The bootstrap driver exposes this experiment as `pop transpile <source.pop>
 --to c`. Successful output is C source on standard output; failure publishes no
 partial artifact. C text is disposable output and is not a stable ABI, cache,

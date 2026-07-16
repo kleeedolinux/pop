@@ -117,6 +117,13 @@ target-type call form `Float64(count)` or `Int32(total)`, not an `as` operator o
 runtime conversion by type name. The complete numeric ordering operators are
 `<`, `<=`, `>`, and `>=`. See ADR 0040.
 
+Checked nominal casts preserve the same explicit target-type direction without
+adding another operator. `FileReader(reader)` accepts one nominal interface
+value and returns `FileReader?`; `Box<Int>(value)` names a complete generic class
+target. This is a compiler-known checked conversion, not construction,
+overloading, reflection, or runtime type lookup. The first slice does not add
+`as`, `as?`, an unchecked assertion, or a type-value argument. See ADR 0091.
+
 String concatenation uses the Luau operator `..`. Backtick interpolation keeps
 Luau's `{expression}` shape, while `String(value)` is the explicit formatting
 form for the closed primitive set:

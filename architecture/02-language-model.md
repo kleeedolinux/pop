@@ -73,8 +73,11 @@ order on every scope exit other than a runtime trap. See ADR 0052.
 - Foreign pointers use explicit typed wrappers and unsafe operations.
 - Existential/interface values expose only the operations in their static
   interface.
-- Downcasts, when supported, target a named type and return an optional/result;
-  they do not produce a dynamically typed value.
+- The first checked nominal cast uses an explicit named-class target-type call
+  such as `FileReader(reader)`, accepts one nominal interface value, and returns
+  `FileReader?`. It matches the exact class or a descendant by stable identity;
+  it never performs structural/name lookup or produces a dynamically typed
+  value. See ADR 0091.
 - Heterogeneous collections use an explicit union or interface element type.
 
 ### Numeric source semantics
@@ -427,6 +430,13 @@ A class explicitly names interfaces after `implements` and must supply exact
 accessible receiver methods. Class-to-interface conversion is a checked static
 upcast; calls carry a resolved interface method/slot rather than a name. See
 ADR 0020.
+
+The inverse first-release operation is an explicit checked interface-to-class
+cast. `FileReader(reader)` evaluates the interface value once and returns
+`FileReader?`; a concrete `FileReader` or descendant succeeds without changing
+object identity, and an unrelated implementation returns `nil`. The target
+must be visible, fully resolved, and proven to implement the exact source
+interface. See ADR 0091.
 
 ## Errors and effects
 

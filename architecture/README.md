@@ -168,6 +168,10 @@ transplanted into a Luau-shaped file.
   ABI 1.18 roots the exact managed environment behind a runtime-owned opaque
   context and validates the callback site, generation, thread, serialized
   entry, and balanced transition without exposing a Pop object address.
+- The first stable checked nominal cast is an explicit interface-to-named-class
+  target-type call returning `TTarget?`. It matches exact specialized class
+  identity or a verified descendant, preserves object identity, and uses only
+  private Bubble-scoped descriptor facts rather than reflection or names.
 - Deterministic FFI generation selects one exact target-owned manifest plan,
   verifies one hashed canonical declarative `.popc` ABI-and-policy descriptor,
   and publishes only validated reviewable source, closed shim output, and

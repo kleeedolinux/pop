@@ -172,9 +172,14 @@ Scoped:        callScopedBorrow{borrowRegion, nestedFunction, captures}
 Debug:         debugValue, sourceScope
 ```
 
-`checkedDowncast` has a named static target and typed optional/result output. It
-does not create an untyped value. Collection operations carry concrete key,
-value, and collection types.
+Under ADR 0091, the first `checkedDowncast` consumes one nominal interface
+reference and carries exact Bubble-scoped source-interface and target-class
+identities plus canonical generic arguments. Its result is exactly the optional
+target class. It matches the exact specialized class or a transitive descendant,
+preserves the operand's object identity, and has no allocation, mutation,
+suspension, FFI, unsafe-memory, trap, panic, unwind, or safe-point effect. It
+cannot be reconstructed from a reflective type test plus unchecked projection.
+Collection operations carry concrete key, value, and collection types.
 
 ADR 0085 gives each managed-capable allocation one `AllocationSiteId`.
 Construction MIR uses ordinary managed-capable allocations and verifies before
