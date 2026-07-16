@@ -4,24 +4,32 @@
 //! consumes resolved stable IDs only and delegates every runtime operation through
 //! the backend-neutral PLRI adapter.
 use crate::evaluation::*;
-use crate::ffi_buffer::{integer_from_u64, integer_i64, integer_u64, marshal, unmarshal};
+use crate::ffi_buffer::{
+    integer_from_u64, integer_i64, integer_kind_for_type, integer_u64, marshal, unmarshal,
+};
 use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
 use pop_foundation::{BorrowRegionId, NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
 use pop_mir::{
-    MirBubble, MirCancellationMode, MirInstruction, MirInstructionKind, MirSuspendOperation,
-    MirTaskDispatch, MirTerminator, MirUnwindAction, MirVerificationError, verify_mir_bubble,
+    MirBubble, MirCancellationMode, MirFfiLayout, MirFfiValueClass, MirInstruction,
+    MirInstructionKind, MirSuspendOperation, MirTaskDispatch, MirTerminator, MirUnwindAction,
+    MirVerificationError, verify_mir_bubble,
 };
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
     CancellationTokenId, FfiBufferBorrowId, FfiBufferOpenFailure, FfiBufferOpenRequest,
-    FfiBytesBorrowId, ForeignAddress, ManagedReference, ObjectAllocationRequest, ObjectMap,
-    ObjectSlot, PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure,
-    RuntimeTypeId, TableAllocationRequest, TaskGroupExit, TaskGroupId, TaskGroupLifecycle, TaskId,
-    TaskLifecycle, TaskOwner, TaskPollCompletion, TaskState as RuntimeTaskState, Trap, TrapKind,
-    UnwindReason, WriteBarrier,
+    FfiBytesBorrowId, ForeignAddress, ForeignCallMode, ManagedReference, ObjectAllocationRequest,
+    ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication, RootSlot, RuntimeAdapter,
+    RuntimeFailure, RuntimeTypeId, StackMap, TableAllocationRequest, TaskGroupExit, TaskGroupId,
+    TaskGroupLifecycle, TaskId, TaskLifecycle, TaskOwner, TaskPollCompletion,
+    TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason, WriteBarrier,
 };
-use pop_types::{IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena};
+use pop_types::{
+    FFI_HANDLE_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID, FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
+    FloatKind, IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena,
+    is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
+    is_ffi_pointer_type_constructor,
+};
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -48,6 +56,139 @@ fn ffi_pointer(value: &MirValue) -> Result<ForeignAddress, ExecutionError> {
         return Err(ExecutionError::TypeMismatch);
     };
     Ok(*address)
+}
+
+fn require_foreign_abi_values(
+    mir: &MirBubble,
+    arena: &TypeArena,
+    expected: &[TypeId],
+    layouts: &[Option<pop_runtime_interface::FfiAbiLayoutId>],
+    values: &[MirValue],
+) -> Result<(), ExecutionError> {
+    if expected.len() != values.len() || layouts.len() != values.len() {
+        return Err(ExecutionError::WrongArity);
+    }
+    for ((expected, layout), value) in expected.iter().zip(layouts).zip(values) {
+        let matches = if let Some(layout) = layout {
+            let layout = mir
+                .ffi_layouts()
+                .get(*layout)
+                .filter(|layout| layout.element() == *expected)
+                .ok_or(ExecutionError::InvalidControlFlow)?;
+            foreign_layout_value_matches(mir, arena, layout, value)?
+        } else {
+            foreign_scalar_value_matches(mir, arena, *expected, value)?
+        };
+        if !matches {
+            return Err(ExecutionError::TypeMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn foreign_scalar_value_matches(
+    mir: &MirBubble,
+    arena: &TypeArena,
+    expected: TypeId,
+    value: &MirValue,
+) -> Result<bool, ExecutionError> {
+    Ok(match arena.get(expected) {
+        Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => {
+            matches!(value, MirValue::Integer(integer) if integer.kind() == *kind)
+        }
+        Some(SemanticType::Primitive(PrimitiveType::Float32)) => {
+            matches!(value, MirValue::Float(float) if float.kind() == FloatKind::Float32)
+        }
+        Some(SemanticType::Primitive(PrimitiveType::Float64)) => {
+            matches!(value, MirValue::Float(float) if float.kind() == FloatKind::Float64)
+        }
+        Some(SemanticType::Builtin { definition, .. })
+            if is_ffi_integer_abi_builtin_type(*definition) =>
+        {
+            let kind = integer_kind_for_type(expected, mir.ffi_layouts(), arena)?;
+            matches!(value, MirValue::Integer(integer) if integer.kind() == kind)
+        }
+        Some(SemanticType::Builtin { definition, .. })
+            if is_ffi_pointer_type_constructor(*definition) =>
+        {
+            matches!(value, MirValue::FfiPointer(_))
+                || (*definition == FFI_OPTIONAL_POINTER_TYPE_ID
+                    || *definition == FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID)
+                    && matches!(value, MirValue::Nil)
+        }
+        Some(SemanticType::Builtin { definition, .. })
+            if is_ffi_function_type_constructor(*definition) =>
+        {
+            matches!(value, MirValue::FfiFunction(_))
+                || definition.raw() == 203 && matches!(value, MirValue::Nil)
+        }
+        Some(SemanticType::Builtin { definition, .. }) if *definition == FFI_HANDLE_TYPE_ID => {
+            matches!(value, MirValue::FfiHandle(handle) if *handle != 0)
+        }
+        _ => return Err(ExecutionError::InvalidControlFlow),
+    })
+}
+
+fn foreign_layout_value_matches(
+    mir: &MirBubble,
+    arena: &TypeArena,
+    layout: &MirFfiLayout,
+    value: &MirValue,
+) -> Result<bool, ExecutionError> {
+    Ok(match layout.value_class() {
+        MirFfiValueClass::Integer => {
+            let kind = integer_kind_for_type(layout.element(), mir.ffi_layouts(), arena)?;
+            matches!(value, MirValue::Integer(integer) if integer.kind() == kind)
+        }
+        MirFfiValueClass::Float => match layout.size() {
+            4 => matches!(value, MirValue::Float(float) if float.kind() == FloatKind::Float32),
+            8 => matches!(value, MirValue::Float(float) if float.kind() == FloatKind::Float64),
+            _ => return Err(ExecutionError::InvalidControlFlow),
+        },
+        MirFfiValueClass::Pointer
+        | MirFfiValueClass::FunctionPointer
+        | MirFfiValueClass::Handle => {
+            foreign_scalar_value_matches(mir, arena, layout.element(), value)?
+        }
+        MirFfiValueClass::Record(plan) => {
+            let Some(expected_record) =
+                mir.declarations()
+                    .iter()
+                    .find_map(|declaration| match declaration.kind() {
+                        pop_mir::MirDeclarationKind::Record(record)
+                            if record.type_id() == layout.element() =>
+                        {
+                            Some(declaration.symbol())
+                        }
+                        _ => None,
+                    })
+            else {
+                return Err(ExecutionError::InvalidControlFlow);
+            };
+            let MirValue::Record { record, fields } = value else {
+                return Ok(false);
+            };
+            if *record != expected_record || fields.len() != plan.len() {
+                return Ok(false);
+            }
+            for field in plan {
+                let Some(value) = fields
+                    .iter()
+                    .find_map(|(identity, value)| (*identity == field.field()).then_some(value))
+                else {
+                    return Ok(false);
+                };
+                let child = mir
+                    .ffi_layouts()
+                    .get(field.layout())
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if !foreign_layout_value_matches(mir, arena, child, value)? {
+                    return Ok(false);
+                }
+            }
+            true
+        }
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,11 +231,49 @@ pub enum ExecutionError {
     InvalidControlFlow,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForeignAdapterRegistrationError {
+    UnknownForeignFunction(SymbolId),
+    SignatureMismatch(SymbolId),
+    Duplicate(SymbolId),
+}
+
+type ForeignAdapterFunction =
+    dyn FnMut(&[MirValue]) -> Result<Vec<MirValue>, RuntimeFailure> + 'static;
+
+pub struct TypedForeignAdapter {
+    symbol: SymbolId,
+    parameters: Vec<TypeId>,
+    results: Vec<TypeId>,
+    function: Box<ForeignAdapterFunction>,
+}
+
+impl TypedForeignAdapter {
+    #[must_use]
+    pub fn new<F>(
+        symbol: SymbolId,
+        parameters: Vec<TypeId>,
+        results: Vec<TypeId>,
+        function: F,
+    ) -> Self
+    where
+        F: FnMut(&[MirValue]) -> Result<Vec<MirValue>, RuntimeFailure> + 'static,
+    {
+        Self {
+            symbol,
+            parameters,
+            results,
+            function: Box::new(function),
+        }
+    }
+}
+
 pub struct MirInterpreter<'mir, R = ReferenceRuntimeAdapter> {
     mir: &'mir MirBubble,
     arena: &'mir TypeArena,
     limits: ExecutionLimits,
     runtime: RefCell<R>,
+    foreign_adapters: RefCell<BTreeMap<SymbolId, TypedForeignAdapter>>,
 }
 
 impl<'mir> MirInterpreter<'mir, ReferenceRuntimeAdapter> {
@@ -113,6 +292,7 @@ impl<'mir> MirInterpreter<'mir, ReferenceRuntimeAdapter> {
             arena,
             limits: ExecutionLimits::default(),
             runtime: RefCell::new(ReferenceRuntimeAdapter::default()),
+            foreign_adapters: RefCell::new(BTreeMap::new()),
         })
     }
 }
@@ -135,6 +315,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             arena,
             limits: ExecutionLimits::default(),
             runtime: RefCell::new(runtime),
+            foreign_adapters: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -142,6 +323,48 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
     pub const fn with_limits(mut self, limits: ExecutionLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Installs one test-only foreign adapter after matching its exact resolved
+    /// symbol and static parameter/result packs.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown identities, signature drift, and duplicate authority.
+    pub fn with_foreign_adapter(
+        mut self,
+        adapter: TypedForeignAdapter,
+    ) -> Result<Self, ForeignAdapterRegistrationError> {
+        let Some(declaration) = self
+            .mir
+            .foreign_functions()
+            .iter()
+            .find(|declaration| declaration.symbol() == adapter.symbol)
+        else {
+            return Err(ForeignAdapterRegistrationError::UnknownForeignFunction(
+                adapter.symbol,
+            ));
+        };
+        if declaration.parameters() != adapter.parameters
+            || declaration.results() != adapter.results
+        {
+            return Err(ForeignAdapterRegistrationError::SignatureMismatch(
+                adapter.symbol,
+            ));
+        }
+        if self
+            .foreign_adapters
+            .get_mut()
+            .contains_key(&adapter.symbol)
+        {
+            return Err(ForeignAdapterRegistrationError::Duplicate(
+                declaration.symbol(),
+            ));
+        }
+        self.foreign_adapters
+            .get_mut()
+            .insert(adapter.symbol, adapter);
+        Ok(self)
     }
 
     #[must_use]
@@ -166,6 +389,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             .map(RuntimeValue::visible)
             .collect();
         let mut runtime = self.runtime.borrow_mut();
+        let mut foreign_adapters = self.foreign_adapters.borrow_mut();
         Engine {
             mir: self.mir,
             arena: self.arena,
@@ -173,6 +397,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             steps: 0,
             depth: 0,
             runtime: &mut *runtime,
+            foreign_adapters: &mut foreign_adapters,
             root_handles: BTreeMap::new(),
             ffi_handles: BTreeMap::new(),
             ffi_buffer_borrows: BTreeMap::new(),
@@ -195,6 +420,7 @@ struct Engine<'mir, 'runtime, R> {
     steps: u64,
     depth: u32,
     runtime: &'runtime mut R,
+    foreign_adapters: &'runtime mut BTreeMap<SymbolId, TypedForeignAdapter>,
     root_handles: BTreeMap<ValueId, RootHandle>,
     ffi_handles: BTreeMap<RootHandle, RuntimeValue>,
     ffi_buffer_borrows: BTreeMap<BorrowRegionId, FfiBufferBorrowId>,
@@ -303,6 +529,84 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         );
         self.depth -= 1;
         result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_foreign_call(
+        &mut self,
+        symbol: SymbolId,
+        arguments: &[ValueId],
+        roots: &[ValueId],
+        safe_point: pop_runtime_interface::SafePointId,
+        effects: pop_mir::MirEffectSummary,
+        values: &mut BTreeMap<ValueId, RuntimeValue>,
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        let declaration = self
+            .mir
+            .foreign_functions()
+            .iter()
+            .find(|declaration| declaration.symbol() == symbol)
+            .ok_or(ExecutionError::UnsupportedForeignFunction(symbol))?;
+        let visible_arguments = arguments
+            .iter()
+            .map(|argument| value(values, *argument).map(|value| value.visible.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        require_foreign_abi_values(
+            self.mir,
+            self.arena,
+            declaration.parameters(),
+            declaration.parameter_layouts(),
+            &visible_arguments,
+        )?;
+        let adapter = self
+            .foreign_adapters
+            .get_mut(&symbol)
+            .ok_or(ExecutionError::UnsupportedForeignFunction(symbol))?;
+        let published_values = roots
+            .iter()
+            .map(|root| value(values, *root).map(|value| value.reference))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stack_map = StackMap::new(
+            safe_point,
+            (0..roots.len())
+                .map(|slot| {
+                    u32::try_from(slot)
+                        .map(RootSlot::new)
+                        .map_err(|_| ExecutionError::InvalidControlFlow)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        let mut publication = RootPublication::new(stack_map, published_values)
+            .map_err(|_| ExecutionError::InvalidControlFlow)?;
+        let mode = if effects.contains(pop_mir::MirEffect::Blocks) {
+            ForeignCallMode::Blocking
+        } else {
+            ForeignCallMode::BoundedNonblocking
+        };
+        let transition = self
+            .runtime
+            .enter_foreign(&mut publication, mode)
+            .map_err(ExecutionError::Runtime)?;
+        let invocation = (adapter.function)(&visible_arguments);
+        self.runtime
+            .leave_foreign(transition, &mut publication)
+            .map_err(ExecutionError::Runtime)?;
+        for (root, (_, relocated)) in roots.iter().copied().zip(publication.root_values()) {
+            values
+                .get_mut(&root)
+                .ok_or(ExecutionError::MissingValue(root))?
+                .install_relocated_reference(relocated)?;
+        }
+        let returned = invocation.map_err(ExecutionError::Runtime)?;
+        require_foreign_abi_values(
+            self.mir,
+            self.arena,
+            declaration.results(),
+            declaration.result_layouts(),
+            &returned,
+        )?;
+        Ok(returned.into_iter().map(RuntimeValue::visible).collect())
     }
 
     fn execute(
@@ -2121,9 +2425,20 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => self.execute_direct_call(*function, arguments, values)?,
-            MirInstructionKind::CallForeign { function, .. } => {
-                return Err(ExecutionError::UnsupportedForeignFunction(*function));
-            }
+            MirInstructionKind::CallForeign {
+                function,
+                arguments,
+                roots,
+                safe_point,
+                ..
+            } => self.execute_foreign_call(
+                *function,
+                arguments,
+                roots,
+                *safe_point,
+                instruction.effects(),
+                values,
+            )?,
             MirInstructionKind::CallReferenced { function, .. } => {
                 return Err(ExecutionError::UnknownReferencedFunction(*function));
             }
@@ -2433,7 +2748,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
     fn evaluate_structured_instruction(
         &mut self,
         instruction: &MirInstruction,
-        values: &BTreeMap<ValueId, RuntimeValue>,
+        values: &mut BTreeMap<ValueId, RuntimeValue>,
     ) -> Result<Option<RuntimeValue>, ExecutionError> {
         let result = match instruction.kind() {
             MirInstructionKind::CallDirect {
@@ -2441,9 +2756,20 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 arguments,
                 ..
             } => single_result(self.execute_direct_call(*function, arguments, values)?),
-            MirInstructionKind::CallForeign { function, .. } => {
-                return Err(ExecutionError::UnsupportedForeignFunction(*function));
-            }
+            MirInstructionKind::CallForeign {
+                function,
+                arguments,
+                roots,
+                safe_point,
+                ..
+            } => single_result(self.execute_foreign_call(
+                *function,
+                arguments,
+                roots,
+                *safe_point,
+                instruction.effects(),
+                values,
+            )?),
             MirInstructionKind::CallReferenced { function, .. } => {
                 return Err(ExecutionError::UnknownReferencedFunction(*function));
             }

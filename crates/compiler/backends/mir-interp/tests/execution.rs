@@ -1,4 +1,7 @@
-use pop_backend_mir_interp::{ExecutionError, MirInterpreter, MirValue};
+use pop_backend_mir_interp::{
+    ExecutionError, ForeignAdapterRegistrationError, MirInterpreter, MirValue,
+    ReferenceRuntimeEvent, TypedForeignAdapter,
+};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
 use pop_foundation::{
     BubbleId, BuiltinTypeId, EnumCaseId, FieldId, FileId, ModuleId, NamespaceId, ResultCaseId,
@@ -1308,6 +1311,131 @@ fn interpreter_rejects_foreign_calls_without_an_exact_typed_adapter() {
             SymbolId::from_raw(0)
         ))
     );
+}
+
+#[test]
+fn interpreter_executes_only_an_exact_identity_and_signature_foreign_adapter() {
+    let types = pop_types::TypeArena::new();
+    let int32 = types.source_type("Int32").expect("Int32");
+    let boolean = types.source_type("Boolean").expect("Boolean");
+    let mir = parse_mir_dump(&format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "foreign s0 f0 params() results(t{int32}) symbol(native_poll) abi(C) links(-) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "function s1 f1() -> (t{int32}) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "  b0():\n",
+            "    do v0 gcSafePoint sp0 roots ()\n",
+            "    v1:t{int32} = callForeign s0 () safePoint sp0 roots () effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks] unwind propagate\n",
+            "    return (v1)\n",
+        ),
+        int32 = int32.raw(),
+    ))
+    .expect("foreign MIR");
+
+    let mismatched =
+        TypedForeignAdapter::new(SymbolId::from_raw(0), Vec::new(), vec![boolean], |_| {
+            Ok(vec![MirValue::Boolean(true)])
+        });
+    assert!(matches!(
+        MirInterpreter::new(&mir, &types)
+            .expect("verified foreign MIR")
+            .with_foreign_adapter(mismatched),
+        Err(ForeignAdapterRegistrationError::SignatureMismatch(symbol))
+            if symbol == SymbolId::from_raw(0)
+    ));
+
+    let wrong_result =
+        TypedForeignAdapter::new(SymbolId::from_raw(0), Vec::new(), vec![int32], |_| {
+            Ok(vec![MirValue::Boolean(true)])
+        });
+    let wrong_result_interpreter = MirInterpreter::new(&mir, &types)
+        .expect("verified foreign MIR")
+        .with_foreign_adapter(wrong_result)
+        .expect("declared adapter signature is exact");
+    assert_eq!(
+        wrong_result_interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::TypeMismatch)
+    );
+    assert!(matches!(
+        wrong_result_interpreter.runtime().events().last(),
+        Some(ReferenceRuntimeEvent::LeaveForeign { .. })
+    ));
+
+    let adapter = TypedForeignAdapter::new(SymbolId::from_raw(0), Vec::new(), vec![int32], |_| {
+        Ok(vec![MirValue::Integer(
+            IntegerValue::parse_decimal("42", IntegerKind::Int32).expect("Int32"),
+        )])
+    });
+    let interpreter = MirInterpreter::new(&mir, &types)
+        .expect("verified foreign MIR")
+        .with_foreign_adapter(adapter)
+        .expect("exact typed adapter");
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Ok(vec![MirValue::Integer(
+            IntegerValue::parse_decimal("42", IntegerKind::Int32).expect("Int32")
+        )])
+    );
+    assert!(matches!(
+        interpreter.runtime().events(),
+        [
+            ReferenceRuntimeEvent::SafePoint { .. },
+            ReferenceRuntimeEvent::SafePoint { .. },
+            ReferenceRuntimeEvent::EnterForeign { .. },
+            ReferenceRuntimeEvent::LeaveForeign { .. }
+        ]
+    ));
+    assert!(matches!(
+        interpreter.runtime().events().get(2),
+        Some(ReferenceRuntimeEvent::EnterForeign {
+            mode: pop_runtime_interface::ForeignCallMode::Blocking,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn foreign_adapters_validate_closed_abi_values_not_only_declared_type_ids() {
+    let mut types = pop_types::TypeArena::new();
+    let int32 = types.source_type("Int32").expect("Int32");
+    let pointer = types
+        .intern(pop_types::SemanticType::Builtin {
+            definition: pop_types::FFI_POINTER_TYPE_ID,
+            arguments: vec![int32],
+        })
+        .expect("FFI pointer");
+    let mir = parse_mir_dump(&format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "foreign s0 f0 params() results(t{pointer}) symbol(native_pointer) abi(C) links(-) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "function s1 f1() -> (t{pointer}) effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks]\n",
+            "  b0():\n",
+            "    do v0 gcSafePoint sp0 roots ()\n",
+            "    v1:t{pointer} = callForeign s0 () safePoint sp0 roots () effects[ForeignFunction,UnsafeMemory,GcSafePoint,Blocks] unwind propagate\n",
+            "    return (v1)\n",
+        ),
+        pointer = pointer.raw(),
+    ))
+    .expect("foreign pointer MIR");
+    let adapter =
+        TypedForeignAdapter::new(SymbolId::from_raw(0), Vec::new(), vec![pointer], |_| {
+            Ok(vec![MirValue::Nil])
+        });
+    let interpreter = MirInterpreter::new(&mir, &types)
+        .expect("verified foreign pointer MIR")
+        .with_foreign_adapter(adapter)
+        .expect("declared adapter signature is exact");
+
+    assert_eq!(
+        interpreter.call(SymbolId::from_raw(1), &[]),
+        Err(ExecutionError::TypeMismatch)
+    );
+    assert!(matches!(
+        interpreter.runtime().events().last(),
+        Some(ReferenceRuntimeEvent::LeaveForeign { .. })
+    ));
 }
 
 #[test]

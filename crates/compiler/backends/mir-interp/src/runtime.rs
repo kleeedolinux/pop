@@ -5,10 +5,11 @@
 //! collector implementation details.
 use pop_runtime_interface::{
     ArrayAllocationRequest, ArrayElementMap, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
-    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, GarbageCollectorContract,
-    ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle,
-    RootPublication, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointId, SafePointOutcome,
-    TableAllocationRequest, Trap, WriteBarrier,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, ForeignCallMode,
+    ForeignTransitionId, GarbageCollectorContract, ManagedReference, ObjectAllocationRequest,
+    ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication, RootSlot, RuntimeAdapter,
+    RuntimeFailure, RuntimeTypeId, SafePointId, SafePointOutcome, TableAllocationRequest, Trap,
+    WriteBarrier,
 };
 use std::collections::BTreeMap;
 
@@ -37,6 +38,16 @@ pub enum ReferenceRuntimeEvent {
         safe_point: SafePointId,
         roots: Vec<ManagedReference>,
     },
+    EnterForeign {
+        transition: ForeignTransitionId,
+        safe_point: SafePointId,
+        mode: ForeignCallMode,
+        roots: Vec<ManagedReference>,
+    },
+    LeaveForeign {
+        transition: ForeignTransitionId,
+        roots: Vec<ManagedReference>,
+    },
     WriteBarrier(WriteBarrier),
     Trap(Trap),
     Panic(pop_runtime_interface::PanicPayload),
@@ -53,6 +64,8 @@ pub struct ReferenceRuntimeAdapter {
     next_pin: u64,
     next_ffi_borrow: u64,
     next_foreign_address: u64,
+    next_foreign_transition: u64,
+    foreign_transitions: Vec<(ForeignTransitionId, Vec<RootSlot>)>,
     events: Vec<ReferenceRuntimeEvent>,
 }
 
@@ -446,6 +459,51 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
             roots: roots.managed_references().collect(),
         });
         Ok(SafePointOutcome::no_collection())
+    }
+
+    fn enter_foreign(
+        &mut self,
+        roots: &mut RootPublication,
+        mode: ForeignCallMode,
+    ) -> Result<ForeignTransitionId, RuntimeFailure> {
+        self.safe_point(roots)?;
+        self.next_foreign_transition = self
+            .next_foreign_transition
+            .checked_add(1)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let transition = ForeignTransitionId::new(self.next_foreign_transition)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let root_slots = roots.stack_map().root_slots().to_vec();
+        self.foreign_transitions.push((transition, root_slots));
+        self.events.push(ReferenceRuntimeEvent::EnterForeign {
+            transition,
+            safe_point: roots.stack_map().safe_point(),
+            mode,
+            roots: roots.managed_references().collect(),
+        });
+        Ok(transition)
+    }
+
+    fn leave_foreign(
+        &mut self,
+        transition: ForeignTransitionId,
+        roots: &mut RootPublication,
+    ) -> Result<(), RuntimeFailure> {
+        let Some((expected, expected_slots)) = self.foreign_transitions.last() else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        if *expected != transition || expected_slots.as_slice() != roots.stack_map().root_slots() {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        for reference in roots.managed_references() {
+            self.valid_reference(reference)?;
+        }
+        self.foreign_transitions.pop();
+        self.events.push(ReferenceRuntimeEvent::LeaveForeign {
+            transition,
+            roots: roots.managed_references().collect(),
+        });
+        Ok(())
     }
 
     fn write_barrier(&mut self, barrier: WriteBarrier) -> Result<(), RuntimeFailure> {

@@ -214,7 +214,7 @@ fn integer_kind(
     integer_kind_for_type(layout.element(), catalog, types)
 }
 
-fn integer_kind_for_type(
+pub(crate) fn integer_kind_for_type(
     type_id: TypeId,
     catalog: &MirFfiLayoutCatalog,
     types: &TypeArena,
