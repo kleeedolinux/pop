@@ -79,6 +79,39 @@ HIR and MIR operations carry the exact element `TypeId` plus the resulting
 the stable artifact layout. A backend consumes this binding and never hashes a
 type, parses an attribute, or recomputes a layout.
 
+### Public layout records across Bubble boundaries
+
+When a public foreign declaration uses a trusted `Ffi.C.Layout` record by
+value, `reference.metadata` carries one closed public layout-record projection
+in addition to the function contract. The projection retains the producer
+`SymbolIdentity`, public Module/namespace/name, declaration-ordered field names
+and exact recursive reference types. Only public trusted layout records that
+are reachable from public signatures enter this projection; ordinary,
+`internal`, and `private` records remain absent.
+
+For each exact compilation target and foreign ABI used by that public surface,
+the projection also carries the reachable canonical layout entries: compact
+identity, exact target and ABI, semantic type identity, size, alignment,
+declaration-order field plan and offsets, canonical descriptor, and full
+fingerprint. Scalar child entries are included so the consumer receives a
+closed catalog rather than recomputing a producer claim. The reference loader
+reconstructs the public record schemas in its isolated type/HIR reference
+arena, recomputes and verifies the canonical descriptors and fingerprints, and
+rejects an unknown record identity, malformed field plan, target/ABI mismatch,
+compact collision, or unequal duplicate before name resolution or backend
+entry. A consumer then remaps record and field identities into its session-local
+arenas while preserving the producer `SymbolIdentity`; it never merges the
+producer Module into the consumer Bubble.
+
+Imported foreign declarations bind their by-value parameter/result layouts
+only from that verified reference catalog. The binding is copied into canonical
+MIR with collision-free consumer-local `TypeId` and `FieldId` values. Foreign
+record marshalling uses each catalog field's verified declaration-order
+`source_index` as the managed record slot and its exact offset as the ABI
+storage location; it does not require the producer declaration to appear among
+the consumer Bubble's declarations. A missing catalog entry or selected-target
+mismatch fails lowering rather than causing a backend layout guess.
+
 ### Source FFI operations
 
 The compiler recognizes the exact `Ffi.Buffer` operations fixed by ADR 0082
@@ -134,6 +167,12 @@ on LLVM or a host compiler.
 - zero compact identity and unequal-full-fingerprint collision rejection;
 - trusted `Ffi.C.Layout` attachment, shadowing, wrong-target, unsupported-field,
   unannotated-record, and managed-field rejection;
+- public producer-to-consumer layout-record metadata round trips, nested-field
+  ordering, exact target/ABI/fingerprint binding, and exclusion of non-public
+  records;
+- malformed public record identity/type/field plans, compact collisions,
+  fingerprint corruption, and selected-target mismatch fail before HIR/MIR or
+  backend entry;
 - source `Ffi.Buffer` positive and negative typing plus HIR/MIR catalog identity
   preservation;
 - catalog/artifact/generated-metadata mismatch failures before backend entry;

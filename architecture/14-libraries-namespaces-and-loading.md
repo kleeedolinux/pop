@@ -195,6 +195,14 @@ verification occurs before executable content is mapped.
 - public constants;
 - referenced `BubbleIdentity` values.
 
+For a public trusted `Ffi.C.Layout` record used by value in a public foreign
+signature, ABI-visible layouts include the stable producer record identity,
+declaration-ordered closed fields, and the exact target/ABI canonical layout
+catalog with full fingerprints required by ADR 0086. Loading reconstructs only
+that public record schema in the isolated reference arena and verifies the full
+catalog before consumer name resolution. It never merges dependency Modules or
+exposes the projection as runtime reflection.
+
 It excludes ordinary `internal`/`private` declarations and UDAs, runtime
 reflection, compiler arenas, backend objects, and unrelated implementation
 details. A public generic callable may carry one verified portable

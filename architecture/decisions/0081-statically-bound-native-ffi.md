@@ -255,11 +255,14 @@ foreign frames by default.
 ### Generated bindings and safe wrappers
 
 `pop ffi generate <alias> --manifestPath <bubble.toml> --platformTarget
-<triple>` consumes the exact target-selected manifest entry and canonical typed
-descriptor fixed by ADR 0093. It performs bounded in-process validation, records
-all input hashes, and emits deterministic reviewable `.pop` declarations,
-`native-bindings.popc`, and required C shims. Generated files are ordinary
-source inputs and are never injected as text during compile-time evaluation.
+<triple>` consumes the exact target-owned manifest entry and its hashed
+canonical declarative `.popc` ABI-and-policy descriptor under ADR 0093. The
+bounded in-process parser invokes no external process, records all input hashes,
+and emits deterministic reviewable `.pop` declarations,
+`native-bindings.popc`, and the closed C shim unit. Generated files are ordinary
+source inputs and are never injected as text during compile-time evaluation. A
+future bounded header adapter may only produce the same canonical `.popc`
+contract under a later accepted ADR.
 
 The generator emits low-level declarations as `internal` under a final
 `Unsafe` namespace by default. It maps only proven layouts/signatures and emits
