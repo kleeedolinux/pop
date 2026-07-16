@@ -136,8 +136,8 @@ is not exactly 64 rejects schema-2 callback metadata.
 
 The parser recomputes the fingerprint from typed descriptor values and rejects
 an unequal assertion. A compact execution key may be derived under ADR 0086,
-but generated metadata, public reference metadata, `ForeignFunctionDeclaration`,
-HIR, and MIR retain the full lowercase fingerprint and full policy facts.
+but generated metadata, `ForeignFunctionDeclaration`, HIR, and MIR retain the
+full lowercase fingerprint and full policy facts.
 
 ### Generated outputs and compiler attachment
 
@@ -161,12 +161,14 @@ mismatched attachment is a compile error before HIR. Files outside the
 manifest-selected generated directory cannot contribute attachments.
 
 The verified value is stored on `ForeignFunctionDeclaration` and therefore
-flows unchanged into HIR, canonical MIR, and public reference metadata. A
-consumer revalidates public metadata against its reconstructed exact signature
-and target FFI layout catalog before making the pair usable. Internal generated
-metadata is not emitted merely because it exists; only a public foreign
-declaration's closed attachment can enter consumer metadata. No stage resolves
-a function, type, policy, or callback site from a runtime string.
+flows unchanged into HIR and canonical MIR for the generated declaration's
+owning Bubble. Schema 2 keeps every callback-bearing generated declaration
+`internal` under the final `Unsafe` namespace; changing it to `public`, copying
+it into another Module, or attaching the sidecar to ordinary source fails
+preflight or front-end matching. Callback-pair contracts therefore do not enter
+public `reference.metadata` in the first release. A Package exposes an ordinary
+typed public wrapper that owns the lexical callback operation instead. No stage
+resolves a function, type, policy, or callback site from a runtime string.
 
 Source pair use is accepted only when both values originate from the same
 `Ffi.withCallback` or `Ffi.Callback.withPair` scope and occupy the attachment's
@@ -201,7 +203,10 @@ string lookup, reflection query, or indirect unknown signature.
 - Schema 1 remains a small stable direct-ABI format; schema 2 makes the first
   callback shape useful without opening arbitrary function pointers.
 - Callback trust originates in one hashed target-selected `.popc` descriptor
-  and survives every compiler/artifact boundary as typed data.
+  and survives the owning compiler/target-artifact boundary as typed data.
+- Public Packages expose typed safe wrappers; they do not stabilize raw public
+  foreign callback declarations or leak descriptor-only policy into consumer
+  reference metadata.
 - Generated source stays reviewable and statically typed while descriptor-only
   lifetime and runtime-entry policy cannot be forged by source attributes.
 - A policy or fingerprint mismatch fails before backend lowering rather than
@@ -248,8 +253,9 @@ comparison before semantic use.
 - ABI-neutral registered open, pair-time C/System thunk selection, unused pair,
   incompatible multi-use ambiguity, and one context shared by distinct fixed
   compatible thunks;
-- `ForeignFunctionDeclaration`, HIR, MIR, optimization, `.poplib`, and imported
-  public reference metadata round trips retaining the complete typed facts;
+- `ForeignFunctionDeclaration`, HIR, MIR, optimization, and target artifact
+  round trips retaining the complete typed facts, plus rejection of public or
+  imported callback-bearing foreign declarations;
 - architecture regressions forbidding JSON callback schemas, runtime strings,
   reflection, arbitrary function pointers, source policy UDAs, inferred
   lifetime, `Ffi.Nonblocking`, and backend reconstruction.
@@ -258,5 +264,4 @@ comparison before semantic use.
 
 ADR 0092/0093, compiler pipeline, closed decisions, `.popc` parser/formatter,
 generator/preflight, type checking, `ForeignFunctionDeclaration`, HIR, MIR,
-reference metadata and `.poplib` verification, diagnostics, and conformance
-tests.
+target artifact verification, diagnostics, and conformance tests.

@@ -170,7 +170,7 @@ HIR. The wider runtime enum does not authorize an unrepresented source policy.
 
 Indices are compile-time parameter identities, not runtime lookup. The full
 callback signature descriptor and SHA-256 layout fingerprint enter source
-metadata, HIR, MIR, `.poplib`, and `native-bindings.popc`. Compact execution
+metadata, HIR, MIR, and `native-bindings.popc`. Compact execution
 keys follow ADR 0086 and cannot replace the full collision check. The checker
 requires the function and context arguments to be the matching pair from one
 registration and rejects lifetime or policy mismatches.
@@ -368,7 +368,8 @@ semantics and can deadlock on reentry.
   immediate closure, capture, result, async, variadic, managed-parameter, and
   C-unwind negatives;
 - trusted callback-pair metadata identity, indices, signature fingerprint,
-  lifetime, thread, shadowing, malformed, and `.poplib` round-trip tests;
+  lifetime, thread, shadowing, malformed, owning-artifact round-trip, and
+  public-reference exclusion tests;
 - call-scoped pair dominance, exact foreign argument use, return/store/capture/
   separate-call/address/suspension escape negatives, and every-exit close;
 - owned open/withPair/close, alias-visible lifecycle state, closed-withPair
@@ -393,5 +394,5 @@ semantics and can deadlock on reentry.
 ## Documents/components affected
 
 Type system, trusted FFI metadata, HIR, MIR, PLRI/runtime, collector state,
-native ABI, LLVM, MIR interpreter, `Pop.Ffi`, `.poplib`, generated binding
+native ABI, LLVM, MIR interpreter, `Pop.Ffi`, generated binding
 metadata, diagnostics, conformance policy, and implementation roadmap.
