@@ -159,6 +159,12 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
         (220, "Ffi.C.UnsignedLongLong", 0),
         (221, "Ffi.C.Size", 0),
         (222, "Ffi.C.PointerDifference", 0),
+        (223, "Ffi.CallbackContext", 0),
+        (224, "Ffi.RegisteredCallback", 1),
+        (225, "Ffi.CallbackThread", 0),
+        (226, "Ffi.CallbackOpenError", 0),
+        (227, "Ffi.CallbackInUseError", 0),
+        (228, "Ffi.CallbackClosedError", 0),
     ];
 
     for (id, source_name, arity) in expected {
@@ -183,6 +189,9 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
         "Buffer",
         "NullPointerError",
         "AllocationError",
+        "CallbackContext",
+        "RegisteredCallback",
+        "CallbackThread",
         "Char",
         "Size",
     ] {
@@ -190,7 +199,9 @@ fn ffi_abi_types_have_stable_qualified_non_prelude_identities() {
     }
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(205)));
     assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(206)));
+    assert!(is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(223)));
     assert!(!is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(207)));
+    assert!(!is_ffi_abi_builtin_type(BuiltinTypeId::from_raw(224)));
     assert_eq!(pop_types::FFI_POINTER_TYPE_ID, BuiltinTypeId::from_raw(200));
     assert_eq!(pop_types::FFI_BUFFER_TYPE_ID, BuiltinTypeId::from_raw(207));
     assert!(pop_types::is_ffi_pointer_type_constructor(

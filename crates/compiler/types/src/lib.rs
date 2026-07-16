@@ -61,11 +61,14 @@ pub use bootstrap::{
     BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
     BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
     CompilerAttributeRole, CompilerAttributeTarget, FFI_ALLOCATION_ERROR_TYPE_ID,
-    FFI_BUFFER_TYPE_ID, FFI_HANDLE_TYPE_ID, FFI_NULL_POINTER_ERROR_TYPE_ID,
-    FFI_OPTIONAL_POINTER_TYPE_ID, FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID,
-    FFI_READ_ONLY_POINTER_TYPE_ID, FfiCIntegerKind, embedded_bootstrap_schema, ffi_c_integer_kind,
-    is_ffi_abi_builtin_type, is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
-    is_ffi_pointer_type_constructor,
+    FFI_BUFFER_TYPE_ID, FFI_CALLBACK_CLOSED_ERROR_TYPE_ID, FFI_CALLBACK_CONTEXT_TYPE_ID,
+    FFI_CALLBACK_IN_USE_ERROR_TYPE_ID, FFI_CALLBACK_OPEN_ERROR_TYPE_ID,
+    FFI_CALLBACK_THREAD_TYPE_ID, FFI_FUNCTION_TYPE_ID, FFI_HANDLE_TYPE_ID,
+    FFI_NULL_POINTER_ERROR_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID,
+    FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID, FFI_READ_ONLY_POINTER_TYPE_ID,
+    FFI_REGISTERED_CALLBACK_TYPE_ID, FfiCIntegerKind, embedded_bootstrap_schema,
+    ffi_c_integer_kind, is_ffi_abi_builtin_type, is_ffi_function_type_constructor,
+    is_ffi_integer_abi_builtin_type, is_ffi_pointer_type_constructor,
 };
 pub use classes::{
     ClassDefinition, ClassDefinitionResult, ClassFieldDefinition, ClassMethodDefinition,
@@ -323,6 +326,212 @@ pub enum ForeignAbi {
     CUnwind,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum FfiCallbackThreadPolicy {
+    CallingThread,
+    AttachedThread,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum FfiCallbackLifetime {
+    CallScoped,
+    Registered,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum FfiCallbackAbi {
+    C,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum FfiCallbackConcurrency {
+    Serialized,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum FfiCallbackReentrancy {
+    Forbidden,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum FfiCallbackPanicPolicy {
+    AbortProcess,
+}
+
+/// The closed generated contract selected by one lexical callback-pair scope.
+///
+/// Foreign parameter indices remain on [`FfiCallbackPairContract`]; this value
+/// contains only the facts that must agree across every exact pair use in the
+/// scope and that select one backend-emitted typed thunk.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct FfiCallbackBindingContract {
+    lifetime: FfiCallbackLifetime,
+    callback_abi: FfiCallbackAbi,
+    signature_fingerprint: String,
+    thread: FfiCallbackThreadPolicy,
+    concurrency: FfiCallbackConcurrency,
+    reentrancy: FfiCallbackReentrancy,
+    panic_policy: FfiCallbackPanicPolicy,
+}
+
+impl FfiCallbackBindingContract {
+    #[must_use]
+    pub const fn lifetime(&self) -> FfiCallbackLifetime {
+        self.lifetime
+    }
+
+    #[must_use]
+    pub const fn callback_abi(&self) -> FfiCallbackAbi {
+        self.callback_abi
+    }
+
+    #[must_use]
+    pub fn signature_fingerprint(&self) -> &str {
+        &self.signature_fingerprint
+    }
+
+    #[must_use]
+    pub const fn thread(&self) -> FfiCallbackThreadPolicy {
+        self.thread
+    }
+
+    #[must_use]
+    pub const fn concurrency(&self) -> FfiCallbackConcurrency {
+        self.concurrency
+    }
+
+    #[must_use]
+    pub const fn reentrancy(&self) -> FfiCallbackReentrancy {
+        self.reentrancy
+    }
+
+    #[must_use]
+    pub const fn panic_policy(&self) -> FfiCallbackPanicPolicy {
+        self.panic_policy
+    }
+
+    #[must_use]
+    pub fn has_valid_shape(&self) -> bool {
+        self.signature_fingerprint.len() == 64
+            && self
+                .signature_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && matches!(
+                (self.lifetime, self.thread),
+                (
+                    FfiCallbackLifetime::CallScoped,
+                    FfiCallbackThreadPolicy::CallingThread
+                ) | (
+                    FfiCallbackLifetime::Registered,
+                    FfiCallbackThreadPolicy::AttachedThread
+                )
+            )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct FfiCallbackPairContract {
+    callback_parameter_index: u16,
+    context_parameter_index: u16,
+    lifetime: FfiCallbackLifetime,
+    callback_abi: FfiCallbackAbi,
+    signature_fingerprint: String,
+    thread: FfiCallbackThreadPolicy,
+    concurrency: FfiCallbackConcurrency,
+    reentrancy: FfiCallbackReentrancy,
+    panic_policy: FfiCallbackPanicPolicy,
+}
+
+impl FfiCallbackPairContract {
+    #[must_use]
+    pub fn new(
+        callback_parameter_index: u16,
+        context_parameter_index: u16,
+        lifetime: FfiCallbackLifetime,
+        callback_abi: FfiCallbackAbi,
+        signature_fingerprint: impl Into<String>,
+        thread: FfiCallbackThreadPolicy,
+    ) -> Self {
+        Self {
+            callback_parameter_index,
+            context_parameter_index,
+            lifetime,
+            callback_abi,
+            signature_fingerprint: signature_fingerprint.into(),
+            thread,
+            concurrency: FfiCallbackConcurrency::Serialized,
+            reentrancy: FfiCallbackReentrancy::Forbidden,
+            panic_policy: FfiCallbackPanicPolicy::AbortProcess,
+        }
+    }
+
+    #[must_use]
+    pub const fn callback_parameter_index(&self) -> u16 {
+        self.callback_parameter_index
+    }
+
+    #[must_use]
+    pub const fn context_parameter_index(&self) -> u16 {
+        self.context_parameter_index
+    }
+
+    #[must_use]
+    pub const fn lifetime(&self) -> FfiCallbackLifetime {
+        self.lifetime
+    }
+
+    #[must_use]
+    pub const fn callback_abi(&self) -> FfiCallbackAbi {
+        self.callback_abi
+    }
+
+    #[must_use]
+    pub fn signature_fingerprint(&self) -> &str {
+        &self.signature_fingerprint
+    }
+
+    #[must_use]
+    pub const fn thread(&self) -> FfiCallbackThreadPolicy {
+        self.thread
+    }
+
+    #[must_use]
+    pub const fn concurrency(&self) -> FfiCallbackConcurrency {
+        self.concurrency
+    }
+
+    #[must_use]
+    pub const fn reentrancy(&self) -> FfiCallbackReentrancy {
+        self.reentrancy
+    }
+
+    #[must_use]
+    pub const fn panic_policy(&self) -> FfiCallbackPanicPolicy {
+        self.panic_policy
+    }
+
+    #[must_use]
+    pub fn binding_contract(&self) -> FfiCallbackBindingContract {
+        FfiCallbackBindingContract {
+            lifetime: self.lifetime,
+            callback_abi: self.callback_abi,
+            signature_fingerprint: self.signature_fingerprint.clone(),
+            thread: self.thread,
+            concurrency: self.concurrency,
+            reentrancy: self.reentrancy,
+            panic_policy: self.panic_policy,
+        }
+    }
+
+    #[must_use]
+    pub fn has_valid_shape(&self) -> bool {
+        self.callback_parameter_index != self.context_parameter_index
+            && self.binding_contract().has_valid_shape()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ForeignFunctionDeclaration {
     symbol: SymbolId,
@@ -331,6 +540,8 @@ pub struct ForeignFunctionDeclaration {
     link_aliases: Vec<String>,
     nonblocking: bool,
     effects: EffectSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    callback_pairs: Vec<FfiCallbackPairContract>,
     span: SourceSpan,
 }
 
@@ -354,8 +565,16 @@ impl ForeignFunctionDeclaration {
             link_aliases,
             nonblocking,
             effects,
+            callback_pairs: Vec::new(),
             span,
         }
+    }
+
+    #[must_use]
+    pub fn with_callback_pairs(mut self, mut callback_pairs: Vec<FfiCallbackPairContract>) -> Self {
+        callback_pairs.sort_by_key(FfiCallbackPairContract::callback_parameter_index);
+        self.callback_pairs = callback_pairs;
+        self
     }
 
     const fn expected_effects(abi: ForeignAbi, nonblocking: bool) -> EffectSummary {
@@ -405,6 +624,31 @@ impl ForeignFunctionDeclaration {
     #[must_use]
     pub const fn effects(&self) -> EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub fn callback_pairs(&self) -> &[FfiCallbackPairContract] {
+        &self.callback_pairs
+    }
+
+    #[must_use]
+    pub fn has_valid_callback_pairs(&self) -> bool {
+        let mut callback_indices = std::collections::BTreeSet::new();
+        let mut context_indices = std::collections::BTreeSet::new();
+        let mut previous = None;
+        self.callback_pairs.iter().all(|pair| {
+            let callback = pair.callback_parameter_index();
+            let context = pair.context_parameter_index();
+            let sorted = previous.is_none_or(|previous| previous < callback);
+            previous = Some(callback);
+            pair.has_valid_shape()
+                && sorted
+                && !self.nonblocking
+                && callback_indices.insert(callback)
+                && context_indices.insert(context)
+                && !callback_indices.contains(&context)
+                && !context_indices.contains(&callback)
+        })
     }
 
     #[must_use]

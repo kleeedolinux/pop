@@ -336,7 +336,7 @@ impl BootstrapTypeEntry {
 /// never managed-reference tokens.
 #[must_use]
 pub const fn is_ffi_abi_builtin_type(id: BuiltinTypeId) -> bool {
-    matches!(id.raw(), 200..=206 | 210..=222)
+    matches!(id.raw(), 200..=206 | 210..=223)
 }
 
 /// Returns whether an identity is one of the closed C integer ABI scalars.
@@ -399,6 +399,8 @@ pub const fn is_ffi_function_type_constructor(id: BuiltinTypeId) -> bool {
 
 /// Stable bootstrap identity of the exact `Ffi.Handle<T>` type constructor.
 pub const FFI_HANDLE_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(204);
+/// Stable bootstrap identity of the required `Ffi.Function<TSignature>` type constructor.
+pub const FFI_FUNCTION_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(202);
 /// Stable bootstrap identity of the exact `Ffi.Pointer<T>` type constructor.
 pub const FFI_POINTER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(200);
 /// Stable bootstrap identity of the exact `Ffi.OptionalPointer<T>` type constructor.
@@ -413,6 +415,18 @@ pub const FFI_BUFFER_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(207);
 pub const FFI_NULL_POINTER_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(208);
 /// Stable bootstrap identity of `Ffi.AllocationError`.
 pub const FFI_ALLOCATION_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(209);
+/// Stable bootstrap identity of the opaque `Ffi.CallbackContext` ABI type.
+pub const FFI_CALLBACK_CONTEXT_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(223);
+/// Stable bootstrap identity of `Ffi.RegisteredCallback<TSignature>`.
+pub const FFI_REGISTERED_CALLBACK_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(224);
+/// Stable bootstrap identity of the closed `Ffi.CallbackThread` enum.
+pub const FFI_CALLBACK_THREAD_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(225);
+/// Stable bootstrap identity of `Ffi.CallbackOpenError`.
+pub const FFI_CALLBACK_OPEN_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(226);
+/// Stable bootstrap identity of `Ffi.CallbackInUseError`.
+pub const FFI_CALLBACK_IN_USE_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(227);
+/// Stable bootstrap identity of `Ffi.CallbackClosedError`.
+pub const FFI_CALLBACK_CLOSED_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(228);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTypeRole {
@@ -949,6 +963,12 @@ fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaE
         (220, "Ffi.C.UnsignedLongLong", 0),
         (221, "Ffi.C.Size", 0),
         (222, "Ffi.C.PointerDifference", 0),
+        (223, "Ffi.CallbackContext", 0),
+        (224, "Ffi.RegisteredCallback", 1),
+        (225, "Ffi.CallbackThread", 0),
+        (226, "Ffi.CallbackOpenError", 0),
+        (227, "Ffi.CallbackInUseError", 0),
+        (228, "Ffi.CallbackClosedError", 0),
     ];
     if entries
         .iter()

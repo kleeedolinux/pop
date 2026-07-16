@@ -406,7 +406,8 @@ impl Parser<'_, '_> {
         } else {
             first
         };
-        before_modifier.is_none_or(|token| token.kind() != TokenKind::Colon)
+        before_modifier
+            .is_none_or(|token| !matches!(token.kind(), TokenKind::Colon | TokenKind::LessThan))
     }
 
     fn if_opens_block(&self, index: usize) -> bool {

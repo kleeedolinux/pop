@@ -14,7 +14,8 @@ use pop_foundation::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue, NumericConversionKind,
+    AttributeQuerySubject, FfiCallbackBindingContract, FfiCallbackThreadPolicy, FloatKind,
+    FloatValue, IntegerKind, IntegerValue, NumericConversionKind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -593,6 +594,33 @@ pub enum TypedExpressionKind {
         body: TypedClosure,
         body_type: TypeId,
         region: BorrowRegionId,
+    },
+    FfiWithCallback {
+        callback: TypedClosure,
+        callback_type: TypeId,
+        binding_contract: Box<FfiCallbackBindingContract>,
+        body: Box<TypedClosure>,
+        body_type: TypeId,
+        site: pop_foundation::FfiCallbackSiteId,
+        region: BorrowRegionId,
+    },
+    FfiCallbackOpen {
+        callback: TypedClosure,
+        callback_type: TypeId,
+        thread: FfiCallbackThreadPolicy,
+        site: pop_foundation::FfiCallbackSiteId,
+    },
+    FfiCallbackWithPair {
+        callback: Box<TypedExpression>,
+        callback_type: TypeId,
+        binding_contract: Box<FfiCallbackBindingContract>,
+        body: Box<TypedClosure>,
+        body_type: TypeId,
+        region: BorrowRegionId,
+    },
+    FfiCallbackClose {
+        callback: Box<TypedExpression>,
+        callback_type: TypeId,
     },
     FfiPointerNone {
         element: TypeId,

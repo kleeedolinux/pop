@@ -1444,6 +1444,59 @@ impl<'index> SignatureResolver<'index> {
         self.define_record_impl(module, symbol, syntax, true)
     }
 
+    /// Reconstructs one verified public dependency record in the consumer's
+    /// isolated semantic arena. Field order remains the producer declaration
+    /// order while the structural semantic type keeps its canonical form.
+    #[must_use]
+    pub fn define_referenced_record(
+        &mut self,
+        symbol: SymbolId,
+        fields: Vec<(String, TypeId)>,
+        ffi_c_layout: bool,
+        span: SourceSpan,
+    ) -> Option<RecordDefinition> {
+        if self.record_definitions.contains_key(&symbol)
+            || fields
+                .iter()
+                .any(|(_, field_type)| self.arena.get(*field_type).is_none())
+        {
+            return None;
+        }
+        let type_id = self
+            .arena
+            .intern(SemanticType::Record(fields.clone()))
+            .ok()?;
+        let fields = fields
+            .into_iter()
+            .map(|(name, field_type)| {
+                let key = (name.clone(), field_type);
+                let field = *self.structural_record_fields.entry(key).or_insert_with(|| {
+                    let field = FieldId::from_raw(self.next_field);
+                    self.next_field = self.next_field.saturating_add(1);
+                    field
+                });
+                RecordFieldDefinition {
+                    field,
+                    name,
+                    field_type,
+                    default: None,
+                    pending_default: None,
+                    span,
+                }
+            })
+            .collect();
+        let definition = RecordDefinition {
+            symbol,
+            type_id,
+            fields,
+            ffi_c_layout,
+            span,
+        };
+        self.records_by_type.entry(type_id).or_insert(symbol);
+        self.record_definitions.insert(symbol, definition.clone());
+        Some(definition)
+    }
+
     fn define_record_impl(
         &mut self,
         module: ModuleId,
@@ -1600,6 +1653,10 @@ impl<'index> SignatureResolver<'index> {
                 definition,
                 arguments,
             }) if crate::is_ffi_integer_abi_builtin_type(*definition) => arguments.is_empty(),
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if *definition == crate::FFI_CALLBACK_CONTEXT_TYPE_ID => arguments.is_empty(),
             Some(SemanticType::Builtin {
                 definition,
                 arguments,

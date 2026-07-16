@@ -349,6 +349,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         }
         | TypedExpressionKind::FfiUnsafePointerFromAddress {
             address: operand, ..
+        }
+        | TypedExpressionKind::FfiCallbackClose {
+            callback: operand, ..
         } => {
             finalize_expression_captures(operand, written);
         }
@@ -361,6 +364,39 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
             bytes: owner, body, ..
         } => {
             finalize_expression_captures(owner, written);
+            for capture in &mut body.captures {
+                if written.contains(&capture.binding) {
+                    capture.mode = CaptureMode::Cell;
+                }
+            }
+            for statement in &mut body.body.statements {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedExpressionKind::FfiWithCallback { callback, body, .. } => {
+            for closure in [callback, body] {
+                for capture in &mut closure.captures {
+                    if written.contains(&capture.binding) {
+                        capture.mode = CaptureMode::Cell;
+                    }
+                }
+                for statement in &mut closure.body.statements {
+                    finalize_statement_captures(statement, written);
+                }
+            }
+        }
+        TypedExpressionKind::FfiCallbackOpen { callback, .. } => {
+            for capture in &mut callback.captures {
+                if written.contains(&capture.binding) {
+                    capture.mode = CaptureMode::Cell;
+                }
+            }
+            for statement in &mut callback.body.statements {
+                finalize_statement_captures(statement, written);
+            }
+        }
+        TypedExpressionKind::FfiCallbackWithPair { callback, body, .. } => {
+            finalize_expression_captures(callback, written);
             for capture in &mut body.captures {
                 if written.contains(&capture.binding) {
                     capture.mode = CaptureMode::Cell;

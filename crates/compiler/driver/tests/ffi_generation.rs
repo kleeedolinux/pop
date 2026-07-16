@@ -62,6 +62,161 @@ fn descriptor(target: &str) -> String {
     )
 }
 
+fn callback_signature_fingerprint(target: &str, abi: &str) -> String {
+    callback_layout_fingerprint(
+        target,
+        abi,
+        &[
+            "Ffi.C.Int(size=4,alignment=4)",
+            "Ffi.CallbackContext(pointerWidth=64)",
+        ],
+        Some("Ffi.C.Int(size=4,alignment=4)"),
+    )
+}
+
+fn callback_layout_fingerprint(
+    target: &str,
+    abi: &str,
+    parameters: &[&str],
+    result: Option<&str>,
+) -> String {
+    let mut descriptor = format!(
+        "Pop.Ffi.CallbackSignature/1\nplatformTarget={target}\nabi={abi}\nparameterCount={}\n",
+        parameters.len()
+    );
+    for (index, parameter) in parameters.iter().enumerate() {
+        writeln!(descriptor, "parameter[{index}]={parameter}").expect("String write");
+    }
+    match result {
+        Some(result) => {
+            descriptor.push_str("resultCount=1\n");
+            writeln!(descriptor, "result[0]={result}").expect("String write");
+        }
+        None => descriptor.push_str("resultCount=0\n"),
+    }
+    sha256(descriptor.as_bytes())
+}
+
+fn callback_descriptor(target: &str) -> String {
+    format!(
+        concat!(
+            "@Ffi.Binding(\n",
+            "    schemaVersion = 2,\n",
+            "    platformTarget = \"{}\",\n",
+            "    producerName = \"fixture-abi\",\n",
+            "    producerVersion = \"1.0.0\",\n",
+            "    outputNamespace = Native.Zlib.Unsafe,\n",
+            ")\n",
+            "namespace Native.Zlib.Binding\n",
+            "\n",
+            "@Ffi.Foreign(\"visit_values\", abi = \"C\")\n",
+            "@Ffi.Binding.CallPolicy(nonblocking = false)\n",
+            "@Ffi.Binding.CallbackPair(\n",
+            "    callbackParameterIndex = 0,\n",
+            "    contextParameterIndex = 1,\n",
+            "    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,\n",
+            "    callbackAbi = Ffi.Binding.CallbackAbi.C,\n",
+            "    signatureFingerprint = \"{}\",\n",
+            "    thread = Ffi.Binding.CallbackThread.CallingThread,\n",
+            "    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,\n",
+            "    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,\n",
+            "    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,\n",
+            ")\n",
+            "internal function visitValues(\n",
+            "    callback: Ffi.Function<function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int>,\n",
+            "    context: Ffi.CallbackContext,\n",
+            "): Ffi.C.Int\n",
+            "end\n",
+        ),
+        target,
+        callback_signature_fingerprint(target, "C")
+    )
+}
+
+fn registered_callback_descriptor(target: &str) -> String {
+    callback_descriptor(target)
+        .replace(
+            "Ffi.Binding.CallbackLifetime.CallScoped",
+            "Ffi.Binding.CallbackLifetime.Registered",
+        )
+        .replace(
+            "Ffi.Binding.CallbackThread.CallingThread",
+            "Ffi.Binding.CallbackThread.AttachedThread",
+        )
+}
+
+fn incompatible_callback_descriptor(target: &str) -> String {
+    let c = callback_descriptor(target);
+    let function = c
+        .find("@Ffi.Foreign")
+        .map(|start| &c[start..])
+        .expect("callback function block");
+    let system = function
+        .replace("visit_values", "visit_values_system")
+        .replace("visitValues", "visitValuesSystem")
+        .replace(
+            "Ffi.Binding.CallbackAbi.C",
+            "Ffi.Binding.CallbackAbi.System",
+        )
+        .replace(
+            &callback_signature_fingerprint(target, "C"),
+            &callback_signature_fingerprint(target, "System"),
+        );
+    format!("{c}\n{system}")
+}
+
+fn record_pointer_callback_descriptor(target: &str) -> (String, String) {
+    let record = "record(size=8,alignment=4,fields=[left@0:Ffi.C.Int(size=4,alignment=4);right@4:Ffi.C.Int(size=4,alignment=4)])";
+    let pointer = format!("Ffi.ReadOnlyPointer<{record}>(size=8,alignment=8)");
+    let fingerprint = callback_layout_fingerprint(
+        target,
+        "C",
+        &[record, &pointer, "Ffi.CallbackContext(pointerWidth=64)"],
+        Some(record),
+    );
+    let descriptor = format!(
+        concat!(
+            "@Ffi.Binding(\n",
+            "    schemaVersion = 2,\n",
+            "    platformTarget = \"{}\",\n",
+            "    producerName = \"fixture-abi\",\n",
+            "    producerVersion = \"1.0.0\",\n",
+            "    outputNamespace = Native.Zlib.Unsafe,\n",
+            ")\n",
+            "namespace Native.Zlib.Binding\n",
+            "\n",
+            "@Ffi.C.Layout(size = 8, alignment = 4)\n",
+            "internal record Pair\n",
+            "    @Ffi.C.Offset(0)\n",
+            "    left: Ffi.C.Int\n",
+            "    @Ffi.C.Offset(4)\n",
+            "    right: Ffi.C.Int\n",
+            "end\n",
+            "\n",
+            "@Ffi.Foreign(\"visit_pairs\", abi = \"C\")\n",
+            "@Ffi.Binding.CallPolicy(nonblocking = false)\n",
+            "@Ffi.Binding.CallbackPair(\n",
+            "    callbackParameterIndex = 0,\n",
+            "    contextParameterIndex = 1,\n",
+            "    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,\n",
+            "    callbackAbi = Ffi.Binding.CallbackAbi.C,\n",
+            "    signatureFingerprint = \"{}\",\n",
+            "    thread = Ffi.Binding.CallbackThread.CallingThread,\n",
+            "    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,\n",
+            "    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,\n",
+            "    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,\n",
+            ")\n",
+            "internal function visitPairs(\n",
+            "    callback: Ffi.Function<function(pair: Pair, pointer: Ffi.ReadOnlyPointer<Pair>, context: Ffi.CallbackContext): Pair>,\n",
+            "    context: Ffi.CallbackContext,\n",
+            "): Ffi.C.Int\n",
+            "end\n",
+        ),
+        target, fingerprint,
+    );
+    (descriptor, fingerprint)
+}
+
 fn write_fixture(name: &str, descriptor_text: &str, target: &str, linked: bool) -> PathBuf {
     let root = fixture_root(name);
     write_fixture_at(root, descriptor_text, target, linked)
@@ -118,20 +273,34 @@ fn run_package_build(root: &Path) -> Output {
 }
 
 fn write_checked_fixture(name: &str) -> (PathBuf, &'static str) {
+    write_checked_fixture_with_descriptor(name, &descriptor("x86_64-unknown-linux-gnu"))
+}
+
+fn write_checked_callback_fixture(name: &str) -> (PathBuf, &'static str) {
+    write_checked_fixture_with_descriptor(name, &callback_descriptor("x86_64-unknown-linux-gnu"))
+}
+
+fn write_checked_registered_callback_fixture(name: &str) -> (PathBuf, &'static str) {
+    write_checked_fixture_with_descriptor(
+        name,
+        &registered_callback_descriptor("x86_64-unknown-linux-gnu"),
+    )
+}
+
+fn write_checked_fixture_with_descriptor(name: &str, input: &str) -> (PathBuf, &'static str) {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)
         .expect("driver crate is under repository root")
         .to_path_buf();
     let target = "x86_64-unknown-linux-gnu";
-    let input = descriptor(target);
     let root = write_fixture_at(
         repository.join("target").join(format!(
             "pop-ffi-generated-{name}-{}-{}",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         )),
-        &input,
+        input,
         target,
         true,
     );
@@ -160,6 +329,269 @@ fn write_checked_fixture(name: &str) -> (PathBuf, &'static str) {
         String::from_utf8_lossy(&generate.stderr)
     );
     (root, target)
+}
+
+#[test]
+fn adr_0094_generates_canonical_typed_callback_pair_source_and_metadata() {
+    let target = "x86_64-unknown-linux-gnu";
+    let input = callback_descriptor(target);
+    let root = write_fixture("callback-pair", &input, target, true);
+
+    let generated = run_generate(&root, target);
+    assert!(
+        generated.status.success(),
+        "callback generation failed: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let output = root.join("src/generated/zlib");
+    let source = std::fs::read_to_string(output.join("bindings.pop")).expect("source");
+    assert_eq!(
+        source,
+        "@Ffi.Link(\"Zlib\")\nnamespace Native.Zlib.Unsafe\n\n@Ffi.Foreign(\"visit_values\")\ninternal function visitValues(callback: Ffi.Function<function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int>, context: Ffi.CallbackContext): Ffi.C.Int\nend\n"
+    );
+    assert!(!source.contains("Ffi.Binding.CallbackPair"));
+    assert!(!source.contains("Ffi.Nonblocking"));
+
+    let metadata = std::fs::read_to_string(output.join("native-bindings.popc")).expect("metadata");
+    assert!(metadata.starts_with("@Ffi.GeneratedBindings(\n    schemaVersion = 2,"));
+    assert!(metadata.contains("    parserVersion = 2,"));
+    assert!(metadata.contains("@Ffi.Binding.CallbackPair(\n"));
+    assert!(metadata.contains("    callbackParameterIndex = 0,"));
+    assert!(metadata.contains("    contextParameterIndex = 1,"));
+    assert!(metadata.contains(&format!(
+        "    signatureFingerprint = \"{}\",",
+        callback_signature_fingerprint(target, "C")
+    )));
+    assert!(metadata.contains("    lifetime = Ffi.Binding.CallbackLifetime.CallScoped,"));
+    assert!(metadata.contains("    callbackAbi = Ffi.Binding.CallbackAbi.C,"));
+    assert!(metadata.contains("    thread = Ffi.Binding.CallbackThread.CallingThread,"));
+    assert!(metadata.contains("    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,"));
+    assert!(metadata.contains("    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,"));
+    assert!(metadata.contains("    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,"));
+    assert!(!metadata.to_ascii_lowercase().contains("json"));
+
+    clean_root(&root);
+}
+
+#[test]
+fn adr_0094_fingerprints_expanded_record_and_pointer_callback_layouts() {
+    let target = "x86_64-unknown-linux-gnu";
+    let (input, fingerprint) = record_pointer_callback_descriptor(target);
+    let root = write_fixture("callback-record-pointer", &input, target, true);
+    let generated = run_generate(&root, target);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let metadata = std::fs::read_to_string(root.join("src/generated/zlib/native-bindings.popc"))
+        .expect("generated metadata");
+    assert!(metadata.contains(&format!("signatureFingerprint = \"{fingerprint}\"")));
+    assert!(metadata.contains(
+        "Ffi.Function<function(pair: Pair, pointer: Ffi.ReadOnlyPointer<Pair>, context: Ffi.CallbackContext): Pair>"
+    ));
+    clean_root(&root);
+}
+
+#[test]
+fn adr_0094_preserves_schema_1_callback_rejection_and_fails_closed_on_policy_mismatch() {
+    let target = "x86_64-unknown-linux-gnu";
+    let schema_1 = callback_descriptor(target).replace("schemaVersion = 2", "schemaVersion = 1");
+    let root = write_fixture("schema-1-callback", &schema_1, target, true);
+    let rejected = run_generate(&root, target);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5085"));
+    clean_root(&root);
+
+    let cases = [
+        (
+            "callback-fingerprint",
+            callback_descriptor(target).replace(
+                &callback_signature_fingerprint(target, "C"),
+                &"0".repeat(64),
+            ),
+        ),
+        (
+            "callback-nonblocking",
+            callback_descriptor(target).replace("nonblocking = false", "nonblocking = true"),
+        ),
+        (
+            "callback-index",
+            callback_descriptor(target)
+                .replace("callbackParameterIndex = 0", "callbackParameterIndex = 1"),
+        ),
+        (
+            "callback-context-index",
+            callback_descriptor(target)
+                .replace("contextParameterIndex = 1", "contextParameterIndex = 2"),
+        ),
+        (
+            "callback-thread",
+            callback_descriptor(target).replace(
+                "Ffi.Binding.CallbackThread.CallingThread",
+                "Ffi.Binding.CallbackThread.AttachedThread",
+            ),
+        ),
+        (
+            "callback-abi",
+            callback_descriptor(target).replace(
+                "Ffi.Binding.CallbackAbi.C",
+                "Ffi.Binding.CallbackAbi.CUnwind",
+            ),
+        ),
+    ];
+    for (name, input) in cases {
+        let root = write_fixture(name, &input, target, true);
+        let rejected = run_generate(&root, target);
+        assert!(!rejected.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("POP5084")
+                || String::from_utf8_lossy(&rejected.stderr).contains("POP5085"),
+            "{name}: {}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(!root.join("src/generated/zlib").exists());
+        clean_root(&root);
+    }
+}
+
+#[test]
+fn adr_0094_package_preflight_attaches_callback_metadata_before_hir() {
+    let (root, _) = write_checked_callback_fixture("callback-check");
+    std::fs::write(
+        root.join("src/lib.pop"),
+        "namespace Example.Bindings\n\
+         private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+         public function invoke(): Ffi.C.Int\n\
+             return Ffi.withCallback(\n\
+                 function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                     return value\n\
+                 end,\n\
+                 function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                     return Native.Zlib.Unsafe.visitValues(callbackFunction, context)\n\
+                 end\n\
+             )\n\
+         end\n",
+    )
+    .expect("write exact attached callback use");
+    let check = run_package_check(&root);
+    assert!(
+        check.status.success(),
+        "generated callback bindings did not type-check with their selected metadata: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let source = root.join("src/generated/zlib/bindings.pop");
+    let source_text = std::fs::read_to_string(&source).expect("generated source");
+    std::fs::write(
+        &source,
+        source_text.replace("context: Ffi.CallbackContext", "context: Ffi.C.Size"),
+    )
+    .expect("tamper resolved callback signature");
+    let rejected = run_package_check(&root);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("POP5086"));
+
+    clean_root(&root);
+}
+
+#[test]
+fn adr_0094_rejects_an_unused_scoped_callback_pair_before_hir() {
+    let (root, _) = write_checked_callback_fixture("callback-unused-pair");
+    std::fs::write(
+        root.join("src/lib.pop"),
+        "namespace Example.Bindings\n\
+         private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+         public function run(): Int\n\
+             return Ffi.withCallback(\n\
+                 function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                     return value\n\
+                 end,\n\
+                 function(callbackFunction: Ffi.Function<CallbackSignature>, callbackContext: Ffi.CallbackContext): Int\n\
+                     return 0\n\
+                 end\n\
+             )\n\
+         end\n",
+    )
+    .expect("write unused pair source");
+
+    let check = run_package_check(&root);
+    assert!(!check.status.success());
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("POP2003"),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    clean_root(&root);
+}
+
+#[test]
+fn adr_0094_rejects_incompatible_pair_contracts_before_hir() {
+    let (root, _) = write_checked_fixture_with_descriptor(
+        "callback-incompatible-pairs",
+        &incompatible_callback_descriptor("x86_64-unknown-linux-gnu"),
+    );
+    std::fs::write(
+        root.join("src/lib.pop"),
+        "namespace Example.Bindings\n\
+         private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+         public function run(): Ffi.C.Int\n\
+             return Ffi.withCallback(\n\
+                 function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                     return value\n\
+                 end,\n\
+                 function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                     Native.Zlib.Unsafe.visitValues(callbackFunction, context)\n\
+                     return Native.Zlib.Unsafe.visitValuesSystem(callbackFunction, context)\n\
+                 end\n\
+             )\n\
+         end\n",
+    )
+    .expect("write incompatible pair source");
+
+    let check = run_package_check(&root);
+    assert!(!check.status.success());
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("POP2003"),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    clean_root(&root);
+}
+
+#[test]
+fn adr_0094_selects_registered_callback_contract_at_pair_time() {
+    let (root, _) = write_checked_registered_callback_fixture("callback-registered-pair");
+    std::fs::write(
+        root.join("src/lib.pop"),
+        "namespace Example.Bindings\n\
+         private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+         public function openCallback(): Result<Ffi.RegisteredCallback<CallbackSignature>, Ffi.CallbackOpenError>\n\
+             return Ffi.Callback.open(\n\
+                 function(value: Ffi.C.Int, _: Ffi.CallbackContext): Ffi.C.Int\n\
+                     return value\n\
+                 end,\n\
+                 Ffi.CallbackThread.AttachedThread\n\
+             )\n\
+         end\n\
+         public function invoke(callback: Ffi.RegisteredCallback<CallbackSignature>): Result<Ffi.C.Int, Ffi.CallbackClosedError>\n\
+             return Ffi.Callback.withPair(\n\
+                 callback,\n\
+                 function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                     return Native.Zlib.Unsafe.visitValues(callbackFunction, context)\n\
+                 end\n\
+             )\n\
+         end\n",
+    )
+    .expect("write registered pair source");
+
+    let check = run_package_check(&root);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    clean_root(&root);
 }
 
 #[test]

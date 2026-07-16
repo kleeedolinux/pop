@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 
 mod descriptor;
 
-use descriptor::{Descriptor, parse_descriptor, parse_generated_metadata, render_declarations};
+use descriptor::{
+    CallbackAbi, CallbackLifetime, CallbackThread, Descriptor, parse_descriptor,
+    parse_generated_metadata, render_declarations,
+};
 
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const GENERATED_SOURCE: &str = "bindings.pop";
@@ -53,6 +56,68 @@ impl FfiGenerationErrorKind {
 pub struct FfiGenerationError {
     kind: FfiGenerationErrorKind,
     reason: String,
+}
+
+/// One manifest-selected generated source Module and its verified callback
+/// contracts. Values can only be constructed by bounded `.popc` preflight.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedFfiGeneratedBindings {
+    source_path: String,
+    output_namespace: String,
+    functions: Vec<VerifiedFfiGeneratedFunction>,
+}
+
+impl VerifiedFfiGeneratedBindings {
+    #[must_use]
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+
+    #[must_use]
+    pub fn output_namespace(&self) -> &str {
+        &self.output_namespace
+    }
+
+    #[must_use]
+    pub fn functions(&self) -> &[VerifiedFfiGeneratedFunction] {
+        &self.functions
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedFfiGeneratedFunction {
+    name: String,
+    external_symbol: String,
+    abi: pop_types::ForeignAbi,
+    parameter_count: u16,
+    callback_pairs: Vec<pop_types::FfiCallbackPairContract>,
+}
+
+impl VerifiedFfiGeneratedFunction {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn external_symbol(&self) -> &str {
+        &self.external_symbol
+    }
+
+    #[must_use]
+    pub const fn abi(&self) -> pop_types::ForeignAbi {
+        self.abi
+    }
+
+    #[must_use]
+    pub const fn parameter_count(&self) -> u16 {
+        self.parameter_count
+    }
+
+    #[must_use]
+    pub fn callback_pairs(&self) -> &[pop_types::FfiCallbackPairContract] {
+        &self.callback_pairs
+    }
 }
 
 impl FfiGenerationError {
@@ -152,15 +217,16 @@ pub fn verify_ffi_generated_bindings(
     package_root: &Path,
     manifest: &PackageManifest,
     platform_target: &str,
-) -> Result<(), FfiGenerationError> {
+) -> Result<Vec<VerifiedFfiGeneratedBindings>, FfiGenerationError> {
     verify_directory(package_root, FfiGenerationErrorKind::InvalidInput)?;
     let Some(platform) = manifest
         .platform_ffi_generators()
         .iter()
         .find(|platform| platform.platform_target() == platform_target)
     else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let mut verified = Vec::new();
     for generator in platform.generators() {
         let generation =
             load_expected_generation(package_root, manifest, platform_target, generator.alias())?;
@@ -179,8 +245,12 @@ pub fn verify_ffi_generated_bindings(
             &generation.descriptor,
             &generation.target,
         )?;
+        if let Some(bindings) = generation.verified_bindings {
+            verified.push(bindings);
+        }
     }
-    Ok(())
+    verified.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+    Ok(verified)
 }
 
 struct ExpectedGeneration {
@@ -190,6 +260,7 @@ struct ExpectedGeneration {
     source: String,
     shim: String,
     metadata: String,
+    verified_bindings: Option<VerifiedFfiGeneratedBindings>,
 }
 
 impl ExpectedGeneration {
@@ -242,6 +313,7 @@ fn load_expected_generation(
     );
     verify_metadata(&metadata, &descriptor, &source, &shim, &target)?;
     let output_path = verified_relative_output(package_root, generator.output_directory())?;
+    let verified_bindings = verified_callback_bindings(generator.output_directory(), &descriptor)?;
     Ok(ExpectedGeneration {
         output_path,
         descriptor,
@@ -249,7 +321,91 @@ fn load_expected_generation(
         source,
         shim,
         metadata,
+        verified_bindings,
     })
+}
+
+fn verified_callback_bindings(
+    output_directory: &str,
+    descriptor: &Descriptor,
+) -> Result<Option<VerifiedFfiGeneratedBindings>, FfiGenerationError> {
+    let functions = descriptor
+        .functions
+        .iter()
+        .filter(|function| !function.callback_pairs.is_empty())
+        .map(|function| {
+            let parameter_count = u16::try_from(function.parameters.len()).map_err(|_| {
+                FfiGenerationError::new(
+                    FfiGenerationErrorKind::ResourceLimit,
+                    "generated callback parameter count exceeds the typed contract",
+                )
+            })?;
+            let callback_pairs = function
+                .callback_pairs
+                .iter()
+                .map(|pair| {
+                    let callback_parameter_index = u16::try_from(pair.callback_parameter_index)
+                        .map_err(|_| {
+                            FfiGenerationError::new(
+                                FfiGenerationErrorKind::ResourceLimit,
+                                "generated callback index exceeds the typed contract",
+                            )
+                        })?;
+                    let context_parameter_index = u16::try_from(pair.context_parameter_index)
+                        .map_err(|_| {
+                            FfiGenerationError::new(
+                                FfiGenerationErrorKind::ResourceLimit,
+                                "generated callback context index exceeds the typed contract",
+                            )
+                        })?;
+                    Ok(pop_types::FfiCallbackPairContract::new(
+                        callback_parameter_index,
+                        context_parameter_index,
+                        match pair.lifetime {
+                            CallbackLifetime::CallScoped => {
+                                pop_types::FfiCallbackLifetime::CallScoped
+                            }
+                            CallbackLifetime::Registered => {
+                                pop_types::FfiCallbackLifetime::Registered
+                            }
+                        },
+                        match pair.abi {
+                            CallbackAbi::C => pop_types::FfiCallbackAbi::C,
+                            CallbackAbi::System => pop_types::FfiCallbackAbi::System,
+                        },
+                        pair.signature_fingerprint.clone(),
+                        match pair.thread {
+                            CallbackThread::CallingThread => {
+                                pop_types::FfiCallbackThreadPolicy::CallingThread
+                            }
+                            CallbackThread::AttachedThread => {
+                                pop_types::FfiCallbackThreadPolicy::AttachedThread
+                            }
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, FfiGenerationError>>()?;
+            Ok(VerifiedFfiGeneratedFunction {
+                name: function.name.clone(),
+                external_symbol: function.symbol.clone(),
+                abi: match function.abi {
+                    descriptor::ForeignAbi::C => pop_types::ForeignAbi::C,
+                    descriptor::ForeignAbi::System => pop_types::ForeignAbi::System,
+                    descriptor::ForeignAbi::CUnwind => pop_types::ForeignAbi::CUnwind,
+                },
+                parameter_count,
+                callback_pairs,
+            })
+        })
+        .collect::<Result<Vec<_>, FfiGenerationError>>()?;
+    if functions.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(VerifiedFfiGeneratedBindings {
+        source_path: format!("{output_directory}/{GENERATED_SOURCE}"),
+        output_namespace: descriptor.output_namespace.clone(),
+        functions,
+    }))
 }
 
 fn manifest_error(error: ManifestError) -> FfiGenerationError {
@@ -283,14 +439,14 @@ fn render_metadata(
     let native_library = identity.native_library.unwrap_or("");
     let mut output = String::new();
     output.push_str("@Ffi.GeneratedBindings(\n");
-    output.push_str("    schemaVersion = 1,\n");
+    writeln!(output, "    schemaVersion = {},", descriptor.schema_version).expect("String write");
     writeln!(
         output,
         "    generatorVersion = \"{}\",",
         env!("CARGO_PKG_VERSION")
     )
     .expect("String write");
-    output.push_str("    parserVersion = 1,\n");
+    writeln!(output, "    parserVersion = {},", descriptor.schema_version).expect("String write");
     writeln!(output, "    alias = \"{}\",", identity.alias).expect("String write");
     writeln!(
         output,
@@ -366,7 +522,7 @@ fn verify_metadata(
     let parsed = parse_generated_metadata(metadata.as_bytes(), target)?;
     if parsed.descriptor != *descriptor
         || parsed.generator_version != env!("CARGO_PKG_VERSION")
-        || parsed.parser_version != 1
+        || parsed.parser_version != descriptor.schema_version
         || parsed.source_path != GENERATED_SOURCE
         || parsed.source_size != u64::try_from(source.len()).expect("output size fits u64")
         || parsed.source_sha256 != sha256_hex(source.as_bytes())

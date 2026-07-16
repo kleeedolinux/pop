@@ -161,12 +161,15 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) resolver: &'resolver mut SignatureResolver<'index>,
     pub(crate) signatures: &'resolver BTreeMap<SymbolId, ResolvedFunctionSignature>,
     pub(crate) constants: Option<&'resolver BTreeMap<SymbolId, RuntimeConstant>>,
+    pub(crate) foreign_declarations:
+        Option<&'resolver BTreeMap<SymbolId, crate::ForeignFunctionDeclaration>>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) scopes: Vec<BTreeMap<String, Binding>>,
     pub(crate) next_local: u32,
     pub(crate) next_binding: u32,
     pub(crate) next_nested_function: u32,
     pub(crate) next_borrow_region: u32,
+    pub(crate) next_callback_site: u32,
     pub(crate) function_depth: u32,
     pub(crate) active_functions: Vec<ActiveFunction>,
     pub(crate) written_bindings: BTreeSet<BindingId>,
@@ -255,12 +258,14 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             resolver,
             signatures,
             constants: None,
+            foreign_declarations: None,
             diagnostics: Vec::new(),
             scopes: vec![BTreeMap::new()],
             next_local: 0,
             next_binding: 0,
             next_nested_function: 0,
             next_borrow_region: 0,
+            next_callback_site: 1,
             function_depth: 0,
             active_functions: Vec::new(),
             written_bindings: BTreeSet::new(),
@@ -277,6 +282,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         constants: &'resolver BTreeMap<SymbolId, RuntimeConstant>,
     ) -> Self {
         self.constants = Some(constants);
+        self
+    }
+
+    /// Supplies the exact verified foreign contracts addressable by this body.
+    #[must_use]
+    pub const fn with_foreign_declarations(
+        mut self,
+        declarations: &'resolver BTreeMap<SymbolId, crate::ForeignFunctionDeclaration>,
+    ) -> Self {
+        self.foreign_declarations = Some(declarations);
         self
     }
 

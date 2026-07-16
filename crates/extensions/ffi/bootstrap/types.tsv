@@ -23,3 +23,9 @@ typeId	sourceName	ownerBubble	arity	role	prelude
 220	Ffi.C.UnsignedLongLong	Pop.Ffi	0	Nominal	false
 221	Ffi.C.Size	Pop.Ffi	0	Nominal	false
 222	Ffi.C.PointerDifference	Pop.Ffi	0	Nominal	false
+223	Ffi.CallbackContext	Pop.Ffi	0	Nominal	false
+224	Ffi.RegisteredCallback	Pop.Ffi	1	Nominal	false
+225	Ffi.CallbackThread	Pop.Ffi	0	Nominal	false
+226	Ffi.CallbackOpenError	Pop.Ffi	0	Nominal	false
+227	Ffi.CallbackInUseError	Pop.Ffi	0	Nominal	false
+228	Ffi.CallbackClosedError	Pop.Ffi	0	Nominal	false

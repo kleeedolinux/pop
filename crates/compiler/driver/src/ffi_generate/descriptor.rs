@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use pop_target::{CAbiScalarKind, TargetSpec};
+use pop_target::{CAbiScalarKind, PointerWidth, TargetSpec};
+use sha2::{Digest, Sha256};
 
 use super::{FfiGenerationError, FfiGenerationErrorKind};
 
@@ -46,14 +47,94 @@ pub(super) struct Function {
     pub nonblocking: bool,
     pub pointer_parameters: Vec<String>,
     pub result_ownership: Option<PointerOwnership>,
+    pub callback_pairs: Vec<CallbackPair>,
     pub parameters: Vec<Parameter>,
     pub result: Option<AbiType>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CallbackPair {
+    pub callback_parameter_index: u64,
+    pub context_parameter_index: u64,
+    pub lifetime: CallbackLifetime,
+    pub abi: CallbackAbi,
+    pub signature_fingerprint: String,
+    pub thread: CallbackThread,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CallbackLifetime {
+    CallScoped,
+    Registered,
+}
+
+impl CallbackLifetime {
+    const fn source_name(self) -> &'static str {
+        match self {
+            Self::CallScoped => "CallScoped",
+            Self::Registered => "Registered",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CallbackAbi {
+    C,
+    System,
+}
+
+impl CallbackAbi {
+    const fn source_name(self) -> &'static str {
+        match self {
+            Self::C => "C",
+            Self::System => "System",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CallbackThread {
+    CallingThread,
+    AttachedThread,
+}
+
+impl CallbackThread {
+    const fn source_name(self) -> &'static str {
+        match self {
+            Self::CallingThread => "CallingThread",
+            Self::AttachedThread => "AttachedThread",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Parameter {
     pub name: String,
     pub type_name: AbiType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CallbackSignature {
+    pub parameters: Vec<Parameter>,
+    pub result: Option<AbiType>,
+}
+
+impl CallbackSignature {
+    fn render(&self, output: &mut String) {
+        output.push_str("function(");
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            write!(output, "{}: ", parameter.name).expect("String write");
+            parameter.type_name.render(output);
+        }
+        output.push(')');
+        if let Some(result) = &self.result {
+            output.push_str(": ");
+            result.render(output);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +182,8 @@ pub(super) enum PointerOwnership {
 pub(super) enum AbiType {
     Scalar(String),
     Record(String),
+    CallbackContext,
+    CallbackFunction(Box<CallbackSignature>),
     Pointer {
         constructor: PointerConstructor,
         element: Box<Self>,
@@ -111,6 +194,12 @@ impl AbiType {
     pub fn render(&self, output: &mut String) {
         match self {
             Self::Scalar(name) | Self::Record(name) => output.push_str(name),
+            Self::CallbackContext => output.push_str("Ffi.CallbackContext"),
+            Self::CallbackFunction(signature) => {
+                output.push_str("Ffi.Function<");
+                signature.render(output);
+                output.push('>');
+            }
             Self::Pointer {
                 constructor,
                 element,
@@ -125,6 +214,22 @@ impl AbiType {
 
     pub const fn is_pointer(&self) -> bool {
         matches!(self, Self::Pointer { .. })
+    }
+
+    const fn is_callback_context(&self) -> bool {
+        matches!(self, Self::CallbackContext)
+    }
+
+    const fn is_callback_function(&self) -> bool {
+        matches!(self, Self::CallbackFunction(_))
+    }
+
+    fn contains_callback_type(&self) -> bool {
+        match self {
+            Self::CallbackContext | Self::CallbackFunction(_) => true,
+            Self::Pointer { element, .. } => element.contains_callback_type(),
+            Self::Scalar(_) | Self::Record(_) => false,
+        }
     }
 }
 
@@ -303,8 +408,7 @@ pub(super) fn parse_generated_metadata(
         functions,
     };
     validate_descriptor(&descriptor, target)?;
-    if schema_version != 1
-        || parser_version != 1
+    if !matches!((schema_version, parser_version), (1, 1) | (2, 2))
         || generator_version.is_empty()
         || !valid_pascal(&alias)
         || (!native_library.is_empty() && !valid_pascal(&native_library))
@@ -589,6 +693,7 @@ impl Parser {
 
         let mut pointer_parameters = Vec::new();
         let mut result_ownership = None;
+        let mut callback_pairs = Vec::new();
         while matches!(self.peek(), Token::At) {
             self.expect(Token::At)?;
             let attribute = self.path()?;
@@ -622,6 +727,11 @@ impl Parser {
                             "duplicate pointer result policy",
                         ));
                     }
+                }
+                "Ffi.Binding.CallbackPair" => {
+                    callback_pairs.push(self.parse_callback_pair()?);
+                    self.expect(Token::RightParenthesis)?;
+                    continue;
                 }
                 _ => {
                     return Err(error(
@@ -669,12 +779,95 @@ impl Parser {
             nonblocking,
             pointer_parameters,
             result_ownership,
+            callback_pairs,
             parameters,
             result,
         })
     }
 
+    fn parse_callback_pair(&mut self) -> Result<CallbackPair, FfiGenerationError> {
+        self.expect_name("callbackParameterIndex")?;
+        self.expect(Token::Equal)?;
+        let callback_parameter_index = self.number()?;
+        self.expect(Token::Comma)?;
+        self.expect_name("contextParameterIndex")?;
+        self.expect(Token::Equal)?;
+        let context_parameter_index = self.number()?;
+        self.expect(Token::Comma)?;
+        self.expect_name("lifetime")?;
+        self.expect(Token::Equal)?;
+        let lifetime = match self.path()?.as_str() {
+            "Ffi.Binding.CallbackLifetime.CallScoped" => CallbackLifetime::CallScoped,
+            "Ffi.Binding.CallbackLifetime.Registered" => CallbackLifetime::Registered,
+            _ => {
+                return Err(error(
+                    FfiGenerationErrorKind::PolicyMismatch,
+                    "callback lifetime is outside the closed policy",
+                ));
+            }
+        };
+        self.expect(Token::Comma)?;
+        self.expect_name("callbackAbi")?;
+        self.expect(Token::Equal)?;
+        let abi = match self.path()?.as_str() {
+            "Ffi.Binding.CallbackAbi.C" => CallbackAbi::C,
+            "Ffi.Binding.CallbackAbi.System" => CallbackAbi::System,
+            _ => {
+                return Err(error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "callback ABI is outside the closed policy",
+                ));
+            }
+        };
+        self.expect(Token::Comma)?;
+        self.expect_name("signatureFingerprint")?;
+        self.expect(Token::Equal)?;
+        let signature_fingerprint = self.string()?;
+        self.expect(Token::Comma)?;
+        self.expect_name("thread")?;
+        self.expect(Token::Equal)?;
+        let thread = match self.path()?.as_str() {
+            "Ffi.Binding.CallbackThread.CallingThread" => CallbackThread::CallingThread,
+            "Ffi.Binding.CallbackThread.AttachedThread" => CallbackThread::AttachedThread,
+            _ => {
+                return Err(error(
+                    FfiGenerationErrorKind::PolicyMismatch,
+                    "callback thread is outside the closed policy",
+                ));
+            }
+        };
+        self.expect(Token::Comma)?;
+        self.expect_name("concurrency")?;
+        self.expect(Token::Equal)?;
+        self.expect_path("Ffi.Binding.CallbackConcurrency.Serialized")?;
+        self.expect(Token::Comma)?;
+        self.expect_name("reentrancy")?;
+        self.expect(Token::Equal)?;
+        self.expect_path("Ffi.Binding.CallbackReentrancy.Forbidden")?;
+        self.expect(Token::Comma)?;
+        self.expect_name("panicPolicy")?;
+        self.expect(Token::Equal)?;
+        self.expect_path("Ffi.Binding.CallbackPanic.AbortProcess")?;
+        self.expect(Token::Comma)?;
+        Ok(CallbackPair {
+            callback_parameter_index,
+            context_parameter_index,
+            lifetime,
+            abi,
+            signature_fingerprint,
+            thread,
+        })
+    }
+
     fn abi_type(&mut self, depth: usize) -> Result<AbiType, FfiGenerationError> {
+        self.abi_type_with_callback_context(depth, false)
+    }
+
+    fn abi_type_with_callback_context(
+        &mut self,
+        depth: usize,
+        inside_callback: bool,
+    ) -> Result<AbiType, FfiGenerationError> {
         if depth > 1 {
             return Err(error(
                 FfiGenerationErrorKind::UnsupportedAbi,
@@ -682,6 +875,18 @@ impl Parser {
             ));
         }
         let name = self.path()?;
+        if name == "Ffi.Function" {
+            if inside_callback || depth != 0 {
+                return Err(error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "nested callback function types are unsupported",
+                ));
+            }
+            self.expect(Token::LeftAngle)?;
+            let signature = self.callback_signature()?;
+            self.expect(Token::RightAngle)?;
+            return Ok(AbiType::CallbackFunction(Box::new(signature)));
+        }
         if matches!(self.peek(), Token::LeftAngle) {
             let constructor = match name.as_str() {
                 "Ffi.Pointer" => PointerConstructor::Mutable,
@@ -696,9 +901,9 @@ impl Parser {
                 }
             };
             self.expect(Token::LeftAngle)?;
-            let element = self.abi_type(depth + 1)?;
+            let element = self.abi_type_with_callback_context(depth + 1, inside_callback)?;
             self.expect(Token::RightAngle)?;
-            if element.is_pointer() {
+            if element.is_pointer() || element.contains_callback_type() {
                 return Err(error(
                     FfiGenerationErrorKind::UnsupportedAbi,
                     "nested pointers are unsupported in descriptor schema 1",
@@ -708,6 +913,9 @@ impl Parser {
                 constructor,
                 element: Box::new(element),
             });
+        }
+        if name == "Ffi.CallbackContext" {
+            return Ok(AbiType::CallbackContext);
         }
         if scalar_layout_name(&name).is_some() {
             Ok(AbiType::Scalar(name))
@@ -719,6 +927,36 @@ impl Parser {
         } else {
             Ok(AbiType::Record(name))
         }
+    }
+
+    fn callback_signature(&mut self) -> Result<CallbackSignature, FfiGenerationError> {
+        self.expect_name("function")?;
+        self.expect(Token::LeftParenthesis)?;
+        let mut parameters = Vec::new();
+        while !matches!(self.peek(), Token::RightParenthesis) {
+            let name = self.identifier()?;
+            self.expect(Token::Colon)?;
+            let type_name = self.abi_type_with_callback_context(0, true)?;
+            parameters.push(Parameter { name, type_name });
+            if parameters.len() > MAX_MEMBERS {
+                return Err(error(
+                    FfiGenerationErrorKind::ResourceLimit,
+                    "callback parameter count exceeds schema limit",
+                ));
+            }
+            if !matches!(self.peek(), Token::Comma) {
+                break;
+            }
+            self.expect(Token::Comma)?;
+        }
+        self.expect(Token::RightParenthesis)?;
+        let result = if matches!(self.peek(), Token::Colon) {
+            self.expect(Token::Colon)?;
+            Some(self.abi_type_with_callback_context(0, true)?)
+        } else {
+            None
+        };
+        Ok(CallbackSignature { parameters, result })
     }
 
     fn expect_path(&mut self, expected: &str) -> Result<(), FfiGenerationError> {
@@ -826,7 +1064,7 @@ fn validate_descriptor(
     descriptor: &Descriptor,
     target: &TargetSpec,
 ) -> Result<(), FfiGenerationError> {
-    if descriptor.schema_version != 1 {
+    if !matches!(descriptor.schema_version, 1 | 2) {
         return Err(error(
             FfiGenerationErrorKind::InvalidDescriptor,
             "unsupported `.popc` schema version",
@@ -864,9 +1102,24 @@ fn validate_descriptor(
             ));
         }
         last_record = Some(record.name.as_str());
+        if record
+            .fields
+            .iter()
+            .any(|field| field.type_name.contains_callback_type())
+        {
+            return Err(error(
+                FfiGenerationErrorKind::UnsupportedAbi,
+                "callback types cannot appear in record storage",
+            ));
+        }
         let layout = validate_record_layout(record, target, &layouts)?;
         layouts.insert(record.name.clone(), layout);
     }
+    let record_definitions = descriptor
+        .records
+        .iter()
+        .map(|record| (record.name.as_str(), record))
+        .collect::<BTreeMap<_, _>>();
 
     let mut last_function = None;
     let mut symbols = BTreeSet::new();
@@ -882,6 +1135,22 @@ fn validate_descriptor(
             ));
         }
         last_function = Some(function.name.as_str());
+        let has_callback_types = function
+            .parameters
+            .iter()
+            .any(|parameter| parameter.type_name.contains_callback_type())
+            || function
+                .result
+                .as_ref()
+                .is_some_and(AbiType::contains_callback_type);
+        if descriptor.schema_version == 1
+            && (has_callback_types || !function.callback_pairs.is_empty())
+        {
+            return Err(error(
+                FfiGenerationErrorKind::UnsupportedAbi,
+                "callbacks require `.popc` descriptor schema 2",
+            ));
+        }
         let mut parameter_names = BTreeSet::new();
         for parameter in &function.parameters {
             if !valid_camel(&parameter.name) || !parameter_names.insert(parameter.name.as_str()) {
@@ -893,6 +1162,12 @@ fn validate_descriptor(
             validate_type(&parameter.type_name, &layouts, target)?;
         }
         if let Some(result) = &function.result {
+            if result.contains_callback_type() {
+                return Err(error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "foreign callback and context results are unsupported",
+                ));
+            }
             validate_type(result, &layouts, target)?;
         }
         let actual_pointers = function
@@ -915,8 +1190,273 @@ fn validate_descriptor(
                 "pointer policy does not exactly cover the static signature",
             ));
         }
+        validate_callback_pairs(function, descriptor, &layouts, &record_definitions, target)?;
     }
     Ok(())
+}
+
+fn validate_callback_pairs(
+    function: &Function,
+    descriptor: &Descriptor,
+    layouts: &BTreeMap<String, (u64, u64)>,
+    records: &BTreeMap<&str, &Record>,
+    target: &TargetSpec,
+) -> Result<(), FfiGenerationError> {
+    let mut callback_indices = BTreeSet::new();
+    let mut context_indices = BTreeSet::new();
+    let mut last_callback_index = None;
+    for pair in &function.callback_pairs {
+        if function.nonblocking {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback-bearing foreign declarations must be blocking",
+            ));
+        }
+        if target.pointer_width() != PointerWidth::Bits64 {
+            return Err(error(
+                FfiGenerationErrorKind::UnsupportedAbi,
+                "callbacks require an exact 64-bit target pointer ABI",
+            ));
+        }
+        if last_callback_index.is_some_and(|last| last >= pair.callback_parameter_index) {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback-pair attachments must be sorted by unique callback index",
+            ));
+        }
+        last_callback_index = Some(pair.callback_parameter_index);
+        let callback_index = usize::try_from(pair.callback_parameter_index).map_err(|_| {
+            error(
+                FfiGenerationErrorKind::ResourceLimit,
+                "callback parameter index exceeds the schema limit",
+            )
+        })?;
+        let context_index = usize::try_from(pair.context_parameter_index).map_err(|_| {
+            error(
+                FfiGenerationErrorKind::ResourceLimit,
+                "callback context index exceeds the schema limit",
+            )
+        })?;
+        if callback_index == context_index
+            || !callback_indices.insert(callback_index)
+            || !context_indices.insert(context_index)
+            || callback_indices.contains(&context_index)
+            || context_indices.contains(&callback_index)
+        {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback-pair parameter indices overlap or are duplicated",
+            ));
+        }
+        let Some(callback) = function.parameters.get(callback_index) else {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback parameter index is out of range",
+            ));
+        };
+        let Some(context) = function.parameters.get(context_index) else {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback context parameter index is out of range",
+            ));
+        };
+        let AbiType::CallbackFunction(signature) = &callback.type_name else {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback index does not name Ffi.Function<TSignature>",
+            ));
+        };
+        if !context.type_name.is_callback_context() {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback context index does not name Ffi.CallbackContext",
+            ));
+        }
+        validate_callback_signature(signature, layouts, target)?;
+        if !valid_sha256(&pair.signature_fingerprint)
+            || pair.signature_fingerprint
+                != callback_signature_fingerprint(
+                    signature,
+                    pair.abi,
+                    &descriptor.platform_target,
+                    records,
+                    target,
+                )?
+        {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback signature fingerprint does not match the typed signature",
+            ));
+        }
+        if !matches!(
+            (pair.lifetime, pair.thread),
+            (CallbackLifetime::CallScoped, CallbackThread::CallingThread)
+                | (CallbackLifetime::Registered, CallbackThread::AttachedThread)
+        ) {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback lifetime and thread policy do not match the stable mapping",
+            ));
+        }
+    }
+
+    for (index, parameter) in function.parameters.iter().enumerate() {
+        if parameter.type_name.is_callback_function() != callback_indices.contains(&index)
+            || parameter.type_name.is_callback_context() != context_indices.contains(&index)
+        {
+            return Err(error(
+                FfiGenerationErrorKind::PolicyMismatch,
+                "callback-pair metadata does not exactly cover the static signature",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_callback_signature(
+    signature: &CallbackSignature,
+    layouts: &BTreeMap<String, (u64, u64)>,
+    target: &TargetSpec,
+) -> Result<(), FfiGenerationError> {
+    let mut names = BTreeSet::new();
+    let mut contexts = 0_usize;
+    for parameter in &signature.parameters {
+        if !valid_camel(&parameter.name) || !names.insert(parameter.name.as_str()) {
+            return Err(error(
+                FfiGenerationErrorKind::InvalidDescriptor,
+                "callback parameters require unique camelCase identities",
+            ));
+        }
+        if parameter.type_name.is_callback_function() {
+            return Err(error(
+                FfiGenerationErrorKind::UnsupportedAbi,
+                "nested callback function types are unsupported",
+            ));
+        }
+        if parameter.type_name.is_callback_context() {
+            contexts = contexts.saturating_add(1);
+        }
+        validate_type(&parameter.type_name, layouts, target)?;
+    }
+    if contexts != 1 {
+        return Err(error(
+            FfiGenerationErrorKind::PolicyMismatch,
+            "callback signature requires exactly one Ffi.CallbackContext parameter",
+        ));
+    }
+    if let Some(result) = &signature.result {
+        if result.contains_callback_type() {
+            return Err(error(
+                FfiGenerationErrorKind::UnsupportedAbi,
+                "callback results cannot contain callback or context types",
+            ));
+        }
+        validate_type(result, layouts, target)?;
+    }
+    Ok(())
+}
+
+fn callback_signature_fingerprint(
+    signature: &CallbackSignature,
+    abi: CallbackAbi,
+    platform_target: &str,
+    records: &BTreeMap<&str, &Record>,
+    target: &TargetSpec,
+) -> Result<String, FfiGenerationError> {
+    let mut descriptor = String::from("Pop.Ffi.CallbackSignature/1\n");
+    writeln!(descriptor, "platformTarget={platform_target}").expect("String write");
+    writeln!(descriptor, "abi={}", abi.source_name()).expect("String write");
+    writeln!(descriptor, "parameterCount={}", signature.parameters.len()).expect("String write");
+    for (index, parameter) in signature.parameters.iter().enumerate() {
+        let layout = callback_abi_layout(&parameter.type_name, records, target)?;
+        writeln!(descriptor, "parameter[{index}]={layout}").expect("String write");
+    }
+    if let Some(result) = &signature.result {
+        descriptor.push_str("resultCount=1\n");
+        let layout = callback_abi_layout(result, records, target)?;
+        writeln!(descriptor, "result[0]={layout}").expect("String write");
+    } else {
+        descriptor.push_str("resultCount=0\n");
+    }
+    Ok(sha256_hex(descriptor.as_bytes()))
+}
+
+fn callback_abi_layout(
+    type_name: &AbiType,
+    records: &BTreeMap<&str, &Record>,
+    target: &TargetSpec,
+) -> Result<String, FfiGenerationError> {
+    let mut active_records = BTreeSet::new();
+    callback_abi_layout_inner(type_name, records, target, &mut active_records)
+}
+
+fn callback_abi_layout_inner(
+    type_name: &AbiType,
+    records: &BTreeMap<&str, &Record>,
+    target: &TargetSpec,
+    active_records: &mut BTreeSet<String>,
+) -> Result<String, FfiGenerationError> {
+    match type_name {
+        AbiType::Scalar(name) => {
+            let (size, alignment) = scalar_layout(name, target).ok_or_else(|| {
+                error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    format!("target does not support ABI scalar `{name}`"),
+                )
+            })?;
+            Ok(format!("{name}(size={size},alignment={alignment})"))
+        }
+        AbiType::Record(name) => {
+            let record = records.get(name.as_str()).ok_or_else(|| {
+                error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    format!("record `{name}` is not declared before use"),
+                )
+            })?;
+            if !active_records.insert(name.clone()) {
+                return Err(error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "recursive by-value callback record layout is unsupported",
+                ));
+            }
+            let mut output = format!(
+                "record(size={},alignment={},fields=[",
+                record.size, record.alignment
+            );
+            for (index, field) in record.fields.iter().enumerate() {
+                if index != 0 {
+                    output.push(';');
+                }
+                let layout =
+                    callback_abi_layout_inner(&field.type_name, records, target, active_records)?;
+                write!(output, "{}@{}:{layout}", field.name, field.offset).expect("String write");
+            }
+            output.push_str("])");
+            active_records.remove(name);
+            Ok(output)
+        }
+        AbiType::Pointer {
+            constructor,
+            element,
+        } => {
+            let (size, alignment) = target.ffi_pointer_layout().ok_or_else(|| {
+                error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "target does not support FFI pointers",
+                )
+            })?;
+            let element = callback_abi_layout_inner(element, records, target, active_records)?;
+            Ok(format!(
+                "{}<{element}>(size={size},alignment={alignment})",
+                constructor.source_name()
+            ))
+        }
+        AbiType::CallbackContext => Ok("Ffi.CallbackContext(pointerWidth=64)".to_owned()),
+        AbiType::CallbackFunction(_) => Err(error(
+            FfiGenerationErrorKind::UnsupportedAbi,
+            "nested callback function types are unsupported",
+        )),
+    }
 }
 
 fn validate_record_layout(
@@ -996,6 +1536,20 @@ fn type_layout(
                 format!("record `{name}` is not declared before use"),
             )
         }),
+        AbiType::CallbackContext | AbiType::CallbackFunction(_) => {
+            if target.pointer_width() != PointerWidth::Bits64 {
+                return Err(error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "callbacks require an exact 64-bit target pointer ABI",
+                ));
+            }
+            target.ffi_pointer_layout().ok_or_else(|| {
+                error(
+                    FfiGenerationErrorKind::UnsupportedAbi,
+                    "target does not support FFI callback pointers",
+                )
+            })
+        }
         AbiType::Pointer { .. } => target.ffi_pointer_layout().ok_or_else(|| {
             error(
                 FfiGenerationErrorKind::UnsupportedAbi,
@@ -1048,6 +1602,15 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, FfiGenerationError> {
         .checked_add(alignment - 1)
         .map(|value| value & !(alignment - 1))
         .ok_or_else(|| error(FfiGenerationErrorKind::ResourceLimit, "layout overflow"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("String write");
+            output
+        })
 }
 
 pub(super) fn render_descriptor(descriptor: &Descriptor) -> String {
@@ -1141,6 +1704,49 @@ pub(super) fn render_declarations(
                     "@Ffi.Binding.ResultPointer(ownership = Ffi.Binding.Ownership.{ownership})"
                 )
                 .expect("String write");
+            }
+            for pair in &function.callback_pairs {
+                output.push_str("@Ffi.Binding.CallbackPair(\n");
+                writeln!(
+                    output,
+                    "    callbackParameterIndex = {},",
+                    pair.callback_parameter_index
+                )
+                .expect("String write");
+                writeln!(
+                    output,
+                    "    contextParameterIndex = {},",
+                    pair.context_parameter_index
+                )
+                .expect("String write");
+                writeln!(
+                    output,
+                    "    lifetime = Ffi.Binding.CallbackLifetime.{},",
+                    pair.lifetime.source_name()
+                )
+                .expect("String write");
+                writeln!(
+                    output,
+                    "    callbackAbi = Ffi.Binding.CallbackAbi.{},",
+                    pair.abi.source_name()
+                )
+                .expect("String write");
+                writeln!(
+                    output,
+                    "    signatureFingerprint = \"{}\",",
+                    pair.signature_fingerprint
+                )
+                .expect("String write");
+                writeln!(
+                    output,
+                    "    thread = Ffi.Binding.CallbackThread.{},",
+                    pair.thread.source_name()
+                )
+                .expect("String write");
+                output.push_str("    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,\n");
+                output.push_str("    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,\n");
+                output.push_str("    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,\n");
+                output.push_str(")\n");
             }
             writeln!(output, "internal function {}(", function.name).expect("String write");
             for parameter in &function.parameters {
