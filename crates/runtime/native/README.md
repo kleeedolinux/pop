@@ -24,6 +24,12 @@ enters managed state, and returns explicit thread-bound authority. Detach is
 rejected until every foreign transition is closed, then clears and unregisters
 the same binding.
 
+ABI 1.18 adds callback registration behind an opaque 64-bit context token.
+Entry validates one compile-time callback site, thread/scheduler policy, and
+serialized non-reentrant state before restoring managed execution; leave
+restores the exact foreign state or detaches an entry-created binding. Close
+invalidates the context before releasing the rooted managed environment.
+
 Heap storage, reachability, roots, pins, and collection policy remain in
 `pop-runtime-collector`; symbol/version vocabulary remains in
 `pop-runtime-native-abi`. See
@@ -34,7 +40,8 @@ Atomic initialized publication is specified by
 [ADR 0072](../../../architecture/decisions/0072-atomic-initialized-object-allocation.md).
 
 The facade is divided into `identity`, `allocation`, `binding`, `storage`,
-`text`, `roots`, `foreign`, `failure`, `scheduler`, and private `state` modules.
+`text`, `roots`, `foreign`, `ffi_callback`, `failure`, `scheduler`, and private
+`state` modules.
 The scheduler provides the bounded synchronized M:N correctness implementation,
 deterministic
 per-dispatch work budgets and record/replay, typed collector-transition hooks,

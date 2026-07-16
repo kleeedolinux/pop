@@ -12,6 +12,10 @@ supported.
 ABI 1.14 adds explicit `pop_rt_attach_managed_thread` and
 `pop_rt_detach_managed_thread` entries without changing the 1.13 transition
 shape.
+ABI 1.18 adds failure-atomic callback registration, managed entry/leave, and
+deterministic close entries. Callback contexts are opaque lookup tokens paired
+with a compile-time site identity; they are never dereferenced managed-object
+addresses.
 
 [ADR 0078](../../../architecture/decisions/0078-native-abi-2-writable-root-coexistence.md)
 adds distinct immutable ABI 1.11 and ABI 2.0 descriptors. ABI 2 owns the

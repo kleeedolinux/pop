@@ -1,4 +1,4 @@
-use crate::{ManagedReference, RuntimeFailure};
+use crate::{ManagedReference, RuntimeFailure, SchedulerId};
 
 pub const IMMUTABLE_BYTES_RUNTIME_TYPE_ID: crate::RuntimeTypeId = crate::RuntimeTypeId::new(2);
 
@@ -59,6 +59,183 @@ impl ForeignAddress {
     #[must_use]
     pub const fn raw(self) -> u64 {
         self.0
+    }
+}
+
+macro_rules! nonzero_callback_identity {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(core::num::NonZeroU64);
+
+        impl $name {
+            #[must_use]
+            pub const fn new(raw: u64) -> Option<Self> {
+                match core::num::NonZeroU64::new(raw) {
+                    Some(raw) => Some(Self(raw)),
+                    None => None,
+                }
+            }
+
+            #[must_use]
+            pub const fn raw(self) -> u64 {
+                self.0.get()
+            }
+        }
+    };
+}
+
+nonzero_callback_identity!(FfiCallbackSiteId);
+nonzero_callback_identity!(FfiCallbackRegistrationId);
+nonzero_callback_identity!(FfiCallbackTransitionId);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum FfiCallbackLifetime {
+    CallScoped = 0,
+    Registered = 1,
+}
+
+impl FfiCallbackLifetime {
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        Some(match raw {
+            0 => Self::CallScoped,
+            1 => Self::Registered,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum FfiCallbackThread {
+    CallingThread = 0,
+    AttachedThread = 1,
+}
+
+impl FfiCallbackThread {
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        Some(match raw {
+            0 => Self::CallingThread,
+            1 => Self::AttachedThread,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FfiCallbackOpenRequest {
+    environment: Option<ManagedReference>,
+    site: FfiCallbackSiteId,
+    scheduler: SchedulerId,
+    lifetime: FfiCallbackLifetime,
+    thread: FfiCallbackThread,
+}
+
+impl FfiCallbackOpenRequest {
+    #[must_use]
+    pub const fn new(
+        environment: Option<ManagedReference>,
+        site: FfiCallbackSiteId,
+        scheduler: SchedulerId,
+        lifetime: FfiCallbackLifetime,
+        thread: FfiCallbackThread,
+    ) -> Self {
+        Self {
+            environment,
+            site,
+            scheduler,
+            lifetime,
+            thread,
+        }
+    }
+
+    #[must_use]
+    pub const fn environment(self) -> Option<ManagedReference> {
+        self.environment
+    }
+
+    #[must_use]
+    pub const fn site(self) -> FfiCallbackSiteId {
+        self.site
+    }
+
+    #[must_use]
+    pub const fn scheduler(self) -> SchedulerId {
+        self.scheduler
+    }
+
+    #[must_use]
+    pub const fn lifetime(self) -> FfiCallbackLifetime {
+        self.lifetime
+    }
+
+    #[must_use]
+    pub const fn thread(self) -> FfiCallbackThread {
+        self.thread
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FfiCallbackRegistration {
+    id: FfiCallbackRegistrationId,
+    context: ForeignAddress,
+}
+
+impl FfiCallbackRegistration {
+    #[must_use]
+    pub const fn new(id: FfiCallbackRegistrationId, context: ForeignAddress) -> Self {
+        Self { id, context }
+    }
+
+    #[must_use]
+    pub const fn id(self) -> FfiCallbackRegistrationId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn context(self) -> ForeignAddress {
+        self.context
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FfiCallbackEntry {
+    transition: FfiCallbackTransitionId,
+    environment: Option<ManagedReference>,
+}
+
+impl FfiCallbackEntry {
+    #[must_use]
+    pub const fn new(
+        transition: FfiCallbackTransitionId,
+        environment: Option<ManagedReference>,
+    ) -> Self {
+        Self {
+            transition,
+            environment,
+        }
+    }
+
+    #[must_use]
+    pub const fn transition(self) -> FfiCallbackTransitionId {
+        self.transition
+    }
+
+    #[must_use]
+    pub const fn environment(self) -> Option<ManagedReference> {
+        self.environment
     }
 }
 

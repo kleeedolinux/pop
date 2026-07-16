@@ -21,7 +21,7 @@ pub extern "C" fn pop_rt_abi_minor() -> u16 {
 pub extern "C" fn pop_rt_supports_abi(major: u16, minor: u16) -> u8 {
     u8::from(
         major == NATIVE_ABI_1_VERSION.major()
-            && matches!(minor, 11..=17)
+            && matches!(minor, 11..=18)
             && minor <= NATIVE_ABI_1_VERSION.minor(),
     )
 }

@@ -440,6 +440,19 @@ layout. Scoped buffer and byte borrows execute only immediate synchronous
 closures through one verified MIR region call. See
 [ADR 0087](./decisions/0087-scoped-ffi-borrow-bodies-and-bytes-pin-abi.md).
 
+Native ABI 1.18 adds failure-atomic callback open, enter, leave, and close
+operations. A registration roots one exact typed managed environment while its
+native-visible context is only a runtime-owned opaque address token. Each fixed
+backend thunk embeds a `FfiCallbackSiteId`; enter validates that site, the
+context generation, lifetime, creating scheduler/thread policy, and serialized
+non-reentrant state before returning the current environment reference and
+establishing managed execution. Leave restores the exact prior foreign state or
+detaches an entry-created binding. Close invalidates the context before
+releasing the root and fails while an entry is active. Callback panic and every
+invalid entry are contained at the generated panic boundary and never unwind
+through foreign frames. See
+[ADR 0088](./decisions/0088-typed-ffi-callbacks-and-native-transition-abi.md).
+
 The compact nonzero `FfiAbiLayoutId` used by those operations is the first
 eight big-endian bytes of ADR 0086's full canonical SHA-256 layout fingerprint.
 Artifacts and generated metadata retain and compare the full fingerprint and

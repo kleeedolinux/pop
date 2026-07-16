@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pop_runtime_interface::{ManagedThreadBindingId, SchedulerId};
 
+use crate::ffi_callback::has_active_callback_transition;
 use crate::foreign::has_active_foreign_transition;
 use crate::state::{
     NativeExecutionBinding, current_native_execution_binding, enter_native_managed_execution,
@@ -63,7 +64,7 @@ pub extern "C" fn pop_rt_detach_managed_thread(binding: u64) -> u8 {
     let Some(id) = ManagedThreadBindingId::new(binding) else {
         return 0;
     };
-    if has_active_foreign_transition() {
+    if has_active_foreign_transition() || has_active_callback_transition() {
         return 0;
     }
     let Some(attached) = ATTACHED_MANAGED_BINDING.with(Cell::get) else {

@@ -1,9 +1,11 @@
 use crate::{
     ArrayAllocationRequest, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
-    FfiBufferOpenFailure, FfiBufferOpenRequest, FfiBytesBorrow, FfiBytesBorrowId, ForeignAddress,
-    ForeignCallMode, ForeignTransitionId, GarbageCollectorContract, ManagedReference,
-    ManagedThreadBindingId, ObjectAllocationRequest, PanicPayload, PinHandle, RootHandle,
-    RootPublication, RuntimeFailure, SchedulerId, TableAllocationRequest, Trap, WriteBarrier,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, FfiBytesBorrow, FfiBytesBorrowId, FfiCallbackEntry,
+    FfiCallbackOpenRequest, FfiCallbackRegistration, FfiCallbackRegistrationId, FfiCallbackSiteId,
+    FfiCallbackTransitionId, ForeignAddress, ForeignCallMode, ForeignTransitionId,
+    GarbageCollectorContract, ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest,
+    PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure, SchedulerId,
+    TableAllocationRequest, Trap, WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,6 +242,63 @@ pub trait RuntimeAdapter {
         borrow: FfiBytesBorrowId,
     ) -> Result<(), RuntimeFailure> {
         let _ = (bytes, borrow);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Retains one exact callback environment and publishes its opaque context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant failure without publishing a registration when the
+    /// callback contract or environment cannot be retained.
+    fn ffi_callback_open(
+        &mut self,
+        request: FfiCallbackOpenRequest,
+    ) -> Result<FfiCallbackRegistration, RuntimeFailure> {
+        let _ = request;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Enters managed execution through one validated callback context/site.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale, forged, wrong-site, wrong-thread, overlapping, or
+    /// reentrant entry before returning the managed environment.
+    fn ffi_callback_enter(
+        &mut self,
+        context: ForeignAddress,
+        site: FfiCallbackSiteId,
+    ) -> Result<FfiCallbackEntry, RuntimeFailure> {
+        let _ = (context, site);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Leaves and consumes one exact callback transition.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale, forged, wrong-thread, or duplicate transitions.
+    fn ffi_callback_leave(
+        &mut self,
+        transition: FfiCallbackTransitionId,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = transition;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Invalidates one callback context before releasing its environment root.
+    ///
+    /// # Errors
+    ///
+    /// Leaves an active registration unchanged when callback entry is active.
+    fn ffi_callback_close(
+        &mut self,
+        registration: FfiCallbackRegistrationId,
+        context: ForeignAddress,
+        site: FfiCallbackSiteId,
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (registration, context, site);
         Err(RuntimeFailure::runtime_invariant())
     }
 

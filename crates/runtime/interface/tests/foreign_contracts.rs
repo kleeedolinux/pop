@@ -1,5 +1,7 @@
 use pop_runtime_interface::{
-    ForeignCallMode, ForeignTransitionId, ManagedThreadBindingId, RuntimeOperation,
+    FfiCallbackLifetime, FfiCallbackRegistrationId, FfiCallbackSiteId, FfiCallbackThread,
+    FfiCallbackTransitionId, ForeignCallMode, ForeignTransitionId, ManagedThreadBindingId,
+    RuntimeOperation,
 };
 
 #[test]
@@ -45,4 +47,60 @@ fn foreign_transitions_are_distinct_runtime_operations() {
         RuntimeOperation::AttachManagedThread,
         RuntimeOperation::DetachManagedThread
     );
+}
+
+#[test]
+fn callback_contracts_are_closed_and_use_distinct_nonzero_identities() {
+    assert_eq!(
+        FfiCallbackLifetime::from_raw(0),
+        Some(FfiCallbackLifetime::CallScoped)
+    );
+    assert_eq!(
+        FfiCallbackLifetime::from_raw(1),
+        Some(FfiCallbackLifetime::Registered)
+    );
+    assert_eq!(FfiCallbackLifetime::from_raw(2), None);
+    assert_eq!(
+        FfiCallbackThread::from_raw(0),
+        Some(FfiCallbackThread::CallingThread)
+    );
+    assert_eq!(
+        FfiCallbackThread::from_raw(1),
+        Some(FfiCallbackThread::AttachedThread)
+    );
+    assert_eq!(FfiCallbackThread::from_raw(2), None);
+
+    assert_eq!(FfiCallbackSiteId::new(0), None);
+    assert_eq!(FfiCallbackRegistrationId::new(0), None);
+    assert_eq!(FfiCallbackTransitionId::new(0), None);
+    assert_eq!(FfiCallbackSiteId::new(11).expect("site").raw(), 11);
+    assert_eq!(
+        FfiCallbackRegistrationId::new(12)
+            .expect("registration")
+            .raw(),
+        12
+    );
+    assert_eq!(
+        FfiCallbackTransitionId::new(13).expect("transition").raw(),
+        13
+    );
+}
+
+#[test]
+fn callback_runtime_operations_have_no_dynamic_fallback() {
+    let operations = [
+        RuntimeOperation::FfiCallbackOpen,
+        RuntimeOperation::FfiCallbackEnter,
+        RuntimeOperation::FfiCallbackLeave,
+        RuntimeOperation::FfiCallbackClose,
+    ];
+    for (index, operation) in operations.into_iter().enumerate() {
+        assert!(
+            operations
+                .iter()
+                .skip(index + 1)
+                .all(|other| operation != *other)
+        );
+        assert_ne!(operation, RuntimeOperation::DispatchCall);
+    }
 }

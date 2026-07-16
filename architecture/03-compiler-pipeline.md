@@ -139,6 +139,16 @@ and exact ABI/effect contract in HIR/MIR. The original attribute value does not
 become runtime reflection. Calls lower to explicit foreign transitions with
 root publication, safe-point, cleanup, and unwind facts.
 
+ADR 0089's binding generator is a tooling phase before ordinary source loading,
+not compile-time execution. For one exact manifest alias and platform target it
+checks one hashed canonical declarative `.popc` descriptor with the bounded
+embedded parser, renders only validated source tokens, and failure-atomically
+publishes reviewable Pop source, a closed C shim unit, and typed `.popc` binding
+metadata.
+Generated source re-enters the normal parse/resolve/type pipeline. The compiler
+never parses a header, invokes a generator, injects returned text, or trusts
+generated metadata as a second semantic type system during analysis.
+
 MIR should use SSA form or block arguments. If mutable locals are convenient
 during construction, a mandatory canonicalization pass converts them before
 optimization and backend handoff.

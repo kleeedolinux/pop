@@ -20,6 +20,7 @@ struct ForeignTransition {
     binding: NativeExecutionBinding,
     publication: RootPublication,
     retained_roots: Vec<Option<RootHandle>>,
+    foreign_state: MutatorExecutionState,
 }
 
 thread_local! {
@@ -99,9 +100,48 @@ pub unsafe extern "C" fn pop_rt_enter_foreign(
             binding,
             publication,
             retained_roots,
+            foreign_state: state,
         });
     });
     id.raw()
+}
+
+pub(crate) fn enter_managed_callback_from_foreign()
+-> Option<(NativeExecutionBinding, MutatorExecutionState)> {
+    let binding = current_native_execution_binding()?;
+    let foreign_state = FOREIGN_TRANSITIONS.with(|transitions| {
+        transitions
+            .borrow()
+            .last()
+            .filter(|transition| {
+                transition.binding == binding
+                    && transition.foreign_state == MutatorExecutionState::HandlesOnly
+            })
+            .map(|transition| transition.foreign_state)
+    })?;
+    let mut runtime = lock_abi_runtime().ok()?;
+    runtime
+        .transition_scheduler_mutator(
+            binding.mutator(),
+            binding.scheduler(),
+            MutatorExecutionState::Managed,
+        )
+        .ok()?;
+    Some((binding, foreign_state))
+}
+
+pub(crate) fn restore_foreign_after_managed_callback(
+    binding: NativeExecutionBinding,
+    foreign_state: MutatorExecutionState,
+) -> bool {
+    if current_native_execution_binding() != Some(binding) {
+        return false;
+    }
+    lock_abi_runtime().is_ok_and(|mut runtime| {
+        runtime
+            .transition_scheduler_mutator(binding.mutator(), binding.scheduler(), foreign_state)
+            .is_ok()
+    })
 }
 
 /// Leaves the most recent foreign call and restores its exact roots. A zero
