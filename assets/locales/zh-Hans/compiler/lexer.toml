@@ -1,0 +1,8 @@
+[messages."syntax.invalidCharacter"]
+text = "无效字符 `{character}`"
+
+[messages."syntax.unterminatedString"]
+text = "字符串字面量未终止"
+
+[messages."syntax.invalidStringEscape"]
+text = "无效的字符串转义"

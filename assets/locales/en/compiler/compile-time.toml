@@ -1,0 +1,44 @@
+[messages."compileTime.ineligibleConstantExpression"]
+text = "{context} is not eligible for constant evaluation"
+arguments = ["context"]
+kinds = ["Identifier"]
+
+[messages."compileTime.constantIntegerOverflow"]
+text = "integer overflow while evaluating {context}"
+arguments = ["context"]
+kinds = ["Identifier"]
+
+[messages."compileTime.constantDivisionByZero"]
+text = "division by zero while evaluating {context}"
+arguments = ["context"]
+kinds = ["Identifier"]
+
+[messages."compileTime.functionNotEligible"]
+text = "function `{function}` is not eligible for compile-time execution"
+arguments = ["function"]
+kinds = ["Identifier"]
+
+[messages."compileTime.forbiddenEffect"]
+text = "function `{function}` uses forbidden compile-time effect `{effect}`"
+arguments = ["function", "effect"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."compileTime.cycle"]
+text = "compile-time dependency cycle: {cycle}"
+arguments = ["cycle"]
+kinds = ["Identifier"]
+
+[messages."compileTime.resourceLimit"]
+text = "compile-time {resource} limit of {limit} was exceeded"
+arguments = ["resource", "limit"]
+kinds = ["Identifier", "Unsigned"]
+
+[messages."compileTime.attributeValidatorRejected"]
+text = "attribute validator `{attribute}` rejected the declaration"
+arguments = ["attribute"]
+kinds = ["Identifier"]
+
+[messages."compileTime.invalidAttributeValidatorSignature"]
+text = "attribute validator `{function}` has an invalid signature"
+arguments = ["function"]
+kinds = ["Identifier"]

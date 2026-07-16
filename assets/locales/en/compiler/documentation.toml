@@ -1,0 +1,44 @@
+[messages."documentation.unsafeXml"]
+text = "XML documentation contains an unsafe construct"
+arguments = []
+kinds = []
+
+[messages."documentation.malformedXml"]
+text = "XML documentation is malformed"
+arguments = []
+kinds = []
+
+[messages."documentation.invalidErrorTag"]
+text = "documentation references invalid error type `{errorType}`"
+arguments = ["errorType"]
+kinds = ["Identifier"]
+
+[messages."documentation.missingErrorCase"]
+text = "documentation is missing error case `{errorCase}`"
+arguments = ["errorCase"]
+kinds = ["Identifier"]
+
+[messages."documentation.missingSummary"]
+text = "public declaration `{declaration}` is missing a summary"
+arguments = ["declaration"]
+kinds = ["Identifier"]
+
+[messages."documentation.duplicateSummary"]
+text = "declaration `{declaration}` has more than one summary"
+arguments = ["declaration"]
+kinds = ["Identifier"]
+
+[messages."documentation.invalidInheritance"]
+text = "documentation cannot inherit from `{source}`"
+arguments = ["source"]
+kinds = ["Identifier"]
+
+[messages."documentation.inheritanceCycle"]
+text = "documentation inheritance cycle at `{declaration}`"
+arguments = ["declaration"]
+kinds = ["Identifier"]
+
+[messages."documentation.invalidReturns"]
+text = "invalid returns documentation: {expectation}"
+arguments = ["expectation"]
+kinds = ["Identifier"]

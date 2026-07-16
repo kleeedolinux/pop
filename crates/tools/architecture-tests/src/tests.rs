@@ -45,6 +45,7 @@ const MEMBERS: &[&str] = &[
     "crates/tools/documentation-generator",
     "crates/tools/formatter",
     "crates/tools/language-server",
+    "crates/tools/localization",
     "crates/tools/test-runner",
 ];
 
@@ -238,6 +239,23 @@ fn collect_text_contract_files(directory: &Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
+}
+
+fn manifests_below(directory: &Path) -> Vec<PathBuf> {
+    let mut manifests = Vec::new();
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read repository entry").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            manifests.extend(manifests_below(&path));
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            manifests.push(path);
+        }
+    }
+    manifests
 }
 
 fn inline_documentation_element(line: &str) -> Option<&str> {
@@ -455,6 +473,7 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
             "serde = { version = \"1.0.228\", features = [\"derive\"] }"
                 | "serde_json = \"1.0.150\""
                 | "sha2 = \"0.11.0\""
+                | "toml = \"0.9.8\""
         );
         assert!(
             local || approved_inkwell || approved_artifact_dependency,
@@ -499,12 +518,15 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                             | "serde_json.workspace = true"
                             | "sha2.workspace = true"
                     );
+                let localization_dependency = *member == "crates/tools/localization"
+                    && matches!(line, "serde.workspace = true" | "toml.workspace = true");
                 assert!(
                     inherited_local
                         || inherited_inkwell
                         || serde_projection
                         || project_artifact_dependency
-                        || driver_artifact_dependency,
+                        || driver_artifact_dependency
+                        || localization_dependency,
                     "{} {table} entry is not inherited from the workspace: {line}",
                     manifest_path.display(),
                 );
@@ -1272,6 +1294,47 @@ fn official_language_server_uses_the_pop_lsp_protocol_boundary() {
         .expect("read language-server source");
     assert!(manifest.contains("pop-extension-lsp.workspace = true"));
     assert!(source.contains("pop_extension_lsp::PACKAGE"));
+}
+
+#[test]
+fn toolchain_localization_stays_at_presentation_boundaries() {
+    let root = repository_root();
+    let driver = fs::read_to_string(root.join("crates/compiler/driver/src/main.rs"))
+        .expect("read driver presentation");
+    assert_eq!(
+        driver.matches("eprintln!").count(),
+        0,
+        "the CLI must write stderr only through localized presentation adapters"
+    );
+    assert!(driver.contains("select_process_language"));
+    assert!(driver.contains("rendering().diagnostic(diagnostic)"));
+
+    for directory in [
+        "crates/compiler/backends",
+        "crates/compiler/compile-time",
+        "crates/compiler/diagnostics",
+        "crates/compiler/foundation",
+        "crates/compiler/hir",
+        "crates/compiler/mir",
+        "crates/compiler/projects",
+        "crates/compiler/query",
+        "crates/compiler/resolve",
+        "crates/compiler/source",
+        "crates/compiler/syntax",
+        "crates/compiler/target",
+        "crates/compiler/types",
+        "crates/libraries",
+        "crates/runtime",
+    ] {
+        for manifest in manifests_below(&root.join(directory)) {
+            let source = fs::read_to_string(&manifest).expect("read Cargo manifest");
+            assert!(
+                !source.contains("pop-localization"),
+                "semantic/base crate must not depend on tool presentation: {}",
+                manifest.display()
+            );
+        }
+    }
 }
 
 #[test]

@@ -1,0 +1,23 @@
+[messages."ui.error"]
+text = "エラー"
+
+[messages."ui.warning"]
+text = "警告"
+
+[messages."ui.information"]
+text = "情報"
+
+[messages."ui.hint"]
+text = "ヒント"
+
+[messages."ui.label"]
+text = "関連"
+
+[messages."ui.note"]
+text = "注記"
+
+[messages."ui.help"]
+text = "ヘルプ"
+
+[messages."ui.suggestion"]
+text = "提案"

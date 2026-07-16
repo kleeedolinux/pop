@@ -1,0 +1,49 @@
+[messages."backend.bpf.invalidEntryPoint"]
+text = "invalid BPF entry point: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.unsupportedMirOperation"]
+text = "BPF does not support MIR operation {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.unsupportedTypeOrLayout"]
+text = "BPF does not support type or layout {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.managedAllocationUnavailable"]
+text = "managed allocation is unavailable for BPF: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.floatingPointUnavailable"]
+text = "floating point is unavailable for BPF: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.callUnavailable"]
+text = "call is unavailable for BPF: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.runtimeContractUnavailable"]
+text = "runtime contract is unavailable: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.llvmTargetUnavailable"]
+text = "LLVM BPF target is unavailable: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.unknownTarget"]
+text = "unknown Pop Lang target: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."backend.bpf.loopBoundUnavailable"]
+text = "BPF loop bound cannot be proven: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]

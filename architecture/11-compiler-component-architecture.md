@@ -75,6 +75,7 @@ runtime/
   native/           native exports, process-global state, and target adapters
 tools/
   language-server/  incremental semantic client
+  localization/     private typed catalogs and human presentation rendering
   formatter/        lossless syntax client
   documentation-generator/ documentation.xml to HTML/searchable output
   test-runner/      conformance and fixture orchestration

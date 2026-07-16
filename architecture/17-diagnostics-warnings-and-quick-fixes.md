@@ -39,6 +39,18 @@ Diagnostic
 Messages are rendered from typed arguments. Compiler passes do not build final
 English sentences or parse messages to discover facts later.
 
+Human messages use the private toolchain localization contract in
+[ADR 0088](./decisions/0088-localized-toolchain-presentation.md). English is the
+canonical catalog schema, not a sentence embedded in a compiler pass. Every
+argument has a stable name and closed value kind so all official translations
+can be checked for exact placeholder parity.
+
+Catalog ownership mirrors the toolchain: compiler lexer, parser, resolution,
+types, compile-time, documentation, FFI, backend, CLI, LSP, and shared
+presentation text use separate formatted TOML fragments below each locale.
+Fragment boundaries organize ownership only; message keys remain globally
+unique and the aggregate locale is validated atomically.
+
 ### Severity
 
 `DiagnosticSeverity` has:
@@ -123,6 +135,17 @@ Rules:
 - paths are workspace-relative by default;
 - color is optional and never carries meaning alone;
 - generated/desugared code maps back through source-origin chains.
+
+The renderer receives an immutable locale context. The CLI, language server,
+tests, and future SARIF adapter share message lookup and typed substitution;
+semantic queries never read environment or user configuration. The initial
+official human languages are `en`, `zh-Hans`, `ja`, `pt-BR`, and `es`.
+
+Diagnostic codes, identifiers, type names, paths, package identities, source
+text, and target triples are never translated. Labels such as “error”, “note”,
+and “help” are presentation text and are translated. JSON and protocol facts
+stay locale invariant; translated display text is never required to recover a
+code, span, argument, edit, or origin.
 
 ## Diagnostic production
 
@@ -427,6 +450,9 @@ orphan fixes.
 ## Testing requirements
 
 - golden human-rendering tests;
+- exact localization-key and named-placeholder parity for every official
+  toolchain catalog;
+- independent CLI and language-server locale-selection tests;
 - JSON/LSP/SARIF schema tests;
 - source-recovery and cascade-count tests;
 - warning-wave/edition matrix tests;

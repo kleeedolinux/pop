@@ -1,0 +1,14 @@
+[messages."syntax.unexpectedToken"]
+text = "expected {expectation}, found `{found}`"
+arguments = ["expectation", "found"]
+kinds = ["SyntaxExpectation", "Token"]
+
+[messages."syntax.missingNamespace"]
+text = "the Module must declare a namespace"
+arguments = []
+kinds = []
+
+[messages."syntax.unsupportedExport"]
+text = "`{keyword}` is not supported; use declaration visibility"
+arguments = ["keyword"]
+kinds = ["Identifier"]

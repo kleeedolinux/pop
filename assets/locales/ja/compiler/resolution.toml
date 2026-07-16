@@ -1,0 +1,23 @@
+[messages."resolution.invalidDeclaration"]
+text = "無効な宣言です"
+
+[messages."resolution.duplicateDeclaration"]
+text = "宣言 `{name}` が重複しています"
+
+[messages."resolution.unknownName"]
+text = "不明な名前 `{name}`"
+
+[messages."resolution.ambiguousName"]
+text = "名前 `{name}` は曖昧です"
+
+[messages."resolution.inaccessibleName"]
+text = "名前 `{name}` にはここからアクセスできません"
+
+[messages."resolution.originalDeclaration"]
+text = "元の宣言"
+
+[messages."resolution.candidate"]
+text = "候補の宣言"
+
+[messages."resolution.declaration"]
+text = "宣言はここにあります"

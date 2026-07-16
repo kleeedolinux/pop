@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 pop-extension-lsp.workspace = true
+pop-localization.workspace = true
+pop-foundation.workspace = true
 pop-diagnostics.workspace = true
 pop-projects.workspace = true
 pop-query.workspace = true
@@ -18,3 +20,6 @@ pop-syntax.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+pop-diagnostics.workspace = true

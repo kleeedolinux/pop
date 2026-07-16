@@ -1,0 +1,23 @@
+[messages."ui.error"]
+text = "error"
+
+[messages."ui.warning"]
+text = "advertencia"
+
+[messages."ui.information"]
+text = "información"
+
+[messages."ui.hint"]
+text = "sugerencia"
+
+[messages."ui.label"]
+text = "relacionado"
+
+[messages."ui.note"]
+text = "nota"
+
+[messages."ui.help"]
+text = "ayuda"
+
+[messages."ui.suggestion"]
+text = "sugerencia"

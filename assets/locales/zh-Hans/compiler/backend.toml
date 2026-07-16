@@ -1,0 +1,29 @@
+[messages."backend.bpf.invalidEntryPoint"]
+text = "无效的 BPF 入口点：{reason}"
+
+[messages."backend.bpf.unsupportedMirOperation"]
+text = "BPF 不支持 MIR 操作 {reason}"
+
+[messages."backend.bpf.unsupportedTypeOrLayout"]
+text = "BPF 不支持类型或布局 {reason}"
+
+[messages."backend.bpf.managedAllocationUnavailable"]
+text = "BPF 无法使用托管分配：{reason}"
+
+[messages."backend.bpf.floatingPointUnavailable"]
+text = "BPF 无法使用浮点数：{reason}"
+
+[messages."backend.bpf.callUnavailable"]
+text = "BPF 无法使用调用：{reason}"
+
+[messages."backend.runtimeContractUnavailable"]
+text = "runtime 契约不可用：{reason}"
+
+[messages."backend.bpf.llvmTargetUnavailable"]
+text = "LLVM BPF target 不可用：{reason}"
+
+[messages."backend.unknownTarget"]
+text = "未知的 Pop Lang target：{reason}"
+
+[messages."backend.bpf.loopBoundUnavailable"]
+text = "无法证明 BPF 循环边界：{reason}"

@@ -1,0 +1,26 @@
+[messages."documentation.unsafeXml"]
+text = "a documentação XML contém uma construção insegura"
+
+[messages."documentation.malformedXml"]
+text = "a documentação XML está malformada"
+
+[messages."documentation.invalidErrorTag"]
+text = "a documentação referencia o tipo de erro inválido `{errorType}`"
+
+[messages."documentation.missingErrorCase"]
+text = "a documentação não contém o caso de erro `{errorCase}`"
+
+[messages."documentation.missingSummary"]
+text = "a declaração pública `{declaration}` não contém um resumo"
+
+[messages."documentation.duplicateSummary"]
+text = "a declaração `{declaration}` contém mais de um resumo"
+
+[messages."documentation.invalidInheritance"]
+text = "a documentação não pode herdar de `{source}`"
+
+[messages."documentation.inheritanceCycle"]
+text = "ciclo de herança de documentação em `{declaration}`"
+
+[messages."documentation.invalidReturns"]
+text = "documentação de retorno inválida: {expectation}"

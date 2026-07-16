@@ -1,0 +1,8 @@
+[messages."syntax.invalidCharacter"]
+text = "carácter no válido `{character}`"
+
+[messages."syntax.unterminatedString"]
+text = "literal de cadena sin terminar"
+
+[messages."syntax.invalidStringEscape"]
+text = "escape de cadena no válido"

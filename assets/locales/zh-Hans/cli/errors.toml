@@ -1,0 +1,116 @@
+[messages."cli.missingCommand"]
+text = "缺少命令"
+
+[messages."cli.unsupportedCommand"]
+text = "不支持的命令 `{command}`"
+
+[messages."cli.unsupportedLanguage"]
+text = "不支持的语言 `{language}`；应为 en、zh-Hans、ja、pt-BR 或 es"
+
+[messages."cli.languageNeedsValue"]
+text = "`--language` 需要语言标签"
+
+[messages."cli.selectLanguageFailed"]
+text = "无法选择工具语言：{detail}"
+
+[messages."cli.checkNeedsSource"]
+text = "`pop check` 需要 .pop 源文件路径或 `--manifestPath`"
+
+[messages."cli.commandRequiresOption"]
+text = "`pop {command}` 需要 `{option}`"
+
+[messages."cli.unsupportedOption"]
+text = "不支持的选项 `{option}`"
+
+[messages."cli.expectedOption"]
+text = "不支持的选项 `{option}`；应为 `{expected}`"
+
+[messages."cli.optionRequiresValue"]
+text = "`{option}` 需要{value}"
+
+[messages."cli.unexpectedArguments"]
+text = "`pop {command}` 收到了意外参数"
+
+[messages."cli.oneSource"]
+text = "引导模式下的 `pop {command}` 只接受一个源文件路径"
+
+[messages."cli.sourceRequired"]
+text = "`pop {command}` 需要 .pop 源文件路径"
+
+[messages."cli.manifestRequired"]
+text = "`pop {command} --manifestPath` 需要 bubble.toml 路径"
+
+[messages."cli.manifestName"]
+text = "`pop {command} --manifestPath` 需要名为 bubble.toml 的路径"
+
+[messages."cli.unsupportedChoice"]
+text = "不支持的{choice} `{value}`；应为 {expected}"
+
+[messages."cli.unsupportedRuntimeProfile"]
+text = "不支持的 runtime 配置 `{value}`"
+
+[messages."cli.manifestOption"]
+text = "不支持的 manifest 选项 `{option}`；应为 --locked、--offline 或 --frozen"
+
+[messages."cli.programArgumentsSeparator"]
+text = "不支持的选项 `{option}`；程序参数必须放在 `--` 之后"
+
+[messages."cli.bpfRequires"]
+text = "BPF build 需要 `{option}`"
+
+[messages."cli.readFailed"]
+text = "无法读取 `{path}`：{detail}"
+
+[messages."cli.loadFailed"]
+text = "无法加载 `{path}`：{detail}"
+
+[messages."cli.writeHelpFailed"]
+text = "无法写入帮助：{detail}"
+
+[messages."cli.writeDiagnosticsFailed"]
+text = "无法写入诊断：{detail}"
+
+[messages."cli.renderDiagnosticsFailed"]
+text = "无法呈现诊断：{detail}"
+
+[messages."cli.writeOutputFailed"]
+text = "无法写入输出：{detail}"
+
+[messages."cli.internalCompilerError"]
+text = "编译器内部错误：{detail}"
+
+[messages."cli.externalFailure"]
+text = "{context}：{detail}"
+
+[messages."cli.toolFailure"]
+text = "工具操作失败：{detail}"
+
+[messages."cli.transpileNeedsFormat"]
+text = "`--to` 需要后端源代码格式（`c`）"
+
+[messages."cli.unsupportedTranspileTarget"]
+text = "不支持转译目标 `{value}`；应为 `c`"
+
+[messages."cli.buildNeedsOutputOrTarget"]
+text = "`pop build` 需要输出路径（`--output`）或目标三元组（`--target`）"
+
+[messages."cli.targetNeedsTriple"]
+text = "`--target` 需要目标三元组"
+
+[messages."cli.runtimeProfileNeedsName"]
+text = "`--runtime-profile` 需要配置文件名称"
+
+[messages."cli.unsupportedBpfProgram"]
+text = "不支持 BPF 程序 `{value}`；应为 `xdp`"
+
+[messages."cli.emitObjectNeedsPath"]
+text = "`--emit-object` 需要对象文件路径"
+
+[messages."cli.outputNeedsExecutablePath"]
+text = "`--output` 需要可执行文件路径"
+
+[messages."cli.runNeedsInput"]
+text = "`pop run` 需要 .pop 源文件路径或 `--manifestPath`"
+
+[messages."cli.unsupportedDumpKind"]
+text = "不支持转储类型 `{value}`；应为 `hir`、`mir` 或 `ll`"

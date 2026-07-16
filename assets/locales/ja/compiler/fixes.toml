@@ -1,0 +1,11 @@
+[messages."fix.addMissingMatchCases"]
+text = "不足している match ケースを追加する"
+
+[messages."fix.replaceExportWithPublic"]
+text = "`export` を `public` に置き換える"
+
+[messages."fix.addNamespace"]
+text = "必要な namespace 宣言を追加する"
+
+[messages."fix.createInterfaceMembers"]
+text = "不足している interface メンバーを作成する"

@@ -365,6 +365,26 @@ constraints.
 formatter/linter entry points. Compiler internals may be separate processes,
 but users and editors consume one stable command and machine protocol.
 
+### Toolchain language selection
+
+Human presentation follows
+[ADR 0088](./decisions/0088-localized-toolchain-presentation.md). The global
+`--language <tag>` option is recognized before command parsing, including when
+it appears after a command but before a program-argument `--`. Selection then
+falls through `POP_LANGUAGE`, user configuration, the POSIX locale environment,
+and finally English. Help and usage failures therefore use the selected locale.
+
+The supported initial tags are `en`, `zh-Hans`, `ja`, `pt-BR`, and `es`.
+Configuration lives at `$XDG_CONFIG_HOME/pop/config.toml` or the corresponding
+`$HOME/.config/pop/config.toml` fallback and uses `language = "<tag>"`.
+Selection is immutable for one invocation. Subcommands and compiler passes do
+not consult ambient locale independently.
+
+Language selection changes human text only. Command names, options, paths,
+Package/Bubble identities, target triples, exit codes, machine schemas, and
+HIR/MIR/backend dumps remain stable. Arguments after `pop run ... --` belong to
+the user program and are never scanned or translated.
+
 Core commands:
 
 | Command | Contract |
@@ -505,6 +525,21 @@ Stable machine-facing contracts are:
 Human output is not parsed as an API. Tools must pass an explicit Workspace,
 Package, Bubble, Module, and platform target selection rather than guessing from
 artifact filenames.
+
+The official language server selects an independent immutable render context
+from the LSP initialization locale and uses the same embedded toolchain catalogs
+as the CLI. Multiple sessions may use different languages in one process.
+Compiler/query crates return structured diagnostics and never depend on the
+private localization crate. `Pop.Locale` and `Pop.Resource` remain public
+application APIs with YAML authoring and do not participate in tool bootstrap.
+
+The bootstrap language server owns versioned open-document snapshots with
+stable session-local `FileId` values, rejects stale versions, honors query
+cancellation before publishing results, converts source spans to UTF-16 protocol
+positions, and publishes structured syntax diagnostics. Semantic analysis and
+the public `Pop.Lsp` transport expand only after their public schemas are
+authorized; the bootstrap does not expose private syntax nodes or compiler
+query handles.
 
 ## Profiles, cache, and reproducibility
 

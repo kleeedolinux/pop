@@ -1,0 +1,194 @@
+[messages."cli.missingCommand"]
+text = "missing command"
+arguments = []
+kinds = []
+
+[messages."cli.unsupportedCommand"]
+text = "unsupported command `{command}`"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."cli.unsupportedLanguage"]
+text = "unsupported language `{language}`; expected en, zh-Hans, ja, pt-BR, or es"
+arguments = ["language"]
+kinds = ["Text"]
+
+[messages."cli.languageNeedsValue"]
+text = "`--language` requires a language tag"
+arguments = []
+kinds = []
+
+[messages."cli.selectLanguageFailed"]
+text = "could not select the tool language: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.checkNeedsSource"]
+text = "`pop check` requires a .pop source path or `--manifestPath`"
+arguments = []
+kinds = []
+
+[messages."cli.commandRequiresOption"]
+text = "`pop {command}` requires `{option}`"
+arguments = ["command", "option"]
+kinds = ["Text", "Text"]
+
+[messages."cli.unsupportedOption"]
+text = "unsupported option `{option}`"
+arguments = ["option"]
+kinds = ["Text"]
+
+[messages."cli.expectedOption"]
+text = "unsupported option `{option}`; expected `{expected}`"
+arguments = ["option", "expected"]
+kinds = ["Text", "Text"]
+
+[messages."cli.optionRequiresValue"]
+text = "`{option}` requires {value}"
+arguments = ["option", "value"]
+kinds = ["Text", "Text"]
+
+[messages."cli.unexpectedArguments"]
+text = "`pop {command}` received unexpected arguments"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."cli.oneSource"]
+text = "`pop {command}` accepts exactly one source path in bootstrap mode"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."cli.sourceRequired"]
+text = "`pop {command}` requires a .pop source path"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."cli.manifestRequired"]
+text = "`pop {command} --manifestPath` requires a bubble.toml path"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."cli.manifestName"]
+text = "`pop {command} --manifestPath` requires a path named bubble.toml"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."cli.unsupportedChoice"]
+text = "unsupported {choice} `{value}`; expected {expected}"
+arguments = ["choice", "value", "expected"]
+kinds = ["Text", "Text", "Text"]
+
+[messages."cli.unsupportedRuntimeProfile"]
+text = "unsupported runtime profile `{value}`"
+arguments = ["value"]
+kinds = ["Text"]
+
+[messages."cli.manifestOption"]
+text = "unsupported manifest option `{option}`; expected --locked, --offline, or --frozen"
+arguments = ["option"]
+kinds = ["Text"]
+
+[messages."cli.programArgumentsSeparator"]
+text = "unsupported option `{option}`; program arguments must follow `--`"
+arguments = ["option"]
+kinds = ["Text"]
+
+[messages."cli.bpfRequires"]
+text = "BPF builds require `{option}`"
+arguments = ["option"]
+kinds = ["Text"]
+
+[messages."cli.readFailed"]
+text = "could not read `{path}`: {detail}"
+arguments = ["path", "detail"]
+kinds = ["Text", "External"]
+
+[messages."cli.loadFailed"]
+text = "could not load `{path}`: {detail}"
+arguments = ["path", "detail"]
+kinds = ["Text", "External"]
+
+[messages."cli.writeHelpFailed"]
+text = "could not write help: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.writeDiagnosticsFailed"]
+text = "could not write diagnostics: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.renderDiagnosticsFailed"]
+text = "could not render diagnostics: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.writeOutputFailed"]
+text = "could not write output: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.internalCompilerError"]
+text = "internal compiler error: {detail}"
+arguments = ["detail"]
+kinds = ["Text"]
+
+[messages."cli.externalFailure"]
+text = "{context}: {detail}"
+arguments = ["context", "detail"]
+kinds = ["Text", "External"]
+
+[messages."cli.toolFailure"]
+text = "tool operation failed: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.transpileNeedsFormat"]
+text = "`--to` requires a backend source format (`c`)"
+arguments = []
+kinds = []
+
+[messages."cli.unsupportedTranspileTarget"]
+text = "unsupported transpilation target `{value}`; expected `c`"
+arguments = ["value"]
+kinds = ["Text"]
+
+[messages."cli.buildNeedsOutputOrTarget"]
+text = "`pop build` requires an output path (`--output`) or target triple (`--target`)"
+arguments = []
+kinds = []
+
+[messages."cli.targetNeedsTriple"]
+text = "`--target` requires a target triple"
+arguments = []
+kinds = []
+
+[messages."cli.runtimeProfileNeedsName"]
+text = "`--runtime-profile` requires a profile name"
+arguments = []
+kinds = []
+
+[messages."cli.unsupportedBpfProgram"]
+text = "unsupported BPF program `{value}`; expected `xdp`"
+arguments = ["value"]
+kinds = ["Text"]
+
+[messages."cli.emitObjectNeedsPath"]
+text = "`--emit-object` requires an object path"
+arguments = []
+kinds = []
+
+[messages."cli.outputNeedsExecutablePath"]
+text = "`--output` requires an executable path"
+arguments = []
+kinds = []
+
+[messages."cli.runNeedsInput"]
+text = "`pop run` requires a .pop source path or `--manifestPath`"
+arguments = []
+kinds = []
+
+[messages."cli.unsupportedDumpKind"]
+text = "unsupported dump kind `{value}`; expected `hir`, `mir`, or `ll`"
+arguments = ["value"]
+kinds = ["Text"]

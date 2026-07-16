@@ -210,9 +210,33 @@ fn invalid_source_emits_a_structured_diagnostic_and_no_dump() {
 
     let stderr = output_text(&output.stderr);
     assert!(
-        stderr.lines().any(|line| line.starts_with("POP1002@")),
+        stderr
+            .lines()
+            .any(|line| line.starts_with("error[POP1002]:")),
         "stderr must contain the stable diagnostic code and span: {stderr:?}"
     );
+}
+
+#[test]
+fn compiler_diagnostics_render_in_every_official_language() {
+    let cases = [
+        ("en", "unknown name"),
+        ("zh-Hans", "未知名称"),
+        ("ja", "不明な名前"),
+        ("pt-BR", "nome desconhecido"),
+        ("es", "nombre desconocido"),
+    ];
+    for (language, message) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+            .args(["--language", language, "check"])
+            .arg(fixture("invalid.pop"))
+            .output()
+            .expect("localized check");
+        assert!(!output.status.success(), "{language}");
+        let stderr = output_text(&output.stderr);
+        assert!(stderr.contains("POP1002"), "{language}: {stderr}");
+        assert!(stderr.contains(message), "{language}: {stderr}");
+    }
 }
 
 #[test]
@@ -231,6 +255,154 @@ fn missing_check_arguments_are_a_usage_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(output_text(&output.stderr).contains("pop check"));
+}
+
+#[test]
+fn help_and_usage_errors_are_available_in_every_official_language() {
+    let cases = [
+        ("en", "Usage"),
+        ("zh-Hans", "用法"),
+        ("ja", "使用法"),
+        ("pt-BR", "Uso"),
+        ("es", "Uso"),
+    ];
+    for (language, heading) in cases {
+        let help = run_pop(&["--language", language, "--help"], None);
+        assert!(
+            help.status.success(),
+            "{language}: {}",
+            output_text(&help.stderr)
+        );
+        assert!(output_text(&help.stdout).contains(heading), "{language}");
+
+        let error = run_pop(&["check", "--language", language], None);
+        assert_eq!(error.status.code(), Some(2), "{language}");
+        assert!(output_text(&error.stderr).contains(heading), "{language}");
+    }
+}
+
+#[test]
+fn usage_details_do_not_embed_english_prose_in_translated_messages() {
+    let source = fixture("cTranspile.pop");
+    let cases = [
+        ("en", "requires a backend source format"),
+        ("zh-Hans", "后端源代码格式"),
+        ("ja", "バックエンドのソース形式"),
+        ("pt-BR", "exige um formato de código-fonte de backend"),
+        ("es", "requiere un formato de código fuente de backend"),
+    ];
+    for (language, expected) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+            .args(["--language", language, "transpile"])
+            .arg(&source)
+            .arg("--to")
+            .output()
+            .expect("localized transpile usage error");
+        assert_eq!(output.status.code(), Some(2), "{language}");
+        let stderr = output_text(&output.stderr);
+        assert!(stderr.contains(expected), "{language}: {stderr}");
+        if language != "en" {
+            assert!(
+                !stderr.contains("a backend source format"),
+                "{language}: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_language_precedes_environment_and_program_arguments_are_untouched() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env("POP_LANGUAGE", "ja")
+        .args(["--language", "pt-BR", "--help"])
+        .output()
+        .expect("pop help");
+    assert!(output.status.success());
+    assert!(output_text(&output.stdout).contains("Uso"));
+    assert!(!output_text(&output.stdout).contains("使用法"));
+
+    let missing = std::env::temp_dir().join("pop-language-argument-missing.pop");
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env("POP_LANGUAGE", "es")
+        .arg("run")
+        .arg(&missing)
+        .args(["--", "--language", "ja"])
+        .output()
+        .expect("pop run");
+    assert!(!run.status.success());
+    let stderr = output_text(&run.stderr);
+    assert!(stderr.contains("no se pudo leer"), "{stderr}");
+    assert!(!stderr.contains("読み取れませんでした"), "{stderr}");
+}
+
+#[test]
+fn environment_user_configuration_and_system_locale_select_human_language() {
+    let root = std::env::temp_dir().join(format!("pop-locale-config-{}", std::process::id()));
+    let pop_config = root.join("pop");
+    std::fs::create_dir_all(&pop_config).expect("locale config directory");
+    std::fs::write(pop_config.join("config.toml"), "language = \"pt-BR\"\n")
+        .expect("locale config");
+
+    let configured = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env_remove("POP_LANGUAGE")
+        .env("XDG_CONFIG_HOME", &root)
+        .env("LANG", "ja_JP.UTF-8")
+        .arg("--help")
+        .output()
+        .expect("configured help");
+    assert!(configured.status.success());
+    assert!(output_text(&configured.stdout).contains("Uso"));
+
+    let environment = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env("POP_LANGUAGE", "es")
+        .env("XDG_CONFIG_HOME", &root)
+        .env("LANG", "ja_JP.UTF-8")
+        .arg("--help")
+        .output()
+        .expect("environment help");
+    assert!(environment.status.success());
+    assert!(output_text(&environment.stdout).contains("Uso"));
+    assert!(output_text(&environment.stdout).contains("La ruta directa"));
+
+    let empty = std::env::temp_dir().join(format!("pop-locale-empty-{}", std::process::id()));
+    let system = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env_remove("POP_LANGUAGE")
+        .env("XDG_CONFIG_HOME", &empty)
+        .env_remove("LC_ALL")
+        .env_remove("LC_MESSAGES")
+        .env("LANG", "ja_JP.UTF-8")
+        .arg("--help")
+        .output()
+        .expect("system help");
+    assert!(system.status.success());
+    assert!(output_text(&system.stdout).contains("使用法"));
+}
+
+#[test]
+fn malformed_configuration_and_missing_language_values_fail_closed() {
+    let root = std::env::temp_dir().join(format!("pop-locale-invalid-{}", std::process::id()));
+    let pop_config = root.join("pop");
+    std::fs::create_dir_all(&pop_config).expect("locale config directory");
+    std::fs::write(pop_config.join("config.toml"), "language = [\n").expect("invalid config");
+    let invalid = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env_remove("POP_LANGUAGE")
+        .env("XDG_CONFIG_HOME", &root)
+        .arg("--help")
+        .output()
+        .expect("invalid config result");
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(output_text(&invalid.stderr).contains("could not select the tool language"));
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("pop-no-locale-config"),
+        )
+        .arg("--language")
+        .output()
+        .expect("missing language result");
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(output_text(&missing.stderr).contains("requires a language tag"));
 }
 
 #[test]
@@ -272,7 +444,7 @@ fn transpile_rejects_unknown_targets_and_runtime_features_without_partial_c() {
         .expect("pop transpile usage error");
     assert_eq!(unknown.status.code(), Some(2));
     assert!(unknown.stdout.is_empty());
-    assert!(output_text(&unknown.stderr).contains("expected c"));
+    assert!(output_text(&unknown.stderr).contains("expected `c`"));
 
     let unsupported = Command::new(env!("CARGO_BIN_EXE_pop"))
         .args(["transpile"])
@@ -348,7 +520,7 @@ fn bpf_build_rejects_unknown_runtime_profile_before_artifact_emission() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(!object.exists(), "failed BPF build must not emit an object");
-    assert!(output_text(&output.stderr).contains("unknown runtime profile"));
+    assert!(output_text(&output.stderr).contains("unsupported runtime profile"));
 }
 
 #[test]

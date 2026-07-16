@@ -1,0 +1,26 @@
+[messages."documentation.unsafeXml"]
+text = "XML ドキュメントに安全でない構造が含まれています"
+
+[messages."documentation.malformedXml"]
+text = "XML ドキュメントの形式が不正です"
+
+[messages."documentation.invalidErrorTag"]
+text = "ドキュメントが無効なエラー型 `{errorType}` を参照しています"
+
+[messages."documentation.missingErrorCase"]
+text = "ドキュメントにエラーケース `{errorCase}` がありません"
+
+[messages."documentation.missingSummary"]
+text = "public 宣言 `{declaration}` に概要がありません"
+
+[messages."documentation.duplicateSummary"]
+text = "宣言 `{declaration}` に複数の概要があります"
+
+[messages."documentation.invalidInheritance"]
+text = "ドキュメントは `{source}` から継承できません"
+
+[messages."documentation.inheritanceCycle"]
+text = "`{declaration}` でドキュメント継承が循環しています"
+
+[messages."documentation.invalidReturns"]
+text = "戻り値ドキュメントが無効です: {expectation}"

@@ -354,6 +354,21 @@ pop remove
 
 Diagnostics, symbols, metadata, documentation, and automated fixes are intended to be available through stable structured formats, so editors and build tools do not need to scrape terminal output.
 
+Human CLI and compiler diagnostics are available in English, Simplified
+Chinese, Japanese, Brazilian Portuguese, and Spanish. Select a language for one
+invocation with `pop --language pt-BR check source.pop`, set `POP_LANGUAGE`, or
+write a user configuration file:
+
+```toml
+# $XDG_CONFIG_HOME/pop/config.toml or $HOME/.config/pop/config.toml
+language = "pt-BR"
+```
+
+The supported tags are `en`, `zh-Hans`, `ja`, `pt-BR`, and `es`. An explicit
+option takes precedence over the environment and user configuration. Machine
+schemas, diagnostic codes, identifiers, paths, and HIR/MIR/LLVM dumps remain
+language-independent.
+
 The language formatter owns canonical whitespace and layout. Pop source uses four-space indentation, avoids mandatory semicolons, and aims for one obvious readable shape.
 
 ## Relationship to Luau

@@ -51,6 +51,14 @@ cross the backend crate boundary. Cargo
 package/crate names are implementation details and do not replace Pop Lang's
 `Item → Module → Bubble → Package → Workspace` terminology.
 
+Artifact metadata later approved `serde`, `serde_json`, and `sha2` at the
+closed producer/consumer boundaries that validate `.poplib` and lock data. ADR
+0088 adds `crates/tools/localization` and approves the dual-licensed `toml`
+parser only there for embedded toolchain catalogs and user tool configuration.
+The parser does not enter compiler semantic crates, the runtime, or either base
+library. Catalog tests reject malformed input and enforce exact key,
+placeholder, and argument-kind parity before release.
+
 Repository architecture tests validate the member inventory, manifest
 inheritance, required source targets, and forbidden dependency directions. New
 feature work follows architecture, then failing tests, then implementation.
@@ -101,9 +109,10 @@ already requires an explicit decision to avoid architecture drift.
 - foundation and runtime-interface crates have no forbidden higher-layer
   dependencies;
 - `pop-driver` produces the binary named `pop`;
-- the only approved external dependency is Inkwell in the LLVM backend, pinned
-  centrally with default features disabled and the LLVM-major/native-target
-  feature set reviewed by architecture tests;
+- external dependencies remain the closed reviewed set: Inkwell in the LLVM
+  backend; Serde, JSON, and SHA-256 at artifact boundaries; and TOML in the
+  private localization presentation crate. Architecture tests pin their owning
+  crates and prevent them from spreading into semantic or base-library layers;
 - the workspace builds and tests without undeclared external dependencies.
 
 ## Documents/components affected

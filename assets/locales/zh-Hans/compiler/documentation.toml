@@ -1,0 +1,26 @@
+[messages."documentation.unsafeXml"]
+text = "XML 文档包含不安全的结构"
+
+[messages."documentation.malformedXml"]
+text = "XML 文档格式错误"
+
+[messages."documentation.invalidErrorTag"]
+text = "文档引用了无效的错误类型 `{errorType}`"
+
+[messages."documentation.missingErrorCase"]
+text = "文档缺少错误 case `{errorCase}`"
+
+[messages."documentation.missingSummary"]
+text = "public 声明 `{declaration}` 缺少摘要"
+
+[messages."documentation.duplicateSummary"]
+text = "声明 `{declaration}` 包含多个摘要"
+
+[messages."documentation.invalidInheritance"]
+text = "文档不能从 `{source}` 继承"
+
+[messages."documentation.inheritanceCycle"]
+text = "`{declaration}` 处存在文档继承循环"
+
+[messages."documentation.invalidReturns"]
+text = "无效的返回值文档：{expectation}"

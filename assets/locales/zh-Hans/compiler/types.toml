@@ -1,0 +1,119 @@
+[messages."types.wrongArity"]
+text = "类型 `{name}` 需要 {expected} 个参数，但找到 {found} 个"
+
+[messages."types.duplicateTypeParameter"]
+text = "重复的类型参数 `{name}`"
+
+[messages."types.mismatch"]
+text = "应为 `{expected}`，但找到 `{found}`"
+
+[messages."types.wrongValueArity"]
+text = "{context} 需要 {expected} 个值，但找到 {found} 个"
+
+[messages."types.noMatchingOverload"]
+text = "`{name}` 没有与这些参数匹配的重载"
+
+[messages."types.invalidOverloadSet"]
+text = "无效的重载集 `{name}`：{reason}"
+
+[messages."types.invalidOperator"]
+text = "运算符 `{operator}` 不适用于 {operands}"
+
+[messages."types.structuralMutationDuringIteration"]
+text = "迭代期间不允许结构变更 `{operation}`"
+
+[messages."types.notAllPathsReturn"]
+text = "并非所有路径都返回声明的结果"
+
+[messages."types.aggregateNeedsContext"]
+text = "聚合字面量需要预期类型"
+
+[messages."types.missingRecordField"]
+text = "缺少 record 字段 `{name}`"
+
+[messages."types.unknownRecordField"]
+text = "未知的 record 字段 `{name}`"
+
+[messages."types.duplicateRecordField"]
+text = "重复的 record 字段 `{name}`"
+
+[messages."types.duplicateAttributeArgument"]
+text = "重复的属性参数 `{name}`"
+
+[messages."types.unknownAttributeArgument"]
+text = "未知的属性参数 `{name}`"
+
+[messages."types.numericLiteralOutOfRange"]
+text = "字面量 `{literal}` 超出 `{numericType}` 的范围"
+
+[messages."types.wrongClassMethodOwner"]
+text = "方法所有者应为 `{expected}`，但找到 `{found}`"
+
+[messages."types.duplicateInterfaceMethod"]
+text = "重复的 interface 方法 `{name}`"
+
+[messages."types.emptyInterface"]
+text = "interface `{name}` 必须至少声明一个方法"
+
+[messages."types.invalidInterfaceImplementation"]
+text = "`{target}` 无法实现此 interface"
+
+[messages."types.missingInterfaceMethod"]
+text = "class `{class}` 未实现 `{interface}.{method}`"
+
+[messages."types.incompatibleInterfaceMethod"]
+text = "`{class}` 对 `{interface}.{method}` 的实现不兼容：{reason}"
+
+[messages."types.missingMatchCases"]
+text = "match 缺少以下 case：{cases}"
+
+[messages."types.duplicateMatchCase"]
+text = "重复的 match case `{name}`"
+
+[messages."types.foreignMatchCase"]
+text = "case `{name}` 不属于匹配的 union"
+
+[messages."types.duplicateBinding"]
+text = "重复的 pattern binding `{name}`"
+
+[messages."types.invalidResultPropagation"]
+text = "无法从 `{enclosing}` 传播 `{operand}`"
+
+[messages."types.ambiguousResultCase"]
+text = "结果 case `{case}` 不明确"
+
+[messages."types.illegalCleanupControl"]
+text = "`{control}` 无法离开清理体"
+
+[messages."types.invalidGenericBound"]
+text = "类型参数 `{parameter}` 不满足 `{bound}`"
+
+[messages."types.genericInferenceFailure"]
+text = "无法推断 `{parameter}`：{reason}"
+
+[messages."types.awaitOutsideAsync"]
+text = "`await` 只能在 async 函数中使用"
+
+[messages."types.awaitNonTask"]
+text = "无法等待类型为 `{found}` 的值"
+
+[messages."types.originalTypeParameter"]
+text = "原始类型参数"
+
+[messages."types.expectedOrigin"]
+text = "预期类型源自此处"
+
+[messages."types.originalRecordField"]
+text = "原始 record 字段"
+
+[messages."types.originalAttributeArgument"]
+text = "原始属性参数"
+
+[messages."types.originalInterfaceMethod"]
+text = "原始 interface 方法"
+
+[messages."types.originalMatchCase"]
+text = "原始 match case"
+
+[messages."types.originalBinding"]
+text = "原始 binding"

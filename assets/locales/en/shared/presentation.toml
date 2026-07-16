@@ -1,0 +1,39 @@
+[messages."ui.error"]
+text = "error"
+arguments = []
+kinds = []
+
+[messages."ui.warning"]
+text = "warning"
+arguments = []
+kinds = []
+
+[messages."ui.information"]
+text = "information"
+arguments = []
+kinds = []
+
+[messages."ui.hint"]
+text = "hint"
+arguments = []
+kinds = []
+
+[messages."ui.label"]
+text = "related"
+arguments = []
+kinds = []
+
+[messages."ui.note"]
+text = "note"
+arguments = []
+kinds = []
+
+[messages."ui.help"]
+text = "help"
+arguments = []
+kinds = []
+
+[messages."ui.suggestion"]
+text = "suggestion"
+arguments = []
+kinds = []

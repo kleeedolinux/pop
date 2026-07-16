@@ -1,0 +1,14 @@
+[messages."syntax.invalidCharacter"]
+text = "invalid character `{character}`"
+arguments = ["character"]
+kinds = ["Character"]
+
+[messages."syntax.unterminatedString"]
+text = "unterminated string literal"
+arguments = []
+kinds = []
+
+[messages."syntax.invalidStringEscape"]
+text = "invalid string escape"
+arguments = []
+kinds = []

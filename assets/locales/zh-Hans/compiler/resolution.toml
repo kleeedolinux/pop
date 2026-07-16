@@ -1,0 +1,23 @@
+[messages."resolution.invalidDeclaration"]
+text = "无效声明"
+
+[messages."resolution.duplicateDeclaration"]
+text = "重复声明 `{name}`"
+
+[messages."resolution.unknownName"]
+text = "未知名称 `{name}`"
+
+[messages."resolution.ambiguousName"]
+text = "名称 `{name}` 不明确"
+
+[messages."resolution.inaccessibleName"]
+text = "此处无法访问名称 `{name}`"
+
+[messages."resolution.originalDeclaration"]
+text = "原始声明"
+
+[messages."resolution.candidate"]
+text = "候选声明"
+
+[messages."resolution.declaration"]
+text = "声明位于此处"

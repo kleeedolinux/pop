@@ -121,6 +121,9 @@ transplanted into a Luau-shaped file.
 - Records/functions/composition are preferred over class hierarchies and fluent
   object APIs.
 - Diagnostics have stable `POP####` identities and structured safe quick fixes.
+- Human toolchain presentation uses complete embedded TOML catalogs for `en`,
+  `zh-Hans`, `ja`, `pt-BR`, and `es`; one immutable locale context renders the
+  same structured diagnostic and event facts for CLI and LSP consumers.
 - Expected failures use the reserved typed `Result` union, nominal error
   declarations, exact prefix propagation, exhaustive recovery, and lexical
   last-in, first-out cleanup.

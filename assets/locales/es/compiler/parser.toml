@@ -1,0 +1,8 @@
+[messages."syntax.unexpectedToken"]
+text = "se esperaba {expectation}, se encontró `{found}`"
+
+[messages."syntax.missingNamespace"]
+text = "el Module debe declarar un namespace"
+
+[messages."syntax.unsupportedExport"]
+text = "`{keyword}` no es compatible; use la visibilidad de la declaración"

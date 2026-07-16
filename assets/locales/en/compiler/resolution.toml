@@ -1,0 +1,39 @@
+[messages."resolution.invalidDeclaration"]
+text = "invalid declaration"
+arguments = []
+kinds = []
+
+[messages."resolution.duplicateDeclaration"]
+text = "duplicate declaration `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."resolution.unknownName"]
+text = "unknown name `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."resolution.ambiguousName"]
+text = "name `{name}` is ambiguous"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."resolution.inaccessibleName"]
+text = "name `{name}` is not accessible here"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."resolution.originalDeclaration"]
+text = "original declaration"
+arguments = []
+kinds = []
+
+[messages."resolution.candidate"]
+text = "candidate declaration"
+arguments = []
+kinds = []
+
+[messages."resolution.declaration"]
+text = "declaration is here"
+arguments = []
+kinds = []

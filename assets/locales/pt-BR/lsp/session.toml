@@ -1,0 +1,20 @@
+[messages."lsp.ready"]
+text = "o servidor de linguagem do Pop Lang está pronto"
+
+[messages."lsp.documentNotOpen"]
+text = "o documento `{uri}` não está aberto"
+
+[messages."lsp.documentAlreadyOpen"]
+text = "o documento `{uri}` já está aberto"
+
+[messages."lsp.staleDocument"]
+text = "o documento `{uri}` rejeitou a versão obsoleta {found}; a versão atual é {expected}"
+
+[messages."lsp.sourceRejected"]
+text = "não foi possível carregar o documento `{uri}`: {detail}"
+
+[messages."lsp.cancelled"]
+text = "a solicitação do servidor de linguagem foi cancelada"
+
+[messages."lsp.tooManyDocuments"]
+text = "o espaço de identificadores de documentos do servidor de linguagem foi esgotado"

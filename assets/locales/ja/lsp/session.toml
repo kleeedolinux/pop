@@ -1,0 +1,20 @@
+[messages."lsp.ready"]
+text = "Pop Lang 言語サーバーの準備ができました"
+
+[messages."lsp.documentNotOpen"]
+text = "ドキュメント `{uri}` は開かれていません"
+
+[messages."lsp.documentAlreadyOpen"]
+text = "ドキュメント `{uri}` はすでに開かれています"
+
+[messages."lsp.staleDocument"]
+text = "ドキュメント `{uri}` は古いバージョン {found} を拒否しました。現在のバージョンは {expected} です"
+
+[messages."lsp.sourceRejected"]
+text = "ドキュメント `{uri}` を読み込めませんでした: {detail}"
+
+[messages."lsp.cancelled"]
+text = "言語サーバーのリクエストはキャンセルされました"
+
+[messages."lsp.tooManyDocuments"]
+text = "言語サーバーのドキュメント識別子を使い切りました"

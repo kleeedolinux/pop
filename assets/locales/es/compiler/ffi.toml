@@ -1,0 +1,2 @@
+[messages."ffi.invalidForeignContract"]
+text = "contrato extranjero no válido: {reason}"

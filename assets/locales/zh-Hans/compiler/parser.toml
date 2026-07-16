@@ -1,0 +1,8 @@
+[messages."syntax.unexpectedToken"]
+text = "应为 {expectation}，但找到 `{found}`"
+
+[messages."syntax.missingNamespace"]
+text = "Module 必须声明 namespace"
+
+[messages."syntax.unsupportedExport"]
+text = "不支持 `{keyword}`；请使用声明可见性"

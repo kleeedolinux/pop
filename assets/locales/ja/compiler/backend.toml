@@ -1,0 +1,29 @@
+[messages."backend.bpf.invalidEntryPoint"]
+text = "無効な BPF エントリポイント: {reason}"
+
+[messages."backend.bpf.unsupportedMirOperation"]
+text = "BPF は MIR 操作 {reason} に対応していません"
+
+[messages."backend.bpf.unsupportedTypeOrLayout"]
+text = "BPF は型またはレイアウト {reason} に対応していません"
+
+[messages."backend.bpf.managedAllocationUnavailable"]
+text = "BPF ではマネージド割り当てを使用できません: {reason}"
+
+[messages."backend.bpf.floatingPointUnavailable"]
+text = "BPF では浮動小数点を使用できません: {reason}"
+
+[messages."backend.bpf.callUnavailable"]
+text = "BPF では呼び出しを使用できません: {reason}"
+
+[messages."backend.runtimeContractUnavailable"]
+text = "runtime 契約を使用できません: {reason}"
+
+[messages."backend.bpf.llvmTargetUnavailable"]
+text = "LLVM BPF target を使用できません: {reason}"
+
+[messages."backend.unknownTarget"]
+text = "不明な Pop Lang target: {reason}"
+
+[messages."backend.bpf.loopBoundUnavailable"]
+text = "BPF ループの上限を証明できません: {reason}"

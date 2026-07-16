@@ -1,0 +1,34 @@
+[messages."lsp.ready"]
+text = "Pop Lang language server is ready"
+arguments = []
+kinds = []
+
+[messages."lsp.documentNotOpen"]
+text = "document `{uri}` is not open"
+arguments = ["uri"]
+kinds = ["Text"]
+
+[messages."lsp.documentAlreadyOpen"]
+text = "document `{uri}` is already open"
+arguments = ["uri"]
+kinds = ["Text"]
+
+[messages."lsp.staleDocument"]
+text = "document `{uri}` rejected stale version {found}; current version is {expected}"
+arguments = ["uri", "found", "expected"]
+kinds = ["Text", "Unsigned", "Unsigned"]
+
+[messages."lsp.sourceRejected"]
+text = "document `{uri}` could not be loaded: {detail}"
+arguments = ["uri", "detail"]
+kinds = ["Text", "External"]
+
+[messages."lsp.cancelled"]
+text = "language-server request was cancelled"
+arguments = []
+kinds = []
+
+[messages."lsp.tooManyDocuments"]
+text = "language-server document identifier space is exhausted"
+arguments = []
+kinds = []
