@@ -350,28 +350,33 @@ An unmodelled operation is retaining. It never means "probably safe."
 
 ### Closed call lifetime summaries
 
-Effects alone do not state whether a callee retains an argument. Every callable
-crossing the analysis boundary therefore carries a closed lifetime summary for
-each managed-capable parameter and result. The initial facts are:
+Effects alone do not state whether a callee retains an argument. ADR 0097
+therefore separates parameter retention from result provenance:
 
 ```text
-DoesNotRetain
-MayRetain
-ReturnsAlias(parameter)
-StoresInto(parameter)
-Captures
-Publishes
+parameterRetention[i] = DoesNotRetain
+                      | MayRetain
+                      | StoresInto(targetParameter)
+                      | Captures
+                      | Publishes
+
+resultProvenance[j] = Independent
+                    | ReturnsAlias(sourceParameter)
+                    | MayAlias
 ```
 
-The summary is inferred from typed bodies, checked at overrides/interface
-implementations, and emitted in public reference metadata and portable generic
-specialization capsules. `MayRetain` is a conservative static fact, not a
-dynamic/unknown operation. Missing, incompatible, or budget-exhausted metadata
-becomes `MayRetain` and forces managed storage.
+The structured summary is inferred from typed bodies, checked at
+overrides/interface implementations, and emitted in public reference metadata
+and portable generic specialization capsules. `MayRetain`/`MayAlias` are
+conservative static facts, not dynamic operations. Missing, incompatible, or
+budget-exhausted metadata selects both conservative facts. That forces ordinary
+owned allocations toward managed storage but rejects a borrowed view rather
+than creating a managed/runtime borrow fallback.
 
 A function-value type carries the closed summary required by all possible
 callees. An interface implementation may not retain where its interface member
-promises `DoesNotRetain`.
+promises `DoesNotRetain`, and a view result must preserve the declared exact
+source-parameter provenance.
 
 ### Path-sensitive lifetime frontier
 
@@ -418,7 +423,7 @@ canonical MIR with these backend-neutral identities and operations:
 
 ```text
 AllocationSiteId
-LifetimeId
+LifetimeId{kind = Storage | Borrow}
 RegionId
 StoragePlan = Elided
             | StaticSlot{lifetime}
@@ -432,6 +437,14 @@ regionOpen{region, lifetime, layoutBudget}
 allocateInRegion{region, allocationSite, objectMap}
 regionClose{region}
 ```
+
+`AllocationSiteId` names one managed-capable construction use and remains
+traceable after optimization. A storage-kind `LifetimeId` governs a slot or
+region frontier; a borrow-kind `LifetimeId` governs one view. `RegionId` names
+only a compiler-inferred storage region and remains distinct from ADR 0087's
+foreign `BorrowRegionId`. A non-allocating `Text.View`/`Bytes.View` descriptor
+has no allocation site or storage plan of its own; it records its lender and a
+contained borrow lifetime under ADR 0097.
 
 The closed initial `StaticReclamationProof` kinds are:
 
@@ -566,11 +579,14 @@ region close does not invent handle cleanup.
 
 Public reference metadata and generic specialization capsules carry closed
 lifetime summaries, not bodies or compiler pointers. The summary is part of
-the compatibility fingerprint because changing `DoesNotRetain` to `MayRetain`
-can invalidate a consumer's storage plan.
+the compatibility fingerprint because changing `DoesNotRetain` to `MayRetain`,
+changing `ReturnsAlias`'s source parameter, or weakening `Independent` to
+`MayAlias` can invalidate a consumer's storage or view plan.
 
-The compiler may always replace a stronger summary with the conservative
-`MayRetain` result and use GC. It may not reuse cached static-reclamation MIR
+The compiler may always replace a stronger summary with conservative
+`MayRetain`/`MayAlias` and use GC for ordinary owned allocations. A borrowed
+view then becomes invalid source rather than a runtime-managed borrow. The
+compiler may not reuse cached static-reclamation MIR
 after the callee summary, effect summary, target storage capability, object
 layout, or compiler proof version changes.
 
@@ -665,8 +681,10 @@ Positive coverage includes:
 - branch-specific final use, loops, early return, result failure, cleanup,
   unwind, cancellation, and coroutine-frame storage;
 - same-region cycles, outward managed references, nested allocation, and bulk
-  close; and
-- separate-Bubble `DoesNotRetain` calls and generic specialization.
+  close;
+- separate-Bubble `DoesNotRetain` calls and generic specialization; and
+- local Text/Bytes views, re-slicing, exact parameter-alias returns, and
+  explicit owned materialization under ADR 0097.
 
 Negative coverage includes:
 
@@ -677,8 +695,10 @@ Negative coverage includes:
 - forged proof, duplicate/missing end, end before use, missing exit, cross-region
   pointer, managed-to-region pointer, stale metadata, and wrong call summary;
 - identity-changing materialization and allocation before a conditional escape
-  that changes evaluation/failure order; and
-- analysis timeout/budget exhaustion falling back to managed allocation.
+  that changes evaluation/failure order;
+- analysis timeout/budget exhaustion falling back to managed allocation; and
+- view aggregate/store/capture/suspension/ownership/FFI escape and missing,
+  conservative, or wrong result-provenance rejection without runtime fallback.
 
 Regression coverage permanently proves:
 

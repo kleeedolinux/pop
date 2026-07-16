@@ -132,6 +132,7 @@ A reusable library Bubble emits a deterministic `.poplib` artifact:
 Studio.Gameplay.poplib/
   bubble.manifest
   reference.metadata
+  retained-adapters.popc
   documentation.xml
   targets/
     x86_64-linux/native.object
@@ -148,9 +149,10 @@ ADR 0055 fixes the version-1 physical control files as bounded canonical UTF-8
 JSON with identity-sorted arrays and exactly one trailing newline. Every
 inventoried file has a recorded size and lowercase hexadecimal SHA-256 digest.
 Paths are normalized relative paths and cannot traverse or escape the artifact.
-`documentation.xml` and opaque target implementation files retain their native
-formats. Emission verifies a complete temporary artifact through the normal
-loader before atomic publication.
+`documentation.xml`, optional ADR 0096 `retained-adapters.popc`, and opaque
+target implementation files retain their native formats. The retained-adapter
+file is canonical typed `.popc`, never JSON. Emission verifies a complete
+temporary artifact through the normal loader before atomic publication.
 
 ### Bubble identity
 
@@ -182,6 +184,8 @@ verification occurs before executable content is mapped.
 - optional signing information;
 - whether this is a reference-only artifact;
 - documentation hash/schema when present.
+- optional ADR 0096 retained-adapter descriptor path, schema/protocol versions,
+  byte size, full SHA-256, and public entry fingerprints.
 
 ### Reference metadata
 
@@ -194,6 +198,12 @@ verification occurs before executable content is mapped.
 - public compile-time-relevant UDA values;
 - public constants;
 - referenced `BubbleIdentity` values.
+
+Public callables containing `Text.View` or `Bytes.View` additionally carry ADR
+0093's complete structured parameter-retention and result-provenance summary.
+A view result names one exact source parameter. The summary schema/proof version
+participates in the API fingerprint, and missing, malformed, conservative, or
+type-inconsistent facts reject that borrowed signature before consumer HIR.
 
 For a public trusted `Ffi.C.Layout` record used by value in a public foreign
 signature, ABI-visible layouts include the stable producer record identity,
@@ -211,6 +221,17 @@ Capsule-private identities are not entered into consumer name resolution and do
 not widen visibility. Reference-only artifacts never execute. XML documentation
 is separate and does not alter the public API hash. See ADR 0054.
 
+For ADR 0096, `reference.metadata` contains only a public generated
+`Codec.Schema<T>` Item's stable identity, exact static type, and the normalized
+`retained-adapters.popc` path/size/full file and entry SHA-256 values. The closed
+record/enum/union projection remains exclusively in the typed `.popc` file.
+Canonical JSON reference metadata never duplicates that structure, admits an
+internal/private entry, or becomes an alternative retained-adapter schema.
+Consumers verify the artifact inventory, descriptor, fingerprints, and public
+visibility closure before entering the adapter Item into normal static lookup.
+The artifact `.popc` is itself public-only; Module-private and Bubble-internal
+descriptors stay in their private build boundaries and are never published.
+
 Cross-Bubble declarations use
 `SymbolIdentity { bubble: BubbleId, symbol: SymbolId }` under
 [ADR 0036](./decisions/0036-typed-cross-bubble-function-references.md). The
@@ -220,6 +241,13 @@ recursive typed schema for parameters, bounds, aggregate/callable types, nominal
 identities, and reserved built-in identities. Unsupported public signature or
 capsule types reject metadata emission rather than becoming erased or dynamic.
 HIR/MIR retain complete identities after any session-local metadata remapping.
+
+Concrete `AllocationSiteId`, `LifetimeId`, `RegionId`, `StoragePlan`, view
+ranges, and proof graphs remain verified implementation/capsule facts rather
+than consumer names or reflection. When serialized for execution or portable
+specialization they are paired with stable origin fingerprints and the proof
+schema; a cache fails closed on summary, effect, layout, target, or proof-version
+mismatch.
 
 For ADR 0095 checked casts, a public class reference additionally retains its
 stable specialized direct-base identity, open/sealed fact, and exact specialized
@@ -266,6 +294,11 @@ reflection.
 A binary Bubble closes its dependency graph and links library Bubble objects
 into an executable/application-owned image. Unused code and metadata may be
 dead-stripped.
+
+An ADR 0096 attachment alone does not create a runtime root. Only reachability
+of the exact generated schema Item retains its adapter body and minimal runtime
+labels/fingerprints. A library's `.popc` descriptor may remain as compile/link
+input without registration, initialization, or runtime enumeration.
 
 ### Shared native Bubble artifacts
 

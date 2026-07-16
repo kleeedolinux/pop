@@ -88,6 +88,10 @@ transplanted into a Luau-shaped file.
 - Compile-time evaluation cannot parse or inject source strings.
 - Reflection is compile-time-first, visibility-preserving, capability-limited,
   and absent from runtime artifacts unless explicitly requested.
+- First-release retained metadata is limited to ADR 0096 codec schemas for
+  non-generic records, enums, and tagged unions. Canonical typed
+  `retained-adapters.popc` is the schema source of truth; generated
+  `Codec.Schema<T>` Items are statically resolved and dead-strippable.
 - Namespaces/types/attributes use `PascalCase`; values/functions use `camelCase`;
   only constants use `UPPER_SNAKE_CASE`.
 - `using` changes compile-time name resolution and never loads code.
@@ -172,11 +176,19 @@ transplanted into a Luau-shaped file.
   target-type call returning `TTarget?`. It matches exact specialized class
   identity or a verified descendant, preserves object identity, and uses only
   private Bubble-scoped descriptor facts rather than reflection or names.
+- `Text.View` and `Bytes.View` are non-allocating compiler-proven lender/range
+  values. Exact structured callable summaries permit direct non-retaining calls
+  and parameter-alias results; storage, capture, suspension, ownership, FFI,
+  and missing-metadata escapes fail statically under ADR 0097.
 - Deterministic FFI generation selects one exact target-owned manifest plan,
   verifies one hashed canonical declarative `.popc` ABI-and-policy descriptor,
   and publishes only validated reviewable source, closed shim output, and
   hashed metadata. The first embedded parser invokes no process and infers no
   safety fact.
+- Retained-adapter descriptors never use JSON. ADR 0055 canonical JSON remains
+  the separate control encoding for ordinary `.poplib` manifests and public
+  reference metadata, which may reference but never duplicate the typed
+  `.popc` projection.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 

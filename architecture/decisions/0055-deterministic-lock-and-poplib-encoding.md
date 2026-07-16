@@ -4,6 +4,8 @@
 - Date: 2026-07-14
 - Depends on: ADR 0007, ADR 0014, ADR 0017, ADR 0028, ADR 0036, ADR 0054
 - Supersedes: the open physical-encoding portions of those decisions
+- Amended by: ADR 0096 for optional canonical typed
+  `retained-adapters.popc` and its public adapter-only JSON references
 
 ## Context
 
@@ -79,6 +81,7 @@ The logical directory remains:
 <BubbleName>.poplib/
   bubble.manifest
   reference.metadata
+  retained-adapters.popc
   documentation.xml
   targets/
     <platform-target>/native.object
@@ -93,11 +96,21 @@ reference-only status, target implementations, optional documentation, and the
 ordered file inventory. Documentation has its own digest and never changes the
 public API or implementation digest.
 
+When public ADR 0096 schemas exist, the artifact additionally inventories a
+public-only canonical typed `retained-adapters.popc` with its independent
+schema/protocol versions, size, and full SHA-256. This optional file is not a
+JSON control file.
+
 `reference.metadata` is a serialization of the verified logical
 `ReferenceMetadata` model, not a parallel resolver contract. It contains only
 public names, signatures, layouts/contracts, constants/UDA projections, exact
 referenced Bubble identities, and portable generic entries. Internal/private
 names never enter consumer lookup.
+
+ADR 0096 public generated schema entries add only their stable
+`Codec.Schema<T>` identity, exact type, and `.popc` path/size/full file and entry
+fingerprints to this JSON file. The record/enum/union projection and provenance
+remain exclusively in `.popc`; JSON cannot duplicate or replace that schema.
 
 A public generic entry records its capsule schema version, source
 `SymbolIdentity`, canonical content SHA-256, resource counts, and its verified
@@ -120,7 +133,8 @@ directories; the verified lock graph supplies every artifact path.
 ### Compatibility
 
 Schema versions are independent for locks, manifests, reference metadata,
-generic capsules, documentation, and target implementations. Version 1 readers
+retained-adapter `.popc`, generic capsules, documentation, and target
+implementations. Version 1 readers
 reject unsupported versions and unknown critical fields. The `0.1.0` release
 freezes the version-1 byte fixtures and compatibility ranges; before that freeze,
 repository caches may be invalidated but accepted conformance fixtures remain

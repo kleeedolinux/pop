@@ -83,7 +83,15 @@ and does not define the work remaining for `0.1.0`.
     propagation, cancellation masking, and cross-backend differential proof.
 - [ ] Close the remaining accepted first-release gaps for FFI, view lifetimes,
   checked nominal casts, effects, and generated typed metadata adapters before
-  exposing those surfaces as stable.
+  exposing those surfaces as stable. ADR 0096 now fixes the metadata contract:
+  exact `Metadata.Use.Codec` targets/arguments, closed projections,
+  same-visibility `Codec.Schema<T>` Items, canonical typed
+  `retained-adapters.popc` as the sole schema/generation source, bounded full
+  hashes/provenance, public adapter-only reference entries, and dead stripping.
+  ADR 0097 now also fixes the direct immutable `Text.View`/`Bytes.View` API,
+  lender provenance, structured retention summaries, escape rules, verified
+  HIR/MIR lifetimes, relocation-safe lowering, and fail-closed C behavior.
+  Implementation and cross-backend conformance for both decisions remain open.
 
 ### 2. Finish the standard foundation
 

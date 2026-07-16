@@ -61,6 +61,13 @@ decide that a managed allocation is non-escaping or free it on fewer exits. The
 existing non-escaping scalar-array special case is a transition implementation:
 its analysis must move to portable MIR before it becomes the general contract.
 
+Under ADR 0097, LLVM lowers a view from its typed lender and checked offsets.
+A managed lender stays in the precise relocating root set, and any ephemeral
+payload address is recomputed after a safe point. A static or region lender uses
+the base selected by its verified storage plan. LLVM cannot allocate a managed
+view object, cache an interior address across relocation, insert runtime borrow
+state, or widen a view's verified lifetime.
+
 The Rust implementation uses Inkwell only inside the LLVM backend. Verified
 canonical MIR first becomes backend-private IR; Inkwell then constructs or
 parses that private emission, verifies the LLVM module, applies target data, and
@@ -159,6 +166,11 @@ class-ancestry descriptors. It cannot substitute a C pointer cast, `void *`,
 name comparison, or partial RTTI. LLVM and the MIR interpreter remain the
 required first-release checked-cast conformance pair.
 
+ADR 0097 view operations and callable signatures containing `Text.View` or
+`Bytes.View` are likewise rejected during C capability validation. The
+runtime-free literal-string path proves neither lender rooting nor Unicode
+slicing and cannot substitute `char *`, `void *`, or an implicit owned copy.
+
 The bootstrap driver exposes this experiment as `pop transpile <source.pop>
 --to c`. Successful output is C source on standard output; failure publishes no
 partial artifact. C text is disposable output and is not a stable ABI, cache,
@@ -217,6 +229,10 @@ It may realize activation storage in typed register/frame arrays, but must end
 and bulk-close it at the exact MIR frontiers and preserve outward relocating
 roots.
 
+It also consumes the same lender/range view operations and borrow frontiers.
+Managed lender slots are relocation-updated before the next bytecode, and the
+VM cannot turn verified views into a dynamically checked object kind.
+
 The VM is an architectural acceptance test: if implementing it would require
 recovering class, closure, error, or lifetime semantics from LLVM-shaped MIR,
 the MIR boundary is wrong.
@@ -246,6 +262,8 @@ All backends run the same observable-language test suite. Tests should cover:
 - collection semantics;
 - proof-directed storage plans, lifetime frontiers, scoped-region roots, and
   managed fallback;
+- borrowed Text/Bytes views, exact retention/result provenance, relocation-safe
+  lender roots, and explicit owned materialization;
 - errors, cleanup, and stack traces;
 - coroutines/tasks;
 - FFI boundary behavior where supported;

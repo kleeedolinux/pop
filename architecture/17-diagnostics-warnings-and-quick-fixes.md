@@ -206,6 +206,15 @@ identities and spans where available. No automatic fix changes the target,
 inserts an unchecked assertion, enables reflection, or silently unwraps the
 optional result.
 
+ADR 0097 reserves `POP2035` for a borrowed view escaping its lender, `POP2036`
+for a view passed to a retaining/conservative callable position, `POP2037` for
+a view live across suspension, and `POP2038` for a callable view signature
+without exact usable result provenance. `POP7040` reports invalid artifact or
+MIR lifetime-summary/provenance facts. These diagnostics carry typed view kind,
+lender, destination/call, reason, and summary facts. Explicit `Text.toString`
+or `Bytes.toBytes` materialization may be a `RequiresReview` action because it
+copies and may allocate; it is never a safe unattended fix.
+
 ## Warning system
 
 ### Warning groups

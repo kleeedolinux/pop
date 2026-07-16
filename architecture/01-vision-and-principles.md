@@ -99,6 +99,9 @@ descriptors. It cannot generate, parse, or inject program text. String mixins,
 Compile-time metadata queries are precise and visibility-aware. Runtime
 reflection is omitted by default, never provides untyped field values, and can
 only exist through explicit metadata retention with narrow generated adapters.
+The first release accepts only ADR 0096 typed codec schemas, whose canonical
+descriptor is `.popc` and whose generated `Codec.Schema<T>` value is resolved
+statically rather than through a registry.
 
 ### Multiple execution engines
 

@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-07-10
 - Supersedes: none
+- Amended by: ADR 0096 for the exact first-release `@RetainMetadata` contract
 
 ## Context
 
@@ -35,7 +36,9 @@ return exactly one `Boolean`. The compiler invokes it with the attachment's
 canonical arguments after defaults and named arguments have been normalized;
 `false` rejects that attachment. Version one passes no target context or
 enumeration handle to a validator. Runtime retention remains an explicit
-trusted `@RetainMetadata` capability and is never implied by usage.
+trusted `@RetainMetadata` capability and is never implied by usage. ADR 0096
+limits that capability to the exact non-repeatable `Metadata.Use.Codec`
+record/enum/tagged-union contract and canonical typed `.popc` descriptor.
 
 ADR 0052 adds `AttributeTarget.Error` for nominal error declarations. It stays
 distinct from `AttributeTarget.Union`; shared attachment mechanics do not merge

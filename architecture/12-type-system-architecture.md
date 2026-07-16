@@ -34,6 +34,7 @@ Union(members)
 Optional(inner)
 TypeParameter(ParameterId)
 Opaque(OpaqueId)
+BorrowedView(Text | Bytes)
 Never
 Error                 // compiler recovery only
 ```
@@ -41,6 +42,11 @@ Error                 // compiler recovery only
 `Error` suppresses cascading diagnostics but cannot appear in a valid HIR/MIR
 module. An internal top type, if useful to constraint solving, has no member or
 call operations and must be eliminated/narrowed before valid HIR.
+
+`BorrowedView` is the closed compiler representation of the nominal
+`Text.View`/`Bytes.View` types from ADR 0097. Its lender and borrow `LifetimeId`
+are value-provenance facts, not source-visible type arguments or runtime type
+metadata.
 
 ## Inference strategy
 
@@ -70,6 +76,21 @@ Examples requiring diagnostics include:
 - a union member access not valid for every remaining variant;
 - a table write inconsistent with its inferred key/value type;
 - an overload set with no unique best statically valid candidate.
+
+## Compiler-proven borrowed views
+
+The first release permits a view only as a direct local, parameter, or exact
+parameter-alias result. Direct assignment and branch joins preserve one lender
+provenance. Embedding a view in a tuple, record, union, optional, result,
+collection, class, capture, coroutine frame, ownership transfer, or FFI type is
+rejected before HIR.
+
+Every callable type carries ADR 0097's closed parameter-retention and
+result-provenance summary in addition to ADR 0022 effects. A view argument
+requires `DoesNotRetain`; a view result requires
+`ReturnsAlias(sourceParameter)`. Missing/conservative facts reject views rather
+than selecting a dynamic or managed-borrow fallback. No lifetime punctuation,
+implicit copy, runtime borrow check, or string-selected operation exists.
 
 ## Exact source overloads
 
@@ -390,6 +411,15 @@ untyped metadata value.
 Symbol/type handles exist only in the compile-time type universe. Escape
 analysis rejects storing them in runtime globals, fields, returned runtime
 values, or retained metadata projections.
+
+ADR 0096 retention checking is a closed type-graph validation, not structural
+reflection. Only a non-generic record, enum, or tagged union with exact
+`Metadata.Use.Codec` and nonzero application schema version is eligible. Its
+recursive projection admits only the fixed scalar leaves, optional/tuple/array/
+list constructors, and visibly retained nominal data types fixed by that ADR.
+Success reserves the exact sibling type
+`TargetSchema: Codec.Schema<Target>`; unsupported or inaccessible nodes are
+errors and never become an opaque/dynamic type.
 
 ## Type checking output
 

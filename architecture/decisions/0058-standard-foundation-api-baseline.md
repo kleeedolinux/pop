@@ -32,7 +32,7 @@ The trusted `Pop.Standard` prelude contains exactly these source bindings:
 | Foundation types | `Bytes`, `Array`, `Table`, `Result`, `List`, `Set`, `Range`, `Task`, `CancelToken`, `Guid`, `Iterable`, `Iterator`, `Equal`, `Order`, `Hash`, `Close`, `AsyncClose`, `Iteration` |
 | Namespace roots | `Sequence` |
 | Function overload sets | `print(Int)`, `print(String)` |
-| Trusted attributes | `CompileTime`, `AttributeUsage`, `AttributeValidator` |
+| Trusted attributes | `CompileTime`, `AttributeUsage`, `AttributeValidator`, `RetainMetadata` |
 
 `nil` remains a literal and is not a type binding. Optional values use the
 language type `T?`; the initial prelude does not add a nominal `Option<T>` that
@@ -89,6 +89,11 @@ The first baseline contains:
   `Sequence.collect` as portable Pop prototypes; and
 - the exact prelude type and attribute identities needed to type those APIs and
   the accepted foundation contracts.
+
+ADR 0096 appends trusted `attribute:3`, `RetainMetadata`, for the first-release
+codec-schema contract. Its implementation must add that exact append-only row
+before the surface is exposed; catalog placement or source spelling alone does
+not claim that the current bootstrap baseline already implements it.
 
 Rust-only Math, Text, and eager Sequence test helpers are implementation
 prototypes, not Pop public declarations. They do not enter the public API

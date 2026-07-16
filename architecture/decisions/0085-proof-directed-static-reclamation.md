@@ -97,23 +97,28 @@ region closes atomically.
 
 ### Calls and separate compilation
 
-Effects do not fully describe retention. Function types/HIR and cross-Bubble
-reference metadata therefore carry a closed lifetime summary for each
-managed-capable parameter/result:
+Effects do not fully describe retention. ADR 0097 refines the original flat
+vocabulary into one structured summary carried by function types/HIR and
+cross-Bubble reference metadata:
 
 ```text
-DoesNotRetain
-MayRetain
-ReturnsAlias(parameter)
-StoresInto(parameter)
-Captures
-Publishes
+parameterRetention[i] = DoesNotRetain
+                      | MayRetain
+                      | StoresInto(targetParameter)
+                      | Captures
+                      | Publishes
+
+resultProvenance[j] = Independent
+                    | ReturnsAlias(sourceParameter)
+                    | MayAlias
 ```
 
-Missing or incompatible metadata is `MayRetain`. This is a conservative static
-fact, not an unknown runtime effect. Interface implementations cannot retain an
-argument where the interface contract promises `DoesNotRetain`. Summary/proof
-versions participate in cache and artifact invalidation.
+Missing or incompatible metadata selects `MayRetain` and `MayAlias`. These are
+conservative static facts, not unknown runtime effects. They force ordinary
+owned allocations toward managed storage but reject a borrowed view. Interface
+implementations cannot retain an argument where the interface contract promises
+`DoesNotRetain` or change an exact result provenance. Summary/proof versions
+participate in cache and artifact invalidation.
 
 ### Required tracing boundary
 

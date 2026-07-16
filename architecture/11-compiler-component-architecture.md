@@ -371,7 +371,8 @@ The driver may emit:
 - diagnostics;
 - syntax/HIR/MIR textual dumps for debugging;
 - dependency metadata;
-- retained metadata projections;
+- canonical typed ADR 0096 `retained-adapters.popc` projections and their
+  source-mapped generated `Codec.Schema<T>` adapters;
 - deterministic C11 source as an experimental backend artifact;
 - LLVM IR/bitcode as optional backend artifacts;
 - native object, library, or executable files;
@@ -381,6 +382,12 @@ The driver may emit:
 
 Only explicitly versioned formats are cache/load contracts. Debug dumps can
 change but must be deterministic within a compiler version.
+
+`retained-adapters.popc` is the sole retained-adapter structural schema and
+generation source. The driver may inventory its full digest in ADR 0055 JSON
+control files, but no compiler component owns a parallel JSON or private
+retained-schema model. Backends receive verified MIR and cannot parse or
+reconstruct the descriptor.
 
 ## Verification gates
 

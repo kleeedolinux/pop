@@ -2,10 +2,11 @@
 
 ## Status and authority
 
-This accepted architecture is authorized by ADRs 0030, 0031, and 0032. It
-defines planned public placement and review rules. A catalog entry is not an
-implementation claim. The Rust `Pop.Standard` bootstrap implements only the
-surfaces explicitly marked `implemented` in the domain catalogs.
+This accepted architecture is authorized by ADRs 0030, 0031, and 0032 and
+extended by ADR 0096. It defines planned public placement and review rules. A
+catalog entry is not an implementation claim. The Rust `Pop.Standard`
+bootstrap implements only the surfaces explicitly marked `implemented` in the
+domain catalogs.
 
 ## Product rule
 
@@ -23,6 +24,10 @@ These sketches show API shape. Prefix `try` provides exact typed `Result`
 propagation under ADR 0052. Advanced control remains available through
 typed options, streams, views, buffers, and resource handles without replacing
 the simple path.
+
+`UserSchema` is ADR 0096's generated same-visibility
+`Codec.Schema<User>` Item from canonical typed `retained-adapters.popc`. It is
+statically resolved and never registered or selected by runtime name.
 
 ## Usability contract
 
@@ -70,6 +75,17 @@ schedule a task. An asynchronous call may allocate task state and must identify
 suspension/cancellation points. Safe convenience functions lower to the same
 typed primitives exposed for advanced use; they are not layers of reflective or
 dynamic dispatch.
+
+ADR 0097 closes the first accepted view contract. `Text.View` and `Bytes.View`
+are compiler-proven immutable lender/range values usable directly as locals,
+parameters, and exact parameter-alias results. They cannot enter aggregates,
+captures, suspension frames, ownership transfers, or FFI. Public callables
+carry structured retention/result-provenance facts; missing facts reject views.
+`Text.slice` measures one-based Unicode scalar start/length, `Bytes.slice`
+measures one-based byte start/length, and `toString`/`toBytes` are the explicit
+owned materializations. Iterator-yielding and mutable-buffer views remain
+unstabilized. Catalog status remains planned until implementation, differential,
+cost, documentation, and API-baseline gates pass.
 
 Pop Lang does not promise that every abstraction is literally free. Benchmarks
 must establish throughput, latency, allocation, code-size, and native-transition

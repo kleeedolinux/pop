@@ -2,6 +2,8 @@
 
 - Status: accepted
 - Date: 2026-07-10
+- Amended by: ADR 0096 for the first-release retained codec projection,
+  generated adapter protocol, and canonical `.popc` descriptor
 
 ## Context
 
@@ -22,7 +24,9 @@ type enumeration, FFI, ambient I/O, or backend access.
 UDAs cannot change parsing/name binding or add declarations in the first
 language version. They are not retained at runtime by default. Reflection-like
 runtime use cases rely on explicit narrow metadata projections and generated
-statically typed adapters.
+statically typed adapters. ADR 0096 authorizes only one fixed compiler-generated
+sibling adapter Item for the closed `Metadata.Use.Codec` request; it does not
+authorize arbitrary declaration generation.
 
 ## Consequences
 
@@ -50,4 +54,3 @@ determinism, and compiler robustness.
 
 Rejected because it increases artifact/runtime cost, leaks structure, prevents
 dead stripping, and pressures the language toward dynamic values.
-

@@ -427,6 +427,11 @@ final directory component must already be a valid PascalCase identity.
 Scaffolding is validated before atomic publication and never overwrites source,
 initializes version control, or downloads dependencies.
 
+`pop metadata` JSON is the tooling graph schema only. It never emits or accepts
+an ADR 0096 retained-adapter structural schema. The sole descriptor/generation
+source for that contract is canonical typed `retained-adapters.popc`; tooling
+JSON may report only its artifact path, size, and full digest.
+
 Shared selectors and controls include:
 
 ```text

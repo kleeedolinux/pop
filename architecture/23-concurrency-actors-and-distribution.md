@@ -236,6 +236,13 @@ tasks, channels, resource/native handles, borrowed views, pins, compiler
 handles, and untyped external data. An immutable collection can enter the set
 only through a focused accepted decision.
 
+ADR 0097 additionally requires every `Text.View`/`Bytes.View` borrow to end
+before suspension, cold-task creation, channel send, actor publication, or
+capture into a coroutine frame. Async code may create and consume a view within
+one non-suspending segment. It materializes an owned `String`/`Bytes` value
+before any longer-lived transfer; no scheduler/runtime borrow table repairs an
+unproven escape.
+
 Local send copies the complete message graph into the receiver's ownership
 domain. Sharing immutable runtime bytes is permitted only as an unobservable
 optimization. No mutable reference points from actor state back into the
@@ -367,6 +374,8 @@ become MIR network opcodes.
 
 MIR verification rejects:
 
+- a borrowed view in a live suspend-frame map, task/channel/actor payload, or
+  captured dispatch environment;
 - wrong task/message/result types;
 - double task start or missing owner;
 - invalid resume predecessor/state;

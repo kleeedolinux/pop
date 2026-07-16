@@ -93,6 +93,11 @@ owned UTF-8 results, but HIR/MIR name only backend-neutral `StringConcat` and
 `StringFormat` operations. Helpers never inspect a runtime type or ambient
 locale. Their output bytes follow ADR 0041 identically across backends.
 
+ADR 0097 adds no runtime borrow manager. `Text.View` and `Bytes.View` remain
+compiler-proven non-allocating lender/range values. Owned materialization uses
+the ordinary typed `String`/`Bytes` allocation operations; the runtime never
+extends a view lifetime, stores a view object, or resolves retention dynamically.
+
 Scoped pin handles advance native ABI 1 to version 1.2. Distinct
 typed table allocation advances it to version 1.3: the allocation request and
 native entry carry the entry count plus homogeneous key/value managed-reference
@@ -256,6 +261,12 @@ The logical convention describes:
 - ownership/rooting expectations across the call;
 - whether the call is a GC safe point.
 
+It also carries ADR 0097's structured parameter-retention and
+result-provenance summary. A view argument requires exact `DoesNotRetain`; a
+view result requires exact `ReturnsAlias(sourceParameter)`. Missing or
+conservative facts reject the borrowed call even though ordinary owned values
+may remain managed.
+
 Each call carries the canonical closed effect summary, and every `MayUnwind` MIR
 instruction carries an explicit unwind action. An unwind action either
 propagates panic to the caller or enters a verified cleanup block that
@@ -311,6 +322,12 @@ mutable root slots until their verified end/close. Managed objects cannot point
 into that storage. Missing retention/lifetime proof selects an ordinary managed
 allocation rather than an unchecked static path.
 
+A live view contributes its managed lender, not an interior address, to the
+precise root publication. Relocation updates the lender token; the backend
+recomputes any ephemeral payload address from the verified range. Views of
+static/region storage end before the corresponding storage frontier and never
+become managed-to-static edges.
+
 Root publications preserve canonical sorted `RootSlot` order. A safe point
 validates all roots and either completes every root/object/handle update or
 fails without exposing a partial relocation. Bootstrap adapters leave tokens
@@ -363,24 +380,37 @@ Runtime reflection is absent by default. The compiler may still emit private
 metadata required for collection, dispatch, stack unwinding, and checked type
 tests; programs cannot enumerate or index that metadata.
 
-The explicit `@RetainMetadata` attribute may request a narrow public metadata
-projection.
-Even then, the runtime does not expose a dynamically typed `get(name)` or
-`call(name, args)` API. Instead, compile-time analysis generates a statically
-typed adapter for the declared use case, such as serialization, RPC binding, or
-test discovery.
+ADR 0096 fixes the only first-release `@RetainMetadata` projection. An exact
+`Metadata.Use.Codec` request on a non-generic record, enum, or tagged union
+generates the sibling `TargetSchema: Codec.Schema<Target>`. Classes, functions,
+members, arbitrary UDA retention, RPC binding, and test discovery are not part
+of schema 1. They require later capability-specific ADRs rather than expansion
+of the codec contract.
+
+The runtime does not expose a dynamically typed `get(name)` or
+`call(name, args)` API. A generated schema's encode/decode entries use resolved
+field/case IDs and closed typed codec operations. Runtime input labels are data
+compared only with one exact adapter's bounded label set; they cannot resolve a
+program Item or schema.
 
 Runtime metadata follows these rules:
 
 - no process-wide “all types” registry is required;
 - private members stay inaccessible unless their own declaration explicitly
-  opts into a named compiler-supported capability;
+  opts into a later named compiler-supported capability; schema 1 has no
+  member-level opt-in and rejects classes;
 - field values are never returned as `any`, `dynamic`, or an untyped box;
 - mutation cannot bypass visibility, immutability, or invariants;
 - lookup by arbitrary runtime string cannot resolve a program symbol;
 - UDAs are compile-time-only unless a retention policy explicitly serializes a
   permitted data projection;
-- retained metadata is removable by dead stripping when its adapter is unused.
+- the sole schema-1 retained-adapter descriptor and generation source is
+  canonical typed `retained-adapters.popc`, never JSON;
+- ADR 0055 canonical JSON `.poplib` control files may reference the `.popc`
+  digest but never duplicate its structural schema; and
+- retained runtime metadata and generated bodies are removable by dead
+  stripping when their exact adapter Item is unused. The `.popc` descriptor may
+  remain as verified compile/link input without becoming runtime data.
 
 ## Module and Bubble initialization
 
@@ -423,6 +453,12 @@ use explicit encoding and ownership adapters. Generated bindings are
 deterministic reviewable source plus hashed ABI metadata, and safe public
 wrappers convert those declarations into normal typed Pop APIs. See
 [ADR 0082](./decisions/0082-ffi-abi-storage-and-lexical-borrows.md).
+
+`Text.View` and `Bytes.View` are not foreign pointer sources. They are rejected
+in foreign signatures, generated bindings, callbacks, handles, buffers, and
+`Ffi.withPin`; callers explicitly materialize owned storage or copy into an
+owned FFI buffer. The lexical `BorrowRegionId` of ADR 0087 remains distinct
+from a view's ordinary borrow `LifetimeId`.
 
 Native ABI 1.15 adds `pop_rt_resolve_root` for the exact current target of a
 live generation-checked handle. Creation/release retain their existing

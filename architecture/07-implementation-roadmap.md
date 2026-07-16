@@ -70,6 +70,8 @@ conversions.
 - portable constant folding and dead-code elimination;
 - stable allocation-site/lifetime/region identities, closed call-retention
   summaries, and negative proof-verifier fixtures from ADR 0085;
+- structured parameter-retention/result-provenance summaries and the
+  non-allocating lender/range HIR/MIR view contract from ADR 0097;
 - a simple MIR interpreter and minimal runtime adapter.
 - warning-wave policy, scoped suppression, LSP/JSON output, and fix-all engine.
 - `.poplib` `documentation.xml`, `pop documentation`, and compiled documentation examples.
@@ -85,6 +87,8 @@ Exit criterion: core language tests execute through MIR without LLVM.
 - closure conversion and captured variables;
 - allocation, precise stack/object maps, and bootstrap stop-the-world GC.
 - initial `Pop.Standard` collections, text, result, and iteration conformance;
+- the exact first `Text.View`/`Bytes.View` surface, escape diagnostics, and
+  interpreter lifetime/provenance fixtures from ADR 0097;
 - modular base-library source and focused test ownership under ADR 0035, so
   ordinary API-family work stays outside compiler and backend crates;
 - conventional reserved source-root discovery and verified HIR/MIR contribution
@@ -143,6 +147,9 @@ not table or runtime-name lookup.
 - `Pop.Standard` I/O, time, tasks, and platform adapters;
 - debug locations and stack traces;
 - differential tests against the MIR interpreter.
+- LLVM view lowering with relocation-safe lender roots and forced-relocation
+  differential tests; the experimental C backend rejects view MIR before
+  emission.
 
 Exit criterion: representative multi-module programs produce native executables
 whose behavior matches the interpreter.
@@ -172,7 +179,10 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   transitions, LLVM calls, read-only byte pins, owned ABI buffers,
   generation-checked handles, callbacks, generated bindings, and ordinary safe
   wrappers;
-- opt-in retained metadata and generated typed adapters where justified;
+- ADR 0096 opt-in `Metadata.Use.Codec` projections for non-generic records,
+  enums, and tagged unions; canonical typed `retained-adapters.popc`; generated
+  same-visibility `Codec.Schema<T>` Items; source-free public consumption;
+  reachability-based runtime retention; and interpreter/LLVM conformance;
 - production concurrent mature GC and latency/benchmark gates, building on the
   implemented cooperative SATB marking and ordered lazy sweeping without a
   full-heap transition inventory, page/TLAB allocation, hard-limit

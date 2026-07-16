@@ -224,10 +224,11 @@ Do not turn every free function whose first parameter is a value into a method.
 In particular, cross-cutting algorithms remain free/generic functions so they do
 not bloat core type APIs.
 
-The standard library favors:
+The standard library favors (with ADR 0097's `Text.slice` using one-based
+Unicode-scalar `start` and `length`):
 
 ```luau
-Text.slice(value, start, finish)
+Text.slice(value, start, length)
 List.sort(values, compare)
 Json.encode(value)
 ```

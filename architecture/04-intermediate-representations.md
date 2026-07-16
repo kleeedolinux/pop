@@ -64,6 +64,9 @@ HirExpr =
   | Construct{classId}
   | FieldGet{fieldId} | FieldSet{fieldId}
   | Record | RecordUpdate | Tuple | Array | Table | TableGet | TableSet
+  | ViewCreate{kind, lender, lifetime}
+  | ViewSlice{kind, lender, start, length, lifetime}
+  | ViewMaterialize{kind, view}
   | Convert{kind}
   | Return | Break | Continue | Await
 ```
@@ -143,7 +146,8 @@ Arithmetic:    checkedAdd, wrappingAdd, floatAdd, compare, convert
 Memory:        allocateObject, allocateClosureEnvironment, allocateArray,
                load, store, captureLoad, captureStore, retainRoot, releaseRoot,
                lifetimeStart, lifetimeEnd, regionOpen, allocateInRegion,
-               regionClose
+               regionClose, viewCreate, viewSlice, viewLength, viewGetByte,
+               viewMaterialize, viewEnd
 Calls:         callStandard{standardFunctionId}, callDirect, callVirtual,
                callInterface, callIndirect
 Types:         typeTest, checkedDowncast, makeUnion, projectUnion
@@ -191,11 +195,25 @@ make every control-flow frontier explicit. The first proof kinds are
 `NonEscapingAllocation` and `CommonLifetimeRegion`; the verifier reconstructs
 them rather than trusting a backend or source annotation.
 
-Callable HIR/MIR types and public reference metadata carry closed per-parameter
-and result lifetime summaries: `DoesNotRetain`, conservative `MayRetain`,
-`ReturnsAlias`, `StoresInto`, `Captures`, or `Publishes`. Missing metadata is
-`MayRetain` and forces managed storage; it never creates a dynamic effect or
-runtime retention query.
+Callable HIR/MIR types and public reference metadata carry ADR 0097's structured
+`CallableLifetimeSummary`. Each parameter is `DoesNotRetain`, conservative
+`MayRetain`, `StoresInto(targetParameter)`, `Captures`, or `Publishes`; each
+result is `Independent`, `ReturnsAlias(sourceParameter)`, or conservative
+`MayAlias`. Missing metadata selects the conservative facts. That forces
+ordinary owned allocations toward managed storage, but never admits a borrowed
+view or creates a dynamic retention query.
+
+`Text.View` and `Bytes.View` use compiler-known `ViewCreate`, `ViewSlice`, and
+`ViewMaterialize` HIR with exact lender provenance. Canonical MIR carries the
+typed lender, checked byte range, one borrow-kind `LifetimeId`, and explicit
+`viewEnd`. A view descriptor has no allocation site or storage plan of its own,
+contains no exposed raw interior pointer, and may appear only in the direct
+local/parameter/result positions accepted by ADR 0097.
+
+View create/length/byte-get operations have no ADR 0022 effects. View slicing
+adds only possible `BoundsViolation`; materialization carries the ordinary
+owned allocation and safe-point effects. Lifetime retention and result
+provenance stay in `CallableLifetimeSummary` rather than becoming effects.
 
 ADR 0081 foreign operations carry one resolved foreign identity, closed ABI,
 exact parameter/result layouts, link aliases, and effect summary. They never
@@ -324,6 +342,13 @@ MIR invariants:
 - every static lifetime/region start dominates its uses, every applicable exit
   crosses exactly one matching end/close, and no interior alias, borrow, root,
   cleanup observation, or managed/shared/foreign edge survives that frontier;
+- every view creation dominates its uses, retains one exact lender, ends on
+  every applicable exit within the lender lifetime, and never enters an
+  aggregate, capture, suspension frame, ownership transfer, or FFI boundary;
+- every view call argument/result agrees with the exact structured callable
+  lifetime summary, while missing or conservative facts reject the view;
+- managed view lenders remain precise mutable roots across safe points, and no
+  cached interior address survives a relocating safe point;
 - managed references held in static slots/regions remain in exact mutable root
   maps until end/close, while managed storage never points into static/region
   storage;

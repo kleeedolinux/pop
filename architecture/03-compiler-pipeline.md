@@ -129,9 +129,21 @@ leaving registered cleanup scopes traverses their explicit MIR cleanup blocks
 in last-in, first-out order. See ADR 0052.
 
 Compile-time-only functions, symbol descriptors, and UDAs do not lower to
-runtime MIR. If explicitly retained metadata is requested, the compiler emits a
-narrow serializable projection and generated typed adapters—not its internal
-reflection objects.
+runtime MIR. ADR 0096 is the only first-release retained-metadata exception.
+For an exact `@RetainMetadata(use = Metadata.Use.Codec, schemaVersion = N)`
+request on an eligible record, enum, or tagged union, typed analysis constructs
+the closed projection, emits and re-loads canonical
+`retained-adapters.popc`, then generates the sibling `Codec.Schema<T>` Item as
+verified typed HIR. The `.popc` descriptor is the sole structural schema and
+generation source of truth; it is not parsed as ordinary source and never
+exposes internal reflection objects.
+
+The generated adapter uses resolved member/case IDs and ordinary typed
+construction. Canonical MIR therefore contains only typed adapter calls and
+closed codec operations, never descriptor parsing, field access by runtime name,
+or a dynamic value. Its reachability controls runtime retention. A library's
+canonical JSON `reference.metadata` may identify a public adapter and the full
+`.popc` digest, but cannot copy the structural projection into JSON.
 
 Statically bound foreign declarations are the exception to ordinary UDA
 erasure: their trusted ADR 0081 consequence becomes a typed foreign identity

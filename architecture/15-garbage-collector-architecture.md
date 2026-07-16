@@ -1153,6 +1153,13 @@ Borrowing helps the compiler:
 - eliminate barriers;
 - preserve local ownership.
 
+ADR 0097 closes the first such public values as `Text.View` and `Bytes.View`.
+They are non-allocating lender/range descriptors, not managed objects. A live
+managed lender remains a precise relocation-updatable root; a backend cannot
+retain a raw interior pointer across a safe point. Static/region lenders outlive
+all contained view `LifetimeId`s. Missing proof is a static view error, not a
+collector-managed borrow.
+
 ## 15.5 Resources
 
 External resources use deterministic lifetime management.
@@ -1475,6 +1482,8 @@ The following invariants are mandatory.
   frontier; every unproven allocation remains managed.
 - Managed storage never points into an activation-owned slot or compiler-scoped
   region, and their precise outward roots remain live until end/close.
+- Every borrowed view ends within its lender lifetime; managed lenders remain
+  precise roots, and no interior payload address survives relocation.
 
 ## 22.2 Local/shared separation
 

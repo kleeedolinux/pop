@@ -82,7 +82,7 @@ attribute constructor parameters in declaration order and its sole result is
 `Boolean`; the compiler supplies normalized canonical arguments and rejects the
 attachment when the validator returns `false`. Version one exposes no target
 context to validators. Runtime projection remains a separate trusted
-`@RetainMetadata` decision. See ADR 0023.
+`@RetainMetadata` decision. See ADR 0023 and ADR 0096.
 
 The closed declaration targets include nominal `Error` declarations as a
 distinct target. `Error` does not alias `Union`, `Class`, or another target even
@@ -272,6 +272,27 @@ instances of predefined typed adapter protocols. It may not return source text,
 tokens, an untyped AST, arbitrary using directives/Bubble references, or
 arbitrary declarations.
 
+ADR 0096 closes the first compiler-generated instance. The exact trusted
+attachment
+
+```luau
+@RetainMetadata(
+    use = Metadata.Use.Codec,
+    schemaVersion = 1,
+)
+public record User
+    name: String
+end
+```
+
+is non-repeatable and legal only on a non-generic namespace-scope record, enum,
+or tagged union. It reserves the sibling `UserSchema: Codec.Schema<User>` with
+the target's exact Module, namespace, and visibility. Schema 1 rejects classes,
+interfaces, functions, members, generic targets, arbitrary UDA retention, and
+all uses except `Metadata.Use.Codec`. The generated Item is one instance of a
+sealed compiler-defined protocol, not permission for arbitrary declaration
+generation.
+
 If Pop Lang later needs user-defined declaration generation, it should use a
 hygienic typed builder with constrained output and explicit provenance. That is
 a separate feature and requires a new ADR; it is not implied by UDAs.
@@ -292,8 +313,27 @@ The core runtime reflection API is empty. Programs cannot enumerate all loaded
 types, fetch arbitrary fields, invoke methods by name, or bypass private access.
 
 Opt-in retained metadata is a generated data projection, not access to compiler
-reflection. A use case such as serialization gets a typed adapter like
-`Serializer<User>`; it does not receive an untyped `User` field iterator.
+reflection. The first release has only ADR 0096's closed codec projection. It
+contains declaration-ordered record fields or enum/union cases, exact data
+labels, closed projected types, application schema version, and full
+fingerprints. Its leaf and recursive type vocabulary is closed; every nested
+nominal type must be visibly retained for the same use. Classes, methods,
+compiler handles, arbitrary attributes, runtime object identity, recursive
+schema cycles, and unsupported types are rejected rather than boxed.
+
+Each visibility boundary's canonical typed `retained-adapters.popc` is the sole
+descriptor, schema, and generation source format. The compiler re-loads and
+verifies it before creating typed HIR for
+`UserSchema: Codec.Schema<User>`. Ordinary `.poplib`
+manifest/reference control files remain ADR 0055 canonical JSON, but JSON may
+only reference the `.popc` path and full digest; it cannot carry a duplicate
+structural retained schema.
+
+The generated `Codec.Schema<T>` has exact typed encode and decode entries using
+resolved member/case IDs and sealed codec reader/writer capabilities. It does
+not provide an untyped `T` field iterator. Input data labels are compared only
+against that adapter's bounded closed label set and select fixed ordinals; they
+cannot resolve a program symbol or another schema.
 
 This boundary gives Pop Lang:
 
@@ -302,6 +342,13 @@ This boundary gives Pop Lang:
 - no dynamic value representation requirement;
 - no automatic privacy leak;
 - clearer security review for each reflection-like capability.
+
+Retention preserves normal visibility. A generated schema has the same
+visibility as its target, and a public schema requires a completely public
+reachable nominal graph. The request emits compile-time `.popc` facts but does
+not force runtime data. Only a reachable exact schema Item retains its generated
+body and minimal labels/fingerprints; unused adapter implementations are
+dead-stripped without registration or Bubble initialization.
 
 ## Diagnostics and provenance
 
@@ -326,7 +373,12 @@ The conformance suite covers:
 - rejection of I/O, FFI, backend access, source parsing, and string injection;
 - proof that compile-time handles cannot escape to runtime MIR;
 - proof that private and unretained metadata cannot be observed at runtime;
-- behavior equivalence between LLVM and the future VM for generated adapters.
+- canonical `.popc` bytes, full fingerprint recomputation, deterministic limit,
+  malformed/tamper, and permanent no-JSON-schema tests under ADR 0096;
+- generated adapter visibility, source-free public artifact consumption, and
+  unused-adapter dead-stripping tests; and
+- behavior equivalence between the MIR interpreter, LLVM, and a future VM for
+  generated adapters.
 
 ## Reference boundary
 
