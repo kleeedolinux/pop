@@ -1,2 +1,26 @@
 [messages."ffi.invalidForeignContract"]
 text = "无效的外部契约：{reason}"
+
+[messages."ffi.generator.invalidManifest"]
+text = "FFI 生成器清单无效：{reason}"
+
+[messages."ffi.generator.invalidInput"]
+text = "FFI 生成器输入无效：{reason}"
+
+[messages."ffi.generator.invalidDescriptor"]
+text = "FFI 生成器描述符无效：{reason}"
+
+[messages."ffi.generator.resourceLimit"]
+text = "FFI 生成器超出资源限制：{reason}"
+
+[messages."ffi.generator.policyMismatch"]
+text = "FFI 生成器策略不匹配：{reason}"
+
+[messages."ffi.generator.unsupportedAbi"]
+text = "FFI 生成器 ABI 不受支持：{reason}"
+
+[messages."ffi.generator.outputConflict"]
+text = "FFI 生成器输出冲突：{reason}"
+
+[messages."ffi.generator.publicationIo"]
+text = "FFI 生成器发布失败：{reason}"

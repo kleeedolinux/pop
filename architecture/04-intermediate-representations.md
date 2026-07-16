@@ -210,7 +210,7 @@ matching buffer or byte-payload end operation on every exit. `ffiBytesBorrow`
 and `ffiBytesBorrowLength` expose only the optional immutable payload pointer
 and exact length while the runtime token remains backend-private.
 
-ADR 0088 represents a callback as one exact signature descriptor, named nested
+ADR 0092 represents a callback as one exact signature descriptor, named nested
 callback body, typed capture environment, `FfiCallbackSiteId`, and either a
 scoped region or an owned registration. Canonical MIR opens the registration,
 projects its inseparable typed function/context pair, invokes the immediate
@@ -219,7 +219,7 @@ signature/layout equality, one opaque context parameter, pair provenance,
 non-suspension, serialized non-reentrant policy, region dominance, and owned
 resource state. LLVM alone selects the physical thunk calling convention; MIR
 contains no native function address or runtime symbol lookup. See
-[ADR 0088](./decisions/0088-typed-ffi-callbacks-and-native-transition-abi.md).
+[ADR 0092](./decisions/0092-typed-ffi-callbacks-and-native-transition-abi.md).
 
 ADR 0084 fixes the exact buffer operation shapes. Open constructs the exact
 typed `Result` only after distinguishing allocation, success, and invariant

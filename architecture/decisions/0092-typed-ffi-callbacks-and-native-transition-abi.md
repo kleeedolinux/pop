@@ -1,4 +1,4 @@
-# ADR 0088: Typed FFI Callbacks and Native Transition ABI
+# ADR 0092: Typed FFI Callbacks and Native Transition ABI
 
 - Status: accepted
 - Date: 2026-07-16

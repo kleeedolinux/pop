@@ -1,2 +1,26 @@
 [messages."ffi.invalidForeignContract"]
 text = "無効な外部契約: {reason}"
+
+[messages."ffi.generator.invalidManifest"]
+text = "FFI ジェネレーターのマニフェストが無効です: {reason}"
+
+[messages."ffi.generator.invalidInput"]
+text = "FFI ジェネレーターの入力が無効です: {reason}"
+
+[messages."ffi.generator.invalidDescriptor"]
+text = "FFI ジェネレーターの記述子が無効です: {reason}"
+
+[messages."ffi.generator.resourceLimit"]
+text = "FFI ジェネレーターがリソース制限を超えました: {reason}"
+
+[messages."ffi.generator.policyMismatch"]
+text = "FFI ジェネレーターのポリシーが一致しません: {reason}"
+
+[messages."ffi.generator.unsupportedAbi"]
+text = "FFI ジェネレーターの ABI はサポートされていません: {reason}"
+
+[messages."ffi.generator.outputConflict"]
+text = "FFI ジェネレーターの出力が競合しています: {reason}"
+
+[messages."ffi.generator.publicationIo"]
+text = "FFI ジェネレーターの公開に失敗しました: {reason}"

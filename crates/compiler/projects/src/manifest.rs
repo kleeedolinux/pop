@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
@@ -19,6 +20,7 @@ pub struct PackageManifest {
     platform_dependencies: Vec<PlatformDependencies>,
     native_libraries: Vec<NativeLibrary>,
     platform_native_libraries: Vec<PlatformNativeLibraries>,
+    platform_ffi_generators: Vec<PlatformFfiGenerators>,
 }
 
 impl PackageManifest {
@@ -60,6 +62,49 @@ impl PackageManifest {
     #[must_use]
     pub fn platform_native_libraries(&self) -> &[PlatformNativeLibraries] {
         &self.platform_native_libraries
+    }
+
+    #[must_use]
+    pub fn platform_ffi_generators(&self) -> &[PlatformFfiGenerators] {
+        &self.platform_ffi_generators
+    }
+
+    /// Selects one exact ADR 0093 generator plan without host fallback.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid target, a missing alias, or a referenced native
+    /// library absent from the common and selected-platform link plan.
+    pub fn ffi_generator(
+        &self,
+        platform_target: &str,
+        alias: &str,
+    ) -> Result<&FfiGenerator, ManifestError> {
+        if !valid_platform_target(platform_target) || !valid_pascal(alias) {
+            return Err(ManifestError::InvalidFfiGenerator);
+        }
+        let generator = self
+            .platform_ffi_generators
+            .iter()
+            .find(|platform| platform.platform_target == platform_target)
+            .and_then(|platform| {
+                platform
+                    .generators
+                    .iter()
+                    .find(|generator| generator.alias == alias)
+            })
+            .ok_or(ManifestError::MissingFfiGenerator)?;
+        if let Some(native_library) = generator.native_library() {
+            let plan = self.native_link_plan(platform_target)?;
+            if !plan
+                .libraries()
+                .iter()
+                .any(|library| library.alias() == native_library)
+            {
+                return Err(ManifestError::MissingFfiGeneratorNativeLibrary);
+            }
+        }
+        Ok(generator)
     }
 
     /// Builds the canonical ADR 0081 native-link plan for one exact platform
@@ -165,6 +210,60 @@ impl NativeLibrary {
 pub struct PlatformNativeLibraries {
     platform_target: String,
     libraries: Vec<NativeLibrary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FfiGenerator {
+    alias: String,
+    native_library: Option<String>,
+    descriptor: String,
+    descriptor_sha256: String,
+    output_directory: String,
+}
+
+impl FfiGenerator {
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    #[must_use]
+    pub fn native_library(&self) -> Option<&str> {
+        self.native_library.as_deref()
+    }
+
+    #[must_use]
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+
+    #[must_use]
+    pub fn descriptor_sha256(&self) -> &str {
+        &self.descriptor_sha256
+    }
+
+    #[must_use]
+    pub fn output_directory(&self) -> &str {
+        &self.output_directory
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformFfiGenerators {
+    platform_target: String,
+    generators: Vec<FfiGenerator>,
+}
+
+impl PlatformFfiGenerators {
+    #[must_use]
+    pub fn platform_target(&self) -> &str {
+        &self.platform_target
+    }
+
+    #[must_use]
+    pub fn generators(&self) -> &[FfiGenerator] {
+        &self.generators
+    }
 }
 
 impl PlatformNativeLibraries {
@@ -558,6 +657,13 @@ pub enum ManifestError {
     InvalidNativeLibraryHash,
     InvalidNativeLibraryTarget,
     DuplicateNativeLibrary,
+    InvalidFfiGenerator,
+    InvalidFfiGeneratorPath,
+    InvalidFfiGeneratorHash,
+    InvalidFfiGeneratorTarget,
+    DuplicateFfiGenerator,
+    MissingFfiGenerator,
+    MissingFfiGeneratorNativeLibrary,
     MissingGitRevision,
     MissingWorkspaceSection,
     MissingWorkspaceMembers,
@@ -607,6 +713,7 @@ struct PackageManifestParser {
     platform_dependencies: BTreeMap<String, BTreeMap<String, DependencyRequirement>>,
     native_libraries: BTreeMap<String, NativeLibrary>,
     platform_native_libraries: BTreeMap<String, BTreeMap<String, NativeLibrary>>,
+    platform_ffi_generators: BTreeMap<String, BTreeMap<String, FfiGenerator>>,
 }
 
 impl PackageManifestParser {
@@ -631,6 +738,9 @@ impl PackageManifestParser {
                 } else if let Some(platform_target) = parse_platform_native_library_section(line) {
                     self.platform_section = Some(platform_target);
                     "platformNativeLibraries"
+                } else if let Some(platform_target) = parse_platform_ffi_generator_section(line) {
+                    self.platform_section = Some(platform_target);
+                    "platformFfiGenerators"
                 } else {
                     return Err(ManifestError::UnsupportedSection);
                 }
@@ -720,6 +830,22 @@ impl PackageManifestParser {
                     return Err(ManifestError::DuplicateNativeLibrary);
                 }
             }
+            "platformFfiGenerators" => {
+                let generator = parse_ffi_generator(key, raw_value.trim())?;
+                let target = self
+                    .platform_section
+                    .as_ref()
+                    .ok_or(ManifestError::InvalidFfiGeneratorTarget)?;
+                if self
+                    .platform_ffi_generators
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(key.to_owned(), generator)
+                    .is_some()
+                {
+                    return Err(ManifestError::DuplicateFfiGenerator);
+                }
+            }
             "workspace" => {}
             _ => return Err(ManifestError::MissingPackageSection),
         }
@@ -727,27 +853,24 @@ impl PackageManifestParser {
     }
 
     fn finish(self) -> Result<PackageManifest, ManifestError> {
-        finish_package_manifest(
-            self.saw_package,
-            self.package,
-            self.dependencies,
-            self.development_dependencies,
-            self.platform_dependencies,
-            self.native_libraries,
-            self.platform_native_libraries,
-        )
+        finish_package_manifest(self)
     }
 }
 
 fn finish_package_manifest(
-    saw_package: bool,
-    mut package: BTreeMap<String, String>,
-    dependencies: BTreeMap<String, DependencyRequirement>,
-    development_dependencies: BTreeMap<String, DependencyRequirement>,
-    platform_dependencies: BTreeMap<String, BTreeMap<String, DependencyRequirement>>,
-    native_libraries: BTreeMap<String, NativeLibrary>,
-    platform_native_libraries: BTreeMap<String, BTreeMap<String, NativeLibrary>>,
+    parser: PackageManifestParser,
 ) -> Result<PackageManifest, ManifestError> {
+    let PackageManifestParser {
+        saw_package,
+        mut package,
+        dependencies,
+        development_dependencies,
+        platform_dependencies,
+        native_libraries,
+        platform_native_libraries,
+        platform_ffi_generators,
+        ..
+    } = parser;
     if !saw_package {
         return Err(ManifestError::MissingPackageSection);
     }
@@ -789,6 +912,13 @@ fn finish_package_manifest(
             libraries: libraries.into_values().collect(),
         })
         .collect();
+    let platform_ffi_generators = platform_ffi_generators
+        .into_iter()
+        .map(|(platform_target, generators)| PlatformFfiGenerators {
+            platform_target,
+            generators: generators.into_values().collect(),
+        })
+        .collect();
     Ok(PackageManifest {
         name,
         version,
@@ -798,6 +928,7 @@ fn finish_package_manifest(
         platform_dependencies,
         native_libraries,
         platform_native_libraries,
+        platform_ffi_generators,
     })
 }
 
@@ -817,6 +948,91 @@ fn parse_platform_native_library_section(line: &str) -> Option<String> {
         .strip_prefix("[platform.\"")?
         .strip_suffix("\".nativeLibraries]")?;
     valid_platform_target(platform_target).then(|| platform_target.to_owned())
+}
+
+fn parse_platform_ffi_generator_section(line: &str) -> Option<String> {
+    let platform_target = line
+        .strip_prefix("[platform.\"")?
+        .strip_suffix("\".ffiGenerators]")?;
+    valid_platform_target(platform_target).then(|| platform_target.to_owned())
+}
+
+fn parse_ffi_generator(alias: &str, value: &str) -> Result<FfiGenerator, ManifestError> {
+    if !valid_pascal(alias) {
+        return Err(ManifestError::InvalidFfiGenerator);
+    }
+    let mut fields = parse_inline_table(value).map_err(|_| ManifestError::InvalidFfiGenerator)?;
+    let native_library = fields
+        .remove("nativeLibrary")
+        .map(|value| parse_string(&value))
+        .transpose()
+        .map_err(|_| ManifestError::InvalidFfiGenerator)?;
+    if native_library
+        .as_deref()
+        .is_some_and(|native_library| !valid_pascal(native_library))
+    {
+        return Err(ManifestError::InvalidFfiGenerator);
+    }
+    let descriptor = fields
+        .remove("descriptor")
+        .ok_or(ManifestError::InvalidFfiGeneratorPath)
+        .and_then(|value| {
+            parse_string(&value).map_err(|_| ManifestError::InvalidFfiGeneratorPath)
+        })?;
+    if !valid_ffi_generator_path(&descriptor)
+        || Path::new(&descriptor).extension() != Some(OsStr::new("popc"))
+    {
+        return Err(ManifestError::InvalidFfiGeneratorPath);
+    }
+    let descriptor_sha256 = fields
+        .remove("descriptorSha256")
+        .ok_or(ManifestError::InvalidFfiGeneratorHash)
+        .and_then(|value| {
+            parse_string(&value).map_err(|_| ManifestError::InvalidFfiGeneratorHash)
+        })?;
+    if !valid_sha256(&descriptor_sha256) {
+        return Err(ManifestError::InvalidFfiGeneratorHash);
+    }
+    let output_directory = fields
+        .remove("outputDirectory")
+        .ok_or(ManifestError::InvalidFfiGeneratorPath)
+        .and_then(|value| {
+            parse_string(&value).map_err(|_| ManifestError::InvalidFfiGeneratorPath)
+        })?;
+    if !valid_generated_output_path(&output_directory) || output_directory == descriptor {
+        return Err(ManifestError::InvalidFfiGeneratorPath);
+    }
+    if !fields.is_empty() {
+        return Err(ManifestError::InvalidFfiGenerator);
+    }
+    Ok(FfiGenerator {
+        alias: alias.to_owned(),
+        native_library,
+        descriptor,
+        descriptor_sha256,
+        output_directory,
+    })
+}
+
+fn valid_generated_output_path(path: &str) -> bool {
+    valid_ffi_generator_path(path)
+        && path
+            .strip_prefix("src/generated/")
+            .is_some_and(|suffix| !suffix.is_empty())
+}
+
+fn valid_ffi_generator_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with(['/', '@', '-'])
+        && !path.contains('\\')
+        && path.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
 }
 
 fn valid_platform_target(platform_target: &str) -> bool {
@@ -1069,6 +1285,7 @@ pub fn parse_workspace_manifest(text: &str) -> Result<WorkspaceManifest, Manifes
                 | "[workspace.diagnostics]" => section = "ignored",
                 _ if parse_platform_dependency_section(line).is_some() => section = "ignored",
                 _ if parse_platform_native_library_section(line).is_some() => section = "ignored",
+                _ if parse_platform_ffi_generator_section(line).is_some() => section = "ignored",
                 _ => return Err(ManifestError::UnsupportedSection),
             }
             continue;

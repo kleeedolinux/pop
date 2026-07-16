@@ -164,6 +164,15 @@ transplanted into a Luau-shaped file.
   verified `BorrowRegionId` call, never unrestricted function values. Native
   ABI 1.17 borrows only the immutable `Bytes` payload through a runtime-owned
   token; no backend calculates a managed-object payload offset.
+- Typed FFI callbacks carry one compiler-proven function/context pair. Native
+  ABI 1.18 roots the exact managed environment behind a runtime-owned opaque
+  context and validates the callback site, generation, thread, serialized
+  entry, and balanced transition without exposing a Pop object address.
+- Deterministic FFI generation selects one exact target-owned manifest plan,
+  verifies one hashed canonical declarative `.popc` ABI-and-policy descriptor,
+  and publishes only validated reviewable source, closed shim output, and
+  hashed metadata. The first embedded parser invokes no process and infers no
+  safety fact.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
 

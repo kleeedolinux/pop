@@ -143,5 +143,5 @@ on LLVM or a host compiler.
 
 Type checking, trusted attributes, HIR declarations and FFI operations, target
 layout computation, MIR catalog construction, `.poplib` target metadata,
-generated `native-bindings.json`, the MIR interpreter, LLVM, diagnostics, and
+generated `native-bindings.popc`, the MIR interpreter, LLVM, diagnostics, and
 FFI conformance tests.

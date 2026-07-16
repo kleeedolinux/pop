@@ -137,6 +137,15 @@ target checked and never invokes a shell. Manifests accept no raw linker flags,
 response files, command substitutions, ambient absolute paths, or host fallback
 during cross compilation.
 
+ADR 0093 adds exact `[platform."<triple>".ffiGenerators]` entries. Each
+PascalCase alias names one hashed package-relative canonical declarative `.popc`
+descriptor, an optional selected native-library alias, and an output directory
+below `src/generated/`. The descriptor contains exact target/layout/signature
+facts and reviewed pointer policy but no executable code. The generator entry
+is selected only for the explicit command target; host fallback, command
+paths/flags, header paths, ambient include search, and un-hashed inputs are not
+manifest capabilities.
+
 The Package version applies to every published Bubble in the Package. A
 `BubbleIdentity` consists of the exact package identity/version/source plus the
 Bubble name, public API hash, and relevant ABI/capability facts. Bubbles do not
@@ -440,6 +449,19 @@ Shared selectors and controls include:
 Long option spelling follows manifest/source nomenclature and avoids arbitrary
 abbreviations. Short flags are limited to established interactive conveniences
 and never become the only documented interface.
+
+The first deterministic binding-generator form is:
+
+```text
+pop ffi generate Zlib --manifestPath path/to/bubble.toml \
+    --platformTarget x86_64-unknown-linux-gnu
+```
+
+ADR 0093 requires the alias, manifest, and exact platform target. The selected
+manifest entry owns the hashed descriptor and output directory; the command
+accepts no header, parser executable, include path, compiler/linker flag, policy
+override, output override, or shell text. Schema 1 uses only the bounded
+in-process canonical `.popc` parser.
 
 ### Standalone compiler inspection
 

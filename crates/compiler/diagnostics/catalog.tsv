@@ -51,6 +51,14 @@ POP4007	Error	CompileTime	-	compileTime.resourceLimit	-	Identifier,Unsigned	fals
 POP4008	Error	CompileTime	-	compileTime.attributeValidatorRejected	-	Identifier	false	diagnostics/POP4008	compile-time	-	1	-
 POP4009	Error	CompileTime	-	compileTime.invalidAttributeValidatorSignature	-	Identifier	false	diagnostics/POP4009	compile-time	-	1	-
 POP5000	Error	RuntimeSafety	-	ffi.invalidForeignContract	-	Identifier	false	diagnostics/POP5000	ffi	-	1	-
+POP5080	Error	RuntimeSafety	-	ffi.generator.invalidManifest	-	Identifier	false	diagnostics/POP5080	ffi-generator	-	1	-
+POP5081	Error	RuntimeSafety	-	ffi.generator.invalidInput	-	Identifier	false	diagnostics/POP5081	ffi-generator	-	1	-
+POP5082	Error	RuntimeSafety	-	ffi.generator.invalidDescriptor	-	Identifier	false	diagnostics/POP5082	ffi-generator	-	1	-
+POP5083	Error	RuntimeSafety	-	ffi.generator.resourceLimit	-	Identifier	false	diagnostics/POP5083	ffi-generator	-	1	-
+POP5084	Error	RuntimeSafety	-	ffi.generator.policyMismatch	-	Identifier	false	diagnostics/POP5084	ffi-generator	-	1	-
+POP5085	Error	RuntimeSafety	-	ffi.generator.unsupportedAbi	-	Identifier	false	diagnostics/POP5085	ffi-generator	-	1	-
+POP5086	Error	RuntimeSafety	-	ffi.generator.outputConflict	-	Identifier	false	diagnostics/POP5086	ffi-generator	-	1	-
+POP5087	Error	RuntimeSafety	-	ffi.generator.publicationIo	-	Identifier	false	diagnostics/POP5087	ffi-generator	-	1	-
 POP6400	Warning	Style	1	documentation.unsafeXml	-	-	true	diagnostics/POP6400	documentation	-	1	-
 POP6401	Warning	Style	1	documentation.malformedXml	-	-	true	diagnostics/POP6401	documentation	-	1	-
 POP6402	Warning	Style	1	documentation.invalidErrorTag	-	Identifier	true	diagnostics/POP6402	documentation	-	1	-

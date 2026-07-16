@@ -451,7 +451,7 @@ detaches an entry-created binding. Close invalidates the context before
 releasing the root and fails while an entry is active. Callback panic and every
 invalid entry are contained at the generated panic boundary and never unwind
 through foreign frames. See
-[ADR 0088](./decisions/0088-typed-ffi-callbacks-and-native-transition-abi.md).
+[ADR 0092](./decisions/0092-typed-ffi-callbacks-and-native-transition-abi.md).
 
 The compact nonzero `FfiAbiLayoutId` used by those operations is the first
 eight big-endian bytes of ADR 0086's full canonical SHA-256 layout fingerprint.

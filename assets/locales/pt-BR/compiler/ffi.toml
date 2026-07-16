@@ -1,2 +1,26 @@
 [messages."ffi.invalidForeignContract"]
 text = "contrato estrangeiro inválido: {reason}"
+
+[messages."ffi.generator.invalidManifest"]
+text = "manifesto inválido do gerador FFI: {reason}"
+
+[messages."ffi.generator.invalidInput"]
+text = "entrada inválida do gerador FFI: {reason}"
+
+[messages."ffi.generator.invalidDescriptor"]
+text = "descritor inválido do gerador FFI: {reason}"
+
+[messages."ffi.generator.resourceLimit"]
+text = "limite de recursos do gerador FFI excedido: {reason}"
+
+[messages."ffi.generator.policyMismatch"]
+text = "política incompatível no gerador FFI: {reason}"
+
+[messages."ffi.generator.unsupportedAbi"]
+text = "ABI não suportada pelo gerador FFI: {reason}"
+
+[messages."ffi.generator.outputConflict"]
+text = "conflito de saída do gerador FFI: {reason}"
+
+[messages."ffi.generator.publicationIo"]
+text = "falha ao publicar a saída do gerador FFI: {reason}"

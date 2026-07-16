@@ -23,4 +23,4 @@ one closed lifetime/thread policy, and an opaque `ForeignAddress` context. The
 PLRI operations retain and resolve the exact managed environment without
 exposing its address; native symbols and physical thunk conventions remain
 outside this crate under
-[ADR 0088](../../../architecture/decisions/0088-typed-ffi-callbacks-and-native-transition-abi.md).
+[ADR 0092](../../../architecture/decisions/0092-typed-ffi-callbacks-and-native-transition-abi.md).

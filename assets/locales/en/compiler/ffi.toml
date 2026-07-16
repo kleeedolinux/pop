@@ -2,3 +2,43 @@
 text = "invalid foreign contract: {reason}"
 arguments = ["reason"]
 kinds = ["Identifier"]
+
+[messages."ffi.generator.invalidManifest"]
+text = "invalid FFI generator manifest: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.invalidInput"]
+text = "invalid FFI generator input: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.invalidDescriptor"]
+text = "invalid FFI generator descriptor: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.resourceLimit"]
+text = "FFI generator resource limit exceeded: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.policyMismatch"]
+text = "FFI generator policy mismatch: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.unsupportedAbi"]
+text = "unsupported FFI generator ABI: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.outputConflict"]
+text = "FFI generator output conflict: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]
+
+[messages."ffi.generator.publicationIo"]
+text = "FFI generator publication failed: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]

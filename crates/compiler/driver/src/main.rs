@@ -26,7 +26,7 @@ use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, NativeLinkInput,
     NativeLinkPlanSource, PoplibDependency, PoplibEmission, ReferenceFunction, ReferenceMetadata,
     ReferenceType, analyze_bubble, artifact_sha256_hex, emit_poplib, encode_reference_metadata,
-    load_poplib, resolve_native_link_inputs, validate_foreign_link_aliases,
+    generate_ffi_bindings, load_poplib, resolve_native_link_inputs, validate_foreign_link_aliases,
 };
 use pop_foundation::{BubbleId, Diagnostic, FileId, ModuleId, NamespaceId, SymbolId};
 use pop_localization::{
@@ -113,6 +113,11 @@ enum CommandLine {
         manifest_path: PathBuf,
         lock_mode: LockMode,
         arguments: Vec<OsString>,
+    },
+    FfiGenerate {
+        alias: String,
+        manifest_path: PathBuf,
+        platform_target: String,
     },
 }
 
@@ -225,6 +230,11 @@ fn main() -> ExitCode {
             lock_mode,
             arguments,
         }) => run_manifest(&manifest_path, lock_mode, &arguments),
+        Ok(CommandLine::FfiGenerate {
+            alias,
+            manifest_path,
+            platform_target,
+        }) => ffi_generate(&alias, &manifest_path, &platform_target),
         Err(error) => {
             let _ = writeln!(
                 io::stderr().lock(),
@@ -319,6 +329,9 @@ fn parse_arguments(
     if command == "run" {
         return parse_run_arguments(arguments);
     }
+    if command == "ffi" {
+        return parse_ffi_arguments(arguments);
+    }
     if command != "check" {
         return Err(UsageError::new(
             "cli.unsupportedCommand",
@@ -393,6 +406,90 @@ fn parse_scaffold_arguments(
         name,
         kind,
     }))
+}
+
+fn parse_ffi_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, UsageError> {
+    let Some(action) = arguments.next() else {
+        return Err(command_requires("ffi", "generate"));
+    };
+    if action != "generate" {
+        return Err(UsageError::new(
+            "cli.unsupportedChoice",
+            vec![
+                LocalizedArgument::text("choice", "`pop ffi` action"),
+                LocalizedArgument::text("value", action.to_string_lossy()),
+                LocalizedArgument::text("expected", "generate"),
+            ],
+        ));
+    }
+    let alias = arguments
+        .next()
+        .ok_or_else(|| command_requires("ffi generate", "<alias>"))?;
+    let alias = alias.into_string().map_err(|_| {
+        UsageError::new(
+            "cli.unsupportedChoice",
+            vec![
+                LocalizedArgument::text("choice", "manifest alias"),
+                LocalizedArgument::text("value", "non-UTF-8 input"),
+                LocalizedArgument::text("expected", "UTF-8"),
+            ],
+        )
+    })?;
+    if alias.starts_with('-') {
+        return Err(command_requires("ffi generate", "<alias> before options"));
+    }
+    let mut manifest_path = None;
+    let mut platform_target = None;
+    while let Some(option) = arguments.next() {
+        match option.to_str() {
+            Some("--manifestPath") if manifest_path.is_none() => {
+                manifest_path = Some(required_manifest_path(arguments.next(), "ffi generate")?);
+            }
+            Some("--platformTarget") if platform_target.is_none() => {
+                platform_target = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| option_requires("--platformTarget", "a target triple"))?
+                        .into_string()
+                        .map_err(|_| {
+                            UsageError::new(
+                                "cli.unsupportedChoice",
+                                vec![
+                                    LocalizedArgument::text("choice", "platform target"),
+                                    LocalizedArgument::text("value", "non-UTF-8 input"),
+                                    LocalizedArgument::text("expected", "UTF-8"),
+                                ],
+                            )
+                        })?,
+                );
+            }
+            _ => {
+                return Err(expected_option(
+                    &option,
+                    "--manifestPath or --platformTarget",
+                ));
+            }
+        }
+    }
+    Ok(CommandLine::FfiGenerate {
+        alias,
+        manifest_path: manifest_path
+            .ok_or_else(|| command_requires("ffi generate", "--manifestPath <bubble.toml>"))?,
+        platform_target: platform_target
+            .ok_or_else(|| command_requires("ffi generate", "--platformTarget <triple>"))?,
+    })
+}
+
+fn ffi_generate(alias: &str, manifest_path: &Path, platform_target: &str) -> ExitCode {
+    match generate_ffi_bindings(manifest_path, platform_target, alias) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tool_failure!("pop: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn parse_documentation_arguments(

@@ -101,6 +101,60 @@ fn adr_0081_default_c_environment_needs_no_native_library_entry() {
 }
 
 #[test]
+fn adr_0093_ffi_generators_are_exact_target_owned_and_sorted() {
+    let manifest = parse_package_manifest(
+        "[package]\n\
+         name = \"Example.Bindings\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [nativeLibraries]\n\
+         Zlib = { kind = \"system\", name = \"z\" }\n\
+         [platform.\"x86_64-unknown-linux-gnu\".ffiGenerators]\n\
+         Zlib = { nativeLibrary = \"Zlib\", descriptor = \"native/zlib.popc\", descriptorSha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\", outputDirectory = \"src/generated/zlib\" }\n\
+         C = { descriptor = \"native/c.popc\", descriptorSha256 = \"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\", outputDirectory = \"src/generated/c\" }\n",
+    )
+    .expect("ADR 0093 manifest");
+
+    assert_eq!(manifest.platform_ffi_generators().len(), 1);
+    assert_eq!(
+        manifest.platform_ffi_generators()[0]
+            .generators()
+            .iter()
+            .map(pop_projects::FfiGenerator::alias)
+            .collect::<Vec<_>>(),
+        ["C", "Zlib"]
+    );
+    let zlib = manifest
+        .ffi_generator("x86_64-unknown-linux-gnu", "Zlib")
+        .expect("exact target generator");
+    assert_eq!(zlib.native_library(), Some("Zlib"));
+    assert_eq!(zlib.descriptor(), "native/zlib.popc");
+    assert_eq!(zlib.output_directory(), "src/generated/zlib");
+    assert_eq!(
+        manifest.ffi_generator("aarch64-unknown-linux-gnu", "Zlib"),
+        Err(ManifestError::MissingFfiGenerator)
+    );
+}
+
+#[test]
+fn adr_0093_ffi_generator_manifest_rejects_unsafe_or_untyped_inputs() {
+    let cases = [
+        "Zlib = { descriptor = \"../zlib.popc\", descriptorSha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\", outputDirectory = \"src/generated/zlib\" }",
+        "Zlib = { descriptor = \"native/zlib.json\", descriptorSha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\", outputDirectory = \"src/generated/zlib\" }",
+        "Zlib = { descriptor = \"native/zlib.popc\", descriptorSha256 = \"bad\", outputDirectory = \"src/generated/zlib\" }",
+        "Zlib = { descriptor = \"native/zlib.popc\", descriptorSha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\", outputDirectory = \"generated/zlib\" }",
+        "Zlib = { descriptor = \"native/zlib`command`.popc\", descriptorSha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\", outputDirectory = \"src/generated/zlib\" }",
+        "Zlib = { descriptor = \"native/zlib.popc\", descriptorSha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\", outputDirectory = \"src/generated/zlib\", header = \"zlib.h\" }",
+    ];
+    for entry in cases {
+        let manifest = format!(
+            "[package]\nname = \"Example.Bindings\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[platform.\"x86_64-unknown-linux-gnu\".ffiGenerators]\n{entry}\n"
+        );
+        assert!(parse_package_manifest(&manifest).is_err(), "{entry}");
+    }
+}
+
+#[test]
 fn adr_0081_native_inputs_reject_paths_hashes_raw_flags_and_shell_text() {
     let cases = [
         (

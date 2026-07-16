@@ -14,11 +14,11 @@ pub use lock::{
     LockedSource, apply_lock_policy, decode_lock, encode_lock, sha256_hex,
 };
 pub use manifest::{
-    BubbleKind, DependencyRequirement, DependencySource, DiscoveredBubble, ManifestError,
-    NativeLibrary, NativeLibraryDiscovery, NativeLibraryKind, NativeLinkPlan, NativeLinkPlanError,
-    PackageManifest, PlatformDependencies, PlatformNativeLibraries, WorkspaceManifest,
-    discover_conventional_bubbles, discover_workspace_members, parse_package_manifest,
-    parse_workspace_manifest,
+    BubbleKind, DependencyRequirement, DependencySource, DiscoveredBubble, FfiGenerator,
+    ManifestError, NativeLibrary, NativeLibraryDiscovery, NativeLibraryKind, NativeLinkPlan,
+    NativeLinkPlanError, PackageManifest, PlatformDependencies, PlatformFfiGenerators,
+    PlatformNativeLibraries, WorkspaceManifest, discover_conventional_bubbles,
+    discover_workspace_members, parse_package_manifest, parse_workspace_manifest,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

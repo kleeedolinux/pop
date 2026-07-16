@@ -254,11 +254,11 @@ foreign frames by default.
 
 ### Generated bindings and safe wrappers
 
-`pop ffi generate <alias>` consumes a manifest entry plus explicitly listed
-headers or machine-readable ABI descriptions. It runs an approved target-aware
-parser directly with bounded resources, records the parser/tool version and all
-input hashes, and emits deterministic reviewable `.pop` declarations,
-`native-bindings.json`, and required C shims. Generated files are ordinary
+`pop ffi generate <alias> --manifestPath <bubble.toml> --platformTarget
+<triple>` consumes the exact target-selected manifest entry and canonical typed
+descriptor fixed by ADR 0093. It performs bounded in-process validation, records
+all input hashes, and emits deterministic reviewable `.pop` declarations,
+`native-bindings.popc`, and required C shims. Generated files are ordinary
 source inputs and are never injected as text during compile-time evaluation.
 
 The generator emits low-level declarations as `internal` under a final

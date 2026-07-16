@@ -214,7 +214,7 @@ The fingerprint is independent of session-local IDs and backend data
 structures.
 
 The `.poplib` target manifest maps the stable declaration identity to these
-facts and the fingerprint. Generated `native-bindings.json` supplies the same
+facts and the fingerprint. Generated `native-bindings.popc` supplies the same
 facts from the approved parser. A missing or unequal field, order, size,
 alignment, offset, target, ABI, or fingerprint fails before HIR/MIR reaches a
 backend.

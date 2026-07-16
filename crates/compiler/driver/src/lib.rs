@@ -30,6 +30,7 @@ mod api;
 mod artifact;
 mod attributes;
 mod compile_time;
+mod ffi_generate;
 mod front_end;
 mod native_link;
 mod reference;
@@ -37,6 +38,7 @@ mod work;
 
 pub use api::*;
 pub use artifact::*;
+pub use ffi_generate::{FfiGenerationError, FfiGenerationErrorKind, generate_ffi_bindings};
 pub use front_end::*;
 pub use native_link::{
     NativeLinkInput, NativeLinkPlanSource, NativeLinkResolution, NativeLinkResolutionError,

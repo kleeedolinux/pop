@@ -350,7 +350,7 @@ rejected statically. HIR and MIR retain the closure identity and
 `BorrowRegionId`; there is no runtime lifetime test or unrestricted matching
 function-value conversion.
 
-ADR 0088 gives callbacks a distinct static capability. One non-async callback
+ADR 0092 gives callbacks a distinct static capability. One non-async callback
 signature contains exactly one opaque `Ffi.CallbackContext` parameter and only
 accepted ABI storage parameters/results. `Ffi.withCallback` supplies one
 inseparable `Ffi.Function<TSignature>`/context pair to an immediate synchronous
@@ -359,7 +359,7 @@ Owned `Ffi.RegisteredCallback<TSignature>` resources retain the exact typed
 environment until deterministic close. Scoped escape, mismatched pairs,
 managed ABI values, suspension, overlapping entry, and reentry are rejected
 without a dynamic signature or runtime type test. See
-[ADR 0088](./decisions/0088-typed-ffi-callbacks-and-native-transition-abi.md).
+[ADR 0092](./decisions/0092-typed-ffi-callbacks-and-native-transition-abi.md).
 
 ADR 0086 makes that proof reproducible: the compiler recognizes the exact
 trusted `Ffi.C.Layout` identity on records, constructs canonical target/ABI
