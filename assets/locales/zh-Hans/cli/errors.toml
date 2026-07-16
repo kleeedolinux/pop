@@ -114,3 +114,15 @@ text = "`pop run` 需要 .pop 源文件路径或 `--manifestPath`"
 
 [messages."cli.unsupportedDumpKind"]
 text = "不支持转储类型 `{value}`；应为 `hir`、`mir` 或 `ll`"
+
+[messages."cli.newNeedsPath"]
+text = "`pop new` 需要目标路径"
+
+[messages."cli.scaffoldKindConflict"]
+text = "只能选择 `--library` 或 `--binary` 其中之一"
+
+[messages."cli.scaffoldFailed"]
+text = "无法创建 Package：{detail}"
+
+[messages."cli.packageCreated"]
+text = "已在 `{path}` 创建 Package `{name}`"

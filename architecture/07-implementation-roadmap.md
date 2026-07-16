@@ -50,7 +50,11 @@ diagnostics.
 - bootstrap the `Pop.Standard` prelude and core protocols.
 - parse `bubble.toml`, discover conventional Bubbles, and emit deterministic
   Workspace/Package/Bubble metadata.
-- checked `<summary>`/parameter/return/`cref` documentation plus LSP hover.
+- checked `<summary>`/parameter/return/`cref` documentation plus LSP hover;
+- compiler-backed LSP diagnostics, related labels, quick fixes, document
+  symbols, direct-call parameter hints, and dependency-free Package snapshots;
+- validated canonical binary/library scaffolding through `pop new` and
+  `pop initialize`.
 
 Exit criterion: multi-module programs type-check; UDA/compile-time tests are
 reproducible; HIR contains no unresolved names, dynamic operations, or implicit

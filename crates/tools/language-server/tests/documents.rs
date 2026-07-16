@@ -293,3 +293,117 @@ fn server_errors_render_with_the_session_catalog() {
     assert!(rendered.contains("未打开"));
     assert!(rendered.contains(uri.as_str()));
 }
+
+#[test]
+fn dependency_free_package_modules_are_analyzed_as_one_bubble() {
+    let root = std::env::temp_dir().join(format!("PopLspProject{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Project\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let active = "namespace Studio.Project\nfunction value(): Int\n    return helper()\nend\n";
+    std::fs::write(root.join("src/lib.pop"), active).unwrap();
+    std::fs::write(
+        root.join("src/helper.pop"),
+        "namespace Studio.Project\nfunction helper(): Int\n    return 42\nend\n",
+    )
+    .unwrap();
+    let uri = DocumentUri::new(format!("file://{}", root.join("src/lib.pop").display())).unwrap();
+    let mut server = LanguageServer::initialize(Some("en")).unwrap();
+    let analysis = server
+        .open(
+            uri,
+            DocumentVersion::new(1),
+            active,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(
+        analysis.diagnostics().is_empty(),
+        "same-Bubble helper must resolve: {:?}",
+        analysis.diagnostics()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn nearest_nested_package_wins_without_merging_outer_visibility() {
+    let root = std::env::temp_dir().join(format!("PopLspNested{}", std::process::id()));
+    let inner = root.join("packages/Inner");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Outer\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        inner.join("bubble.toml"),
+        "[package]\nname = \"Studio.Inner\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let active = "namespace Studio.Inner\nfunction value(): Int\n    return outerOnly()\nend\n";
+    std::fs::write(inner.join("src/lib.pop"), active).unwrap();
+    let uri = DocumentUri::new(format!("file://{}", inner.join("src/lib.pop").display())).unwrap();
+    let mut server = LanguageServer::initialize(Some("en")).unwrap();
+    let analysis = server
+        .open(
+            uri,
+            DocumentVersion::new(1),
+            active,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(
+        analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "POP1002")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn outer_package_scan_does_not_absorb_nested_package_sources() {
+    let root = std::env::temp_dir().join(format!("PopLspOuter{}", std::process::id()));
+    let inner = root.join("src/vendor/Inner");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Outer\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        inner.join("bubble.toml"),
+        "[package]\nname = \"Studio.Inner\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let active = "namespace Studio.Outer\nfunction value(): Int\n    return 1\nend\n";
+    std::fs::write(root.join("src/lib.pop"), active).unwrap();
+    std::fs::write(
+        inner.join("src/lib.pop"),
+        "namespace Studio.Outer\nfunction value(): Int\n    return 2\nend\n",
+    )
+    .unwrap();
+
+    let uri = DocumentUri::new(format!("file://{}", root.join("src/lib.pop").display())).unwrap();
+    let mut server = LanguageServer::initialize(Some("en")).unwrap();
+    let analysis = server
+        .open(
+            uri,
+            DocumentVersion::new(1),
+            active,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(
+        analysis.diagnostics().is_empty(),
+        "nested Package sources must not enter the outer Bubble: {:?}",
+        analysis.diagnostics()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

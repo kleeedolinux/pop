@@ -373,6 +373,23 @@ fn private_language_server_uses_compiler_queries_without_cli_scraping() {
             && !implementation.contains("pop check"),
         "the language server must not replace compiler queries with parser-only or CLI scraping"
     );
+    assert!(implementation.contains("tooling_inlay_hints()"));
+    assert!(implementation.contains(".fixes()"));
+    assert!(implementation.contains("nearest_package_manifest("));
+    let transport = read_required(root.join("crates/tools/language-server/src/transport.rs"));
+    assert!(transport.contains("\"codeActionProvider\": true"));
+    assert!(transport.contains("\"inlayHintProvider\": true"));
+}
+
+#[test]
+fn package_scaffolding_uses_only_the_canonical_layout() {
+    let driver = read_required(repository_root().join("crates/compiler/driver/src/main.rs"));
+    assert!(driver.contains("ScaffoldMode::New"));
+    assert!(driver.contains("ScaffoldMode::Initialize"));
+    assert!(driver.contains("src/main.pop"));
+    assert!(driver.contains("src/lib.pop"));
+    assert!(!driver.contains("git init"));
+    assert!(!driver.contains("cargo new"));
 }
 
 #[test]

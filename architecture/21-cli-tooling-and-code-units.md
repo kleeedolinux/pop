@@ -409,6 +409,15 @@ Core commands:
 | `pop install` | Build/install a selected public binary Bubble |
 | `pop clean` | Remove selected build outputs, never source/manifests/lockfiles |
 
+ADR 0091 fixes the bootstrap scaffolding contract. `pop new <path>` requires a
+new destination, while `pop initialize [path]` works in an existing directory
+and defaults to the current directory. Both create either the canonical binary
+`src/main.pop` layout (the default) or the canonical library `src/lib.pop`
+layout selected by `--library`. A Package name may be explicit; otherwise the
+final directory component must already be a valid PascalCase identity.
+Scaffolding is validated before atomic publication and never overwrites source,
+initializes version control, or downloads dependencies.
+
 Shared selectors and controls include:
 
 ```text
@@ -551,11 +560,18 @@ compiler-private syntax or query values. Protocol method names, JSON fields,
 codes, and severities are locale invariant; only diagnostic display text uses
 the session render context.
 
+ADR 0090 additionally maps structured labels, notes, categories, warning waves,
+and current source-only quick fixes to LSP diagnostics and code actions. It also
+permits compiler-proven direct-call parameter inlay hints. For file documents,
+the nearest ancestor Package manifest selects conventional same-Bubble Modules
+when that Bubble has no unresolved dependency edge. Nested Packages remain
+distinct; an outer Workspace or editor folder never merges their visibility.
+
 The adapter is a private executable protocol boundary, not the public
 `Pop.Lsp` API and not a re-export of `Pop.Rpc`. Completion, signature help,
-cross-Module navigation, references, rename, formatting, semantic tokens, code
-actions, incremental text edits, Workspace analysis, and public transport types
-require their separately reviewed schemas.
+cross-Bubble navigation, references, rename, formatting, semantic tokens,
+incremental text edits, complete Workspace/dependency analysis, and public
+transport types require their separately reviewed schemas.
 Editor extensions launch the server directly and consume structured LSP data;
 they may invoke `pop` commands for explicit user actions but never scrape CLI
 human output to synthesize language-server results.

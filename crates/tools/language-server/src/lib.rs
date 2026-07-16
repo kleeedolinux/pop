@@ -5,16 +5,20 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pop_documentation::{XmlFragment, XmlNode};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, ToolingDeclarationKind, analyze_bubble};
 use pop_foundation::{
-    BubbleId, Diagnostic, DiagnosticSeverity, FileId, ModuleId, NamespaceId, TextRange, TextSize,
+    BubbleId, Diagnostic, DiagnosticCategory, DiagnosticSeverity, FileId, FixApplicability,
+    ModuleId, NamespaceId, TextRange, TextSize,
 };
 use pop_localization::{
     Argument, Language, LocalizationError, RenderContext, select_process_language,
 };
+use pop_projects::{BubbleKind, discover_conventional_bubbles, parse_package_manifest};
 use pop_query::CancellationToken;
 use pop_source::SourceFile;
 
@@ -160,6 +164,38 @@ pub struct ProtocolDiagnostic {
     severity: DiagnosticSeverity,
     range: ProtocolRange,
     message: String,
+    category: DiagnosticCategory,
+    related: Vec<DiagnosticRelatedInformation>,
+    notes: Vec<String>,
+    warning_wave: Option<u32>,
+    suppression_key: Option<String>,
+    fixes: Vec<ProtocolQuickFix>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticRelatedInformation {
+    range: ProtocolRange,
+    message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolTextEdit {
+    range: ProtocolRange,
+    replacement: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolQuickFix {
+    id: String,
+    title: String,
+    safe: bool,
+    edits: Vec<ProtocolTextEdit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlayHint {
+    position: ProtocolPosition,
+    label: String,
 }
 
 impl ProtocolDiagnostic {
@@ -181,6 +217,94 @@ impl ProtocolDiagnostic {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    #[must_use]
+    pub const fn category(&self) -> DiagnosticCategory {
+        self.category
+    }
+
+    #[must_use]
+    pub fn related(&self) -> &[DiagnosticRelatedInformation] {
+        &self.related
+    }
+
+    #[must_use]
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    #[must_use]
+    pub const fn warning_wave(&self) -> Option<u32> {
+        self.warning_wave
+    }
+
+    #[must_use]
+    pub fn suppression_key(&self) -> Option<&str> {
+        self.suppression_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn fixes(&self) -> &[ProtocolQuickFix] {
+        &self.fixes
+    }
+}
+
+impl DiagnosticRelatedInformation {
+    #[must_use]
+    pub const fn range(&self) -> ProtocolRange {
+        self.range
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl ProtocolTextEdit {
+    #[must_use]
+    pub const fn range(&self) -> ProtocolRange {
+        self.range
+    }
+
+    #[must_use]
+    pub fn replacement(&self) -> &str {
+        &self.replacement
+    }
+}
+
+impl ProtocolQuickFix {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[must_use]
+    pub const fn is_safe(&self) -> bool {
+        self.safe
+    }
+
+    #[must_use]
+    pub fn edits(&self) -> &[ProtocolTextEdit] {
+        &self.edits
+    }
+}
+
+impl InlayHint {
+    #[must_use]
+    pub const fn position(&self) -> ProtocolPosition {
+        self.position
+    }
+
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
     }
 }
 
@@ -294,6 +418,7 @@ struct OpenDocument {
     version: DocumentVersion,
     analysis: DocumentAnalysis,
     declarations: Vec<AnalyzedDeclaration>,
+    inlay_hints: Vec<InlayHint>,
 }
 
 struct AnalyzedDeclaration {
@@ -330,6 +455,21 @@ impl LanguageServer {
         self.documents.len()
     }
 
+    /// Returns the currently published version of an open document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LanguageServerError::DocumentNotOpen`] for an unknown URI.
+    pub fn document_version(
+        &self,
+        uri: &DocumentUri,
+    ) -> Result<DocumentVersion, LanguageServerError> {
+        self.documents
+            .get(uri)
+            .map(|document| document.version)
+            .ok_or_else(|| LanguageServerError::DocumentNotOpen { uri: uri.clone() })
+    }
+
     /// Opens and analyzes a new versioned document snapshot atomically.
     ///
     /// # Errors
@@ -357,8 +497,13 @@ impl LanguageServer {
                     detail: error.to_string(),
                 }
             })?;
-        let (analysis, declarations) =
-            analyze_document(self.session, &source, version, cancellation)?;
+        let (analysis, declarations, inlay_hints) = analyze_document(
+            self.session,
+            &self.documents,
+            &source,
+            version,
+            cancellation,
+        )?;
         self.next_file = self
             .next_file
             .checked_add(1)
@@ -370,6 +515,7 @@ impl LanguageServer {
                 version,
                 analysis: analysis.clone(),
                 declarations,
+                inlay_hints,
             },
         );
         Ok(analysis)
@@ -407,8 +553,13 @@ impl LanguageServer {
                 uri: uri.clone(),
                 detail: error.to_string(),
             })?;
-        let (analysis, declarations) =
-            analyze_document(self.session, &source, version, cancellation)?;
+        let (analysis, declarations, inlay_hints) = analyze_document(
+            self.session,
+            &self.documents,
+            &source,
+            version,
+            cancellation,
+        )?;
         self.documents.insert(
             uri.clone(),
             OpenDocument {
@@ -416,6 +567,7 @@ impl LanguageServer {
                 version,
                 analysis: analysis.clone(),
                 declarations,
+                inlay_hints,
             },
         );
         Ok(analysis)
@@ -505,6 +657,76 @@ impl LanguageServer {
             .collect()
     }
 
+    /// Returns compiler-proven direct-call parameter hints in one range.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown documents or cancellation.
+    pub fn inlay_hints(
+        &self,
+        uri: &DocumentUri,
+        range: ProtocolRange,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<InlayHint>, LanguageServerError> {
+        cancellation
+            .check()
+            .map_err(|_| LanguageServerError::Cancelled)?;
+        let document = self
+            .documents
+            .get(uri)
+            .ok_or_else(|| LanguageServerError::DocumentNotOpen { uri: uri.clone() })?;
+        Ok(document
+            .inlay_hints
+            .iter()
+            .filter(|hint| position_in_range(hint.position, range))
+            .cloned()
+            .collect())
+    }
+
+    /// Returns current compiler-produced quick fixes for matching diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown documents or cancellation.
+    pub fn code_actions(
+        &self,
+        uri: &DocumentUri,
+        range: ProtocolRange,
+        requested_fixes: &[(String, String)],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<(String, ProtocolQuickFix)>, LanguageServerError> {
+        cancellation
+            .check()
+            .map_err(|_| LanguageServerError::Cancelled)?;
+        let document = self
+            .documents
+            .get(uri)
+            .ok_or_else(|| LanguageServerError::DocumentNotOpen { uri: uri.clone() })?;
+        Ok(document
+            .analysis
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                ranges_overlap(diagnostic.range(), range)
+                    && requested_fixes
+                        .iter()
+                        .any(|(code, _)| code == diagnostic.code())
+            })
+            .flat_map(|diagnostic| {
+                diagnostic
+                    .fixes()
+                    .iter()
+                    .filter(|fix| {
+                        requested_fixes
+                            .iter()
+                            .any(|(code, fix_id)| code == diagnostic.code() && fix_id == fix.id())
+                    })
+                    .cloned()
+                    .map(|fix| (diagnostic.code().to_owned(), fix))
+            })
+            .collect())
+    }
+
     pub fn close(&mut self, uri: &DocumentUri) -> bool {
         self.documents.remove(uri).is_some()
     }
@@ -564,28 +786,33 @@ impl LanguageServer {
 
 fn analyze_document(
     session: LanguageServerSession,
+    open_documents: &BTreeMap<DocumentUri, OpenDocument>,
     source: &SourceFile,
     version: DocumentVersion,
     cancellation: &CancellationToken,
-) -> Result<(DocumentAnalysis, Vec<AnalyzedDeclaration>), LanguageServerError> {
+) -> Result<(DocumentAnalysis, Vec<AnalyzedDeclaration>, Vec<InlayHint>), LanguageServerError> {
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
-    let result = analyze_bubble(FrontEndBubbleInput::new(
-        BubbleId::from_raw(0),
-        NamespaceId::from_raw(0),
-        Vec::new(),
-        vec![FrontEndModule::new(
-            ModuleId::from_raw(source.id().raw()),
-            source.clone(),
-        )],
-    ));
+    let input = package_analysis_input(open_documents, source).unwrap_or_else(|| {
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            Vec::new(),
+            vec![FrontEndModule::new(
+                ModuleId::from_raw(source.id().raw()),
+                source.clone(),
+            )],
+        )
+    });
+    let result = analyze_bubble(input);
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
     let diagnostics = result
         .diagnostics()
         .iter()
+        .filter(|diagnostic| diagnostic.primary_span().file() == source.id())
         .map(|diagnostic| protocol_diagnostic(session, source, diagnostic))
         .collect::<Result<Vec<_>, _>>()?;
     cancellation
@@ -619,6 +846,19 @@ fn analyze_document(
             }
         })
         .collect();
+    let inlay_hints = result
+        .tooling_inlay_hints()
+        .iter()
+        .filter(|hint| hint.argument_span().file() == source.id())
+        .filter_map(|hint| {
+            protocol_position(source.text(), hint.argument_span().range().start()).map(|position| {
+                InlayHint {
+                    position,
+                    label: format!("{}:", hint.parameter_name()),
+                }
+            })
+        })
+        .collect();
     Ok((
         DocumentAnalysis {
             file: source.id(),
@@ -626,7 +866,209 @@ fn analyze_document(
             diagnostics,
         },
         declarations,
+        inlay_hints,
     ))
+}
+
+fn package_analysis_input(
+    open_documents: &BTreeMap<DocumentUri, OpenDocument>,
+    active: &SourceFile,
+) -> Option<FrontEndBubbleInput> {
+    let active_path = file_uri_path(active.path())?;
+    let manifest_path = nearest_package_manifest(&active_path)?;
+    let package_root = manifest_path.parent()?;
+    let manifest_text = fs::read_to_string(&manifest_path).ok()?;
+    let manifest = parse_package_manifest(&manifest_text).ok()?;
+    if !manifest.dependencies().is_empty()
+        || !manifest.platform_dependencies().is_empty()
+        || !manifest.native_libraries().is_empty()
+        || !manifest.platform_native_libraries().is_empty()
+    {
+        return None;
+    }
+    let files = conventional_pop_files(package_root)?;
+    let relative_active = relative_pop_path(package_root, &active_path)?;
+    let bubbles = discover_conventional_bubbles(&manifest, &files).ok()?;
+    let bubble = bubbles.iter().find(|bubble| {
+        bubble
+            .modules()
+            .iter()
+            .any(|module| module == &relative_active)
+    })?;
+    if bubble.depends_on_library()
+        || matches!(
+            bubble.kind(),
+            BubbleKind::Test | BubbleKind::Example | BubbleKind::Benchmark
+        ) && !manifest.development_dependencies().is_empty()
+    {
+        return None;
+    }
+    let mut modules = Vec::new();
+    let mut implicit_main = None;
+    for (index, relative) in bubble.modules().iter().enumerate() {
+        let path = package_root.join(relative);
+        let module = ModuleId::from_raw(u32::try_from(index).ok()?);
+        let file = if relative == &relative_active {
+            active.id()
+        } else {
+            FileId::from_raw(u32::MAX.checked_sub(u32::try_from(index).ok()?)?)
+        };
+        let text = open_document_text(open_documents, &path)
+            .or_else(|| fs::read_to_string(&path).ok().map(Arc::<str>::from))?;
+        let source = SourceFile::new(file, Arc::<str>::from(file_uri(&path)?), text).ok()?;
+        if bubble.kind() == BubbleKind::Binary && relative == bubble.root() {
+            implicit_main = Some(module);
+        }
+        modules.push(FrontEndModule::new(module, source));
+    }
+    let input = FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        modules,
+    );
+    Some(if let Some(module) = implicit_main {
+        input.with_implicit_main_entry(module)
+    } else {
+        input
+    })
+}
+
+fn nearest_package_manifest(path: &Path) -> Option<PathBuf> {
+    let mut directory = path.parent()?;
+    loop {
+        let candidate = directory.join("bubble.toml");
+        if fs::symlink_metadata(&candidate)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            && fs::read_to_string(&candidate)
+                .ok()
+                .and_then(|text| parse_package_manifest(&text).ok())
+                .is_some()
+        {
+            return Some(candidate);
+        }
+        directory = directory.parent()?;
+    }
+}
+
+fn conventional_pop_files(root: &Path) -> Option<Vec<String>> {
+    let mut files = Vec::new();
+    for directory in ["src", "tests", "examples", "benchmarks"] {
+        collect_pop_files(root, &root.join(directory), &mut files)?;
+    }
+    files.sort();
+    files.dedup();
+    Some(files)
+}
+
+fn collect_pop_files(root: &Path, directory: &Path, output: &mut Vec<String>) -> Option<()> {
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(()),
+        Err(_) => return None,
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    if directory != root
+        && fs::read_to_string(directory.join("bubble.toml"))
+            .ok()
+            .and_then(|text| parse_package_manifest(&text).ok())
+            .is_some()
+    {
+        return Some(());
+    }
+    let mut entries = fs::read_dir(directory)
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| name.starts_with('.')) {
+            continue;
+        }
+        let file_type = entry.file_type().ok()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_pop_files(root, &entry.path(), output)?;
+        } else if file_type.is_file()
+            && entry.path().extension().is_some_and(|value| value == "pop")
+        {
+            output.push(relative_pop_path(root, &entry.path())?);
+        }
+    }
+    Some(())
+}
+
+fn relative_pop_path(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    Some(
+        relative
+            .components()
+            .map(|component| component.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>()?
+            .join("/"),
+    )
+}
+
+fn open_document_text(
+    documents: &BTreeMap<DocumentUri, OpenDocument>,
+    path: &Path,
+) -> Option<Arc<str>> {
+    let uri = file_uri(path)?;
+    documents
+        .iter()
+        .find(|(candidate, _)| candidate.as_str() == uri)
+        .map(|(_, document)| Arc::<str>::from(document.source.text()))
+}
+
+fn file_uri_path(uri: &str) -> Option<PathBuf> {
+    let encoded = uri.strip_prefix("file://")?;
+    if !encoded.starts_with('/') {
+        return None;
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(decoded).ok()?))
+}
+
+fn file_uri(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    let mut uri = String::from("file://");
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            uri.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(uri, "%{byte:02X}").ok()?;
+        }
+    }
+    Some(uri)
+}
+
+const fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 const fn declaration_kind(kind: ToolingDeclarationKind) -> &'static str {
@@ -713,12 +1155,97 @@ fn protocol_diagnostic(
         .rendering
         .diagnostic_message_only(diagnostic)
         .map_err(|error| LanguageServerError::Localization(error.to_string()))?;
+    let related = diagnostic
+        .labels()
+        .iter()
+        .filter(|label| label.span().file() == source.id())
+        .map(|label| {
+            let text = session
+                .rendering
+                .diagnostic_message(label.message_key().as_str(), label.arguments())
+                .map_err(|error| LanguageServerError::Localization(error.to_string()))?;
+            Ok(DiagnosticRelatedInformation {
+                range: protocol_range(source.text(), label.span().range())?,
+                message: text,
+            })
+        })
+        .collect::<Result<Vec<_>, LanguageServerError>>()?;
+    let notes = diagnostic
+        .notes()
+        .iter()
+        .map(|note| {
+            session
+                .rendering
+                .diagnostic_message(note.message_key().as_str(), note.arguments())
+                .map_err(|error| LanguageServerError::Localization(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fixes = diagnostic
+        .fixes()
+        .iter()
+        .filter(|fix| fix.applicability() != FixApplicability::Unsafe)
+        .filter_map(|fix| {
+            let edits = fix
+                .edit()
+                .edits()
+                .iter()
+                .map(|edit| {
+                    if edit.file() != source.id() {
+                        return None;
+                    }
+                    Some(protocol_range(source.text(), edit.range()).map(|range| {
+                        ProtocolTextEdit {
+                            range,
+                            replacement: edit.replacement().to_owned(),
+                        }
+                    }))
+                })
+                .collect::<Option<Result<Vec<_>, LanguageServerError>>>()?;
+            let edits = edits.ok()?;
+            let title = session
+                .rendering
+                .diagnostic_message(fix.title_key().as_str(), &[])
+                .ok()?;
+            Some(ProtocolQuickFix {
+                id: fix.id().to_owned(),
+                title,
+                safe: fix.is_safe(),
+                edits,
+            })
+        })
+        .collect();
     Ok(ProtocolDiagnostic {
         code: diagnostic.code().as_str().to_owned(),
         severity: diagnostic.severity(),
         range: ProtocolRange { start, end },
         message,
+        category: diagnostic.category(),
+        related,
+        notes,
+        warning_wave: diagnostic
+            .warning_wave()
+            .map(pop_foundation::WarningWave::value),
+        suppression_key: diagnostic
+            .suppression_key()
+            .map(|key| key.as_str().to_owned()),
+        fixes,
     })
+}
+
+fn position_in_range(position: ProtocolPosition, range: ProtocolRange) -> bool {
+    position_at_or_after(position, range.start) && position_at_or_before(position, range.end)
+}
+
+fn ranges_overlap(left: ProtocolRange, right: ProtocolRange) -> bool {
+    position_at_or_before(left.start, right.end) && position_at_or_before(right.start, left.end)
+}
+
+const fn position_at_or_after(left: ProtocolPosition, right: ProtocolPosition) -> bool {
+    left.line > right.line || left.line == right.line && left.character >= right.character
+}
+
+const fn position_at_or_before(left: ProtocolPosition, right: ProtocolPosition) -> bool {
+    left.line < right.line || left.line == right.line && left.character <= right.character
 }
 
 fn protocol_position(text: &str, offset: TextSize) -> Option<ProtocolPosition> {

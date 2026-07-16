@@ -7,8 +7,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    DocumentAnalysis, DocumentSymbol, DocumentUri, DocumentVersion, Hover, LanguageServer,
-    LanguageServerError, ProtocolDiagnostic, ProtocolPosition, ProtocolRange,
+    DocumentAnalysis, DocumentSymbol, DocumentUri, DocumentVersion, Hover, InlayHint,
+    LanguageServer, LanguageServerError, ProtocolDiagnostic, ProtocolPosition, ProtocolQuickFix,
+    ProtocolRange,
 };
 
 const MAXIMUM_HEADER_BYTES: usize = 8 * 1024;
@@ -166,6 +167,12 @@ impl Connection {
             "textDocument/documentSymbol" if self.lifecycle == Lifecycle::Running => {
                 self.document_symbols(id, params)
             }
+            "textDocument/codeAction" if self.lifecycle == Lifecycle::Running => {
+                self.code_actions(id, params)
+            }
+            "textDocument/inlayHint" if self.lifecycle == Lifecycle::Running => {
+                self.inlay_hints(id, params)
+            }
             "$/cancelRequest" if id.is_none() => Ok(ConnectionAction::None),
             _ => Ok(id.map_or(ConnectionAction::None, |id| {
                 let code = if self.lifecycle == Lifecycle::WaitingForInitialize {
@@ -219,7 +226,9 @@ impl Connection {
                     "positionEncoding": "utf-16",
                     "textDocumentSync": 1,
                     "hoverProvider": true,
-                    "documentSymbolProvider": true
+                    "documentSymbolProvider": true,
+                    "codeActionProvider": true,
+                    "inlayHintProvider": true
                 },
                 "serverInfo": {
                     "name": "Pop Lang",
@@ -366,6 +375,130 @@ impl Connection {
         }
     }
 
+    fn code_actions(
+        &self,
+        id: Option<Value>,
+        params: Value,
+    ) -> Result<ConnectionAction, TransportError> {
+        let Some(id) = id else {
+            return Ok(ConnectionAction::None);
+        };
+        let params: CodeActionParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &format!("Invalid params: {error}"),
+                )));
+            }
+        };
+        let uri = match DocumentUri::new(params.text_document.uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &error.to_string(),
+                )));
+            }
+        };
+        let server = self.server.as_ref().expect("running server");
+        let version = server
+            .document_version(&uri)
+            .map_err(|_| TransportError::InvalidJson("document is not open".to_owned()))?;
+        let requested_fixes = params
+            .context
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["source"] == "pop")
+            .filter(|diagnostic| {
+                diagnostic["data"]["documentVersion"].as_u64() == Some(version.value())
+            })
+            .flat_map(|diagnostic| {
+                let code = diagnostic.get("code").map(protocol_code);
+                diagnostic["data"]["fixIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter_map(move |fix_id| {
+                        code.as_ref().map(|code| (code.clone(), fix_id.to_owned()))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let range = params.range.into();
+        match server.code_actions(&uri, range, &requested_fixes, &CancellationToken::new()) {
+            Ok(actions) => Ok(ConnectionAction::Reply(success_response(
+                &id,
+                &Value::Array(
+                    actions
+                        .iter()
+                        .map(|(code, fix)| {
+                            let diagnostic = params.context.diagnostics.iter().find(|value| {
+                                value["source"] == "pop"
+                                    && value["data"]["documentVersion"].as_u64()
+                                        == Some(version.value())
+                                    && value
+                                        .get("code")
+                                        .is_some_and(|value| protocol_code(value) == *code)
+                                    && value["data"]["fixIds"].as_array().is_some_and(|fix_ids| {
+                                        fix_ids
+                                            .iter()
+                                            .any(|fix_id| fix_id.as_str() == Some(fix.id()))
+                                    })
+                            });
+                            protocol_code_action(&uri, version, diagnostic, fix)
+                        })
+                        .collect(),
+                ),
+            ))),
+            Err(error) => Ok(ConnectionAction::Reply(language_server_error(
+                server, &id, &error,
+            )?)),
+        }
+    }
+
+    fn inlay_hints(
+        &self,
+        id: Option<Value>,
+        params: Value,
+    ) -> Result<ConnectionAction, TransportError> {
+        let Some(id) = id else {
+            return Ok(ConnectionAction::None);
+        };
+        let params: InlayHintParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &format!("Invalid params: {error}"),
+                )));
+            }
+        };
+        let uri = match DocumentUri::new(params.text_document.uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &error.to_string(),
+                )));
+            }
+        };
+        let server = self.server.as_ref().expect("running server");
+        match server.inlay_hints(&uri, params.range.into(), &CancellationToken::new()) {
+            Ok(hints) => Ok(ConnectionAction::Reply(success_response(
+                &id,
+                &Value::Array(hints.iter().map(protocol_inlay_hint).collect()),
+            ))),
+            Err(error) => Ok(ConnectionAction::Reply(language_server_error(
+                server, &id, &error,
+            )?)),
+        }
+    }
+
     fn document_size_error(&self, uri: &DocumentUri, text: &str) -> Option<LanguageServerError> {
         if text.len() > self.limits.maximum_document_bytes {
             return Some(LanguageServerError::DocumentTooLarge {
@@ -456,10 +589,46 @@ struct TextDocumentPositionParams {
     position: Position,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 struct Position {
     line: u32,
     character: u32,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct Range {
+    start: Position,
+    end: Position,
+}
+
+impl From<Range> for ProtocolRange {
+    fn from(range: Range) -> Self {
+        Self {
+            start: ProtocolPosition::new(range.start.line, range.start.character),
+            end: ProtocolPosition::new(range.end.line, range.end.character),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeActionParams {
+    text_document: TextDocumentIdentifier,
+    range: Range,
+    context: CodeActionContext,
+}
+
+#[derive(Deserialize)]
+struct CodeActionContext {
+    #[serde(default)]
+    diagnostics: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InlayHintParams {
+    text_document: TextDocumentIdentifier,
+    range: Range,
 }
 
 #[derive(Deserialize)]
@@ -472,6 +641,12 @@ fn decode_notification<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T,
     serde_json::from_value(params).map_err(|error| TransportError::InvalidJson(error.to_string()))
 }
 
+fn protocol_code(value: &Value) -> String {
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_owned)
+}
+
 fn document_version(version: i64) -> Result<DocumentVersion, TransportError> {
     u64::try_from(version)
         .map(DocumentVersion::new)
@@ -482,7 +657,7 @@ fn publish_diagnostics(uri: &DocumentUri, analysis: &DocumentAnalysis) -> Value 
     let diagnostics: Vec<_> = analysis
         .diagnostics()
         .iter()
-        .map(protocol_diagnostic)
+        .map(|diagnostic| protocol_diagnostic(uri, analysis.version(), diagnostic))
         .collect();
     json!({
         "jsonrpc": "2.0",
@@ -495,8 +670,30 @@ fn publish_diagnostics(uri: &DocumentUri, analysis: &DocumentAnalysis) -> Value 
     })
 }
 
-fn protocol_diagnostic(diagnostic: &ProtocolDiagnostic) -> Value {
+fn protocol_diagnostic(
+    uri: &DocumentUri,
+    version: DocumentVersion,
+    diagnostic: &ProtocolDiagnostic,
+) -> Value {
     let range = diagnostic.range();
+    let related_information = diagnostic
+        .related()
+        .iter()
+        .map(|related| {
+            json!({
+                "location": {
+                    "uri": uri.as_str(),
+                    "range": protocol_range(related.range())
+                },
+                "message": related.message()
+            })
+        })
+        .collect::<Vec<_>>();
+    let fix_ids = diagnostic
+        .fixes()
+        .iter()
+        .map(ProtocolQuickFix::id)
+        .collect::<Vec<_>>();
     json!({
         "range": {
             "start": {
@@ -515,8 +712,69 @@ fn protocol_diagnostic(diagnostic: &ProtocolDiagnostic) -> Value {
             DiagnosticSeverity::Hint => 4,
         },
         "code": diagnostic.code(),
-        "source": "Pop Lang",
-        "message": diagnostic.message()
+        "source": "pop",
+        "message": diagnostic.message(),
+        "relatedInformation": related_information,
+        "data": {
+            "category": diagnostic_category(diagnostic.category()),
+            "documentVersion": version.value(),
+            "warningWave": diagnostic.warning_wave(),
+            "suppressionKey": diagnostic.suppression_key(),
+            "notes": diagnostic.notes(),
+            "fixIds": fix_ids
+        }
+    })
+}
+
+const fn diagnostic_category(category: pop_foundation::DiagnosticCategory) -> &'static str {
+    use pop_foundation::DiagnosticCategory;
+    match category {
+        DiagnosticCategory::Syntax => "Syntax",
+        DiagnosticCategory::Resolution => "Resolution",
+        DiagnosticCategory::Type => "Type",
+        DiagnosticCategory::Flow => "Flow",
+        DiagnosticCategory::CompileTime => "CompileTime",
+        DiagnosticCategory::RuntimeSafety => "RuntimeSafety",
+        DiagnosticCategory::Style => "Style",
+        DiagnosticCategory::Backend => "Backend",
+        DiagnosticCategory::Project => "Project",
+        DiagnosticCategory::Tooling => "Tooling",
+    }
+}
+
+fn protocol_code_action(
+    uri: &DocumentUri,
+    version: DocumentVersion,
+    diagnostic: Option<&Value>,
+    fix: &ProtocolQuickFix,
+) -> Value {
+    json!({
+        "title": fix.title(),
+        "kind": "quickfix",
+        "isPreferred": fix.is_safe(),
+        "diagnostics": diagnostic.into_iter().collect::<Vec<_>>(),
+        "edit": {
+            "documentChanges": [{
+                "textDocument": {"uri": uri.as_str(), "version": version.value()},
+                "edits": fix.edits().iter().map(|edit| json!({
+                    "range": protocol_range(edit.range()),
+                    "newText": edit.replacement()
+                })).collect::<Vec<_>>()
+            }]
+        },
+        "data": {"fixId": fix.id()}
+    })
+}
+
+fn protocol_inlay_hint(hint: &InlayHint) -> Value {
+    json!({
+        "position": {
+            "line": hint.position().line(),
+            "character": hint.position().character()
+        },
+        "label": hint.label(),
+        "kind": 2,
+        "paddingRight": true
     })
 }
 

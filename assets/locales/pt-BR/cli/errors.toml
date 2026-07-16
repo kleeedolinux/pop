@@ -114,3 +114,15 @@ text = "`pop run` exige um caminho de fonte .pop ou `--manifestPath`"
 
 [messages."cli.unsupportedDumpKind"]
 text = "tipo de despejo `{value}` não suportado; esperado `hir`, `mir` ou `ll`"
+
+[messages."cli.newNeedsPath"]
+text = "`pop new` requer um caminho de destino"
+
+[messages."cli.scaffoldKindConflict"]
+text = "selecione apenas `--library` ou `--binary`"
+
+[messages."cli.scaffoldFailed"]
+text = "não foi possível criar o Package: {detail}"
+
+[messages."cli.packageCreated"]
+text = "Package `{name}` criado em `{path}`"

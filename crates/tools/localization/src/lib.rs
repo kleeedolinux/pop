@@ -745,7 +745,13 @@ impl RenderContext {
         self.diagnostic_message(diagnostic.message_key().as_str(), diagnostic.arguments())
     }
 
-    fn diagnostic_message(
+    /// Renders one compiler diagnostic component from its typed catalog key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the key or typed arguments do not match the
+    /// immutable catalog schema.
+    pub fn diagnostic_message(
         self,
         key: &str,
         arguments: &[DiagnosticArgument],

@@ -538,6 +538,11 @@ impl QuickFix {
     }
 
     #[must_use]
+    pub const fn applicability(&self) -> FixApplicability {
+        self.applicability
+    }
+
+    #[must_use]
     pub const fn edit(&self) -> &WorkspaceEdit {
         &self.edit
     }

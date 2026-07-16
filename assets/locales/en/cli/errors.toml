@@ -192,3 +192,23 @@ kinds = []
 text = "unsupported dump kind `{value}`; expected `hir`, `mir`, or `ll`"
 arguments = ["value"]
 kinds = ["Text"]
+
+[messages."cli.newNeedsPath"]
+text = "`pop new` requires a destination path"
+arguments = []
+kinds = []
+
+[messages."cli.scaffoldKindConflict"]
+text = "select only one of `--library` or `--binary`"
+arguments = []
+kinds = []
+
+[messages."cli.scaffoldFailed"]
+text = "could not create Package: {detail}"
+arguments = ["detail"]
+kinds = ["External"]
+
+[messages."cli.packageCreated"]
+text = "created Package `{name}` at `{path}`"
+arguments = ["name", "path"]
+kinds = ["Text", "Text"]

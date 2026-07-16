@@ -84,6 +84,14 @@ fn stdio_session_negotiates_utf16_and_publishes_localized_diagnostics() {
         messages[0]["result"]["capabilities"]["documentSymbolProvider"],
         true
     );
+    assert_eq!(
+        messages[0]["result"]["capabilities"]["codeActionProvider"],
+        true
+    );
+    assert_eq!(
+        messages[0]["result"]["capabilities"]["inlayHintProvider"],
+        true
+    );
     let publication = messages
         .iter()
         .find(|message| message["method"] == "textDocument/publishDiagnostics")
@@ -105,6 +113,109 @@ fn stdio_session_negotiates_utf16_and_publishes_localized_diagnostics() {
             .is_some_and(|message| message.contains("Esperado") || message.contains("esperado"))
     }));
     assert_eq!(messages.last().expect("shutdown response")["id"], 2);
+}
+
+#[test]
+fn stdio_exposes_compiler_quick_fixes_and_direct_call_parameter_hints() {
+    let uri = "file:///workspace/actions.pop";
+    let hint_uri = "file:///workspace/hints.pop";
+    let source = "namespace Example\nexport function add(left: Int, right: Int): Int\n    return left + right\nend\nfunction value(): Int\n    return add(1, 2)\nend\n";
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"locale":"en","capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"pop","version":7,"text":source}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":hint_uri,"languageId":"pop","version":1,"text":"namespace Example\nfunction add(left: Int, right: Int): Int\n    return left + right\nend\nfunction value(): Int\n    return add(1, 2)\nend\n"}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri},"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":6}},"context":{"diagnostics":[{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":6}},"severity":1,"code":"POP0004","source":"pop","message":"unsupported export","data":{"documentVersion":7,"fixIds":["replaceExportWithPublic"]}}]}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri},"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":6}},"context":{"diagnostics":[{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":6}},"severity":1,"code":"POP0004","source":"pop","message":"stale export","data":{"documentVersion":6,"fixIds":["replaceExportWithPublic"]}}]}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":hint_uri},"range":{"start":{"line":0,"character":0},"end":{"line":7,"character":0}}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    let messages = responses(&output);
+    let publication = messages
+        .iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .expect("diagnostics");
+    let diagnostic = publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "POP0004")
+        .expect("export diagnostic");
+    assert_eq!(diagnostic["source"], "pop");
+    assert_eq!(diagnostic["data"]["category"], "Syntax");
+    assert_eq!(diagnostic["data"]["documentVersion"], 7);
+    assert_eq!(diagnostic["data"]["fixIds"][0], "replaceExportWithPublic");
+
+    let actions = &messages.iter().find(|message| message["id"] == 3).unwrap()["result"];
+    assert_eq!(actions[0]["kind"], "quickfix");
+    assert_eq!(actions[0]["isPreferred"], true);
+    assert_eq!(
+        actions[0]["edit"]["documentChanges"][0]["textDocument"]["version"],
+        7
+    );
+    assert_eq!(
+        actions[0]["edit"]["documentChanges"][0]["edits"][0]["newText"],
+        "public"
+    );
+    assert!(
+        messages.iter().find(|message| message["id"] == 5).unwrap()["result"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a stale diagnostic snapshot must not receive a current edit"
+    );
+
+    let hints = messages.iter().find(|message| message["id"] == 4).unwrap()["result"]
+        .as_array()
+        .unwrap();
+    assert!(hints.iter().any(|hint| hint["label"] == "left:"));
+    assert!(hints.iter().any(|hint| hint["label"] == "right:"));
+}
+
+#[test]
+fn stdio_preserves_compiler_secondary_labels_as_related_information() {
+    let uri = "file:///workspace/labels.pop";
+    let source = "namespace Example\npublic union Choice\n    One(value: Int)\n    Two\nend\nfunction read(choice: Choice): Int\n    match choice\n    when Choice.One(value) then\n        return value\n    when Choice.One(other) then\n        return other\n    when Choice.Two then\n        return 0\n    end\nend\n";
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"locale":"en","capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"pop","version":1,"text":source}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .unwrap();
+    let publication = responses(&output)
+        .into_iter()
+        .find(|message| message["method"] == "textDocument/publishDiagnostics")
+        .unwrap();
+    let diagnostic = publication["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "POP2021")
+        .expect("duplicate case diagnostic");
+    assert_eq!(diagnostic["data"]["category"], "Type");
+    assert_eq!(diagnostic["relatedInformation"][0]["location"]["uri"], uri);
+    assert!(
+        !diagnostic["relatedInformation"][0]["message"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -212,6 +323,35 @@ fn unknown_request_gets_method_not_found_without_terminating_session() {
         .find(|message| message["id"] == 9)
         .expect("method error");
     assert_eq!(error["error"]["code"], -32601);
+}
+
+#[test]
+fn invalid_rich_request_params_do_not_terminate_the_session() {
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"textDocument/codeAction","params":{}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"textDocument/inlayHint","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    let status = serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    assert_eq!(status, ExitStatus::Success);
+
+    let messages = responses(&output);
+    for id in [8, 9] {
+        let error = messages
+            .iter()
+            .find(|message| message["id"] == id)
+            .expect("invalid params response");
+        assert_eq!(error["error"]["code"], -32602);
+    }
+    assert!(messages.iter().any(|message| message["id"] == 2));
 }
 
 #[test]

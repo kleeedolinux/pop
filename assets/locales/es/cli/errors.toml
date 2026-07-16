@@ -114,3 +114,15 @@ text = "`pop run` requiere una ruta de fuente .pop o `--manifestPath`"
 
 [messages."cli.unsupportedDumpKind"]
 text = "tipo de volcado `{value}` no compatible; se esperaba `hir`, `mir` o `ll`"
+
+[messages."cli.newNeedsPath"]
+text = "`pop new` requiere una ruta de destino"
+
+[messages."cli.scaffoldKindConflict"]
+text = "seleccione solo `--library` o `--binary`"
+
+[messages."cli.scaffoldFailed"]
+text = "no se pudo crear el Package: {detail}"
+
+[messages."cli.packageCreated"]
+text = "se creó el Package `{name}` en `{path}`"

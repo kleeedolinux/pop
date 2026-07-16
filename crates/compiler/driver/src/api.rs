@@ -124,6 +124,7 @@ pub struct FrontEndResult {
     pub(crate) reference_metadata: Result<ReferenceMetadata, ReferenceMetadataError>,
     pub(crate) checked_documentation: Vec<CheckedDocumentation>,
     pub(crate) tooling_declarations: Vec<ToolingDeclaration>,
+    pub(crate) tooling_inlay_hints: Vec<ToolingInlayHint>,
 }
 
 /// Version-coupled declaration projection for private compiler tooling.
@@ -190,6 +191,31 @@ pub enum ToolingDeclarationKind {
     Class,
     Interface,
     Enum,
+}
+
+/// Compiler-proven parameter name attached to one direct-call argument.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolingInlayHint {
+    pub(crate) module: ModuleId,
+    pub(crate) argument_span: SourceSpan,
+    pub(crate) parameter_name: String,
+}
+
+impl ToolingInlayHint {
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub const fn argument_span(&self) -> SourceSpan {
+        self.argument_span
+    }
+
+    #[must_use]
+    pub fn parameter_name(&self) -> &str {
+        &self.parameter_name
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -713,5 +739,10 @@ impl FrontEndResult {
     #[must_use]
     pub fn tooling_declarations(&self) -> &[ToolingDeclaration] {
         &self.tooling_declarations
+    }
+
+    #[must_use]
+    pub fn tooling_inlay_hints(&self) -> &[ToolingInlayHint] {
+        &self.tooling_inlay_hints
     }
 }

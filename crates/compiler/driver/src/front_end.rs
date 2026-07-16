@@ -285,6 +285,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         .map_or(Err(ReferenceMetadataError::AnalysisUnavailable), |hir| {
             emit_reference_metadata(hir, database.index(), resolver.arena())
         });
+    let tooling_inlay_hints = hir.as_ref().map_or_else(Vec::new, tooling_inlay_hints);
     FrontEndResult {
         hir,
         hir_bubble_error,
@@ -308,7 +309,43 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         reference_metadata,
         checked_documentation,
         tooling_declarations,
+        tooling_inlay_hints,
     }
+}
+
+fn tooling_inlay_hints(hir: &HirBubble) -> Vec<ToolingInlayHint> {
+    let parameters = hir
+        .functions()
+        .iter()
+        .map(|function| (function.symbol(), function.parameters()))
+        .collect::<BTreeMap<_, _>>();
+    let mut hints = hir
+        .functions()
+        .iter()
+        .flat_map(|owner| {
+            pop_hir::hir_source_calls(owner)
+                .into_iter()
+                .filter_map(|call| {
+                    parameters
+                        .get(&call.target())
+                        .map(|parameters| (call, *parameters))
+                })
+                .flat_map(move |(call, parameters)| {
+                    call.arguments()
+                        .iter()
+                        .zip(parameters)
+                        .filter(|(_, parameter)| parameter.name() != "_")
+                        .map(move |(argument, parameter)| ToolingInlayHint {
+                            module: owner.module(),
+                            argument_span: *argument,
+                            parameter_name: parameter.name().to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+        })
+        .collect::<Vec<_>>();
+    hints.sort_by_key(|hint| (hint.module, hint.argument_span.range().start()));
+    hints
 }
 
 fn tooling_declarations(

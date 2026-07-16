@@ -13,7 +13,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use pop_backend_api::RuntimeProfile;
 use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
@@ -74,6 +74,7 @@ enum DumpKind {
 #[derive(Debug, Eq, PartialEq)]
 enum CommandLine {
     Help,
+    Scaffold(ScaffoldOptions),
     Check {
         source_path: PathBuf,
         dumps: Vec<DumpKind>,
@@ -113,6 +114,26 @@ enum CommandLine {
         lock_mode: LockMode,
         arguments: Vec<OsString>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScaffoldMode {
+    New,
+    Initialize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScaffoldKind {
+    Binary,
+    Library,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ScaffoldOptions {
+    mode: ScaffoldMode,
+    path: PathBuf,
+    name: Option<String>,
+    kind: ScaffoldKind,
 }
 
 #[derive(Debug)]
@@ -162,6 +183,7 @@ fn main() -> ExitCode {
     }
     match parse_arguments(arguments) {
         Ok(CommandLine::Help) => write_help(),
+        Ok(CommandLine::Scaffold(options)) => scaffold_package(&options),
         Ok(CommandLine::Check { source_path, dumps }) => check_source(&source_path, &dumps),
         Ok(CommandLine::PackageCheck {
             manifest_path,
@@ -282,6 +304,9 @@ fn parse_arguments(
     if command == "--help" || command == "-h" {
         return Ok(CommandLine::Help);
     }
+    if command == "new" || command == "initialize" {
+        return parse_scaffold_arguments(command == "new", arguments);
+    }
     if command == "build" {
         return parse_build_arguments(arguments);
     }
@@ -305,6 +330,69 @@ fn parse_arguments(
     }
 
     parse_check_arguments(arguments)
+}
+
+fn parse_scaffold_arguments(
+    create_new: bool,
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, UsageError> {
+    let mode = if create_new {
+        ScaffoldMode::New
+    } else {
+        ScaffoldMode::Initialize
+    };
+    let mut path = None;
+    let mut name = None;
+    let mut kind = ScaffoldKind::Binary;
+    let mut selected_kind = false;
+    let mut arguments = arguments.peekable();
+    while let Some(argument) = arguments.next() {
+        match argument.to_str() {
+            Some("--name") => {
+                if name.is_some() {
+                    return Err(unsupported_option(&argument));
+                }
+                name = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| option_requires("--name", "<Package.Name>"))?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            Some("--library" | "--binary") => {
+                if selected_kind {
+                    return Err(UsageError::simple("cli.scaffoldKindConflict"));
+                }
+                selected_kind = true;
+                kind = if argument == "--library" {
+                    ScaffoldKind::Library
+                } else {
+                    ScaffoldKind::Binary
+                };
+            }
+            Some(value) if value.starts_with('-') => return Err(unsupported_option(&argument)),
+            _ if path.is_none() => path = Some(PathBuf::from(argument)),
+            _ => {
+                return Err(unexpected_arguments(if create_new {
+                    "new"
+                } else {
+                    "initialize"
+                }));
+            }
+        }
+    }
+    let path = match (mode, path) {
+        (ScaffoldMode::New | ScaffoldMode::Initialize, Some(path)) => path,
+        (ScaffoldMode::Initialize, None) => PathBuf::from("."),
+        (ScaffoldMode::New, None) => return Err(UsageError::simple("cli.newNeedsPath")),
+    };
+    Ok(CommandLine::Scaffold(ScaffoldOptions {
+        mode,
+        path,
+        name,
+        kind,
+    }))
 }
 
 fn parse_documentation_arguments(
@@ -680,6 +768,213 @@ fn write_help() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+fn scaffold_package(options: &ScaffoldOptions) -> ExitCode {
+    match create_scaffold(options) {
+        Ok((name, destination)) => {
+            let message = localized(
+                "cli.packageCreated",
+                &[
+                    LocalizedArgument::text("name", name),
+                    LocalizedArgument::text("path", destination.display()),
+                ],
+            );
+            if writeln!(io::stdout().lock(), "{message}").is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            emit_localized(
+                "cli.scaffoldFailed",
+                &[LocalizedArgument::external("detail", error)],
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn create_scaffold(options: &ScaffoldOptions) -> Result<(String, PathBuf), String> {
+    let destination = absolute_scaffold_path(&options.path)?;
+    let name = options
+        .name
+        .clone()
+        .or_else(|| scaffold_directory_name(&destination))
+        .ok_or_else(|| "a valid PascalCase Package name is required; use --name".to_owned())?;
+    let (manifest, source, root_name) = scaffold_text(&name, options.kind)?;
+    validate_scaffold(&manifest, &source, options.kind)?;
+
+    match options.mode {
+        ScaffoldMode::New => publish_new_scaffold(&destination, &manifest, &source, root_name)?,
+        ScaffoldMode::Initialize => {
+            publish_initialized_scaffold(&destination, &manifest, &source, root_name)?;
+        }
+    }
+    Ok((name, destination))
+}
+
+fn absolute_scaffold_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .map_err(|error| format!("could not resolve destination: {error}"))
+}
+
+fn scaffold_directory_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn scaffold_text(name: &str, kind: ScaffoldKind) -> Result<(String, String, &'static str), String> {
+    let manifest =
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n");
+    parse_package_manifest(&manifest)
+        .map_err(|_| format!("`{name}` is not a valid PascalCase Package identity"))?;
+    Ok(match kind {
+        ScaffoldKind::Binary => (
+            manifest,
+            format!("namespace {name}\n\nfunction main()\nend\n"),
+            "main.pop",
+        ),
+        ScaffoldKind::Library => (manifest, format!("namespace {name}\n"), "lib.pop"),
+    })
+}
+
+fn validate_scaffold(manifest: &str, source: &str, kind: ScaffoldKind) -> Result<(), String> {
+    parse_package_manifest(manifest)
+        .map_err(|error| format!("generated manifest is invalid: {error}"))?;
+    let file = FileId::from_raw(0);
+    let module = ModuleId::from_raw(0);
+    let source = SourceFile::new(
+        file,
+        Arc::<str>::from("scaffold.pop"),
+        Arc::<str>::from(source),
+    )
+    .map_err(|error| format!("generated source is invalid: {error}"))?;
+    let input = FrontEndBubbleInput::new(
+        BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
+        NamespaceId::from_raw(FIRST_PACKAGE_BUBBLE),
+        Vec::new(),
+        vec![FrontEndModule::new(module, source)],
+    );
+    let input = if kind == ScaffoldKind::Binary {
+        input.with_implicit_main_entry(module)
+    } else {
+        input
+    };
+    let result = analyze_bubble(input);
+    if let Some(diagnostic) = result.diagnostics().first() {
+        return Err(format!(
+            "generated source failed compiler validation with {}",
+            diagnostic.code()
+        ));
+    }
+    Ok(())
+}
+
+fn publish_new_scaffold(
+    destination: &Path,
+    manifest: &str,
+    source: &str,
+    root_name: &str,
+) -> Result<(), String> {
+    if fs::symlink_metadata(destination).is_ok() {
+        return Err(format!(
+            "destination `{}` already exists",
+            destination.display()
+        ));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "destination has no parent directory".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| format!("could not create parent: {error}"))?;
+    let leaf = destination
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "destination must have a UTF-8 directory name".to_owned())?;
+    let staging = parent.join(format!(".{leaf}.pop-new-{}", std::process::id()));
+    if fs::symlink_metadata(&staging).is_ok() {
+        return Err("scaffolding staging path already exists".to_owned());
+    }
+    if let Err(error) = write_scaffold(&staging, manifest, source, root_name) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    fs::rename(&staging, destination).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging);
+        format!("could not publish Package atomically: {error}")
+    })
+}
+
+fn publish_initialized_scaffold(
+    destination: &Path,
+    manifest: &str,
+    source: &str,
+    root_name: &str,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(destination)
+        .map_err(|error| format!("initialization directory is unavailable: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("initialization destination must be a real directory".to_owned());
+    }
+    for protected in ["bubble.toml", "src/lib.pop", "src/main.pop"] {
+        if fs::symlink_metadata(destination.join(protected)).is_ok() {
+            return Err(format!("refusing to overwrite `{protected}`"));
+        }
+    }
+    let existing_source = destination.join("src");
+    if let Ok(metadata) = fs::symlink_metadata(&existing_source)
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err("existing `src` must be a real directory".to_owned());
+    }
+    let staging = destination.join(format!(".pop-initialize-{}", std::process::id()));
+    if fs::symlink_metadata(&staging).is_ok() {
+        return Err("scaffolding staging path already exists".to_owned());
+    }
+    write_scaffold(&staging, manifest, source, root_name)?;
+    let staged_manifest = staging.join("bubble.toml");
+    let staged_source = staging.join("src");
+    let manifest_path = destination.join("bubble.toml");
+    fs::rename(&staged_manifest, &manifest_path)
+        .map_err(|error| format!("could not publish manifest: {error}"))?;
+    let publish_source = if existing_source.is_dir() {
+        fs::rename(
+            staged_source.join(root_name),
+            existing_source.join(root_name),
+        )
+        .map(|()| {
+            let _ = fs::remove_dir(&staged_source);
+        })
+    } else {
+        fs::rename(&staged_source, &existing_source)
+    };
+    if let Err(error) = publish_source {
+        let _ = fs::remove_file(&manifest_path);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("could not publish source directory: {error}"));
+    }
+    let _ = fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+fn write_scaffold(
+    root: &Path,
+    manifest: &str,
+    source: &str,
+    root_name: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(root.join("src"))
+        .map_err(|error| format!("could not create scaffold: {error}"))?;
+    fs::write(root.join("bubble.toml"), manifest)
+        .map_err(|error| format!("could not write manifest: {error}"))?;
+    fs::write(root.join("src").join(root_name), source)
+        .map_err(|error| format!("could not write source: {error}"))
 }
 
 fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
