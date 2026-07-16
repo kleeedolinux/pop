@@ -1,4 +1,4 @@
-# ADR 0091: Checked Interface-to-Class Casts
+# ADR 0095: Checked Interface-to-Class Casts
 
 - Status: accepted
 - Date: 2026-07-16

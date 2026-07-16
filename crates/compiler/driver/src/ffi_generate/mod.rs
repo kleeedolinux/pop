@@ -141,7 +141,7 @@ pub fn generate_ffi_bindings(
     )
 }
 
-/// Verifies every selected ADR 0089 generated directory before Package source
+/// Verifies every selected ADR 0093 generated directory before Package source
 /// discovery or compilation.
 ///
 /// # Errors

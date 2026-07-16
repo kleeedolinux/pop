@@ -165,7 +165,7 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   exhaustive recovery boundaries, and deterministic lexical cleanup;
 - explicit checked interface-to-named-class casts with exact/descendant stable
   identity, typed optional absence, and MIR-interpreter/LLVM differential
-  behavior under ADR 0091;
+  behavior under ADR 0095;
 - coroutines/async model;
 - the statically bound native FFI from ADR 0081 and ADR 0082, including exact
   C/system ABI types, typed native-link manifests/artifacts, HIR/MIR foreign

@@ -77,7 +77,7 @@ order on every scope exit other than a runtime trap. See ADR 0052.
   such as `FileReader(reader)`, accepts one nominal interface value, and returns
   `FileReader?`. It matches the exact class or a descendant by stable identity;
   it never performs structural/name lookup or produces a dynamically typed
-  value. See ADR 0091.
+  value. See ADR 0095.
 - Heterogeneous collections use an explicit union or interface element type.
 
 ### Numeric source semantics
@@ -436,7 +436,7 @@ cast. `FileReader(reader)` evaluates the interface value once and returns
 `FileReader?`; a concrete `FileReader` or descendant succeeds without changing
 object identity, and an unrelated implementation returns `nil`. The target
 must be visible, fully resolved, and proven to implement the exact source
-interface. See ADR 0091.
+interface. See ADR 0095.
 
 ## Errors and effects
 

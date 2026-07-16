@@ -190,7 +190,7 @@ nominally implements that exact interface. It succeeds for the exact specialized
 class or a descendant and preserves object identity. Class-to-class,
 interface-to-interface, structural, type-parameter, optional-operand, and
 string-selected casts are outside this first slice. There is no universal
-object type offering reflection or string member access. See ADR 0091.
+object type offering reflection or string member access. See ADR 0095.
 
 The reserved `Result<T, TError>` type has exact `Ok(T)` and `Error(TError)`
 cases. Prefix `try` requires an enclosing single-result function of type
@@ -287,7 +287,7 @@ upcast, and checked downcast are distinct conversion kinds in HIR. No conversion
 is labeled “dynamic.” Lossy conversions require explicit syntax unless an ADR
 proves a safe implicit rule.
 
-ADR 0091 fixes checked nominal casts as compiler-known target-type calls rather
+ADR 0095 fixes checked nominal casts as compiler-known target-type calls rather
 than ordinary overloads. The checker records the exact source interface,
 target class, canonical arguments, nominal witness relation, and optional
 result. The conversion has no source-visible effect and cannot widen an inferred

@@ -5,6 +5,7 @@
 - Supersedes: none
 - Extends: ADR 0003, ADR 0008, ADR 0022, ADR 0039, ADR 0077,
   ADR 0080, ADR 0081, ADR 0082, and ADR 0087
+- Generator schema fixed by: ADR 0094
 
 ## Context
 
@@ -82,10 +83,11 @@ capturing, address-converting, comparing, or retaining either member is an
 error. The scope cannot suspend. Its callback registration is closed on every
 normal, expected-failure, panic, unwind, and cancellation exit.
 
-The `thread` argument of `Ffi.Callback.open` must be the direct spelling of one
-`Ffi.CallbackThread` case. It is a required compile-time constant carried in
-HIR, MIR, and metadata; a local, parameter, conditional, integer, or runtime
-enum value is rejected.
+The `thread` argument of `Ffi.Callback.open` must be the direct spelling
+`Ffi.CallbackThread.AttachedThread` in the first stable source contract. It is
+a required compile-time constant carried in HIR, MIR, and metadata; the
+`CallingThread` case, a local, parameter, conditional, integer, or runtime enum
+value is rejected for owned registration.
 
 `Ffi.Callback.open` creates an explicitly owned
 `Ffi.RegisteredCallback<TSignature>` stable-identity lifecycle object. Aliases
@@ -93,6 +95,13 @@ refer to the same open/active/closed state; Pop Lang does not require an affine
 or move-only type to enforce callback lifecycle. The object is neither a
 pointer nor a managed function value and never exposes its function/context
 pair as independently storable values.
+
+ADR 0094 fixes the first stable lifetime/thread mapping so the fact survives
+aliases without dependent or phantom types: call-scoped pairs are always
+`CallingThread`, while owned `RegisteredCallback<TSignature>` pairs are always
+`AttachedThread`. The registered type does not retain an arbitrary enum-value
+refinement, so registered `CallingThread` is a later architecture gap and only
+a runtime-internal capability.
 
 `Ffi.Callback.withPair` requires one immediate non-async body and returns
 `Ffi.CallbackClosedError` without running it when the shared lifecycle is
@@ -113,14 +122,15 @@ success; duplicate native close fails instead of retaining an unbounded
 tombstone registry.
 
 `Ffi.CallbackThread` is a closed enum with `CallingThread` and
-`AttachedThread`. `CallingThread` binds the registration to its creating host
-thread and scheduler. Entry requires that same thread while it is executing an
-active foreign transition which received the exact function/context pair; the
-registration necessarily exists before that transition begins. `AttachedThread`
-records the creating logical scheduler and permits entry from an otherwise
-unattached native thread through a balanced managed-thread attachment. A
-thread already attached to a different scheduler is rejected. There is no
-ambient scheduler lookup or user-supplied numeric scheduler identity.
+`AttachedThread`. The first stable source mapping is fixed by lifetime:
+call-scoped pairs use `CallingThread`, while owned registered pairs use
+`AttachedThread`. Calling-thread entry requires the same thread while it is
+executing an active foreign transition which received the exact pair.
+Attached-thread entry records the creating logical scheduler and permits entry
+from an otherwise unattached native thread through a balanced managed-thread
+attachment. A thread already attached to a different scheduler is rejected.
+There is no ambient scheduler lookup or user-supplied numeric scheduler
+identity.
 
 The first stable callbacks are serialized and non-reentrant. The runtime
 rejects overlapping or nested entry of the same registration before managed
@@ -154,12 +164,22 @@ reentrancy = Forbidden
 panic = AbortProcess
 ```
 
+For stable source attachments, `CallScoped` pairs require `CallingThread` and
+`Registered` pairs require `AttachedThread`; crossed combinations fail before
+HIR. The wider runtime enum does not authorize an unrepresented source policy.
+
 Indices are compile-time parameter identities, not runtime lookup. The full
 callback signature descriptor and SHA-256 layout fingerprint enter source
 metadata, HIR, MIR, `.poplib`, and `native-bindings.popc`. Compact execution
 keys follow ADR 0086 and cannot replace the full collision check. The checker
 requires the function and context arguments to be the matching pair from one
 registration and rejects lifetime or policy mismatches.
+
+ADR 0094 supplies the closed generator encoding: schema 1 remains callback-free
+and schema 2 carries exact zero-based indices, inline typed signature, full
+fingerprint, lifetime, ABI, thread, serialized/non-reentrant policy, and abort
+policy. The trusted attachment is descriptor-only and must match ordinary
+generated source before it enters `ForeignFunctionDeclaration`.
 
 The first stable panic policy is `AbortProcess`. Generated thunks balance every
 runtime transition and then invoke the runtime's declared panic boundary. A
@@ -183,9 +203,13 @@ runtime treats its bits solely as a lookup key and never dereferences them.
 Each registration also has a private nonzero generation and one compile-time
 `FfiCallbackSiteId`. A generated thunk passes its embedded site identity when
 entering. Wrong-site, zero, forged, stale, and closed contexts fail before a
-managed reference is returned. The function pointer is a backend-emitted fixed
-typed thunk address; no runtime symbol name or indirect unknown signature is
-resolved. ABI 1.18 callback support is target-gated to ABIs whose pointer width
+managed reference is returned. Opening a registration publishes only this
+context and the typed environment/site identity; it does not choose a physical
+callback ABI. Each verified pair scope selects a backend-emitted fixed typed
+thunk address from its trusted generated contract. Multiple physical ABI thunks
+may therefore share one registered context, but no runtime branch, symbol name,
+or indirect unknown signature selects between them. ABI 1.18 callback support
+is target-gated to ABIs whose pointer width
 is exactly 64 bits, so converting the complete nonzero context token to and
 from the userdata pointer cannot truncate or collide. A 16-bit, 32-bit, or
 wider pointer target rejects callback lowering before link; it never masks or
@@ -195,24 +219,30 @@ closed context encoding and ABI revision.
 ### HIR and canonical MIR
 
 HIR owns distinct `FfiWithCallback`, `FfiCallbackOpen`,
-`FfiCallbackWithPair`, and `FfiCallbackClose`
-expressions. Each carries the exact callback signature descriptor, generated
-callback body identity, captures, policy, and source region or owned resource
-identity. HIR does not contain a native function address.
+`FfiCallbackWithPair`, and `FfiCallbackClose` expressions. Open expressions
+carry the exact source callback signature, generated callback body identity,
+captures, thread/lifetime policy, and source region or owned resource identity.
+Each pair expression additionally carries the one exact generated callback
+contract selected from its lexically proven foreign uses: ABI, full signature
+fingerprint, layouts, lifetime, thread, concurrency, reentrancy, and panic
+policy. An unused pair or pair body with incompatible contracts is rejected
+before HIR. HIR does not contain a native function address.
 
 Canonical MIR owns backend-neutral operations:
 
 ```text
-ffiCallbackOpenScoped{site, signature, callback, captures, region}
-ffiCallbackOpenOwned{site, signature, callback, captures, thread}
-callScopedCallback{region, body, callbackFunction, context}
-callRegisteredCallbackPair{registration, site, signature, region, body}
+ffiCallbackOpenScoped{site, sourceSignature, callback, captures, region}
+ffiCallbackOpenOwned{site, sourceSignature, callback, captures, thread}
+callScopedCallback{registration, region, bindingSignature, body}
+callRegisteredCallbackPair{registration, site, bindingSignature, region, body}
 ffiCallbackCloseScoped{registration, region}
 ffiCallbackCloseOwned{registration}
 ```
 
-The callback body is one named nested MIR function with the exact ABI
-parameters and result plus typed direct captures. `FfiCallbackSiteId` and
+The callback body is one named nested MIR function with the exact source
+parameters and result plus typed direct captures. `bindingSignature` is a
+backend-neutral closed value containing callback ABI, full fixed fingerprint,
+and parameter/result `FfiAbiLayoutId` facts. `FfiCallbackSiteId` and
 `BorrowRegionId`-style scoped provenance are compiler identities, not runtime
 strings. The verifier proves exact signature/layout equality, one context
 parameter, function/context pair provenance, region dominance, non-escape,
@@ -226,7 +256,9 @@ the same closed state rather than receiving an invented move operation.
 The MIR interpreter uses an exact typed test adapter for callback registration
 and invocation. Without one it reports the unavailable native capability. The
 experimental C backend rejects all callback operations. LLVM emits one fixed
-typed thunk per callback site from verified MIR and the selected target ABI.
+typed thunk per callback-site/binding-signature pair from verified MIR. A
+registered open is ABI-neutral; only the lexical pair operation materializes
+the compile-time-selected C or System thunk address beside the context.
 
 ### PLRI and native ABI 1.18
 

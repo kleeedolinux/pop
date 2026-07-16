@@ -153,7 +153,7 @@ closures, panic and unwinding, coroutines, unsafe memory, and FFI are rejected
 during backend validation. The backend does not invent a placeholder runtime or
 expose a raw pointer fallback.
 
-ADR 0091's `checkedDowncast` is also rejected during C capability validation:
+ADR 0095's `checkedDowncast` is also rejected during C capability validation:
 the experimental backend has neither managed interface values nor verified
 class-ancestry descriptors. It cannot substitute a C pointer cast, `void *`,
 name comparison, or partial RTTI. LLVM and the MIR interpreter remain the

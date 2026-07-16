@@ -213,7 +213,7 @@ identities, and reserved built-in identities. Unsupported public signature or
 capsule types reject metadata emission rather than becoming erased or dynamic.
 HIR/MIR retain complete identities after any session-local metadata remapping.
 
-For ADR 0091 checked casts, a public class reference additionally retains its
+For ADR 0095 checked casts, a public class reference additionally retains its
 stable specialized direct-base identity, open/sealed fact, and exact specialized
 interface witnesses. A consumer can therefore validate a visible
 interface-to-class cast without loading source or discovering private types.

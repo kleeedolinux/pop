@@ -122,7 +122,7 @@ adding another operator. `FileReader(reader)` accepts one nominal interface
 value and returns `FileReader?`; `Box<Int>(value)` names a complete generic class
 target. This is a compiler-known checked conversion, not construction,
 overloading, reflection, or runtime type lookup. The first slice does not add
-`as`, `as?`, an unchecked assertion, or a type-value argument. See ADR 0091.
+`as`, `as?`, an unchecked assertion, or a type-value argument. See ADR 0095.
 
 String concatenation uses the Luau operator `..`. Backtick interpolation keeps
 Luau's `{expression}` shape, while `String(value)` is the explicit formatting

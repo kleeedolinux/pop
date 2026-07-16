@@ -198,7 +198,7 @@ help: check for `nil` before this call
 Full solver graphs remain available in machine/debug output, not dumped into the
 normal message.
 
-ADR 0091 reserves `POP2032` for a checked-cast target that is not one fully
+ADR 0095 reserves `POP2032` for a checked-cast target that is not one fully
 applied named class, `POP2033` for an operand that is not one non-optional
 nominal interface value, and `POP2034` for a target without the exact nominal
 source-interface implementation. These diagnostics carry typed source/target

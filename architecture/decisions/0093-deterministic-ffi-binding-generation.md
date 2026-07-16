@@ -6,6 +6,7 @@
   ADR 0086
 - Supersedes: the generator input and `native-bindings` physical-encoding
   portions of ADR 0081, ADR 0082, and ADR 0086
+- Amended by: ADR 0094 for the closed schema-2 callback-pair form
 
 ## Context
 
@@ -105,13 +106,15 @@ by Pop name and state one validated external symbol, closed ABI (`C`, `System`,
 or `CUnwind`), exact ordered parameters, exact result, and reviewed blocking
 policy. Duplicate native or Pop identities fail closed.
 
-The closed direct ABI types are Pop's exact fixed integers and floats, the
+Schema 1's closed direct ABI types are Pop's exact fixed integers and floats, the
 accepted `Ffi.C` scalar types, `Byte`, a record declared earlier in the same
 descriptor, and one of ADR 0082's four pointer constructors around one direct
 nonpointer ABI type. No nested pointer, function pointer, array, handle,
 managed type, optional unrelated to a pointer, union, bit field, packed record,
-flexible member, vector, variadic pack, or untyped value is accepted in schema
-1. A function may omit a result; `Void` is not a value type.
+flexible member, vector, variadic pack, or untyped value is accepted. A function
+may omit a result; `Void` is not a value type. ADR 0094 adds schema 2 without
+changing schema 1: only a fully attached `Ffi.Function<TSignature>` and matching
+`Ffi.CallbackContext` parameter pair becomes valid.
 
 Every pointer parameter has exactly one
 `@Ffi.Binding.ParameterPointer` naming its resolved parameter token and the
@@ -200,9 +203,10 @@ generator fix downloads tools, changes safety policy, or deletes output.
   generated metadata; an untyped parallel schema is unnecessary.
 - Generated source remains reviewable ordinary Pop Lang. The path adds no
   reflection, macro enumeration, source mixin, runtime lookup, or dynamic value.
-- Version 1 intentionally rejects headers, callbacks, nested pointers,
+- Schema 1 intentionally rejects headers, callbacks, nested pointers,
   arrays/unions/bit fields, variadics, and shim-requiring declarations rather
-  than guessing. Later adapters extend the closed contract deliberately.
+  than guessing. ADR 0094's schema 2 accepts only the closed first callback-pair
+  attachment and retains every other rejection.
 - Regeneration never destroys local edits. A changed generation requires
   explicit removal of the old generated directory after review or a future
   separately accepted transactional replacement protocol.
@@ -251,7 +255,10 @@ An immutable publish or byte-identical no-op gives a small failure-atomic path.
 - exact scalar/record/read-only/mutable/optional pointer and `C`/`System`/
   `CUnwind` positives plus missing policy and unsupported nested pointer,
   function pointer, array, union, bit-field, packed, flexible, vector, and
-  variadic negatives;
+  variadic schema-1 negatives;
+- schema-2 exact callback/context indices, signature fingerprint, lifetime,
+  callback ABI, thread, serialized/non-reentrant/abort policy, blocking-only,
+  generated-source, metadata, and schema-1-regression coverage from ADR 0094;
 - no inferred safety facts, source/C injection, shell/process invocation,
   compile-time execution, reflection, runtime lookup, ambient paths, timestamps,
   or environment output;

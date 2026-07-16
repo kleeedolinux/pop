@@ -172,7 +172,7 @@ Scoped:        callScopedBorrow{borrowRegion, nestedFunction, captures}
 Debug:         debugValue, sourceScope
 ```
 
-Under ADR 0091, the first `checkedDowncast` consumes one nominal interface
+Under ADR 0095, the first `checkedDowncast` consumes one nominal interface
 reference and carries exact Bubble-scoped source-interface and target-class
 identities plus canonical generic arguments. Its result is exactly the optional
 target class. It matches the exact specialized class or a transitive descendant,

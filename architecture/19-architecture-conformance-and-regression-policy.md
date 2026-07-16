@@ -304,7 +304,7 @@ Architecture CI should eventually verify:
 - native class field/method lowering without table/metatable lookup;
 - checked nominal-cast exact/descendant identity, visibility, optional absence,
   metadata round trips, verifier negatives, interpreter/LLVM differentials, and
-  fail-closed unsupported backends under ADR 0091;
+  fail-closed unsupported backends under ADR 0095;
 - Module/Bubble behavior without `require` value tables;
 - `bubble.toml`/`bubble.lock` and monorepo selection/reproducibility tests;
 - canonical native link plans, hashed local inputs, exact ABI fingerprints, and
