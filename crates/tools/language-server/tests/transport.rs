@@ -79,6 +79,11 @@ fn stdio_session_negotiates_utf16_and_publishes_localized_diagnostics() {
         "utf-16"
     );
     assert_eq!(messages[0]["result"]["capabilities"]["textDocumentSync"], 1);
+    assert_eq!(messages[0]["result"]["capabilities"]["hoverProvider"], true);
+    assert_eq!(
+        messages[0]["result"]["capabilities"]["documentSymbolProvider"],
+        true
+    );
     let publication = messages
         .iter()
         .find(|message| message["method"] == "textDocument/publishDiagnostics")
@@ -100,6 +105,44 @@ fn stdio_session_negotiates_utf16_and_publishes_localized_diagnostics() {
             .is_some_and(|message| message.contains("Esperado") || message.contains("esperado"))
     }));
     assert_eq!(messages.last().expect("shutdown response")["id"], 2);
+}
+
+#[test]
+fn stdio_hover_and_document_symbols_use_compiler_results() {
+    let uri = "file:///workspace/tooling.pop";
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"locale":"en","capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"pop","version":1,"text":"namespace Example\n--- <summary>\n--- Returns one.\n--- </summary>\npublic function one(): Int\n    return 1\nend\n"}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri},"position":{"line":4,"character":18}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":uri}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    let messages = responses(&output);
+    let hover = messages
+        .iter()
+        .find(|message| message["id"] == 3)
+        .expect("hover");
+    assert!(
+        hover["result"]["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("Returns one.")
+    );
+    let symbols = messages
+        .iter()
+        .find(|message| message["id"] == 4)
+        .expect("symbols");
+    assert_eq!(symbols["result"][0]["name"], "one");
+    assert_eq!(symbols["result"][0]["kind"], 12);
 }
 
 #[test]

@@ -392,13 +392,14 @@ name = "pop-language-server"
 version = "0.1.0"
 dependencies = [
  "pop-diagnostics",
+ "pop-documentation",
+ "pop-driver",
  "pop-extension-lsp",
  "pop-foundation",
  "pop-localization",
  "pop-projects",
  "pop-query",
  "pop-source",
- "pop-syntax",
  "serde",
  "serde_json",
 ]

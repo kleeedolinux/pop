@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    DocumentAnalysis, DocumentUri, DocumentVersion, LanguageServer, LanguageServerError,
-    ProtocolDiagnostic,
+    DocumentAnalysis, DocumentSymbol, DocumentUri, DocumentVersion, Hover, LanguageServer,
+    LanguageServerError, ProtocolDiagnostic, ProtocolPosition, ProtocolRange,
 };
 
 const MAXIMUM_HEADER_BYTES: usize = 8 * 1024;
@@ -162,6 +162,10 @@ impl Connection {
             "textDocument/didClose" if self.lifecycle == Lifecycle::Running && id.is_none() => {
                 self.close(params)
             }
+            "textDocument/hover" if self.lifecycle == Lifecycle::Running => self.hover(id, params),
+            "textDocument/documentSymbol" if self.lifecycle == Lifecycle::Running => {
+                self.document_symbols(id, params)
+            }
             "$/cancelRequest" if id.is_none() => Ok(ConnectionAction::None),
             _ => Ok(id.map_or(ConnectionAction::None, |id| {
                 let code = if self.lifecycle == Lifecycle::WaitingForInitialize {
@@ -213,7 +217,9 @@ impl Connection {
             &json!({
                 "capabilities": {
                     "positionEncoding": "utf-16",
-                    "textDocumentSync": 1
+                    "textDocumentSync": 1,
+                    "hoverProvider": true,
+                    "documentSymbolProvider": true
                 },
                 "serverInfo": {
                     "name": "Pop Lang",
@@ -281,6 +287,83 @@ impl Connection {
             "method": "textDocument/publishDiagnostics",
             "params": {"uri": uri.as_str(), "diagnostics": []}
         })))
+    }
+
+    fn hover(&self, id: Option<Value>, params: Value) -> Result<ConnectionAction, TransportError> {
+        let Some(id) = id else {
+            return Ok(ConnectionAction::None);
+        };
+        let params: TextDocumentPositionParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &format!("Invalid params: {error}"),
+                )));
+            }
+        };
+        let uri = match DocumentUri::new(params.text_document.uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &error.to_string(),
+                )));
+            }
+        };
+        let position = ProtocolPosition::new(params.position.line, params.position.character);
+        let server = self.server.as_ref().expect("running server");
+        match server.hover(&uri, position, &CancellationToken::new()) {
+            Ok(hover) => Ok(ConnectionAction::Reply(success_response(
+                &id,
+                &hover.map_or(Value::Null, |hover| protocol_hover(&hover)),
+            ))),
+            Err(error) => Ok(ConnectionAction::Reply(language_server_error(
+                server, &id, &error,
+            )?)),
+        }
+    }
+
+    fn document_symbols(
+        &self,
+        id: Option<Value>,
+        params: Value,
+    ) -> Result<ConnectionAction, TransportError> {
+        let Some(id) = id else {
+            return Ok(ConnectionAction::None);
+        };
+        let params: DocumentSymbolParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &format!("Invalid params: {error}"),
+                )));
+            }
+        };
+        let uri = match DocumentUri::new(params.text_document.uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(error_response(
+                    &id,
+                    -32602,
+                    &error.to_string(),
+                )));
+            }
+        };
+        let server = self.server.as_ref().expect("running server");
+        match server.document_symbols(&uri, &CancellationToken::new()) {
+            Ok(symbols) => Ok(ConnectionAction::Reply(success_response(
+                &id,
+                &Value::Array(symbols.iter().map(protocol_document_symbol).collect()),
+            ))),
+            Err(error) => Ok(ConnectionAction::Reply(language_server_error(
+                server, &id, &error,
+            )?)),
+        }
     }
 
     fn document_size_error(&self, uri: &DocumentUri, text: &str) -> Option<LanguageServerError> {
@@ -366,6 +449,25 @@ struct TextDocumentIdentifier {
     uri: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextDocumentPositionParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+}
+
+#[derive(Deserialize)]
+struct Position {
+    line: u32,
+    character: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentSymbolParams {
+    text_document: TextDocumentIdentifier,
+}
+
 fn decode_notification<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, TransportError> {
     serde_json::from_value(params).map_err(|error| TransportError::InvalidJson(error.to_string()))
 }
@@ -416,6 +518,64 @@ fn protocol_diagnostic(diagnostic: &ProtocolDiagnostic) -> Value {
         "source": "Pop Lang",
         "message": diagnostic.message()
     })
+}
+
+fn protocol_hover(hover: &Hover) -> Value {
+    let mut value = hover.signature().to_owned();
+    if let Some(summary) = hover.summary() {
+        value.push_str("\n\n");
+        value.push_str(summary);
+    }
+    json!({
+        "contents": {"kind": "plaintext", "value": value},
+        "range": protocol_range(hover.range())
+    })
+}
+
+fn protocol_document_symbol(symbol: &DocumentSymbol) -> Value {
+    json!({
+        "name": symbol.name(),
+        "detail": symbol.kind(),
+        "kind": symbol_kind(symbol.kind()),
+        "range": protocol_range(symbol.range()),
+        "selectionRange": protocol_range(symbol.selection_range())
+    })
+}
+
+fn symbol_kind(kind: &str) -> u8 {
+    match kind {
+        "function" => 12,
+        "constant" => 14,
+        "record" => 23,
+        "union" | "error" | "enum" => 10,
+        "interface" => 11,
+        "class" | "attribute" => 5,
+        "type alias" => 26,
+        _ => 13,
+    }
+}
+
+fn protocol_range(range: ProtocolRange) -> Value {
+    json!({
+        "start": {"line": range.start().line(), "character": range.start().character()},
+        "end": {"line": range.end().line(), "character": range.end().character()}
+    })
+}
+
+fn language_server_error(
+    server: &LanguageServer,
+    id: &Value,
+    error: &LanguageServerError,
+) -> Result<Value, TransportError> {
+    let message = server
+        .render_error(error)
+        .map_err(|error| TransportError::InvalidJson(error.to_string()))?;
+    let code = if matches!(error, LanguageServerError::Cancelled) {
+        -32800
+    } else {
+        -32602
+    };
+    Ok(error_response(id, code, &message))
 }
 
 fn success_response(id: &Value, result: &Value) -> Value {

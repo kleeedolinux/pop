@@ -354,6 +354,42 @@ fn accepted_adrs_have_unique_numeric_identities() {
 }
 
 #[test]
+fn private_language_server_uses_compiler_queries_without_cli_scraping() {
+    let root = repository_root();
+    let manifest = read_required(root.join("crates/tools/language-server/Cargo.toml"));
+    let implementation = read_required(root.join("crates/tools/language-server/src/lib.rs"));
+
+    assert!(
+        manifest.contains("pop-driver.workspace = true"),
+        "ADR 0089 requires the private language server to consume compiler tooling queries"
+    );
+    assert!(
+        implementation.contains("analyze_bubble("),
+        "semantic editor diagnostics must come from the compiler front end"
+    );
+    assert!(
+        !implementation.contains("pop_syntax::parse_file")
+            && !implementation.contains("Command::new")
+            && !implementation.contains("pop check"),
+        "the language server must not replace compiler queries with parser-only or CLI scraping"
+    );
+}
+
+#[test]
+fn release_toolchains_ship_the_official_language_server() {
+    let workflow = read_required(repository_root().join(".github/workflows/release-pr.yml"));
+
+    assert!(workflow.contains("-p pop-language-server"));
+    assert!(workflow.contains("pop-language-server-${{ matrix.target }}"));
+    assert!(
+        workflow.contains(
+            "zip -9 \"../$bundle.zip\" \"$bundle\" \"pop-language-server-${{ matrix.target }}\""
+        ),
+        "ADR 0028 toolchain archives must contain the first-party language server"
+    );
+}
+
+#[test]
 fn pull_request_tests_do_not_execute_harness_free_benchmarks() {
     let workflow = read_required(repository_root().join(".github/workflows/pr-check.yml"));
 

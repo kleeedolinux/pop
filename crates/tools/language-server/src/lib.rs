@@ -7,7 +7,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use pop_foundation::{Diagnostic, DiagnosticSeverity, FileId, TextSize};
+use pop_documentation::{XmlFragment, XmlNode};
+use pop_driver::{FrontEndBubbleInput, FrontEndModule, ToolingDeclarationKind, analyze_bubble};
+use pop_foundation::{
+    BubbleId, Diagnostic, DiagnosticSeverity, FileId, ModuleId, NamespaceId, TextRange, TextSize,
+};
 use pop_localization::{
     Argument, Language, LocalizationError, RenderContext, select_process_language,
 };
@@ -187,6 +191,60 @@ pub struct DocumentAnalysis {
     diagnostics: Vec<ProtocolDiagnostic>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hover {
+    signature: String,
+    summary: Option<String>,
+    range: ProtocolRange,
+}
+
+impl Hover {
+    #[must_use]
+    pub fn signature(&self) -> &str {
+        &self.signature
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        self.summary.as_deref()
+    }
+
+    #[must_use]
+    pub const fn range(&self) -> ProtocolRange {
+        self.range
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentSymbol {
+    name: String,
+    kind: &'static str,
+    range: ProtocolRange,
+    selection_range: ProtocolRange,
+}
+
+impl DocumentSymbol {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn range(&self) -> ProtocolRange {
+        self.range
+    }
+
+    #[must_use]
+    pub const fn selection_range(&self) -> ProtocolRange {
+        self.selection_range
+    }
+}
+
 impl DocumentAnalysis {
     #[must_use]
     pub const fn file(&self) -> FileId {
@@ -234,6 +292,17 @@ pub enum LanguageServerError {
 struct OpenDocument {
     source: SourceFile,
     version: DocumentVersion,
+    analysis: DocumentAnalysis,
+    declarations: Vec<AnalyzedDeclaration>,
+}
+
+struct AnalyzedDeclaration {
+    name: String,
+    kind: &'static str,
+    declaration: TextRange,
+    selection: TextRange,
+    signature: String,
+    summary: Option<String>,
 }
 
 pub struct LanguageServer {
@@ -288,12 +357,21 @@ impl LanguageServer {
                     detail: error.to_string(),
                 }
             })?;
-        let analysis = analyze_document(self.session, &source, version, cancellation)?;
+        let (analysis, declarations) =
+            analyze_document(self.session, &source, version, cancellation)?;
         self.next_file = self
             .next_file
             .checked_add(1)
             .ok_or(LanguageServerError::TooManyDocuments)?;
-        self.documents.insert(uri, OpenDocument { source, version });
+        self.documents.insert(
+            uri,
+            OpenDocument {
+                source,
+                version,
+                analysis: analysis.clone(),
+                declarations,
+            },
+        );
         Ok(analysis)
     }
 
@@ -329,9 +407,17 @@ impl LanguageServer {
                 uri: uri.clone(),
                 detail: error.to_string(),
             })?;
-        let analysis = analyze_document(self.session, &source, version, cancellation)?;
-        self.documents
-            .insert(uri.clone(), OpenDocument { source, version });
+        let (analysis, declarations) =
+            analyze_document(self.session, &source, version, cancellation)?;
+        self.documents.insert(
+            uri.clone(),
+            OpenDocument {
+                source,
+                version,
+                analysis: analysis.clone(),
+                declarations,
+            },
+        );
         Ok(analysis)
     }
 
@@ -349,12 +435,74 @@ impl LanguageServer {
             .documents
             .get(uri)
             .ok_or_else(|| LanguageServerError::DocumentNotOpen { uri: uri.clone() })?;
-        analyze_document(
-            self.session,
-            &document.source,
-            document.version,
-            cancellation,
-        )
+        cancellation
+            .check()
+            .map_err(|_| LanguageServerError::Cancelled)?;
+        Ok(document.analysis.clone())
+    }
+
+    /// Returns compiler-checked hover information for a namespace declaration.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown documents, cancellation, or invalid UTF-16 positions.
+    pub fn hover(
+        &self,
+        uri: &DocumentUri,
+        position: ProtocolPosition,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<Hover>, LanguageServerError> {
+        cancellation
+            .check()
+            .map_err(|_| LanguageServerError::Cancelled)?;
+        let document = self
+            .documents
+            .get(uri)
+            .ok_or_else(|| LanguageServerError::DocumentNotOpen { uri: uri.clone() })?;
+        let Some(offset) = source_offset(document.source.text(), position) else {
+            return Ok(None);
+        };
+        let Some(declaration) = document.declarations.iter().find(|declaration| {
+            declaration.selection.start() <= offset && offset < declaration.selection.end()
+        }) else {
+            return Ok(None);
+        };
+        Ok(Some(Hover {
+            signature: declaration.signature.clone(),
+            summary: declaration.summary.clone(),
+            range: protocol_range(document.source.text(), declaration.selection)?,
+        }))
+    }
+
+    /// Returns compiler-indexed namespace declarations for the open Module.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown documents, cancellation, or invalid compiler spans.
+    pub fn document_symbols(
+        &self,
+        uri: &DocumentUri,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<DocumentSymbol>, LanguageServerError> {
+        cancellation
+            .check()
+            .map_err(|_| LanguageServerError::Cancelled)?;
+        let document = self
+            .documents
+            .get(uri)
+            .ok_or_else(|| LanguageServerError::DocumentNotOpen { uri: uri.clone() })?;
+        document
+            .declarations
+            .iter()
+            .map(|declaration| {
+                Ok(DocumentSymbol {
+                    name: declaration.name.clone(),
+                    kind: declaration.kind,
+                    range: protocol_range(document.source.text(), declaration.declaration)?,
+                    selection_range: protocol_range(document.source.text(), declaration.selection)?,
+                })
+            })
+            .collect()
     }
 
     pub fn close(&mut self, uri: &DocumentUri) -> bool {
@@ -419,15 +567,23 @@ fn analyze_document(
     source: &SourceFile,
     version: DocumentVersion,
     cancellation: &CancellationToken,
-) -> Result<DocumentAnalysis, LanguageServerError> {
+) -> Result<(DocumentAnalysis, Vec<AnalyzedDeclaration>), LanguageServerError> {
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
-    let syntax = pop_syntax::parse_file(source);
+    let result = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(
+            ModuleId::from_raw(source.id().raw()),
+            source.clone(),
+        )],
+    ));
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
-    let diagnostics = syntax
+    let diagnostics = result
         .diagnostics()
         .iter()
         .map(|diagnostic| protocol_diagnostic(session, source, diagnostic))
@@ -435,11 +591,112 @@ fn analyze_document(
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
-    Ok(DocumentAnalysis {
-        file: source.id(),
-        version,
-        diagnostics,
+    let documentation = result
+        .checked_documentation()
+        .iter()
+        .map(|documentation| (documentation.identity(), documentation.fragment()))
+        .collect::<BTreeMap<_, _>>();
+    let declarations = result
+        .tooling_declarations()
+        .iter()
+        .map(|declaration| {
+            let signature_range = declaration.signature_span().range();
+            let signature = source
+                .text()
+                .get(signature_range.start().to_usize()..signature_range.end().to_usize())
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            AnalyzedDeclaration {
+                name: declaration.name().to_owned(),
+                kind: declaration_kind(declaration.kind()),
+                declaration: declaration.declaration_span().range(),
+                selection: declaration.selection_span().range(),
+                signature,
+                summary: documentation
+                    .get(&declaration.identity())
+                    .and_then(|fragment| documentation_summary(fragment)),
+            }
+        })
+        .collect();
+    Ok((
+        DocumentAnalysis {
+            file: source.id(),
+            version,
+            diagnostics,
+        },
+        declarations,
+    ))
+}
+
+const fn declaration_kind(kind: ToolingDeclarationKind) -> &'static str {
+    match kind {
+        ToolingDeclarationKind::Function => "function",
+        ToolingDeclarationKind::Constant => "constant",
+        ToolingDeclarationKind::TypeAlias => "type alias",
+        ToolingDeclarationKind::Attribute => "attribute",
+        ToolingDeclarationKind::Record => "record",
+        ToolingDeclarationKind::Union => "union",
+        ToolingDeclarationKind::Error => "error",
+        ToolingDeclarationKind::Class => "class",
+        ToolingDeclarationKind::Interface => "interface",
+        ToolingDeclarationKind::Enum => "enum",
+    }
+}
+
+fn documentation_summary(fragment: &XmlFragment) -> Option<String> {
+    fragment.children().iter().find_map(|node| match node {
+        XmlNode::Element { name, children, .. } if name == "summary" => {
+            let mut text = String::new();
+            collect_documentation_text(children, &mut text);
+            let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!normalized.is_empty()).then_some(normalized)
+        }
+        _ => None,
     })
+}
+
+fn collect_documentation_text(nodes: &[XmlNode], output: &mut String) {
+    for node in nodes {
+        match node {
+            XmlNode::Text(text) => output.push_str(text),
+            XmlNode::Element { children, .. } => collect_documentation_text(children, output),
+        }
+    }
+}
+
+fn protocol_range(text: &str, range: TextRange) -> Result<ProtocolRange, LanguageServerError> {
+    let start = protocol_position(text, range.start())
+        .ok_or_else(|| LanguageServerError::Localization("invalid tooling start".to_owned()))?;
+    let end = protocol_position(text, range.end())
+        .ok_or_else(|| LanguageServerError::Localization("invalid tooling end".to_owned()))?;
+    Ok(ProtocolRange { start, end })
+}
+
+fn source_offset(text: &str, position: ProtocolPosition) -> Option<TextSize> {
+    let mut line_start = 0_usize;
+    for _ in 0..position.line {
+        let newline = text.get(line_start..)?.find('\n')?;
+        line_start = line_start.checked_add(newline)?.checked_add(1)?;
+    }
+    let line = text
+        .get(line_start..)?
+        .split_once('\n')
+        .map_or(text.get(line_start..)?, |(line, _)| line);
+    let content = line;
+    let mut utf16 = 0_u32;
+    for (byte, character) in content.char_indices() {
+        if utf16 == position.character {
+            return TextSize::try_from_usize(line_start + byte);
+        }
+        utf16 = utf16.checked_add(u32::try_from(character.len_utf16()).ok()?)?;
+        if utf16 > position.character {
+            return None;
+        }
+    }
+    (utf16 == position.character)
+        .then(|| TextSize::try_from_usize(line_start + content.len()))
+        .flatten()
 }
 
 fn protocol_diagnostic(
