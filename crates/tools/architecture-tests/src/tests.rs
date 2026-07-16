@@ -398,6 +398,12 @@ fn pull_request_tests_do_not_execute_harness_free_benchmarks() {
         "PR tests must select test targets without executing harness-free benchmarks"
     );
     assert!(
+        workflow.contains(
+            "run: cargo test --workspace --lib --bins --tests --examples -- --test-threads=1"
+        ),
+        "runtime integration tests share process-global native state and must run serially"
+    );
+    assert!(
         !workflow.contains("run: cargo test --workspace --all-targets"),
         "Cargo's all-targets test mode executes harness-free benchmark binaries"
     );
