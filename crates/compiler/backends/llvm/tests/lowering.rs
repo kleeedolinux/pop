@@ -113,9 +113,15 @@ fn llvm_lowers_foreign_calls_with_exact_abi_and_balanced_transitions() {
     .expect("foreign LLVM lowering");
     let text = module.to_string();
     assert!(text.contains("declare i32 @native_poll(i32)"), "{text}");
-    assert!(text.contains("define i64 @pop_b0_s0(i64 %v0)"), "{text}");
+    assert!(
+        !text.contains("define i64 @pop_b0_s0"),
+        "foreign declarations must have one direct external-call lowering path: {text}"
+    );
     assert!(text.contains("trunc i64 %v0 to i32"), "{text}");
-    assert!(text.contains("sext i32 %foreign_result to i64"), "{text}");
+    assert!(
+        text.contains("sext i32") && text.contains("to i64"),
+        "{text}"
+    );
     assert!(text.contains("call i64 @pop_rt_enter_foreign"), "{text}");
     assert!(text.contains("call i8 @pop_rt_leave_foreign"), "{text}");
     assert!(
@@ -160,6 +166,103 @@ fn llvm_lowers_foreign_calls_with_exact_abi_and_balanced_transitions() {
         result.status.code(),
         Some(42),
         "native foreign call failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn llvm_executes_nested_by_value_layout_records_through_catalog_marshalling() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/byValueLayout.pop",
+        "namespace Native.Unsafe\n\
+         @Ffi.C.Layout\n\
+         internal record Inner\n\
+             value: Int32\n\
+             marker: UInt8\n\
+         end\n\
+         @Ffi.C.Layout\n\
+         internal record Outer\n\
+             prefix: UInt8\n\
+             inner: Inner\n\
+             tail: Int\n\
+         end\n\
+         @Ffi.Foreign(\"transform_outer\")\n\
+         internal function transform(value: Outer): Outer\n\
+         end\n\
+         private function main(): Int\n\
+             local prefix: UInt8 = 7\n\
+             local value: Int32 = 5\n\
+             local marker: UInt8 = 3\n\
+             local inner: Inner = { value = value, marker = marker }\n\
+             local input: Outer = { prefix = prefix, inner = inner, tail = 1 }\n\
+             local output = transform(input)\n\
+             return output.tail\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("main")
+        .symbol();
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        hir,
+        front_end.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("verified by-value MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("by-value LLVM lowering");
+    let text = module.to_string();
+    let inner = "{ i32, i8 }";
+    let outer = format!("{{ i8, {inner}, i64 }}");
+    assert!(
+        text.contains(&format!("declare {outer} @transform_outer({outer})")),
+        "{text}"
+    );
+    assert!(text.contains("store [24 x i8] zeroinitializer"), "{text}");
+    assert!(text.contains("call i64 @pop_rt_field_get"), "{text}");
+    assert!(text.contains("call i8 @pop_rt_field_set"), "{text}");
+    assert!(!text.contains("memcpy"), "{text}");
+    module.verify().expect("valid by-value LLVM module");
+
+    let harness = format!(
+        "target triple = \"x86_64-unknown-linux-gnu\"\n\
+         define {outer} @transform_outer({outer} %value) {{\n\
+         entry:\n\
+           %updated = insertvalue {outer} %value, i64 42, 2\n\
+           ret {outer} %updated\n\
+         }}\n"
+    );
+    let result =
+        link_llvm_modules_with_runtime_and_run(&[text, harness], "nested-by-value-foreign-layout");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native by-value record call failed: {}",
         String::from_utf8_lossy(&result.stderr)
     );
 }
@@ -225,7 +328,10 @@ fn llvm_contains_c_unwind_at_one_balanced_foreign_boundary() {
     )
     .expect("CUnwind LLVM lowering");
     let text = module.to_string();
-    assert!(text.contains("invoke i64 @pop_b0_s0"), "{text}");
+    assert!(
+        text.contains("invoke i32 @native_may_unwind(i32"),
+        "CUnwind must use the same direct external-call path: {text}"
+    );
     assert!(text.contains("landingpad { ptr, i32 } cleanup"), "{text}");
     let landing = text
         .split("landingpad { ptr, i32 } cleanup")

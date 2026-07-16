@@ -147,17 +147,21 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
 
 fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunction, MirParseError> {
     let parts: Vec<_> = line.split_whitespace().collect();
-    if !matches!(parts.len(), 9 | 10) || parts[0] != "foreign" {
+    if !matches!(parts.len(), 9..=12) || parts[0] != "foreign" {
         return Err(error(number, "malformed foreign function"));
     }
     let symbol = parts[1];
     let function = parts[2];
     let parameters = parts[3];
     let results = parts[4];
-    let external_symbol = parts[5];
-    let abi = parts[6];
-    let links = parts[7];
-    let effects = parts[8];
+    let has_layouts = matches!(parts.len(), 11 | 12);
+    let parameter_layouts = has_layouts.then_some(parts[5]);
+    let result_layouts = has_layouts.then_some(parts[6]);
+    let offset = usize::from(has_layouts) * 2;
+    let external_symbol = parts[5 + offset];
+    let abi = parts[6 + offset];
+    let links = parts[7 + offset];
+    let effects = parts[8 + offset];
     let symbol = SymbolId::from_raw(parse_prefixed(symbol, 's', number)?);
     let function = FunctionId::from_raw(parse_prefixed(function, 'f', number)?);
     let external_symbol = external_symbol
@@ -196,8 +200,18 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         !effects.contains(MirEffect::Blocks),
         SourceSpan::new(FileId::from_raw(0), TextRange::empty(TextSize::from_u32(0))),
     );
+    let parameters = parse_wrapped_types(parameters, "params(", number)?;
+    let results = parse_wrapped_types(results, "results(", number)?;
+    let parameter_layouts = parameter_layouts.map_or_else(
+        || Ok(vec![None; parameters.len()]),
+        |layouts| parse_optional_ffi_layouts(layouts, "paramLayouts(", number),
+    )?;
+    let result_layouts = result_layouts.map_or_else(
+        || Ok(vec![None; results.len()]),
+        |layouts| parse_optional_ffi_layouts(layouts, "resultLayouts(", number),
+    )?;
     let reference_identity = parts
-        .get(9)
+        .get(9 + offset)
         .map(|reference| {
             let identity = reference
                 .strip_prefix("reference(b")
@@ -213,12 +227,38 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
     Ok(MirForeignFunction {
         function,
         symbol,
-        parameters: parse_wrapped_types(parameters, "params(", number)?,
-        results: parse_wrapped_types(results, "results(", number)?,
+        parameters,
+        results,
+        parameter_layouts,
+        result_layouts,
         effects,
         declaration,
         reference_identity,
     })
+}
+
+fn parse_optional_ffi_layouts(
+    text: &str,
+    prefix: &'static str,
+    line: usize,
+) -> Result<Vec<Option<FfiAbiLayoutId>>, MirParseError> {
+    let values = text
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| error(line, "foreign layout bindings"))?;
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    values
+        .split(',')
+        .map(|value| {
+            if value == "-" {
+                Ok(None)
+            } else {
+                parse_ffi_layout(value, line).map(Some)
+            }
+        })
+        .collect()
 }
 
 fn parse_function_reference(

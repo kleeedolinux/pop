@@ -12,6 +12,33 @@ use crate::instruction_lowering::{
 };
 use crate::lowering::native_runtime_symbol;
 
+/// Renders the target ABI value type from one verified canonical layout.
+/// Record order comes from the catalog field plan; LLVM supplies only the
+/// physical target calling convention for that already-authorized shape.
+pub(crate) fn physical_type(
+    layout: &MirFfiLayout,
+    catalog: &MirFfiLayoutCatalog,
+) -> Result<String, LlvmLoweringError> {
+    match layout.value_class() {
+        MirFfiValueClass::Integer => Ok(format!("i{}", layout.size() * 8)),
+        MirFfiValueClass::Float if layout.size() == 4 => Ok("float".to_owned()),
+        MirFfiValueClass::Float if layout.size() == 8 => Ok("double".to_owned()),
+        MirFfiValueClass::Pointer | MirFfiValueClass::FunctionPointer => Ok("ptr".to_owned()),
+        MirFfiValueClass::Handle => Ok("i64".to_owned()),
+        MirFfiValueClass::Record(fields) => fields
+            .iter()
+            .map(|field| {
+                catalog
+                    .get(field.layout())
+                    .ok_or(LlvmLoweringError::InvalidFfiLayout(field.layout()))
+                    .and_then(|child| physical_type(child, catalog))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|fields| format!("{{ {} }}", fields.join(", "))),
+        MirFfiValueClass::Float => Err(LlvmLoweringError::InvalidType(layout.element())),
+    }
+}
+
 pub(crate) fn marshal(
     value: &str,
     layout: &MirFfiLayout,

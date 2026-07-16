@@ -268,6 +268,41 @@ fn foreign_contract_and_transitive_effects_survive_public_reference_metadata() {
 }
 
 #[test]
+fn public_foreign_layout_records_fail_closed_before_reference_layout_metadata_exists() {
+    let ffi_bubble = BubbleId::from_raw(20);
+    let producer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(21),
+            NamespaceId::from_raw(21),
+            vec![ffi_bubble],
+            vec![module(
+                0,
+                "src/layout.pop",
+                "namespace Native.Unsafe\n\
+                 @Ffi.C.Layout\n\
+                 public record Pair\n\
+                     left: Int32\n\
+                     right: Int32\n\
+                 end\n\
+                 @Ffi.Foreign(\"transform_pair\")\n\
+                 public function transform(value: Pair): Pair\n\
+                 end\n",
+            )],
+        )
+        .with_ffi_dependency(ffi_bubble),
+    );
+    assert!(
+        producer.diagnostics().is_empty(),
+        "{}",
+        producer.diagnostic_snapshot()
+    );
+    assert!(matches!(
+        producer.reference_metadata(),
+        Err(ReferenceMetadataError::UnsupportedPublicType { .. })
+    ));
+}
+
+#[test]
 fn public_function_metadata_resolves_in_a_dependent_bubble_by_typed_identity() {
     let standard_bubble = BubbleId::from_raw(2);
     let standard = analyze_bubble(FrontEndBubbleInput::new(

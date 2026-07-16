@@ -48,8 +48,13 @@ pub(super) fn validate_entry(
     }
     let mut identities = BTreeSet::new();
     let mut ranges = Vec::with_capacity(fields.len());
-    for (expected_index, field) in fields.iter().enumerate() {
-        if field.source_index as usize != expected_index || !identities.insert(field.field) {
+    let mut source_indices = BTreeSet::new();
+    for field in fields {
+        let source_index = field.source_index as usize;
+        if source_index >= source_fields.len()
+            || !source_indices.insert(source_index)
+            || !identities.insert(field.field)
+        {
             return Err(MirFfiLayoutError::InvalidRecordFields(entry.id));
         }
         let child = by_id
@@ -59,7 +64,7 @@ pub(super) fn validate_entry(
         if child.abi != entry.abi {
             return Err(MirFfiLayoutError::RecordAbiMismatch(entry.id));
         }
-        if source_fields[expected_index].1 != child.element {
+        if source_fields[source_index].1 != child.element {
             return Err(MirFfiLayoutError::InvalidRecordFields(entry.id));
         }
         if child.alignment > entry.alignment || field.offset % child.alignment != 0 {

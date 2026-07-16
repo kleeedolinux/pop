@@ -352,6 +352,98 @@ fn ffi_layout_records_flow_from_trusted_source_attributes_into_the_target_catalo
 }
 
 #[test]
+fn by_value_foreign_layouts_bind_exact_catalog_entries_in_canonical_mir() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/byValueLayout.pop",
+            "namespace Native.Unsafe\n\
+             @Ffi.C.Layout\n\
+             internal record Inner\n\
+                 value: Int32\n\
+                 marker: UInt8\n\
+             end\n\
+             @Ffi.C.Layout\n\
+             internal record Outer\n\
+                 prefix: UInt8\n\
+                 inner: Inner\n\
+                 tail: Int\n\
+             end\n\
+             @Ffi.Foreign(\"transform_outer\")\n\
+             internal function transform(value: Outer): Outer\n\
+             end\n",
+        )
+        .expect("source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        result.diagnostics().is_empty() && result.hir_build_errors().is_empty(),
+        "{}\n{:?}",
+        result.diagnostic_snapshot(),
+        result.hir_build_errors()
+    );
+
+    let mir = pop_mir::lower_hir_bubble_with_fingerprint(
+        result.hir().expect("layout HIR"),
+        result.types(),
+        pop_driver::artifact_sha256_hex,
+    )
+    .expect("by-value foreign layouts lower");
+    let foreign = mir
+        .foreign_functions()
+        .iter()
+        .find(|function| function.declaration().external_symbol() == "transform_outer")
+        .expect("foreign function");
+    let outer = foreign.parameters()[0];
+    let layout = mir
+        .ffi_layouts()
+        .entries()
+        .iter()
+        .find(|entry| entry.element() == outer && entry.abi() == ForeignAbi::C)
+        .expect("by-value record catalog entry");
+    assert!(matches!(
+        layout.value_class(),
+        pop_mir::MirFfiValueClass::Record(fields) if fields.len() == 3
+    ));
+    assert_eq!(foreign.parameter_layouts(), &[Some(layout.id())]);
+    assert_eq!(foreign.result_layouts(), &[Some(layout.id())]);
+    let dump = mir.dump();
+    assert!(
+        dump.contains(&format!(
+            "paramLayouts(layout#{0}) resultLayouts(layout#{0})",
+            layout.id().raw()
+        )),
+        "{dump}"
+    );
+    let corrupt = dump.replacen(
+        &format!("paramLayouts(layout#{})", layout.id().raw()),
+        "paramLayouts(layout#1)",
+        1,
+    );
+    let corrupt = pop_mir::parse_mir_dump(&corrupt)
+        .expect("corrupt foreign binding remains structurally parseable")
+        .with_ffi_layouts(mir.ffi_layouts().clone());
+    assert!(matches!(
+        pop_mir::verify_mir_bubble(&corrupt, result.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            pop_mir::MirVerificationError::InvalidForeignFunction(symbol)
+                if *symbol == foreign.symbol()
+        ))
+    ));
+}
+
+#[test]
 fn ffi_layout_records_reject_missing_trust_and_managed_fields() {
     let ffi = BubbleId::from_raw(20);
     for source in [
@@ -1649,4 +1741,91 @@ fn assert_invalid_foreign_contract(name: &str, declaration: &str) {
         result.diagnostic_snapshot()
     );
     assert!(result.foreign_declarations().is_empty());
+}
+
+#[test]
+fn ffi_callbacks_type_check_as_scoped_and_shared_lifecycle_operations() {
+    let ffi = BubbleId::from_raw(20);
+    let module = FrontEndModule::new(
+        ModuleId::from_raw(0),
+        SourceFile::new(
+            FileId::from_raw(0),
+            "src/callbacks.pop",
+            "namespace CallbackDemo\n\
+             private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+             public function scoped(): Int\n\
+                 return Ffi.withCallback(\n\
+                     function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                         return value\n\
+                     end,\n\
+                     function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Int\n\
+                         return 17\n\
+                     end\n\
+                 )\n\
+             end\n\
+             public function open(): Result<Ffi.RegisteredCallback<CallbackSignature>, Ffi.CallbackOpenError>\n\
+                 return Ffi.Callback.open(\n\
+                     function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+                         return value\n\
+                     end,\n\
+                     Ffi.CallbackThread.CallingThread\n\
+                 )\n\
+             end\n\
+             public function use(callback: Ffi.RegisteredCallback<CallbackSignature>): Result<Int, Ffi.CallbackClosedError>\n\
+                 return Ffi.Callback.withPair(\n\
+                     callback,\n\
+                     function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Int\n\
+                         return 19\n\
+                     end\n\
+                 )\n\
+             end\n\
+             public function close(callback: Ffi.RegisteredCallback<CallbackSignature>)\n\
+                 Ffi.Callback.close(callback)\n\
+             end\n",
+        )
+        .expect("callback source"),
+    );
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![module],
+        )
+        .with_ffi_dependency(ffi),
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let mir = pop_mir::lower_hir_bubble(
+        result.hir().expect("callback source reaches HIR"),
+        result.types(),
+    )
+    .expect("callback source lowers to MIR");
+    let operations: Vec<_> = mir
+        .functions()
+        .iter()
+        .flat_map(|function| function.blocks())
+        .flat_map(|block| block.instructions())
+        .map(pop_mir::MirInstruction::kind)
+        .collect();
+    assert!(operations.iter().any(|operation| matches!(
+        operation,
+        pop_mir::MirInstructionKind::FfiCallbackOpenScoped { .. }
+    )));
+    assert!(operations.iter().any(|operation| matches!(
+        operation,
+        pop_mir::MirInstructionKind::FfiCallbackOpenOwned { .. }
+    )));
+    assert!(operations.iter().any(|operation| matches!(
+        operation,
+        pop_mir::MirInstructionKind::CallCallbackPair { .. }
+    )));
+    assert!(operations.iter().any(|operation| matches!(
+        operation,
+        pop_mir::MirInstructionKind::FfiCallbackCloseOwned { .. }
+    )));
 }

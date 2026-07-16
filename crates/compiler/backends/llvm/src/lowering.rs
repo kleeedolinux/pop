@@ -11,7 +11,7 @@ use pop_mir::{
     MirBubble, MirEffect, MirEffectSummary, MirForeignFunction, MirInstructionKind, MirTerminator,
     verify_mir_bubble,
 };
-use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
+use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, RuntimeOperation};
 use pop_target::{CAbiScalarKind, CAbiSignedness, TargetCapability, TargetSpec};
 use pop_types::{
     ForeignAbi, IntegerKind, PrimitiveType, SemanticType, TypeArena, embedded_bootstrap_schema,
@@ -21,6 +21,7 @@ use std::fmt;
 
 use crate::api::{LlvmLoweringError, LlvmLoweringOptions, LlvmModule};
 use crate::async_lowering::{lower_async_function, lower_async_nested};
+use crate::ffi_buffer::marshalling;
 use crate::instruction_lowering::{
     llvm_results, llvm_type, lower_instruction, lower_runtime_slot_load, lower_terminator,
 };
@@ -102,6 +103,11 @@ pub fn lower_mir_to_llvm_ir(
     let string_literals = collect_string_literals(bubble);
     let self_capture_slots = collect_self_capture_slots(bubble);
     let memory_none_functions = analyze_memory_none_functions(bubble);
+    let foreign_functions = bubble
+        .foreign_functions()
+        .iter()
+        .map(|function| (function.symbol(), function))
+        .collect::<BTreeMap<_, _>>();
     let mut functions = Vec::new();
     for function in bubble.functions() {
         if function.is_async() {
@@ -110,6 +116,7 @@ pub fn lower_mir_to_llvm_ir(
                 function,
                 types,
                 bubble.ffi_layouts(),
+                &foreign_functions,
                 options,
                 &field_layout,
                 &record_fields,
@@ -122,6 +129,7 @@ pub fn lower_mir_to_llvm_ir(
                 function,
                 types,
                 bubble.ffi_layouts(),
+                &foreign_functions,
                 options,
                 memory_none_functions.contains(&function.symbol()),
                 &field_layout,
@@ -137,6 +145,7 @@ pub fn lower_mir_to_llvm_ir(
             method.function(),
             types,
             bubble.ffi_layouts(),
+            &foreign_functions,
             options,
             false,
             &field_layout,
@@ -182,6 +191,7 @@ pub fn lower_mir_to_llvm_ir(
                 nested,
                 types,
                 bubble.ffi_layouts(),
+                &foreign_functions,
                 options,
                 &field_layout,
                 &record_fields,
@@ -211,6 +221,7 @@ pub fn lower_mir_to_llvm_ir(
             environment,
             types,
             bubble.ffi_layouts(),
+            &foreign_functions,
             options,
             &field_layout,
             &record_fields,
@@ -220,10 +231,12 @@ pub fn lower_mir_to_llvm_ir(
     }
     let mut foreign_declarations = Vec::new();
     for foreign in bubble.foreign_functions() {
-        let (function, declaration) =
-            lower_foreign_function(bubble.bubble(), foreign, types, target)?;
-        functions.push(function);
-        foreign_declarations.push(declaration);
+        foreign_declarations.push(lower_foreign_declaration(
+            foreign,
+            types,
+            target,
+            bubble.ffi_layouts(),
+        )?);
     }
     functions.push(direct_scalar_array_fill_function(bubble.bubble()));
     functions.extend(lower_interface_dispatchers(bubble, types)?);
@@ -634,25 +647,26 @@ pub(crate) fn function_name(bubble: BubbleId, symbol: SymbolId) -> String {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ForeignConversion {
+pub(crate) enum ForeignConversion {
     Direct,
     SignedInteger,
     UnsignedInteger,
     Pointer,
+    Layout(FfiAbiLayoutId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ForeignPhysicalType {
-    llvm: String,
-    conversion: ForeignConversion,
+pub(crate) struct ForeignPhysicalType {
+    pub(crate) llvm: String,
+    pub(crate) conversion: ForeignConversion,
 }
 
-fn lower_foreign_function(
-    bubble: BubbleId,
+fn lower_foreign_declaration(
     function: &MirForeignFunction,
     types: &TypeArena,
     target: &TargetSpec,
-) -> Result<(PrivateFunction, String), LlvmLoweringError> {
+    layouts: &pop_mir::MirFfiLayoutCatalog,
+) -> Result<String, LlvmLoweringError> {
     if function.results().len() > 1
         || function.declaration().abi() == ForeignAbi::System
             && target.operating_system() == pop_target::OperatingSystem::None
@@ -664,54 +678,17 @@ fn lower_foreign_function(
     let physical_parameters = function
         .parameters()
         .iter()
-        .map(|type_id| foreign_physical_type(*type_id, types, target))
+        .zip(function.parameter_layouts())
+        .map(|(type_id, layout)| foreign_physical_type(*type_id, *layout, types, target, layouts))
         .collect::<Result<Vec<_>, _>>()?;
     let physical_result = function
         .results()
         .first()
-        .map(|type_id| foreign_physical_type(*type_id, types, target))
+        .zip(function.result_layouts().first())
+        .map(|(type_id, layout)| foreign_physical_type(*type_id, *layout, types, target, layouts))
         .transpose()?;
-    let internal_parameters = function
-        .parameters()
-        .iter()
-        .enumerate()
-        .map(|(index, type_id)| Ok(format!("{} %v{index}", llvm_type(*type_id, types)?)))
-        .collect::<Result<Vec<_>, LlvmLoweringError>>()?;
-    let mut instructions = Vec::new();
-    let mut external_arguments = Vec::new();
-    for (index, physical) in physical_parameters.iter().enumerate() {
-        let internal = llvm_type(function.parameters()[index], types)?;
-        let value = lower_foreign_argument(index, &internal, physical, &mut instructions);
-        external_arguments.push(format!("{} {value}", physical.llvm));
-    }
     let external = llvm_global_name(function.declaration().external_symbol());
-    let result = function.results().first().map_or_else(
-        || Ok("void".to_owned()),
-        |type_id| llvm_type(*type_id, types),
-    )?;
-    let terminator = if let Some(physical) = &physical_result {
-        let internal = result.clone();
-        let external_result =
-            if physical.conversion == ForeignConversion::Direct && physical.llvm == internal {
-                "%pop_result"
-            } else {
-                "%foreign_result"
-            };
-        instructions.push(format!(
-            "{external_result} = call {} {external}({})",
-            physical.llvm,
-            external_arguments.join(", ")
-        ));
-        lower_foreign_result(&internal, physical, external_result, &mut instructions);
-        format!("ret {internal} %pop_result")
-    } else {
-        instructions.push(format!(
-            "call void {external}({})",
-            external_arguments.join(", ")
-        ));
-        "ret void".to_owned()
-    };
-    let declaration = format!(
+    Ok(format!(
         "declare {} {external}({})",
         physical_result
             .as_ref()
@@ -721,84 +698,26 @@ fn lower_foreign_function(
             .map(|physical| physical.llvm.as_str())
             .collect::<Vec<_>>()
             .join(", ")
-    );
-    Ok((
-        PrivateFunction {
-            name: function_name(bubble, function.symbol()),
-            parameters: internal_parameters,
-            result,
-            blocks: vec![PrivateBlock {
-                label: "entry".to_owned(),
-                instructions,
-                terminator,
-            }],
-            attributes: Vec::new(),
-        },
-        declaration,
     ))
 }
 
-fn lower_foreign_argument(
-    index: usize,
-    internal: &str,
-    physical: &ForeignPhysicalType,
-    instructions: &mut Vec<String>,
-) -> String {
-    let source = format!("%v{index}");
-    match physical.conversion {
-        ForeignConversion::Pointer => {
-            let converted = format!("%ffi_arg{index}");
-            instructions.push(format!("{converted} = inttoptr {internal} {source} to ptr"));
-            converted
-        }
-        ForeignConversion::SignedInteger | ForeignConversion::UnsignedInteger
-            if internal != physical.llvm =>
-        {
-            let converted = format!("%ffi_arg{index}");
-            instructions.push(format!(
-                "{converted} = trunc {internal} {source} to {}",
-                physical.llvm
-            ));
-            converted
-        }
-        _ => source,
-    }
-}
-
-fn lower_foreign_result(
-    internal: &str,
-    physical: &ForeignPhysicalType,
-    external_result: &str,
-    instructions: &mut Vec<String>,
-) {
-    if external_result == "%pop_result" {
-        return;
-    }
-    let conversion = match physical.conversion {
-        ForeignConversion::Pointer => {
-            format!("%pop_result = ptrtoint ptr {external_result} to {internal}")
-        }
-        ForeignConversion::SignedInteger => format!(
-            "%pop_result = sext {} {external_result} to {internal}",
-            physical.llvm
-        ),
-        ForeignConversion::UnsignedInteger => format!(
-            "%pop_result = zext {} {external_result} to {internal}",
-            physical.llvm
-        ),
-        ForeignConversion::Direct => format!(
-            "%pop_result = bitcast {} {external_result} to {internal}",
-            physical.llvm
-        ),
-    };
-    instructions.push(conversion);
-}
-
-fn foreign_physical_type(
+pub(crate) fn foreign_physical_type(
     type_id: TypeId,
+    layout: Option<FfiAbiLayoutId>,
     types: &TypeArena,
     target: &TargetSpec,
+    layouts: &pop_mir::MirFfiLayoutCatalog,
 ) -> Result<ForeignPhysicalType, LlvmLoweringError> {
+    if let Some(layout) = layout {
+        let entry = layouts
+            .get(layout)
+            .filter(|entry| entry.element() == type_id)
+            .ok_or(LlvmLoweringError::InvalidFfiLayout(layout))?;
+        return Ok(ForeignPhysicalType {
+            llvm: marshalling::physical_type(entry, layouts)?,
+            conversion: ForeignConversion::Layout(layout),
+        });
+    }
     match types.get(type_id) {
         Some(SemanticType::Primitive(PrimitiveType::Integer(kind))) => Ok(ForeignPhysicalType {
             llvm: format!("i{}", kind.bit_width()),
@@ -873,7 +792,7 @@ fn foreign_builtin_physical_type(name: &str, target: &TargetSpec) -> Option<Fore
     })
 }
 
-fn llvm_global_name(name: &str) -> String {
+pub(crate) fn llvm_global_name(name: &str) -> String {
     let mut characters = name.chars();
     let simple = characters
         .next()
@@ -1023,6 +942,7 @@ pub(crate) fn lower_function(
     function: &pop_mir::MirFunction,
     types: &TypeArena,
     ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
+    foreign_functions: &BTreeMap<SymbolId, &MirForeignFunction>,
     options: LlvmLoweringOptions,
     memory_none: bool,
     field_layout: &BTreeMap<FieldId, u32>,
@@ -1041,6 +961,7 @@ pub(crate) fn lower_function(
         CaptureEnvironment::None,
         types,
         ffi_layouts,
+        foreign_functions,
         options,
         field_layout,
         record_fields,
@@ -1315,6 +1236,7 @@ pub(crate) fn lower_function_parts(
     environment: CaptureEnvironment<'_>,
     types: &TypeArena,
     ffi_layouts: &pop_mir::MirFfiLayoutCatalog,
+    foreign_functions: &BTreeMap<SymbolId, &MirForeignFunction>,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
@@ -1436,6 +1358,7 @@ pub(crate) fn lower_function_parts(
                 &value_types,
                 types,
                 ffi_layouts,
+                foreign_functions,
                 field_layout,
                 record_fields,
                 record_field_types,

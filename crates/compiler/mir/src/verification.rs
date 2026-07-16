@@ -52,11 +52,27 @@ pub fn verify_mir_bubble(
         let valid = declaration.symbol() == function.symbol()
             && declaration.has_valid_effects()
             && function.effects() == lower_effect_summary(declaration.effects())
+            && function.parameter_layouts().len() == function.parameters().len()
+            && function.result_layouts().len() == function.results().len()
             && function
                 .parameters()
                 .iter()
                 .chain(function.results())
-                .all(|type_id| arena.is_valid_hir_type(*type_id));
+                .all(|type_id| arena.is_valid_hir_type(*type_id))
+            && foreign_layout_bindings_are_valid(
+                function.parameters(),
+                function.parameter_layouts(),
+                declaration.abi(),
+                bubble.ffi_layouts(),
+                arena,
+            )
+            && foreign_layout_bindings_are_valid(
+                function.results(),
+                function.result_layouts(),
+                declaration.abi(),
+                bubble.ffi_layouts(),
+                arena,
+            );
         if !valid {
             errors.push(MirVerificationError::InvalidForeignFunction(
                 function.symbol(),
@@ -179,6 +195,29 @@ pub fn verify_mir_bubble(
     } else {
         Err(errors)
     }
+}
+
+fn foreign_layout_bindings_are_valid(
+    types: &[TypeId],
+    bindings: &[Option<FfiAbiLayoutId>],
+    abi: pop_types::ForeignAbi,
+    catalog: &crate::MirFfiLayoutCatalog,
+    arena: &TypeArena,
+) -> bool {
+    types
+        .iter()
+        .zip(bindings)
+        .all(|(type_id, binding)| match arena.get(*type_id) {
+            Some(SemanticType::Record(_)) => binding.is_some_and(|layout| {
+                catalog.get(layout).is_some_and(|entry| {
+                    entry.element() == *type_id
+                        && entry.abi() == abi
+                        && matches!(entry.value_class(), crate::MirFfiValueClass::Record(_))
+                })
+            }),
+            Some(_) => binding.is_none(),
+            None => false,
+        })
 }
 
 #[derive(Clone)]

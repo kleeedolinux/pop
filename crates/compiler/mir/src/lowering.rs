@@ -165,6 +165,8 @@ fn lower_hir_bubble_for_target_internal(
                 .map(pop_hir::HirParameter::type_id)
                 .collect(),
             results: function.results().to_vec(),
+            parameter_layouts: Vec::new(),
+            result_layouts: Vec::new(),
             effects: lower_effect_summary(function.effects()),
             declaration: function.declaration().clone(),
             reference_identity: None,
@@ -227,6 +229,8 @@ fn lower_hir_bubble_for_target_internal(
             symbol,
             parameters: reference.parameters().to_vec(),
             results: reference.results().to_vec(),
+            parameter_layouts: Vec::new(),
+            result_layouts: Vec::new(),
             effects: lower_effect_summary(reference.effects()),
             declaration,
             reference_identity: Some(reference.identity()),
@@ -236,6 +240,7 @@ fn lower_hir_bubble_for_target_internal(
     let gc_schema = LoweringGcSchema::new(&declarations, arena);
     let (ffi_layouts, provisional_ffi_layouts) =
         source_ffi_layout_catalog(hir, arena, target, fingerprint)?;
+    bind_foreign_layouts(&mut foreign_functions, &ffi_layouts, arena)?;
     let specialized_hir_functions = specialize_reachable_functions(hir, arena)?;
     let empty_function_effects = BTreeMap::new();
     let empty_method_effects = BTreeMap::new();
@@ -393,14 +398,49 @@ fn source_ffi_layout_catalog(
             _ => {}
         }
     }
-    if !buffer_elements.is_empty() && fingerprint.is_none() {
+    let mut foreign_record_elements = BTreeMap::new();
+    for (abi, type_id) in hir
+        .foreign_functions()
+        .iter()
+        .flat_map(|function| {
+            function
+                .parameters()
+                .iter()
+                .map(pop_hir::HirParameter::type_id)
+                .chain(function.results().iter().copied())
+                .map(move |type_id| (function.declaration().abi(), type_id))
+        })
+        .chain(hir.function_references().iter().flat_map(|reference| {
+            reference
+                .foreign_declaration()
+                .into_iter()
+                .flat_map(move |declaration| {
+                    reference
+                        .parameters()
+                        .iter()
+                        .chain(reference.results())
+                        .copied()
+                        .map(move |type_id| (declaration.abi(), type_id))
+                })
+        }))
+    {
+        if matches!(arena.get(type_id), Some(SemanticType::Record(_))) {
+            foreign_record_elements.insert((type_id, foreign_abi_key(abi)), abi);
+        }
+    }
+    if (!buffer_elements.is_empty() || !foreign_record_elements.is_empty()) && fingerprint.is_none()
+    {
         return Err(vec![MirVerificationError::MissingFfiLayoutFingerprint]);
     }
     let provisional = fingerprint.is_none() && !pointer_elements.is_empty();
-    let elements = buffer_elements
-        .into_iter()
-        .chain(pointer_elements)
-        .collect::<BTreeSet<_>>();
+    let mut elements = BTreeMap::new();
+    for element in buffer_elements.into_iter().chain(pointer_elements) {
+        elements.insert(
+            (element, foreign_abi_key(pop_types::ForeignAbi::C)),
+            pop_types::ForeignAbi::C,
+        );
+    }
+    elements.extend(foreign_record_elements);
     if elements.is_empty() {
         return Ok((MirFfiLayoutCatalog::empty(target), false));
     }
@@ -417,9 +457,10 @@ fn source_ffi_layout_catalog(
     let mut entries = Vec::new();
     let mut by_type = BTreeMap::new();
     let mut next_id = 1;
-    for element in elements {
+    for ((element, _), abi) in elements {
         ensure_source_ffi_layout(
             element,
+            abi,
             arena,
             target,
             &trusted_records,
@@ -468,19 +509,21 @@ fn mir_uses_ffi_unsafe_memory(mir: &MirBubble) -> bool {
 
 fn ensure_source_ffi_layout(
     element: TypeId,
+    abi: pop_types::ForeignAbi,
     arena: &TypeArena,
     target: &TargetSpec,
     trusted_records: &BTreeMap<TypeId, &pop_hir::HirRecordDeclaration>,
     entries: &mut Vec<MirFfiLayout>,
-    by_type: &mut BTreeMap<TypeId, FfiAbiLayoutId>,
+    by_type: &mut BTreeMap<(TypeId, u8), FfiAbiLayoutId>,
     next_id: &mut u64,
 ) -> Option<FfiAbiLayoutId> {
-    if let Some(layout) = by_type.get(&element) {
+    let key = (element, foreign_abi_key(abi));
+    if let Some(layout) = by_type.get(&key) {
         return Some(*layout);
     }
     let provisional = FfiAbiLayoutId::new(*next_id)?;
     *next_id = next_id.checked_add(1)?;
-    by_type.insert(element, provisional);
+    by_type.insert(key, provisional);
     let (size, alignment, value_class) = match arena.get(element)? {
         SemanticType::Primitive(PrimitiveType::Integer(kind)) => {
             let size = u64::from(kind.bit_width()) / 8;
@@ -520,14 +563,18 @@ fn ensure_source_ffi_layout(
             let mut offset = 0_u64;
             let mut alignment = 1_u64;
             let mut fields = Vec::with_capacity(semantic_fields.len());
-            for (index, ((_, field_type), field)) in
-                semantic_fields.iter().zip(record.fields()).enumerate()
-            {
-                if *field_type != field.field_type() {
+            for field in record.fields() {
+                let (source_index, field_type) = semantic_fields.iter().enumerate().find_map(
+                    |(index, (name, field_type))| {
+                        (name == field.name()).then_some((index, *field_type))
+                    },
+                )?;
+                if field_type != field.field_type() {
                     return None;
                 }
                 let child = ensure_source_ffi_layout(
-                    *field_type,
+                    field_type,
+                    abi,
                     arena,
                     target,
                     trusted_records,
@@ -540,7 +587,7 @@ fn ensure_source_ffi_layout(
                 offset = align_ffi_offset(offset, child_layout.alignment())?;
                 fields.push(MirFfiLayoutField::new(
                     field.field(),
-                    u32::try_from(index).ok()?,
+                    u32::try_from(source_index).ok()?,
                     child,
                     offset,
                 ));
@@ -551,14 +598,67 @@ fn ensure_source_ffi_layout(
         }
         _ => return None,
     };
-    entries.push(MirFfiLayout::new(
+    entries.push(MirFfiLayout::new_for_abi(
         provisional,
         element,
         size,
         alignment,
         value_class,
+        abi,
     ));
     Some(provisional)
+}
+
+const fn foreign_abi_key(abi: pop_types::ForeignAbi) -> u8 {
+    match abi {
+        pop_types::ForeignAbi::C => 0,
+        pop_types::ForeignAbi::System => 1,
+        pop_types::ForeignAbi::CUnwind => 2,
+    }
+}
+
+fn bind_foreign_layouts(
+    functions: &mut [MirForeignFunction],
+    catalog: &MirFfiLayoutCatalog,
+    arena: &TypeArena,
+) -> Result<(), Vec<MirVerificationError>> {
+    for function in functions {
+        let abi = function.declaration().abi();
+        function.parameter_layouts = function
+            .parameters
+            .iter()
+            .map(|type_id| foreign_layout_binding(*type_id, abi, catalog, arena))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|()| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+        function.result_layouts = function
+            .results
+            .iter()
+            .map(|type_id| foreign_layout_binding(*type_id, abi, catalog, arena))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|()| vec![MirVerificationError::InvalidFfiLayoutCatalog])?;
+    }
+    Ok(())
+}
+
+fn foreign_layout_binding(
+    type_id: TypeId,
+    abi: pop_types::ForeignAbi,
+    catalog: &MirFfiLayoutCatalog,
+    arena: &TypeArena,
+) -> Result<Option<FfiAbiLayoutId>, ()> {
+    if !matches!(arena.get(type_id), Some(SemanticType::Record(_))) {
+        return Ok(None);
+    }
+    catalog
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry.element() == type_id
+                && entry.abi() == abi
+                && matches!(entry.value_class(), MirFfiValueClass::Record(_))
+        })
+        .map(|entry| Some(entry.id()))
+        .ok_or(())
 }
 
 fn align_ffi_offset(offset: u64, alignment: u64) -> Option<u64> {

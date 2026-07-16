@@ -284,6 +284,10 @@ pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFu
     dump_type_ids(output, function.parameters());
     output.push_str(") results(");
     dump_type_ids(output, function.results());
+    output.push_str(") paramLayouts(");
+    dump_optional_ffi_layouts(output, function.parameter_layouts());
+    output.push_str(") resultLayouts(");
+    dump_optional_ffi_layouts(output, function.result_layouts());
     let _ = write!(
         output,
         ") symbol({}) abi({:?}) links(",
@@ -312,6 +316,22 @@ pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFu
         );
     }
     output.push('\n');
+}
+
+fn dump_optional_ffi_layouts(
+    output: &mut String,
+    layouts: &[Option<pop_runtime_interface::FfiAbiLayoutId>],
+) {
+    for (index, layout) in layouts.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        if let Some(layout) = layout {
+            let _ = write!(output, "layout#{}", layout.raw());
+        } else {
+            output.push('-');
+        }
+    }
 }
 
 pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFunctionReference) {

@@ -20,6 +20,7 @@ pub(crate) fn lower_instruction(
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     ffi_layouts: &MirFfiLayoutCatalog,
+    foreign_functions: &BTreeMap<SymbolId, &pop_mir::MirForeignFunction>,
     field_layout: &BTreeMap<FieldId, u32>,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
@@ -461,10 +462,12 @@ pub(crate) fn lower_instruction(
             unwind,
             ..
         } => lower_foreign_call(
-            bubble,
+            foreign_functions
+                .get(callee)
+                .copied()
+                .ok_or(LlvmLoweringError::UnsupportedForeignFunction(*callee))?,
             instruction.result(),
             result_type,
-            *callee,
             arguments,
             safe_point.raw(),
             roots,
@@ -472,6 +475,8 @@ pub(crate) fn lower_instruction(
             *unwind,
             value_types,
             types,
+            ffi_layouts,
+            field_layout,
             matches!(
                 options.runtime_profile,
                 pop_backend_api::RuntimeProfile::ProductionGenerational
@@ -1834,10 +1839,9 @@ pub(crate) fn call_line(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_foreign_call(
-    bubble: BubbleId,
+    foreign: &pop_mir::MirForeignFunction,
     result_id: ValueId,
     result_type: Option<TypeId>,
-    callee: SymbolId,
     arguments: &[ValueId],
     safe_point: u32,
     roots: &[ValueId],
@@ -1845,6 +1849,8 @@ fn lower_foreign_call(
     unwind: pop_mir::MirUnwindAction,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    layouts: &MirFfiLayoutCatalog,
+    field_layout: &BTreeMap<FieldId, u32>,
     writable_roots: bool,
 ) -> Result<String, LlvmLoweringError> {
     let result = format!("%v{}", result_id.raw());
@@ -1855,7 +1861,111 @@ fn lower_foreign_call(
     } else {
         format!("{root_array}_pointer")
     };
+    let target = pop_target::TargetSpec::for_triple(layouts.target()).map_err(|_| {
+        LlvmLoweringError::FfiLayoutTargetMismatch {
+            catalog: layouts.target().to_owned(),
+            target: layouts.target().to_owned(),
+        }
+    })?;
+    let physical_parameters = foreign
+        .parameters()
+        .iter()
+        .zip(foreign.parameter_layouts())
+        .map(|(type_id, layout)| foreign_physical_type(*type_id, *layout, types, &target, layouts))
+        .collect::<Result<Vec<_>, _>>()?;
+    let physical_result = foreign
+        .results()
+        .first()
+        .zip(foreign.result_layouts().first())
+        .map(|(type_id, layout)| foreign_physical_type(*type_id, *layout, types, &target, layouts))
+        .transpose()?;
     let mut lines = Vec::new();
+    let mut external_arguments = Vec::with_capacity(arguments.len());
+    for (index, (argument, physical)) in arguments.iter().zip(&physical_parameters).enumerate() {
+        let internal = llvm_value_type(values, *argument, types)?;
+        let source = format!("%v{}", argument.raw());
+        let value = match physical.conversion {
+            ForeignConversion::Layout(layout) => {
+                let layout = layouts
+                    .get(layout)
+                    .ok_or(LlvmLoweringError::InvalidFfiLayout(layout))?;
+                let storage = format!("{result}_foreign_arg_{index}_storage");
+                lines.extend([
+                    format!(
+                        "{storage} = alloca [{} x i8], align {}",
+                        layout.size(),
+                        layout.alignment()
+                    ),
+                    format!(
+                        "store [{} x i8] zeroinitializer, ptr {storage}, align {}",
+                        layout.size(),
+                        layout.alignment()
+                    ),
+                ]);
+                lines.extend(crate::ffi_buffer::marshalling::marshal(
+                    &source,
+                    layout,
+                    layouts,
+                    types,
+                    field_layout,
+                    &storage,
+                    &format!("{result}_foreign_arg_{index}_marshal"),
+                )?);
+                let value = format!("{result}_foreign_arg_{index}");
+                lines.push(format!(
+                    "{value} = load {}, ptr {storage}, align {}",
+                    physical.llvm,
+                    layout.alignment()
+                ));
+                value
+            }
+            ForeignConversion::Pointer => {
+                let value = format!("{result}_foreign_arg_{index}");
+                lines.push(format!(
+                    "{value} = inttoptr {internal} {source} to {}",
+                    physical.llvm
+                ));
+                value
+            }
+            ForeignConversion::SignedInteger | ForeignConversion::UnsignedInteger
+                if internal != physical.llvm =>
+            {
+                let value = format!("{result}_foreign_arg_{index}");
+                lines.push(format!(
+                    "{value} = trunc {internal} {source} to {}",
+                    physical.llvm
+                ));
+                value
+            }
+            ForeignConversion::Direct
+            | ForeignConversion::SignedInteger
+            | ForeignConversion::UnsignedInteger => source,
+        };
+        external_arguments.push(format!("{} {value}", physical.llvm));
+    }
+    let internal_result = result_type
+        .map(|type_id| llvm_type(type_id, types))
+        .transpose()?;
+    let foreign_result = physical_result.as_ref().map(|physical| {
+        if physical.conversion == ForeignConversion::Direct
+            && internal_result.as_deref() == Some(physical.llvm.as_str())
+        {
+            result.clone()
+        } else {
+            format!("{result}_foreign_value")
+        }
+    });
+    let call = format!(
+        "{}call {} {}({})",
+        foreign_result
+            .as_ref()
+            .map_or_else(String::new, |value| format!("{value} = ")),
+        physical_result
+            .as_ref()
+            .map_or("void", |physical| physical.llvm.as_str()),
+        llvm_global_name(foreign.declaration().external_symbol()),
+        external_arguments.join(", ")
+    );
     if !roots.is_empty() {
         lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
         for (index, root) in roots.iter().enumerate() {
@@ -1889,28 +1999,13 @@ fn lower_foreign_call(
         format!("{label}_call:"),
     ]);
     if effects.contains(pop_mir::MirEffect::MayUnwind) {
-        let call = call_line(
-            &result,
-            result_type,
-            &format!("@{}", function_name(bubble, callee)),
-            arguments,
-            values,
-            types,
-        )?;
         let invoke = call.replacen("call ", "invoke ", 1);
         lines.extend([
             format!("{invoke} to label %{label}_returned unwind label %{label}_unwind"),
             format!("{label}_returned:"),
         ]);
     } else {
-        lines.push(call_line(
-            &result,
-            result_type,
-            &format!("@{}", function_name(bubble, callee)),
-            arguments,
-            values,
-            types,
-        )?);
+        lines.push(call);
     }
     lines.extend([
         format!(
@@ -1986,6 +2081,56 @@ fn lower_foreign_call(
                     result_id.raw()
                 ),
             ]);
+        }
+    }
+    if let (Some(physical), Some(foreign_result), Some(internal)) = (
+        physical_result.as_ref(),
+        foreign_result.as_deref(),
+        internal_result.as_deref(),
+    ) && foreign_result != result
+    {
+        match physical.conversion {
+            ForeignConversion::Layout(layout) => {
+                let layout = layouts
+                    .get(layout)
+                    .ok_or(LlvmLoweringError::InvalidFfiLayout(layout))?;
+                let storage = format!("{result}_foreign_result_storage");
+                lines.extend([
+                    format!(
+                        "{storage} = alloca [{} x i8], align {}",
+                        layout.size(),
+                        layout.alignment()
+                    ),
+                    format!(
+                        "store {} {foreign_result}, ptr {storage}, align {}",
+                        physical.llvm,
+                        layout.alignment()
+                    ),
+                ]);
+                lines.extend(crate::ffi_buffer::marshalling::unmarshal(
+                    &result,
+                    layout,
+                    layouts,
+                    types,
+                    field_layout,
+                    &storage,
+                )?);
+            }
+            ForeignConversion::Pointer => lines.push(format!(
+                "{result} = ptrtoint ptr {foreign_result} to {internal}"
+            )),
+            ForeignConversion::SignedInteger => lines.push(format!(
+                "{result} = sext {} {foreign_result} to {internal}",
+                physical.llvm
+            )),
+            ForeignConversion::UnsignedInteger => lines.push(format!(
+                "{result} = zext {} {foreign_result} to {internal}",
+                physical.llvm
+            )),
+            ForeignConversion::Direct => lines.push(format!(
+                "{result} = bitcast {} {foreign_result} to {internal}",
+                physical.llvm
+            )),
         }
     }
     Ok(lines.join("\n"))

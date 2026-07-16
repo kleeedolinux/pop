@@ -253,6 +253,8 @@ pub struct MirForeignFunction {
     pub(crate) symbol: SymbolId,
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
+    pub(crate) parameter_layouts: Vec<Option<FfiAbiLayoutId>>,
+    pub(crate) result_layouts: Vec<Option<FfiAbiLayoutId>>,
     pub(crate) effects: MirEffectSummary,
     pub(crate) declaration: pop_types::ForeignFunctionDeclaration,
     pub(crate) reference_identity: Option<SymbolIdentity>,
@@ -277,6 +279,20 @@ impl MirForeignFunction {
     #[must_use]
     pub fn results(&self) -> &[TypeId] {
         &self.results
+    }
+
+    /// Returns the exact target catalog binding for each by-value layout
+    /// parameter. Non-record ABI values have no record-layout binding.
+    #[must_use]
+    pub fn parameter_layouts(&self) -> &[Option<FfiAbiLayoutId>] {
+        &self.parameter_layouts
+    }
+
+    /// Returns the exact target catalog binding for each by-value layout
+    /// result. Non-record ABI values have no record-layout binding.
+    #[must_use]
+    pub fn result_layouts(&self) -> &[Option<FfiAbiLayoutId>] {
+        &self.result_layouts
     }
 
     #[must_use]
