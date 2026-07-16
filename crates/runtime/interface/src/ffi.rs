@@ -193,6 +193,18 @@ pub struct FfiCallbackRegistration {
     context: ForeignAddress,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FfiCallbackOpenFailure {
+    Allocation,
+    Invariant(RuntimeFailure),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FfiCallbackCloseFailure {
+    InUse,
+    Invariant(RuntimeFailure),
+}
+
 impl FfiCallbackRegistration {
     #[must_use]
     pub const fn new(id: FfiCallbackRegistrationId, context: ForeignAddress) -> Self {

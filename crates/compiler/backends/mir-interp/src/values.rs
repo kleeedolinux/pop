@@ -39,8 +39,15 @@ pub enum MirValue {
     Bytes(ManagedReference),
     FfiPointer(ForeignAddress),
     FfiFunction(u64),
+    FfiRegisteredCallback {
+        registration: u64,
+        reference: ManagedReference,
+    },
     FfiNullPointerError,
     FfiAllocationError,
+    FfiCallbackOpenError,
+    FfiCallbackInUseError,
+    FfiCallbackClosedError,
     Enum {
         definition: SymbolId,
         case: EnumCaseId,
@@ -109,7 +116,9 @@ impl RuntimeValue {
     pub(crate) fn visible(visible: MirValue) -> Self {
         let reference = match &visible {
             MirValue::Class(class) => Some(class.reference),
-            MirValue::FfiBuffer(reference) | MirValue::Bytes(reference) => Some(*reference),
+            MirValue::FfiBuffer(reference)
+            | MirValue::Bytes(reference)
+            | MirValue::FfiRegisteredCallback { reference, .. } => Some(*reference),
             _ => None,
         };
         Self { visible, reference }

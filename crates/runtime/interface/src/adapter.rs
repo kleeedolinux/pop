@@ -1,11 +1,12 @@
 use crate::{
     ArrayAllocationRequest, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
-    FfiBufferOpenFailure, FfiBufferOpenRequest, FfiBytesBorrow, FfiBytesBorrowId, FfiCallbackEntry,
-    FfiCallbackOpenRequest, FfiCallbackRegistration, FfiCallbackRegistrationId, FfiCallbackSiteId,
-    FfiCallbackTransitionId, ForeignAddress, ForeignCallMode, ForeignTransitionId,
-    GarbageCollectorContract, ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest,
-    PanicPayload, PinHandle, RootHandle, RootPublication, RuntimeFailure, SchedulerId,
-    TableAllocationRequest, Trap, WriteBarrier,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, FfiBytesBorrow, FfiBytesBorrowId,
+    FfiCallbackCloseFailure, FfiCallbackEntry, FfiCallbackOpenFailure, FfiCallbackOpenRequest,
+    FfiCallbackRegistration, FfiCallbackRegistrationId, FfiCallbackSiteId, FfiCallbackTransitionId,
+    ForeignAddress, ForeignCallMode, ForeignTransitionId, GarbageCollectorContract,
+    ManagedReference, ManagedThreadBindingId, ObjectAllocationRequest, PanicPayload, PinHandle,
+    RootHandle, RootPublication, RuntimeFailure, SchedulerId, TableAllocationRequest, Trap,
+    WriteBarrier,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -254,9 +255,11 @@ pub trait RuntimeAdapter {
     fn ffi_callback_open(
         &mut self,
         request: FfiCallbackOpenRequest,
-    ) -> Result<FfiCallbackRegistration, RuntimeFailure> {
+    ) -> Result<FfiCallbackRegistration, FfiCallbackOpenFailure> {
         let _ = request;
-        Err(RuntimeFailure::runtime_invariant())
+        Err(FfiCallbackOpenFailure::Invariant(
+            RuntimeFailure::runtime_invariant(),
+        ))
     }
 
     /// Enters managed execution through one validated callback context/site.
@@ -297,9 +300,11 @@ pub trait RuntimeAdapter {
         registration: FfiCallbackRegistrationId,
         context: ForeignAddress,
         site: FfiCallbackSiteId,
-    ) -> Result<(), RuntimeFailure> {
+    ) -> Result<(), FfiCallbackCloseFailure> {
         let _ = (registration, context, site);
-        Err(RuntimeFailure::runtime_invariant())
+        Err(FfiCallbackCloseFailure::Invariant(
+            RuntimeFailure::runtime_invariant(),
+        ))
     }
 
     /// Reads exact ABI bytes through a verified foreign pointer.

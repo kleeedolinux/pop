@@ -228,6 +228,7 @@ dependencies = [
  "pop-driver",
  "pop-foundation",
  "pop-mir",
+ "pop-projects",
  "pop-query",
  "pop-runtime-collector",
  "pop-runtime-interface",

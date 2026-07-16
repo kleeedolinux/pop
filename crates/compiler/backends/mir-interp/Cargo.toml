@@ -20,6 +20,7 @@ pop-types.workspace = true
 [dev-dependencies]
 pop-compile-time.workspace = true
 pop-driver.workspace = true
+pop-projects.workspace = true
 pop-query.workspace = true
 pop-runtime-collector.workspace = true
 pop-source.workspace = true

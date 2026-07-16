@@ -9,7 +9,10 @@ use crate::ffi_buffer::{
 };
 use crate::runtime::ReferenceRuntimeAdapter;
 use crate::values::{MirClassValue, MirValue, RuntimeValue};
-use pop_foundation::{BorrowRegionId, NestedFunctionId, SymbolId, SymbolIdentity, TypeId, ValueId};
+use pop_foundation::{
+    BorrowRegionId, FfiCallbackSiteId as MirFfiCallbackSiteId, NestedFunctionId, SymbolId,
+    SymbolIdentity, TypeId, ValueId,
+};
 use pop_mir::{
     MirBubble, MirCancellationMode, MirFfiLayout, MirFfiValueClass, MirInstruction,
     MirInstructionKind, MirSuspendOperation, MirTaskDispatch, MirTerminator, MirUnwindAction,
@@ -18,16 +21,18 @@ use pop_mir::{
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, BarrierKind, CancellationObservation,
     CancellationTokenId, FfiBufferBorrowId, FfiBufferOpenFailure, FfiBufferOpenRequest,
-    FfiBytesBorrowId, ForeignAddress, ForeignCallMode, ManagedReference, ObjectAllocationRequest,
+    FfiBytesBorrowId, FfiCallbackCloseFailure, FfiCallbackLifetime, FfiCallbackOpenFailure,
+    FfiCallbackOpenRequest, FfiCallbackRegistration, FfiCallbackRegistrationId, FfiCallbackSiteId,
+    FfiCallbackThread, ForeignAddress, ForeignCallMode, ManagedReference, ObjectAllocationRequest,
     ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication, RootSlot, RuntimeAdapter,
-    RuntimeFailure, RuntimeTypeId, StackMap, TableAllocationRequest, TaskGroupExit, TaskGroupId,
-    TaskGroupLifecycle, TaskId, TaskLifecycle, TaskOwner, TaskPollCompletion,
+    RuntimeFailure, RuntimeTypeId, SchedulerId, StackMap, TableAllocationRequest, TaskGroupExit,
+    TaskGroupId, TaskGroupLifecycle, TaskId, TaskLifecycle, TaskOwner, TaskPollCompletion,
     TaskState as RuntimeTaskState, Trap, TrapKind, UnwindReason, WriteBarrier,
 };
 use pop_types::{
-    FFI_HANDLE_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID, FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID,
-    FloatKind, IntegerKind, IntegerValue, PrimitiveType, SemanticType, TypeArena,
-    is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
+    FFI_CALLBACK_CONTEXT_TYPE_ID, FFI_HANDLE_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID,
+    FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID, FloatKind, IntegerKind, IntegerValue, PrimitiveType,
+    SemanticType, TypeArena, is_ffi_function_type_constructor, is_ffi_integer_abi_builtin_type,
     is_ffi_pointer_type_constructor,
 };
 use std::cell::{Ref, RefCell};
@@ -56,6 +61,14 @@ fn ffi_pointer(value: &MirValue) -> Result<ForeignAddress, ExecutionError> {
         return Err(ExecutionError::TypeMismatch);
     };
     Ok(*address)
+}
+
+fn runtime_callback_site(
+    owner: SymbolId,
+    site: MirFfiCallbackSiteId,
+) -> Result<FfiCallbackSiteId, ExecutionError> {
+    FfiCallbackSiteId::new((u64::from(owner.raw()) << 32) | u64::from(site.raw()))
+        .ok_or(ExecutionError::InvalidControlFlow)
 }
 
 fn require_foreign_abi_values(
@@ -125,8 +138,35 @@ fn foreign_scalar_value_matches(
         Some(SemanticType::Builtin { definition, .. }) if *definition == FFI_HANDLE_TYPE_ID => {
             matches!(value, MirValue::FfiHandle(handle) if *handle != 0)
         }
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) if *definition == FFI_CALLBACK_CONTEXT_TYPE_ID && arguments.is_empty() => {
+            matches!(value, MirValue::FfiPointer(_))
+        }
         _ => return Err(ExecutionError::InvalidControlFlow),
     })
+}
+
+fn callback_abi_value_matches(
+    mir: &MirBubble,
+    arena: &TypeArena,
+    expected: TypeId,
+    value: &MirValue,
+) -> Result<bool, ExecutionError> {
+    let mut layouts = mir
+        .ffi_layouts()
+        .entries()
+        .iter()
+        .filter(|layout| layout.element() == expected);
+    let first = layouts.next();
+    if layouts.next().is_some() {
+        return Err(ExecutionError::InvalidControlFlow);
+    }
+    match first {
+        Some(layout) => foreign_layout_value_matches(mir, arena, layout, value),
+        None => foreign_scalar_value_matches(mir, arena, expected, value),
+    }
 }
 
 fn foreign_layout_value_matches(
@@ -217,6 +257,10 @@ impl Default for ExecutionLimits {
 pub enum ExecutionError {
     UnknownFunction(SymbolId),
     UnsupportedForeignFunction(SymbolId),
+    UnsupportedFfiCallback {
+        function: u64,
+        context: ForeignAddress,
+    },
     UnknownReferencedFunction(SymbolIdentity),
     WrongArity,
     TypeMismatch,
@@ -238,8 +282,23 @@ pub enum ForeignAdapterRegistrationError {
     Duplicate(SymbolId),
 }
 
-type ForeignAdapterFunction =
-    dyn FnMut(&[MirValue]) -> Result<Vec<MirValue>, RuntimeFailure> + 'static;
+pub trait FfiCallbackInvoker {
+    /// Invokes one exact function/context pair published by the interpreter.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unavailable, stale, closed, mismatched, or ill-typed pairs
+    /// before managed callback execution.
+    fn invoke(
+        &mut self,
+        function: &MirValue,
+        context: &MirValue,
+        arguments: &[MirValue],
+    ) -> Result<Vec<MirValue>, ExecutionError>;
+}
+
+type ForeignAdapterFunction = dyn FnMut(&[MirValue], &mut dyn FfiCallbackInvoker) -> Result<Vec<MirValue>, ExecutionError>
+    + 'static;
 
 pub struct TypedForeignAdapter {
     symbol: SymbolId,
@@ -259,6 +318,30 @@ impl TypedForeignAdapter {
     where
         F: FnMut(&[MirValue]) -> Result<Vec<MirValue>, RuntimeFailure> + 'static,
     {
+        let mut function = function;
+        Self {
+            symbol,
+            parameters,
+            results,
+            function: Box::new(move |arguments, _| {
+                function(arguments).map_err(ExecutionError::Runtime)
+            }),
+        }
+    }
+
+    /// Creates an exact foreign adapter that may synchronously invoke a
+    /// compiler-proven callback function/context pair.
+    #[must_use]
+    pub fn new_with_callbacks<F>(
+        symbol: SymbolId,
+        parameters: Vec<TypeId>,
+        results: Vec<TypeId>,
+        function: F,
+    ) -> Self
+    where
+        F: FnMut(&[MirValue], &mut dyn FfiCallbackInvoker) -> Result<Vec<MirValue>, ExecutionError>
+            + 'static,
+    {
         Self {
             symbol,
             parameters,
@@ -274,6 +357,7 @@ pub struct MirInterpreter<'mir, R = ReferenceRuntimeAdapter> {
     limits: ExecutionLimits,
     runtime: RefCell<R>,
     foreign_adapters: RefCell<BTreeMap<SymbolId, TypedForeignAdapter>>,
+    ffi_callbacks: RefCell<BTreeMap<FfiCallbackRegistrationId, InterpreterCallback>>,
 }
 
 impl<'mir> MirInterpreter<'mir, ReferenceRuntimeAdapter> {
@@ -293,6 +377,7 @@ impl<'mir> MirInterpreter<'mir, ReferenceRuntimeAdapter> {
             limits: ExecutionLimits::default(),
             runtime: RefCell::new(ReferenceRuntimeAdapter::default()),
             foreign_adapters: RefCell::new(BTreeMap::new()),
+            ffi_callbacks: RefCell::new(BTreeMap::new()),
         })
     }
 }
@@ -316,6 +401,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             limits: ExecutionLimits::default(),
             runtime: RefCell::new(runtime),
             foreign_adapters: RefCell::new(BTreeMap::new()),
+            ffi_callbacks: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -390,6 +476,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             .collect();
         let mut runtime = self.runtime.borrow_mut();
         let mut foreign_adapters = self.foreign_adapters.borrow_mut();
+        let mut ffi_callbacks = self.ffi_callbacks.borrow_mut();
         Engine {
             mir: self.mir,
             arena: self.arena,
@@ -402,6 +489,7 @@ impl<'mir, R: RuntimeAdapter> MirInterpreter<'mir, R> {
             ffi_handles: BTreeMap::new(),
             ffi_buffer_borrows: BTreeMap::new(),
             ffi_bytes_borrows: BTreeMap::new(),
+            ffi_callbacks: &mut ffi_callbacks,
             pin_handles: BTreeMap::new(),
             private_values: BTreeMap::new(),
             next_private_value: u32::MAX,
@@ -425,6 +513,7 @@ struct Engine<'mir, 'runtime, R> {
     ffi_handles: BTreeMap<RootHandle, RuntimeValue>,
     ffi_buffer_borrows: BTreeMap<BorrowRegionId, FfiBufferBorrowId>,
     ffi_bytes_borrows: BTreeMap<BorrowRegionId, FfiBytesBorrowState>,
+    ffi_callbacks: &'runtime mut BTreeMap<FfiCallbackRegistrationId, InterpreterCallback>,
     pin_handles: BTreeMap<ValueId, PinHandle>,
     private_values: BTreeMap<SymbolId, PrivateValue>,
     next_private_value: u32,
@@ -439,9 +528,28 @@ struct FfiBytesBorrowState {
     length: u64,
 }
 
+#[derive(Clone)]
+struct InterpreterCallback {
+    registration: FfiCallbackRegistration,
+    site: FfiCallbackSiteId,
+    target: InterpreterCallbackTarget,
+    environment: ManagedReference,
+    closed: bool,
+}
+
+#[derive(Clone)]
+enum InterpreterCallbackTarget {
+    Closure {
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: Rc<RefCell<Vec<RuntimeValue>>>,
+    },
+}
+
 enum PrivateValue {
     Cell(Rc<RefCell<RuntimeValue>>),
     Closure {
+        owner: SymbolId,
         function: NestedFunctionId,
         captures: Rc<RefCell<Vec<RuntimeValue>>>,
     },
@@ -558,10 +666,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             declaration.parameter_layouts(),
             &visible_arguments,
         )?;
-        let adapter = self
-            .foreign_adapters
-            .get_mut(&symbol)
-            .ok_or(ExecutionError::UnsupportedForeignFunction(symbol))?;
+        if !self.foreign_adapters.contains_key(&symbol) {
+            return Err(ExecutionError::UnsupportedForeignFunction(symbol));
+        }
         let published_values = roots
             .iter()
             .map(|root| value(values, *root).map(|value| value.reference))
@@ -588,7 +695,14 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             .runtime
             .enter_foreign(&mut publication, mode)
             .map_err(ExecutionError::Runtime)?;
-        let invocation = (adapter.function)(&visible_arguments);
+        let mut adapter = self
+            .foreign_adapters
+            .remove(&symbol)
+            .ok_or(ExecutionError::UnsupportedForeignFunction(symbol))?;
+        let invocation = (adapter.function)(&visible_arguments, self);
+        if self.foreign_adapters.insert(symbol, adapter).is_some() {
+            return Err(ExecutionError::InvalidControlFlow);
+        }
         self.runtime
             .leave_foreign(transition, &mut publication)
             .map_err(ExecutionError::Runtime)?;
@@ -598,7 +712,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 .ok_or(ExecutionError::MissingValue(root))?
                 .install_relocated_reference(relocated)?;
         }
-        let returned = invocation.map_err(ExecutionError::Runtime)?;
+        let returned = invocation?;
         require_foreign_abi_values(
             self.mir,
             self.arena,
@@ -2117,6 +2231,150 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 managed.install_relocated_reference(Some(reference))?;
                 return Ok(managed.clone());
             }
+            MirInstructionKind::FfiCallbackOpenScoped {
+                callback,
+                owner,
+                function,
+                site,
+                ..
+            } => {
+                let callback = value(values, *callback)?;
+                let reference = callback.reference.ok_or(ExecutionError::TypeMismatch)?;
+                let target = self.interpreter_callback_target(callback, *owner, *function)?;
+                let site = runtime_callback_site(*owner, *site)?;
+                let request = FfiCallbackOpenRequest::new(
+                    Some(reference),
+                    site,
+                    SchedulerId::new(1),
+                    FfiCallbackLifetime::CallScoped,
+                    FfiCallbackThread::CallingThread,
+                );
+                let registration = match self.runtime.ffi_callback_open(request) {
+                    Ok(registration) => registration,
+                    Err(
+                        FfiCallbackOpenFailure::Allocation | FfiCallbackOpenFailure::Invariant(_),
+                    ) => {
+                        return Err(self.runtime_invariant());
+                    }
+                };
+                self.ffi_callbacks.insert(
+                    registration.id(),
+                    InterpreterCallback {
+                        registration,
+                        site,
+                        target,
+                        environment: reference,
+                        closed: false,
+                    },
+                );
+                return Ok(RuntimeValue::managed(
+                    MirValue::FfiRegisteredCallback {
+                        registration: registration.id().raw(),
+                        reference,
+                    },
+                    reference,
+                ));
+            }
+            MirInstructionKind::FfiCallbackOpenOwned {
+                callback,
+                owner,
+                function,
+                site,
+                thread,
+                result,
+                success,
+                failure,
+                ..
+            } => {
+                let callback = value(values, *callback)?;
+                let reference = callback.reference.ok_or(ExecutionError::TypeMismatch)?;
+                let target = self.interpreter_callback_target(callback, *owner, *function)?;
+                let site = runtime_callback_site(*owner, *site)?;
+                let request = FfiCallbackOpenRequest::new(
+                    Some(reference),
+                    site,
+                    SchedulerId::new(1),
+                    FfiCallbackLifetime::Registered,
+                    *thread,
+                );
+                let visible = match self.runtime.ffi_callback_open(request) {
+                    Ok(registration) => {
+                        self.ffi_callbacks.insert(
+                            registration.id(),
+                            InterpreterCallback {
+                                registration,
+                                site,
+                                target,
+                                environment: reference,
+                                closed: false,
+                            },
+                        );
+                        MirValue::Result {
+                            definition: *result,
+                            case: *success,
+                            arguments: vec![MirValue::FfiRegisteredCallback {
+                                registration: registration.id().raw(),
+                                reference,
+                            }],
+                        }
+                    }
+                    Err(FfiCallbackOpenFailure::Allocation) => MirValue::Result {
+                        definition: *result,
+                        case: *failure,
+                        arguments: vec![MirValue::FfiCallbackOpenError],
+                    },
+                    Err(FfiCallbackOpenFailure::Invariant(_)) => {
+                        return Err(self.runtime_invariant());
+                    }
+                };
+                return Ok(RuntimeValue::visible(visible));
+            }
+            MirInstructionKind::FfiCallbackCloseOwned {
+                callback,
+                result,
+                success,
+                failure,
+            } => {
+                let MirValue::FfiRegisteredCallback { registration, .. } =
+                    value(values, *callback)?.visible
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let id = FfiCallbackRegistrationId::new(registration)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let state = self
+                    .ffi_callbacks
+                    .get_mut(&id)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let case = if state.closed {
+                    *success
+                } else {
+                    match self.runtime.ffi_callback_close(
+                        id,
+                        state.registration.context(),
+                        state.site,
+                    ) {
+                        Ok(()) => {
+                            state.closed = true;
+                            *success
+                        }
+                        Err(FfiCallbackCloseFailure::InUse) => *failure,
+                        Err(FfiCallbackCloseFailure::Invariant(_)) => {
+                            return Err(self.runtime_invariant());
+                        }
+                    }
+                };
+                let arguments = if case == *success {
+                    vec![MirValue::Nil]
+                } else {
+                    vec![MirValue::FfiCallbackInUseError]
+                };
+                MirValue::Result {
+                    definition: *result,
+                    case,
+                    arguments,
+                }
+            }
             MirInstructionKind::FfiBufferOpen {
                 length,
                 element_size,
@@ -2333,6 +2591,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::CallBuiltinInterface { .. }
             | MirInstructionKind::CallIndirect { .. }
             | MirInstructionKind::CallScopedBorrow { .. }
+            | MirInstructionKind::CallCallbackPair { .. }
             | MirInstructionKind::RecordMake { .. }
             | MirInstructionKind::ClassMake { .. }
             | MirInstructionKind::RecordUpdate { .. }
@@ -2354,6 +2613,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             | MirInstructionKind::RetainRoot { .. }
             | MirInstructionKind::ReleaseRoot { .. }
             | MirInstructionKind::FfiHandleClose { .. }
+            | MirInstructionKind::FfiCallbackCloseScoped { .. }
             | MirInstructionKind::FfiBufferWrite { .. }
             | MirInstructionKind::FfiBufferEndBorrow { .. }
             | MirInstructionKind::FfiBytesEndBorrow { .. }
@@ -2628,6 +2888,32 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 self.ffi_bytes_borrows.remove(region);
                 return Ok(());
             }
+            MirInstructionKind::FfiCallbackCloseScoped { callback, .. } => {
+                let MirValue::FfiRegisteredCallback { registration, .. } =
+                    &value(values, *callback)?.visible
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let id = FfiCallbackRegistrationId::new(*registration)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let state = self
+                    .ffi_callbacks
+                    .get_mut(&id)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if state.closed {
+                    return Err(ExecutionError::InvalidControlFlow);
+                }
+                match self
+                    .runtime
+                    .ffi_callback_close(id, state.registration.context(), state.site)
+                {
+                    Ok(()) => state.closed = true,
+                    Err(FfiCallbackCloseFailure::InUse | FfiCallbackCloseFailure::Invariant(_)) => {
+                        return Err(self.runtime_invariant());
+                    }
+                }
+                return Ok(());
+            }
             MirInstructionKind::FfiBufferClose { buffer } => {
                 let reference = value(values, *buffer)?
                     .reference
@@ -2788,6 +3074,62 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             } => single_result(
                 self.execute_scoped_borrow_call(*owner, *function, captures, arguments, values)?,
             ),
+            MirInstructionKind::CallCallbackPair {
+                callback,
+                owner,
+                function,
+                captures,
+                lifetime,
+                result,
+                success,
+                failure,
+                ..
+            } => {
+                let MirValue::FfiRegisteredCallback { registration, .. } =
+                    &value(values, *callback)?.visible
+                else {
+                    return Err(ExecutionError::TypeMismatch);
+                };
+                let id = FfiCallbackRegistrationId::new(*registration)
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                let state = self
+                    .ffi_callbacks
+                    .get(&id)
+                    .cloned()
+                    .ok_or(ExecutionError::InvalidControlFlow)?;
+                if state.closed {
+                    if *lifetime != FfiCallbackLifetime::Registered {
+                        return Err(ExecutionError::InvalidControlFlow);
+                    }
+                    let (Some(result), Some(failure)) = (result, failure) else {
+                        return Err(ExecutionError::InvalidControlFlow);
+                    };
+                    return Ok(Some(RuntimeValue::visible(MirValue::Result {
+                        definition: *result,
+                        case: *failure,
+                        arguments: vec![MirValue::FfiCallbackClosedError],
+                    })));
+                }
+                let arguments = [
+                    RuntimeValue::visible(MirValue::FfiFunction(state.site.raw())),
+                    RuntimeValue::visible(MirValue::FfiPointer(state.registration.context())),
+                ];
+                let returned = self
+                    .execute_callback_pair_call(*owner, *function, captures, &arguments, values)?;
+                let returned = single_result(returned)?;
+                if *lifetime == FfiCallbackLifetime::CallScoped {
+                    Ok(returned)
+                } else {
+                    let (Some(result), Some(success)) = (result, success) else {
+                        return Err(ExecutionError::InvalidControlFlow);
+                    };
+                    Ok(RuntimeValue::visible(MirValue::Result {
+                        definition: *result,
+                        case: *success,
+                        arguments: vec![returned.visible],
+                    }))
+                }
+            }
             MirInstructionKind::CallInterface {
                 method, arguments, ..
             } => {
@@ -2933,6 +3275,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     .ok_or(ExecutionError::InvalidControlFlow)
             }
             MirInstructionKind::ClosureEnvironmentAllocate {
+                owner,
                 function,
                 captures,
                 object_map,
@@ -2966,6 +3309,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 self.private_values.insert(
                     symbol,
                     PrivateValue::Closure {
+                        owner: *owner,
                         function: *function,
                         captures: environment.clone(),
                     },
@@ -3330,6 +3674,191 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         result
     }
 
+    fn execute_callback_pair_call(
+        &mut self,
+        owner: SymbolId,
+        function: NestedFunctionId,
+        captures: &[pop_mir::MirClosureCapture],
+        arguments: &[RuntimeValue],
+        values: &BTreeMap<ValueId, RuntimeValue>,
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        if captures.iter().any(|capture| capture.self_reference()) {
+            return Err(ExecutionError::InvalidControlFlow);
+        }
+        let nested = self
+            .mir
+            .nested_functions()
+            .iter()
+            .find(|candidate| candidate.owner() == owner && candidate.function() == function)
+            .ok_or(ExecutionError::InvalidControlFlow)?;
+        let capture_values = captures
+            .iter()
+            .map(|capture| value(values, capture.value()).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(ExecutionError::CallDepthLimit)?;
+        if self.depth > self.limits.maximum_call_depth {
+            return Err(ExecutionError::CallDepthLimit);
+        }
+        let result = self.execute(
+            nested.parameters(),
+            nested.results(),
+            nested.blocks(),
+            arguments,
+            Some(Rc::new(RefCell::new(capture_values))),
+        );
+        self.depth -= 1;
+        result
+    }
+
+    fn interpreter_callback_target(
+        &self,
+        callback: &RuntimeValue,
+        expected_owner: SymbolId,
+        expected_function: NestedFunctionId,
+    ) -> Result<InterpreterCallbackTarget, ExecutionError> {
+        let MirValue::Function(symbol) = callback.visible else {
+            return Err(ExecutionError::TypeMismatch);
+        };
+        match self.private_values.get(&symbol) {
+            Some(PrivateValue::Closure {
+                owner,
+                function,
+                captures,
+            }) if *owner == expected_owner && *function == expected_function => {
+                Ok(InterpreterCallbackTarget::Closure {
+                    owner: *owner,
+                    function: *function,
+                    captures: captures.clone(),
+                })
+            }
+            _ => Err(ExecutionError::InvalidControlFlow),
+        }
+    }
+
+    fn execute_callback_target(
+        &mut self,
+        target: &InterpreterCallbackTarget,
+        arguments: &[RuntimeValue],
+    ) -> Result<Vec<RuntimeValue>, ExecutionError> {
+        let InterpreterCallbackTarget::Closure {
+            owner,
+            function,
+            captures,
+        } = target;
+        let nested = self
+            .mir
+            .nested_functions()
+            .iter()
+            .find(|candidate| candidate.owner() == *owner && candidate.function() == *function)
+            .ok_or(ExecutionError::InvalidControlFlow)?;
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(ExecutionError::CallDepthLimit)?;
+        if self.depth > self.limits.maximum_call_depth {
+            return Err(ExecutionError::CallDepthLimit);
+        }
+        let returned = self.execute(
+            nested.parameters(),
+            nested.results(),
+            nested.blocks(),
+            arguments,
+            Some(captures.clone()),
+        );
+        self.depth -= 1;
+        returned
+    }
+
+    fn invoke_ffi_callback(
+        &mut self,
+        function: &MirValue,
+        context: &MirValue,
+        arguments: &[MirValue],
+    ) -> Result<Vec<MirValue>, ExecutionError> {
+        let MirValue::FfiFunction(raw_site) = function else {
+            return Err(ExecutionError::TypeMismatch);
+        };
+        let context = ffi_pointer(context)?;
+        let site = FfiCallbackSiteId::new(*raw_site).ok_or(ExecutionError::TypeMismatch)?;
+        let state = self
+            .ffi_callbacks
+            .values()
+            .find(|state| state.site == site && state.registration.context() == context)
+            .cloned()
+            .filter(|state| !state.closed)
+            .ok_or(ExecutionError::UnsupportedFfiCallback {
+                function: *raw_site,
+                context,
+            })?;
+        let InterpreterCallbackTarget::Closure {
+            owner,
+            function: callback,
+            ..
+        } = &state.target;
+        let nested = self
+            .mir
+            .nested_functions()
+            .iter()
+            .find(|candidate| candidate.owner() == *owner && candidate.function() == *callback)
+            .ok_or(ExecutionError::InvalidControlFlow)?;
+        if nested.parameters().len() != arguments.len() || nested.results().len() != 1 {
+            return Err(ExecutionError::WrongArity);
+        }
+        let mut context_parameters = 0_u8;
+        for (parameter, argument) in nested.parameters().iter().zip(arguments) {
+            let is_context = matches!(
+                self.arena.get(*parameter),
+                Some(SemanticType::Builtin { definition, arguments })
+                    if *definition == FFI_CALLBACK_CONTEXT_TYPE_ID && arguments.is_empty()
+            );
+            if is_context {
+                context_parameters = context_parameters.saturating_add(1);
+                if argument != &MirValue::FfiPointer(context) {
+                    return Err(ExecutionError::TypeMismatch);
+                }
+            }
+            if !callback_abi_value_matches(self.mir, self.arena, *parameter, argument)? {
+                return Err(ExecutionError::TypeMismatch);
+            }
+        }
+        if context_parameters != 1 {
+            return Err(ExecutionError::InvalidControlFlow);
+        }
+        let entry = self
+            .runtime
+            .ffi_callback_enter(context, site)
+            .map_err(ExecutionError::Runtime)?;
+        if entry.environment() != Some(state.environment) {
+            let _ = self.runtime.ffi_callback_leave(entry.transition());
+            return Err(self.runtime_invariant());
+        }
+        let runtime_arguments = arguments
+            .iter()
+            .cloned()
+            .map(RuntimeValue::visible)
+            .collect::<Vec<_>>();
+        let invocation = self.execute_callback_target(&state.target, &runtime_arguments);
+        self.runtime
+            .ffi_callback_leave(entry.transition())
+            .map_err(ExecutionError::Runtime)?;
+        let returned = invocation?;
+        let [returned] = returned.as_slice() else {
+            return Err(ExecutionError::WrongArity);
+        };
+        if !callback_abi_value_matches(
+            self.mir,
+            self.arena,
+            nested.results()[0],
+            &returned.visible,
+        )? {
+            return Err(ExecutionError::TypeMismatch);
+        }
+        Ok(vec![returned.visible.clone()])
+    }
+
     fn execute_indirect_value(
         &mut self,
         callee: &RuntimeValue,
@@ -3339,17 +3868,19 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
             return Err(ExecutionError::TypeMismatch);
         };
         let closure = match self.private_values.get(function) {
-            Some(PrivateValue::Closure { function, captures }) => {
-                Some((*function, captures.clone()))
-            }
+            Some(PrivateValue::Closure {
+                owner,
+                function,
+                captures,
+            }) => Some((*owner, *function, captures.clone())),
             _ => None,
         };
-        if let Some((function, captures)) = closure {
+        if let Some((owner, function, captures)) = closure {
             let nested = self
                 .mir
                 .nested_functions()
                 .iter()
-                .find(|candidate| candidate.function() == function)
+                .find(|candidate| candidate.owner() == owner && candidate.function() == function)
                 .ok_or(ExecutionError::InvalidControlFlow)?;
             self.depth = self
                 .depth
@@ -3425,5 +3956,16 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
         } else {
             Ok(())
         }
+    }
+}
+
+impl<R: RuntimeAdapter> FfiCallbackInvoker for Engine<'_, '_, R> {
+    fn invoke(
+        &mut self,
+        function: &MirValue,
+        context: &MirValue,
+        arguments: &[MirValue],
+    ) -> Result<Vec<MirValue>, ExecutionError> {
+        self.invoke_ffi_callback(function, context, arguments)
     }
 }

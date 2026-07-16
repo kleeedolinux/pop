@@ -5,11 +5,13 @@
 //! collector implementation details.
 use pop_runtime_interface::{
     ArrayAllocationRequest, ArrayElementMap, FfiAbiLayoutId, FfiBufferBorrow, FfiBufferBorrowId,
-    FfiBufferOpenFailure, FfiBufferOpenRequest, ForeignAddress, ForeignCallMode,
-    ForeignTransitionId, GarbageCollectorContract, ManagedReference, ObjectAllocationRequest,
-    ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication, RootSlot, RuntimeAdapter,
-    RuntimeFailure, RuntimeTypeId, SafePointId, SafePointOutcome, TableAllocationRequest, Trap,
-    WriteBarrier,
+    FfiBufferOpenFailure, FfiBufferOpenRequest, FfiCallbackCloseFailure, FfiCallbackEntry,
+    FfiCallbackOpenFailure, FfiCallbackOpenRequest, FfiCallbackRegistration,
+    FfiCallbackRegistrationId, FfiCallbackSiteId, FfiCallbackTransitionId, ForeignAddress,
+    ForeignCallMode, ForeignTransitionId, GarbageCollectorContract, ManagedReference,
+    ObjectAllocationRequest, ObjectMap, ObjectSlot, PinHandle, RootHandle, RootPublication,
+    RootSlot, RuntimeAdapter, RuntimeFailure, RuntimeTypeId, SafePointId, SafePointOutcome,
+    TableAllocationRequest, Trap, WriteBarrier,
 };
 use std::collections::BTreeMap;
 
@@ -51,6 +53,10 @@ pub enum ReferenceRuntimeEvent {
     WriteBarrier(WriteBarrier),
     Trap(Trap),
     Panic(pop_runtime_interface::PanicPayload),
+    OpenCallback(FfiCallbackRegistration),
+    EnterCallback(FfiCallbackEntry),
+    LeaveCallback(FfiCallbackTransitionId),
+    CloseCallback(FfiCallbackRegistrationId),
 }
 
 #[derive(Default)]
@@ -59,10 +65,14 @@ pub struct ReferenceRuntimeAdapter {
     roots: BTreeMap<RootHandle, ManagedReference>,
     pins: BTreeMap<PinHandle, ManagedReference>,
     ffi_buffers: BTreeMap<ManagedReference, ReferenceFfiBuffer>,
+    ffi_callbacks: BTreeMap<FfiCallbackRegistrationId, ReferenceFfiCallback>,
+    ffi_callback_transitions: BTreeMap<FfiCallbackTransitionId, FfiCallbackRegistrationId>,
     next_reference: u64,
     next_root: u64,
     next_pin: u64,
     next_ffi_borrow: u64,
+    next_ffi_callback: u64,
+    next_ffi_callback_transition: u64,
     next_foreign_address: u64,
     next_foreign_transition: u64,
     foreign_transitions: Vec<(ForeignTransitionId, Vec<RootSlot>)>,
@@ -76,6 +86,14 @@ struct ReferenceFfiBuffer {
     storage: Vec<u8>,
     address: Option<ForeignAddress>,
     borrow: Option<FfiBufferBorrowId>,
+    closed: bool,
+}
+
+struct ReferenceFfiCallback {
+    environment: Option<ManagedReference>,
+    site: FfiCallbackSiteId,
+    context: ForeignAddress,
+    active: bool,
     closed: bool,
 }
 
@@ -260,6 +278,112 @@ impl RuntimeAdapter for ReferenceRuntimeAdapter {
             },
         );
         Ok(reference)
+    }
+
+    fn ffi_callback_open(
+        &mut self,
+        request: FfiCallbackOpenRequest,
+    ) -> Result<FfiCallbackRegistration, FfiCallbackOpenFailure> {
+        if let Some(environment) = request.environment() {
+            self.valid_reference(environment)
+                .map_err(FfiCallbackOpenFailure::Invariant)?;
+        }
+        self.next_ffi_callback = self
+            .next_ffi_callback
+            .checked_add(1)
+            .ok_or(FfiCallbackOpenFailure::Allocation)?;
+        let id = FfiCallbackRegistrationId::new(self.next_ffi_callback)
+            .ok_or(FfiCallbackOpenFailure::Allocation)?;
+        let raw_context = 0x4000_0000_u64
+            .checked_add(self.next_ffi_callback)
+            .ok_or(FfiCallbackOpenFailure::Allocation)?;
+        let context = ForeignAddress::new(raw_context).ok_or(FfiCallbackOpenFailure::Allocation)?;
+        let registration = FfiCallbackRegistration::new(id, context);
+        self.ffi_callbacks.insert(
+            id,
+            ReferenceFfiCallback {
+                environment: request.environment(),
+                site: request.site(),
+                context,
+                active: false,
+                closed: false,
+            },
+        );
+        self.events
+            .push(ReferenceRuntimeEvent::OpenCallback(registration));
+        Ok(registration)
+    }
+
+    fn ffi_callback_enter(
+        &mut self,
+        context: ForeignAddress,
+        site: FfiCallbackSiteId,
+    ) -> Result<FfiCallbackEntry, RuntimeFailure> {
+        let (registration, state) = self
+            .ffi_callbacks
+            .iter_mut()
+            .find(|(_, state)| state.context == context && state.site == site)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if state.closed || state.active {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        state.active = true;
+        self.next_ffi_callback_transition = self
+            .next_ffi_callback_transition
+            .checked_add(1)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let transition = FfiCallbackTransitionId::new(self.next_ffi_callback_transition)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        self.ffi_callback_transitions
+            .insert(transition, *registration);
+        let entry = FfiCallbackEntry::new(transition, state.environment);
+        self.events
+            .push(ReferenceRuntimeEvent::EnterCallback(entry));
+        Ok(entry)
+    }
+
+    fn ffi_callback_leave(
+        &mut self,
+        transition: FfiCallbackTransitionId,
+    ) -> Result<(), RuntimeFailure> {
+        let registration = self
+            .ffi_callback_transitions
+            .remove(&transition)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let state = self
+            .ffi_callbacks
+            .get_mut(&registration)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if !state.active || state.closed {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        state.active = false;
+        self.events
+            .push(ReferenceRuntimeEvent::LeaveCallback(transition));
+        Ok(())
+    }
+
+    fn ffi_callback_close(
+        &mut self,
+        registration: FfiCallbackRegistrationId,
+        context: ForeignAddress,
+        site: FfiCallbackSiteId,
+    ) -> Result<(), FfiCallbackCloseFailure> {
+        let state = self.ffi_callbacks.get_mut(&registration).ok_or_else(|| {
+            FfiCallbackCloseFailure::Invariant(RuntimeFailure::runtime_invariant())
+        })?;
+        if state.context != context || state.site != site || state.closed {
+            return Err(FfiCallbackCloseFailure::Invariant(
+                RuntimeFailure::runtime_invariant(),
+            ));
+        }
+        if state.active {
+            return Err(FfiCallbackCloseFailure::InUse);
+        }
+        state.closed = true;
+        self.events
+            .push(ReferenceRuntimeEvent::CloseCallback(registration));
+        Ok(())
     }
 
     fn ffi_buffer_length(
