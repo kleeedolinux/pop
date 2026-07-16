@@ -30,6 +30,44 @@ fn lower(source_text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     (optimized, front_end.types().clone())
 }
 
+fn lower_ffi(source_text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
+    let ffi = BubbleId::from_raw(20);
+    let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    (mir, front_end.types().clone())
+}
+
+#[test]
+fn experimental_c_backend_rejects_callback_operations_without_a_fallback() {
+    let (mir, types) = lower_ffi(
+        "namespace CallbackDemo\n\
+         private type CallbackSignature = function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int\n\
+         public function closeCallback(callback: Ffi.RegisteredCallback<CallbackSignature>): Result<nil, Ffi.CallbackInUseError>\n\
+             return Ffi.Callback.close(callback)\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        lower_mir_to_c(&mir, &types, CLoweringOptions::default()),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
+}
+
 #[test]
 fn emits_deterministic_strict_c11_with_checked_direct_calls_and_entry() {
     let (mir, types) = lower(

@@ -46,6 +46,18 @@ fn validate_function(function: &MirFunction, types: &TypeArena) -> Result<(), CB
             function.symbol(),
         ));
     }
+    for block in function.blocks() {
+        if let Some(instruction) = block
+            .instructions()
+            .iter()
+            .find(|instruction| is_ffi_callback_instruction(instruction.kind()))
+        {
+            return Err(CBackendError::UnsupportedInstruction {
+                function: function.function(),
+                value: instruction.result(),
+            });
+        }
+    }
     for type_id in function.parameters().iter().chain(function.results()) {
         c_type(*type_id, types)?;
     }
@@ -109,6 +121,9 @@ fn validate_function(function: &MirFunction, types: &TypeArena) -> Result<(), CB
 }
 
 fn is_supported_instruction(kind: &MirInstructionKind) -> bool {
+    if is_ffi_callback_instruction(kind) {
+        return false;
+    }
     if let MirInstructionKind::CallStandard {
         function,
         arguments,
@@ -152,6 +167,17 @@ fn is_supported_instruction(kind: &MirInstructionKind) -> bool {
             | MirInstructionKind::CompareFloatGreater { .. }
             | MirInstructionKind::CompareFloatGreaterOrEqual { .. }
             | MirInstructionKind::CallDirect { .. }
+    )
+}
+
+fn is_ffi_callback_instruction(kind: &MirInstructionKind) -> bool {
+    matches!(
+        kind,
+        MirInstructionKind::FfiCallbackOpenScoped { .. }
+            | MirInstructionKind::FfiCallbackOpenOwned { .. }
+            | MirInstructionKind::CallCallbackPair { .. }
+            | MirInstructionKind::FfiCallbackCloseScoped { .. }
+            | MirInstructionKind::FfiCallbackCloseOwned { .. }
     )
 }
 
