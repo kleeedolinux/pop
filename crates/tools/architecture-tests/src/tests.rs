@@ -1385,6 +1385,7 @@ fn toolchain_localization_stays_at_presentation_boundaries() {
     assert!(driver.contains("rendering().diagnostic(diagnostic)"));
 
     for directory in [
+        "crates/compiler/backend-api",
         "crates/compiler/backends",
         "crates/compiler/compile-time",
         "crates/compiler/diagnostics",

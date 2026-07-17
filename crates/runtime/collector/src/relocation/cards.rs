@@ -55,4 +55,26 @@ impl RelocationRuntime {
         }
         Ok(())
     }
+
+    pub(crate) fn mark_initialized_mature_object(
+        &mut self,
+        owner: ManagedReference,
+    ) -> Result<(), RuntimeFailure> {
+        if self.generation(owner) != Some(CollectorGeneration::Mature) {
+            return Ok(());
+        }
+        let slot_count = self.object_slot_count(owner)?;
+        for slot in 0..slot_count {
+            if let Some(child) = self.load_reference(owner, ObjectSlot(slot))? {
+                if matches!(
+                    self.generation(child),
+                    Some(CollectorGeneration::Nursery { .. })
+                ) {
+                    self.dirty_cards.insert(owner);
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
 }

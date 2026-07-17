@@ -115,7 +115,8 @@ already requires an explicit decision to avoid architecture drift.
   dependencies;
 - `pop-driver` produces the binary named `pop`;
 - external dependencies remain the closed reviewed set: Inkwell in the LLVM
-  backend; Serde, JSON, and SHA-256 at artifact boundaries; and TOML in the
+  backend; Serde for HIR/MIR projection and at artifact/protocol boundaries;
+  JSON and SHA-256 confined to artifact boundaries; and TOML confined to the
   private localization presentation crate. Architecture tests pin their owning
   crates and prevent them from spreading into semantic or base-library layers;
 - the workspace builds and tests without undeclared external dependencies.

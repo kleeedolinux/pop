@@ -65,7 +65,7 @@ text = "class `{class}` は `{interface}.{method}` を実装していません"
 text = "`{class}` の `{interface}.{method}` 実装には互換性がありません: {reason}"
 
 [messages."types.missingMatchCases"]
-text = "match にケースがありません: {cases}"
+text = "match に次のケースがありません: {cases}"
 
 [messages."types.duplicateMatchCase"]
 text = "match ケース `{name}` が重複しています"

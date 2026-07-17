@@ -660,7 +660,6 @@ impl RenderContext {
             .iter()
             .map(|argument| (argument.name.as_str(), argument))
             .collect::<BTreeMap<_, _>>();
-        let mut rendered = message.text.clone();
         for (name, expected_kind) in message.arguments.iter().zip(&message.kinds) {
             let argument = supplied.get(name.as_str()).ok_or_else(|| {
                 LocalizationError::InvalidArguments(format!(
@@ -673,8 +672,27 @@ impl RenderContext {
                     argument.kind.name()
                 )));
             }
-            rendered = rendered.replace(&format!("{{{name}}}"), &argument.value);
         }
+        let mut rendered = String::new();
+        let mut rest = message.text.as_str();
+        while let Some(start) = rest.find('{') {
+            rendered.push_str(&rest[..start]);
+            rest = &rest[start + 1..];
+            if let Some(end) = rest.find('}') {
+                let name = &rest[..end];
+                if let Some(argument) = supplied.get(name) {
+                    rendered.push_str(&argument.value);
+                } else {
+                    rendered.push('{');
+                    rendered.push_str(name);
+                    rendered.push('}');
+                }
+                rest = &rest[end + 1..];
+            } else {
+                rendered.push('{');
+            }
+        }
+        rendered.push_str(rest);
         Ok(rendered)
     }
 

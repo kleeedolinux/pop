@@ -78,7 +78,22 @@ impl DocumentUri {
     /// value.
     pub fn new(value: impl Into<Arc<str>>) -> Result<Self, DocumentUriError> {
         let value = value.into();
-        if value.is_empty() || !value.contains(':') || value.chars().any(char::is_control) {
+        if value.is_empty() || value.chars().any(char::is_control) {
+            return Err(DocumentUriError);
+        }
+        let Some(colon_position) = value.find(':') else {
+            return Err(DocumentUriError);
+        };
+        let scheme = &value[..colon_position];
+        if scheme.is_empty()
+            || !scheme
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            || !scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        {
             return Err(DocumentUriError);
         }
         Ok(Self(value))

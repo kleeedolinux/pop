@@ -98,7 +98,7 @@ text = "`pop build` 需要输出路径（`--output`）或目标三元组（`--ta
 text = "`--target` 需要目标三元组"
 
 [messages."cli.runtimeProfileNeedsName"]
-text = "`--runtime-profile` 需要配置文件名称"
+text = "`--runtime-profile` 需要配置名称"
 
 [messages."cli.unsupportedBpfProgram"]
 text = "不支持 BPF 程序 `{value}`；应为 `xdp`"
