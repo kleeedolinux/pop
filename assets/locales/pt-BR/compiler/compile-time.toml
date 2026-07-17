@@ -1,0 +1,26 @@
+[messages."compileTime.ineligibleConstantExpression"]
+text = "{context} não é elegível para avaliação constante"
+
+[messages."compileTime.constantIntegerOverflow"]
+text = "overflow de inteiro ao avaliar {context}"
+
+[messages."compileTime.constantDivisionByZero"]
+text = "divisão por zero ao avaliar {context}"
+
+[messages."compileTime.functionNotEligible"]
+text = "a função `{function}` não é elegível para execução em tempo de compilação"
+
+[messages."compileTime.forbiddenEffect"]
+text = "a função `{function}` usa o efeito proibido em tempo de compilação `{effect}`"
+
+[messages."compileTime.cycle"]
+text = "ciclo de dependência em tempo de compilação: {cycle}"
+
+[messages."compileTime.resourceLimit"]
+text = "o limite de {resource} em tempo de compilação, de {limit}, foi excedido"
+
+[messages."compileTime.attributeValidatorRejected"]
+text = "o validador de atributo `{attribute}` rejeitou a declaração"
+
+[messages."compileTime.invalidAttributeValidatorSignature"]
+text = "o validador de atributo `{function}` tem uma assinatura inválida"

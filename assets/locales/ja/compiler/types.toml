@@ -1,0 +1,119 @@
+[messages."types.wrongArity"]
+text = "型 `{name}` には {expected} 個の引数が必要ですが、{found} 個見つかりました"
+
+[messages."types.duplicateTypeParameter"]
+text = "型パラメータ `{name}` が重複しています"
+
+[messages."types.mismatch"]
+text = "`{expected}` が必要ですが、`{found}` が見つかりました"
+
+[messages."types.wrongValueArity"]
+text = "{context} には {expected} 個の値が必要ですが、{found} 個見つかりました"
+
+[messages."types.noMatchingOverload"]
+text = "これらの引数に一致する `{name}` のオーバーロードはありません"
+
+[messages."types.invalidOverloadSet"]
+text = "無効なオーバーロード集合 `{name}`: {reason}"
+
+[messages."types.invalidOperator"]
+text = "演算子 `{operator}` は {operands} に使用できません"
+
+[messages."types.structuralMutationDuringIteration"]
+text = "反復中に構造変更 `{operation}` は許可されません"
+
+[messages."types.notAllPathsReturn"]
+text = "宣言された結果を返さない経路があります"
+
+[messages."types.aggregateNeedsContext"]
+text = "集約リテラルには期待される型が必要です"
+
+[messages."types.missingRecordField"]
+text = "record フィールド `{name}` がありません"
+
+[messages."types.unknownRecordField"]
+text = "不明な record フィールド `{name}`"
+
+[messages."types.duplicateRecordField"]
+text = "record フィールド `{name}` が重複しています"
+
+[messages."types.duplicateAttributeArgument"]
+text = "属性引数 `{name}` が重複しています"
+
+[messages."types.unknownAttributeArgument"]
+text = "不明な属性引数 `{name}`"
+
+[messages."types.numericLiteralOutOfRange"]
+text = "リテラル `{literal}` は `{numericType}` の範囲外です"
+
+[messages."types.wrongClassMethodOwner"]
+text = "メソッドの所有者は `{expected}` である必要がありますが、`{found}` が見つかりました"
+
+[messages."types.duplicateInterfaceMethod"]
+text = "interface メソッド `{name}` が重複しています"
+
+[messages."types.emptyInterface"]
+text = "interface `{name}` は少なくとも 1 つのメソッドを宣言する必要があります"
+
+[messages."types.invalidInterfaceImplementation"]
+text = "`{target}` はこの interface を実装できません"
+
+[messages."types.missingInterfaceMethod"]
+text = "class `{class}` は `{interface}.{method}` を実装していません"
+
+[messages."types.incompatibleInterfaceMethod"]
+text = "`{class}` の `{interface}.{method}` 実装には互換性がありません: {reason}"
+
+[messages."types.missingMatchCases"]
+text = "match に次のケースがありません: {cases}"
+
+[messages."types.duplicateMatchCase"]
+text = "match ケース `{name}` が重複しています"
+
+[messages."types.foreignMatchCase"]
+text = "ケース `{name}` は対象の union に属していません"
+
+[messages."types.duplicateBinding"]
+text = "pattern の binding `{name}` が重複しています"
+
+[messages."types.invalidResultPropagation"]
+text = "`{enclosing}` から `{operand}` を伝播できません"
+
+[messages."types.ambiguousResultCase"]
+text = "結果ケース `{case}` は曖昧です"
+
+[messages."types.illegalCleanupControl"]
+text = "`{control}` でクリーンアップ本体から離脱できません"
+
+[messages."types.invalidGenericBound"]
+text = "型パラメータ `{parameter}` は `{bound}` を満たしていません"
+
+[messages."types.genericInferenceFailure"]
+text = "`{parameter}` を推論できません: {reason}"
+
+[messages."types.awaitOutsideAsync"]
+text = "`await` は async 関数内でのみ使用できます"
+
+[messages."types.awaitNonTask"]
+text = "型 `{found}` の値を await できません"
+
+[messages."types.originalTypeParameter"]
+text = "元の型パラメータ"
+
+[messages."types.expectedOrigin"]
+text = "期待される型はここで決まります"
+
+[messages."types.originalRecordField"]
+text = "元の record フィールド"
+
+[messages."types.originalAttributeArgument"]
+text = "元の属性引数"
+
+[messages."types.originalInterfaceMethod"]
+text = "元の interface メソッド"
+
+[messages."types.originalMatchCase"]
+text = "元の match ケース"
+
+[messages."types.originalBinding"]
+text = "元の binding"

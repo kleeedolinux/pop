@@ -1,0 +1,26 @@
+[messages."compileTime.ineligibleConstantExpression"]
+text = "{context} no es apto para la evaluación constante"
+
+[messages."compileTime.constantIntegerOverflow"]
+text = "desbordamiento de entero al evaluar {context}"
+
+[messages."compileTime.constantDivisionByZero"]
+text = "división por cero al evaluar {context}"
+
+[messages."compileTime.functionNotEligible"]
+text = "la función `{function}` no es apta para ejecución en tiempo de compilación"
+
+[messages."compileTime.forbiddenEffect"]
+text = "la función `{function}` usa el efecto prohibido en tiempo de compilación `{effect}`"
+
+[messages."compileTime.cycle"]
+text = "ciclo de dependencias en tiempo de compilación: {cycle}"
+
+[messages."compileTime.resourceLimit"]
+text = "se superó el límite de {resource} en tiempo de compilación, de {limit}"
+
+[messages."compileTime.attributeValidatorRejected"]
+text = "el validador de atributo `{attribute}` rechazó la declaración"
+
+[messages."compileTime.invalidAttributeValidatorSignature"]
+text = "el validador de atributo `{function}` tiene una firma no válida"

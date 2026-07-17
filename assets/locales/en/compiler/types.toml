@@ -1,0 +1,199 @@
+[messages."types.wrongArity"]
+text = "type `{name}` expects {expected} arguments, found {found}"
+arguments = ["name", "expected", "found"]
+kinds = ["Identifier", "Unsigned", "Unsigned"]
+
+[messages."types.duplicateTypeParameter"]
+text = "duplicate type parameter `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.mismatch"]
+text = "expected `{expected}`, found `{found}`"
+arguments = ["expected", "found"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.wrongValueArity"]
+text = "{context} expects {expected} values, found {found}"
+arguments = ["context", "expected", "found"]
+kinds = ["Identifier", "Unsigned", "Unsigned"]
+
+[messages."types.noMatchingOverload"]
+text = "no overload of `{name}` matches these arguments"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.invalidOverloadSet"]
+text = "invalid overload set `{name}`: {reason}"
+arguments = ["name", "reason"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.invalidOperator"]
+text = "operator `{operator}` is invalid for {operands}"
+arguments = ["operator", "operands"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.structuralMutationDuringIteration"]
+text = "structural mutation `{operation}` is not allowed during iteration"
+arguments = ["operation"]
+kinds = ["Identifier"]
+
+[messages."types.notAllPathsReturn"]
+text = "not all paths return the declared result"
+arguments = []
+kinds = []
+
+[messages."types.aggregateNeedsContext"]
+text = "aggregate literal needs an expected type"
+arguments = []
+kinds = []
+
+[messages."types.missingRecordField"]
+text = "missing record field `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.unknownRecordField"]
+text = "unknown record field `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.duplicateRecordField"]
+text = "duplicate record field `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.duplicateAttributeArgument"]
+text = "duplicate attribute argument `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.unknownAttributeArgument"]
+text = "unknown attribute argument `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.numericLiteralOutOfRange"]
+text = "literal `{literal}` is outside the range of `{numericType}`"
+arguments = ["literal", "numericType"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.wrongClassMethodOwner"]
+text = "method owner must be `{expected}`, found `{found}`"
+arguments = ["expected", "found"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.duplicateInterfaceMethod"]
+text = "duplicate interface method `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.emptyInterface"]
+text = "interface `{name}` must declare at least one method"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.invalidInterfaceImplementation"]
+text = "`{target}` cannot implement this interface"
+arguments = ["target"]
+kinds = ["Identifier"]
+
+[messages."types.missingInterfaceMethod"]
+text = "class `{class}` does not implement `{interface}.{method}`"
+arguments = ["class", "interface", "method"]
+kinds = ["Identifier", "Identifier", "Identifier"]
+
+[messages."types.incompatibleInterfaceMethod"]
+text = "`{class}` has an incompatible implementation of `{interface}.{method}`: {reason}"
+arguments = ["class", "interface", "method", "reason"]
+kinds = ["Identifier", "Identifier", "Identifier", "Identifier"]
+
+[messages."types.missingMatchCases"]
+text = "match is missing cases: {cases}"
+arguments = ["cases"]
+kinds = ["Identifier"]
+
+[messages."types.duplicateMatchCase"]
+text = "duplicate match case `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.foreignMatchCase"]
+text = "case `{name}` does not belong to the matched union"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.duplicateBinding"]
+text = "duplicate pattern binding `{name}`"
+arguments = ["name"]
+kinds = ["Identifier"]
+
+[messages."types.invalidResultPropagation"]
+text = "cannot propagate `{operand}` from `{enclosing}`"
+arguments = ["operand", "enclosing"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.ambiguousResultCase"]
+text = "result case `{case}` is ambiguous"
+arguments = ["case"]
+kinds = ["Identifier"]
+
+[messages."types.illegalCleanupControl"]
+text = "`{control}` cannot leave a cleanup body"
+arguments = ["control"]
+kinds = ["Identifier"]
+
+[messages."types.invalidGenericBound"]
+text = "type parameter `{parameter}` does not satisfy `{bound}`"
+arguments = ["parameter", "bound"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.genericInferenceFailure"]
+text = "cannot infer `{parameter}`: {reason}"
+arguments = ["parameter", "reason"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.awaitOutsideAsync"]
+text = "`await` is only valid inside an async function"
+arguments = []
+kinds = []
+
+[messages."types.awaitNonTask"]
+text = "cannot await value of type `{found}`"
+arguments = ["found"]
+kinds = ["Identifier"]
+
+[messages."types.originalTypeParameter"]
+text = "original type parameter"
+arguments = []
+kinds = []
+
+[messages."types.expectedOrigin"]
+text = "expected type originates here"
+arguments = []
+kinds = []
+
+[messages."types.originalRecordField"]
+text = "original record field"
+arguments = []
+kinds = []
+
+[messages."types.originalAttributeArgument"]
+text = "original attribute argument"
+arguments = []
+kinds = []
+
+[messages."types.originalInterfaceMethod"]
+text = "original interface method"
+arguments = []
+kinds = []
+
+[messages."types.originalMatchCase"]
+text = "original match case"
+arguments = []
+kinds = []
+
+[messages."types.originalBinding"]
+text = "original binding"
+arguments = []
+kinds = []

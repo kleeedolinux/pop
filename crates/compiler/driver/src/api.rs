@@ -123,6 +123,99 @@ pub struct FrontEndResult {
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) reference_metadata: Result<ReferenceMetadata, ReferenceMetadataError>,
     pub(crate) checked_documentation: Vec<CheckedDocumentation>,
+    pub(crate) tooling_declarations: Vec<ToolingDeclaration>,
+    pub(crate) tooling_inlay_hints: Vec<ToolingInlayHint>,
+}
+
+/// Version-coupled declaration projection for private compiler tooling.
+///
+/// This is not a public `Pop.Syntax` or `Pop.Lsp` value. It deliberately keeps
+/// resolver databases, syntax nodes, and HIR values behind compiler ownership.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolingDeclaration {
+    pub(crate) identity: SymbolIdentity,
+    pub(crate) module: ModuleId,
+    pub(crate) name: String,
+    pub(crate) kind: ToolingDeclarationKind,
+    pub(crate) declaration_span: SourceSpan,
+    pub(crate) selection_span: SourceSpan,
+    pub(crate) signature_span: SourceSpan,
+}
+
+impl ToolingDeclaration {
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ToolingDeclarationKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn declaration_span(&self) -> SourceSpan {
+        self.declaration_span
+    }
+
+    #[must_use]
+    pub const fn selection_span(&self) -> SourceSpan {
+        self.selection_span
+    }
+
+    #[must_use]
+    pub const fn signature_span(&self) -> SourceSpan {
+        self.signature_span
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolingDeclarationKind {
+    Function,
+    Constant,
+    TypeAlias,
+    Attribute,
+    Record,
+    Union,
+    Error,
+    Class,
+    Interface,
+    Enum,
+}
+
+/// Compiler-proven parameter name attached to one direct-call argument.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolingInlayHint {
+    pub(crate) module: ModuleId,
+    pub(crate) argument_span: SourceSpan,
+    pub(crate) parameter_name: String,
+}
+
+impl ToolingInlayHint {
+    #[must_use]
+    pub const fn module(&self) -> ModuleId {
+        self.module
+    }
+
+    #[must_use]
+    pub const fn argument_span(&self) -> SourceSpan {
+        self.argument_span
+    }
+
+    #[must_use]
+    pub fn parameter_name(&self) -> &str {
+        &self.parameter_name
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -641,5 +734,15 @@ impl FrontEndResult {
     #[must_use]
     pub fn checked_documentation(&self) -> &[CheckedDocumentation] {
         &self.checked_documentation
+    }
+
+    #[must_use]
+    pub fn tooling_declarations(&self) -> &[ToolingDeclaration] {
+        &self.tooling_declarations
+    }
+
+    #[must_use]
+    pub fn tooling_inlay_hints(&self) -> &[ToolingInlayHint] {
+        &self.tooling_inlay_hints
     }
 }

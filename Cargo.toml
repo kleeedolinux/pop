@@ -38,6 +38,7 @@ members = [
     "crates/tools/documentation-generator",
     "crates/tools/formatter",
     "crates/tools/language-server",
+    "crates/tools/localization",
     "crates/tools/test-runner",
 ]
 resolver = "3"
@@ -53,6 +54,7 @@ inkwell = { version = "0.9.0", default-features = false, features = ["llvm22-1-p
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
+toml = "0.9.8"
 pop-foundation = { path = "crates/compiler/foundation" }
 pop-source = { path = "crates/compiler/source" }
 pop-syntax = { path = "crates/compiler/syntax" }
@@ -88,6 +90,7 @@ pop-runtime-interface = { path = "crates/runtime/interface" }
 pop-runtime-native-abi = { path = "crates/runtime/native-abi" }
 pop-runtime-native = { path = "crates/runtime/native" }
 pop-language-server = { path = "crates/tools/language-server" }
+pop-localization = { path = "crates/tools/localization" }
 pop-formatter = { path = "crates/tools/formatter" }
 pop-documentation-generator = { path = "crates/tools/documentation-generator" }
 pop-test-runner = { path = "crates/tools/test-runner" }

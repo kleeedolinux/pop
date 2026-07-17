@@ -1,0 +1,19 @@
+[messages."fix.addMissingMatchCases"]
+text = "add the missing match cases"
+arguments = []
+kinds = []
+
+[messages."fix.replaceExportWithPublic"]
+text = "replace `export` with `public`"
+arguments = []
+kinds = []
+
+[messages."fix.addNamespace"]
+text = "add the required namespace declaration"
+arguments = []
+kinds = []
+
+[messages."fix.createInterfaceMembers"]
+text = "create the missing interface members"
+arguments = []
+kinds = []

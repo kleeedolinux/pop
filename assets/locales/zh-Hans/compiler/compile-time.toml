@@ -1,0 +1,26 @@
+[messages."compileTime.ineligibleConstantExpression"]
+text = "{context} 不符合常量求值条件"
+
+[messages."compileTime.constantIntegerOverflow"]
+text = "计算 {context} 时发生整数溢出"
+
+[messages."compileTime.constantDivisionByZero"]
+text = "计算 {context} 时发生除以零"
+
+[messages."compileTime.functionNotEligible"]
+text = "函数 `{function}` 不符合编译时执行条件"
+
+[messages."compileTime.forbiddenEffect"]
+text = "函数 `{function}` 使用了禁止的编译时 effect `{effect}`"
+
+[messages."compileTime.cycle"]
+text = "编译时依赖循环：{cycle}"
+
+[messages."compileTime.resourceLimit"]
+text = "超出编译时 {resource} 限制 {limit}"
+
+[messages."compileTime.attributeValidatorRejected"]
+text = "属性验证器 `{attribute}` 拒绝了该声明"
+
+[messages."compileTime.invalidAttributeValidatorSignature"]
+text = "属性验证器 `{function}` 的签名无效"

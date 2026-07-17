@@ -1,0 +1,23 @@
+[messages."ui.error"]
+text = "错误"
+
+[messages."ui.warning"]
+text = "警告"
+
+[messages."ui.information"]
+text = "信息"
+
+[messages."ui.hint"]
+text = "提示"
+
+[messages."ui.label"]
+text = "相关"
+
+[messages."ui.note"]
+text = "注释"
+
+[messages."ui.help"]
+text = "帮助"
+
+[messages."ui.suggestion"]
+text = "建议"

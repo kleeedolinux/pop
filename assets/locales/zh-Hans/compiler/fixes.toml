@@ -1,0 +1,11 @@
+[messages."fix.addMissingMatchCases"]
+text = "添加缺少的 match case"
+
+[messages."fix.replaceExportWithPublic"]
+text = "将 `export` 替换为 `public`"
+
+[messages."fix.addNamespace"]
+text = "添加必需的 namespace 声明"
+
+[messages."fix.createInterfaceMembers"]
+text = "创建缺少的 interface 成员"

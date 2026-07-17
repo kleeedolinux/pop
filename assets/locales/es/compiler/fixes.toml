@@ -1,0 +1,11 @@
+[messages."fix.addMissingMatchCases"]
+text = "añadir los casos de match que faltan"
+
+[messages."fix.replaceExportWithPublic"]
+text = "reemplazar `export` por `public`"
+
+[messages."fix.addNamespace"]
+text = "añadir la declaración de namespace obligatoria"
+
+[messages."fix.createInterfaceMembers"]
+text = "crear los miembros de interface que faltan"

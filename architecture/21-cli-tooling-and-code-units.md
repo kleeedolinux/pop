@@ -365,6 +365,26 @@ constraints.
 formatter/linter entry points. Compiler internals may be separate processes,
 but users and editors consume one stable command and machine protocol.
 
+### Toolchain language selection
+
+Human presentation follows
+[ADR 0088](./decisions/0088-localized-toolchain-presentation.md). The global
+`--language <tag>` option is recognized before command parsing, including when
+it appears after a command but before a program-argument `--`. Selection then
+falls through `POP_LANGUAGE`, user configuration, the POSIX locale environment,
+and finally English. Help and usage failures therefore use the selected locale.
+
+The supported initial tags are `en`, `zh-Hans`, `ja`, `pt-BR`, and `es`.
+Configuration lives at `$XDG_CONFIG_HOME/pop/config.toml` or the corresponding
+`$HOME/.config/pop/config.toml` fallback and uses `language = "<tag>"`.
+Selection is immutable for one invocation. Subcommands and compiler passes do
+not consult ambient locale independently.
+
+Language selection changes human text only. Command names, options, paths,
+Package/Bubble identities, target triples, exit codes, machine schemas, and
+HIR/MIR/backend dumps remain stable. Arguments after `pop run ... --` belong to
+the user program and are never scanned or translated.
+
 Core commands:
 
 | Command | Contract |
@@ -388,6 +408,15 @@ Core commands:
 | `pop package` / `pop publish` | Verify and create/publish a deterministic Package archive |
 | `pop install` | Build/install a selected public binary Bubble |
 | `pop clean` | Remove selected build outputs, never source/manifests/lockfiles |
+
+ADR 0091 fixes the bootstrap scaffolding contract. `pop new <path>` requires a
+new destination, while `pop initialize [path]` works in an existing directory
+and defaults to the current directory. Both create either the canonical binary
+`src/main.pop` layout (the default) or the canonical library `src/lib.pop`
+layout selected by `--library`. A Package name may be explicit; otherwise the
+final directory component must already be a valid PascalCase identity.
+Scaffolding is validated before atomic publication and never overwrites source,
+initializes version control, or downloads dependencies.
 
 Shared selectors and controls include:
 
@@ -505,6 +534,47 @@ Stable machine-facing contracts are:
 Human output is not parsed as an API. Tools must pass an explicit Workspace,
 Package, Bubble, Module, and platform target selection rather than guessing from
 artifact filenames.
+
+The official language server selects an independent immutable render context
+from the LSP initialization locale and uses the same embedded toolchain catalogs
+as the CLI. Multiple sessions may use different languages in one process.
+Compiler/query crates return structured diagnostics and never depend on the
+private localization crate. `Pop.Locale` and `Pop.Resource` remain public
+application APIs with YAML authoring and do not participate in tool bootstrap.
+
+The bootstrap language server owns versioned open-document snapshots with
+stable session-local `FileId` values, rejects stale versions, honors query
+cancellation before publishing results, converts source spans to UTF-16 protocol
+positions, and publishes structured compiler diagnostics.
+
+The toolchain may expose this private engine through a bounded LSP 3.17 JSON-RPC
+stdio adapter so official editors can use implemented behavior before the
+public `Pop.Lsp` Package is stabilized. The initial transport bootstrap implements
+`initialize`, `initialized`, `textDocument/didOpen`, full-text
+`textDocument/didChange`, `textDocument/didClose`, `shutdown`, and `exit`.
+ADR 0089 adds bounded `textDocument/hover` and
+`textDocument/documentSymbol` requests backed by a compiler-owned tooling
+projection. The adapter advertises only implemented capabilities, limits frame
+and document sizes, rejects invalid lifecycle transitions, and never returns
+compiler-private syntax or query values. Protocol method names, JSON fields,
+codes, and severities are locale invariant; only diagnostic display text uses
+the session render context.
+
+ADR 0090 additionally maps structured labels, notes, categories, warning waves,
+and current source-only quick fixes to LSP diagnostics and code actions. It also
+permits compiler-proven direct-call parameter inlay hints. For file documents,
+the nearest ancestor Package manifest selects conventional same-Bubble Modules
+when that Bubble has no unresolved dependency edge. Nested Packages remain
+distinct; an outer Workspace or editor folder never merges their visibility.
+
+The adapter is a private executable protocol boundary, not the public
+`Pop.Lsp` API and not a re-export of `Pop.Rpc`. Completion, signature help,
+cross-Bubble navigation, references, rename, formatting, semantic tokens,
+incremental text edits, complete Workspace/dependency analysis, and public
+transport types require their separately reviewed schemas.
+Editor extensions launch the server directly and consume structured LSP data;
+they may invoke `pop` commands for explicit user actions but never scrape CLI
+human output to synthesize language-server results.
 
 ## Profiles, cache, and reproducibility
 

@@ -65,14 +65,15 @@ jobs:
         env:
           LLVM_SYS_221_PREFIX: /usr/lib/llvm-22
         run: |
-          cargo build -p pop-driver -p pop-standard -p pop-runtime-native --release --target "${{ matrix.target }}"
+          cargo build -p pop-driver -p pop-language-server -p pop-standard -p pop-runtime-native --release --target "${{ matrix.target }}"
           bundle="pop-${{ matrix.target }}"
           mkdir -p "dist/$bundle"
           cp "target/${{ matrix.target }}/release/pop" "dist/$bundle/$bundle"
+          cp "target/${{ matrix.target }}/release/pop-language-server" "dist/$bundle/pop-language-server-${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/libpop_standard.a" "dist/$bundle/"
           cp "target/${{ matrix.target }}/release/libpop_runtime_native.a" "dist/$bundle/"
           cd "dist/$bundle"
-          zip -9 "../$bundle.zip" "$bundle" libpop_standard.a libpop_runtime_native.a
+          zip -9 "../$bundle.zip" "$bundle" "pop-language-server-${{ matrix.target }}" libpop_standard.a libpop_runtime_native.a
           cd ..
           sha256sum "$bundle.zip" > "$bundle.zip.sha256"
           rm -rf "$bundle"

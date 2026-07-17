@@ -1,0 +1,26 @@
+[messages."compileTime.ineligibleConstantExpression"]
+text = "{context} は定数評価の対象にできません"
+
+[messages."compileTime.constantIntegerOverflow"]
+text = "{context} の評価中に整数オーバーフローが発生しました"
+
+[messages."compileTime.constantDivisionByZero"]
+text = "{context} の評価中にゼロ除算が発生しました"
+
+[messages."compileTime.functionNotEligible"]
+text = "関数 `{function}` はコンパイル時に実行できません"
+
+[messages."compileTime.forbiddenEffect"]
+text = "関数 `{function}` は禁止されたコンパイル時効果 `{effect}` を使用しています"
+
+[messages."compileTime.cycle"]
+text = "コンパイル時依存関係の循環: {cycle}"
+
+[messages."compileTime.resourceLimit"]
+text = "コンパイル時の {resource} 上限 {limit} を超えました"
+
+[messages."compileTime.attributeValidatorRejected"]
+text = "属性バリデータ `{attribute}` が宣言を拒否しました"
+
+[messages."compileTime.invalidAttributeValidatorSignature"]
+text = "属性バリデータ `{function}` のシグネチャが無効です"

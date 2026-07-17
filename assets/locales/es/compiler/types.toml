@@ -1,0 +1,119 @@
+[messages."types.wrongArity"]
+text = "el tipo `{name}` espera {expected} argumentos; se encontraron {found}"
+
+[messages."types.duplicateTypeParameter"]
+text = "parámetro de tipo duplicado `{name}`"
+
+[messages."types.mismatch"]
+text = "se esperaba `{expected}`, se encontró `{found}`"
+
+[messages."types.wrongValueArity"]
+text = "{context} espera {expected} valores; se encontraron {found}"
+
+[messages."types.noMatchingOverload"]
+text = "ninguna sobrecarga de `{name}` coincide con estos argumentos"
+
+[messages."types.invalidOverloadSet"]
+text = "conjunto de sobrecargas no válido `{name}`: {reason}"
+
+[messages."types.invalidOperator"]
+text = "el operador `{operator}` no es válido para {operands}"
+
+[messages."types.structuralMutationDuringIteration"]
+text = "la mutación estructural `{operation}` no se permite durante la iteración"
+
+[messages."types.notAllPathsReturn"]
+text = "no todas las rutas devuelven el resultado declarado"
+
+[messages."types.aggregateNeedsContext"]
+text = "el literal agregado necesita un tipo esperado"
+
+[messages."types.missingRecordField"]
+text = "falta el campo de record `{name}`"
+
+[messages."types.unknownRecordField"]
+text = "campo de record desconocido `{name}`"
+
+[messages."types.duplicateRecordField"]
+text = "campo de record duplicado `{name}`"
+
+[messages."types.duplicateAttributeArgument"]
+text = "argumento de atributo duplicado `{name}`"
+
+[messages."types.unknownAttributeArgument"]
+text = "argumento de atributo desconocido `{name}`"
+
+[messages."types.numericLiteralOutOfRange"]
+text = "el literal `{literal}` está fuera del intervalo de `{numericType}`"
+
+[messages."types.wrongClassMethodOwner"]
+text = "el propietario del método debe ser `{expected}`; se encontró `{found}`"
+
+[messages."types.duplicateInterfaceMethod"]
+text = "método de interface duplicado `{name}`"
+
+[messages."types.emptyInterface"]
+text = "la interface `{name}` debe declarar al menos un método"
+
+[messages."types.invalidInterfaceImplementation"]
+text = "`{target}` no puede implementar esta interface"
+
+[messages."types.missingInterfaceMethod"]
+text = "la clase `{class}` no implementa `{interface}.{method}`"
+
+[messages."types.incompatibleInterfaceMethod"]
+text = "`{class}` tiene una implementación incompatible de `{interface}.{method}`: {reason}"
+
+[messages."types.missingMatchCases"]
+text = "faltan casos en el match: {cases}"
+
+[messages."types.duplicateMatchCase"]
+text = "caso de match duplicado `{name}`"
+
+[messages."types.foreignMatchCase"]
+text = "el caso `{name}` no pertenece a la union examinada"
+
+[messages."types.duplicateBinding"]
+text = "binding de pattern duplicado `{name}`"
+
+[messages."types.invalidResultPropagation"]
+text = "no se puede propagar `{operand}` desde `{enclosing}`"
+
+[messages."types.ambiguousResultCase"]
+text = "el caso de resultado `{case}` es ambiguo"
+
+[messages."types.illegalCleanupControl"]
+text = "`{control}` no puede salir de un cuerpo de limpieza"
+
+[messages."types.invalidGenericBound"]
+text = "el parámetro de tipo `{parameter}` no satisface `{bound}`"
+
+[messages."types.genericInferenceFailure"]
+text = "no se puede inferir `{parameter}`: {reason}"
+
+[messages."types.awaitOutsideAsync"]
+text = "`await` solo es válido dentro de una función async"
+
+[messages."types.awaitNonTask"]
+text = "no se puede esperar un valor de tipo `{found}`"
+
+[messages."types.originalTypeParameter"]
+text = "parámetro de tipo original"
+
+[messages."types.expectedOrigin"]
+text = "el tipo esperado se origina aquí"
+
+[messages."types.originalRecordField"]
+text = "campo de record original"
+
+[messages."types.originalAttributeArgument"]
+text = "argumento de atributo original"
+
+[messages."types.originalInterfaceMethod"]
+text = "método de interface original"
+
+[messages."types.originalMatchCase"]
+text = "caso de match original"
+
+[messages."types.originalBinding"]
+text = "binding original"

@@ -1,0 +1,29 @@
+[messages."backend.bpf.invalidEntryPoint"]
+text = "ponto de entrada BPF inválido: {reason}"
+
+[messages."backend.bpf.unsupportedMirOperation"]
+text = "BPF não suporta a operação MIR {reason}"
+
+[messages."backend.bpf.unsupportedTypeOrLayout"]
+text = "BPF não suporta o tipo ou layout {reason}"
+
+[messages."backend.bpf.managedAllocationUnavailable"]
+text = "a alocação gerenciada não está disponível para BPF: {reason}"
+
+[messages."backend.bpf.floatingPointUnavailable"]
+text = "ponto flutuante não está disponível para BPF: {reason}"
+
+[messages."backend.bpf.callUnavailable"]
+text = "a chamada não está disponível para BPF: {reason}"
+
+[messages."backend.runtimeContractUnavailable"]
+text = "o contrato de runtime não está disponível: {reason}"
+
+[messages."backend.bpf.llvmTargetUnavailable"]
+text = "o target BPF do LLVM não está disponível: {reason}"
+
+[messages."backend.unknownTarget"]
+text = "target desconhecido do Pop Lang: {reason}"
+
+[messages."backend.bpf.loopBoundUnavailable"]
+text = "não é possível provar o limite do loop BPF: {reason}"

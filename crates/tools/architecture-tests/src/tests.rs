@@ -45,6 +45,7 @@ const MEMBERS: &[&str] = &[
     "crates/tools/documentation-generator",
     "crates/tools/formatter",
     "crates/tools/language-server",
+    "crates/tools/localization",
     "crates/tools/test-runner",
 ];
 
@@ -240,6 +241,23 @@ fn collect_text_contract_files(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+fn manifests_below(directory: &Path) -> Vec<PathBuf> {
+    let mut manifests = Vec::new();
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read repository entry").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            manifests.extend(manifests_below(&path));
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            manifests.push(path);
+        }
+    }
+    manifests
+}
+
 fn inline_documentation_element(line: &str) -> Option<&str> {
     let mut remainder = line;
     while let Some(start) = remainder.find("--- <") {
@@ -336,12 +354,71 @@ fn accepted_adrs_have_unique_numeric_identities() {
 }
 
 #[test]
+fn private_language_server_uses_compiler_queries_without_cli_scraping() {
+    let root = repository_root();
+    let manifest = read_required(root.join("crates/tools/language-server/Cargo.toml"));
+    let implementation = read_required(root.join("crates/tools/language-server/src/lib.rs"));
+
+    assert!(
+        manifest.contains("pop-driver.workspace = true"),
+        "ADR 0089 requires the private language server to consume compiler tooling queries"
+    );
+    assert!(
+        implementation.contains("analyze_bubble("),
+        "semantic editor diagnostics must come from the compiler front end"
+    );
+    assert!(
+        !implementation.contains("pop_syntax::parse_file")
+            && !implementation.contains("Command::new")
+            && !implementation.contains("pop check"),
+        "the language server must not replace compiler queries with parser-only or CLI scraping"
+    );
+    assert!(implementation.contains("tooling_inlay_hints()"));
+    assert!(implementation.contains(".fixes()"));
+    assert!(implementation.contains("nearest_package_manifest("));
+    let transport = read_required(root.join("crates/tools/language-server/src/transport.rs"));
+    assert!(transport.contains("\"codeActionProvider\": true"));
+    assert!(transport.contains("\"inlayHintProvider\": true"));
+}
+
+#[test]
+fn package_scaffolding_uses_only_the_canonical_layout() {
+    let driver = read_required(repository_root().join("crates/compiler/driver/src/main.rs"));
+    assert!(driver.contains("ScaffoldMode::New"));
+    assert!(driver.contains("ScaffoldMode::Initialize"));
+    assert!(driver.contains("src/main.pop"));
+    assert!(driver.contains("src/lib.pop"));
+    assert!(!driver.contains("git init"));
+    assert!(!driver.contains("cargo new"));
+}
+
+#[test]
+fn release_toolchains_ship_the_official_language_server() {
+    let workflow = read_required(repository_root().join(".github/workflows/release-pr.yml"));
+
+    assert!(workflow.contains("-p pop-language-server"));
+    assert!(workflow.contains("pop-language-server-${{ matrix.target }}"));
+    assert!(
+        workflow.contains(
+            "zip -9 \"../$bundle.zip\" \"$bundle\" \"pop-language-server-${{ matrix.target }}\""
+        ),
+        "ADR 0028 toolchain archives must contain the first-party language server"
+    );
+}
+
+#[test]
 fn pull_request_tests_do_not_execute_harness_free_benchmarks() {
     let workflow = read_required(repository_root().join(".github/workflows/pr-check.yml"));
 
     assert!(
         workflow.contains("run: cargo test --workspace --lib --bins --tests --examples"),
         "PR tests must select test targets without executing harness-free benchmarks"
+    );
+    assert!(
+        workflow.contains(
+            "run: cargo test --workspace --lib --bins --tests --examples -- --test-threads=1"
+        ),
+        "runtime integration tests share process-global native state and must run serially"
     );
     assert!(
         !workflow.contains("run: cargo test --workspace --all-targets"),
@@ -455,6 +532,7 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
             "serde = { version = \"1.0.228\", features = [\"derive\"] }"
                 | "serde_json = \"1.0.150\""
                 | "sha2 = \"0.11.0\""
+                | "toml = \"0.9.8\""
         );
         assert!(
             local || approved_inkwell || approved_artifact_dependency,
@@ -499,12 +577,22 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                             | "serde_json.workspace = true"
                             | "sha2.workspace = true"
                     );
+                let localization_dependency = *member == "crates/tools/localization"
+                    && matches!(line, "serde.workspace = true" | "toml.workspace = true");
+                let language_server_transport_dependency = *member
+                    == "crates/tools/language-server"
+                    && matches!(
+                        line,
+                        "serde.workspace = true" | "serde_json.workspace = true"
+                    );
                 assert!(
                     inherited_local
                         || inherited_inkwell
                         || serde_projection
                         || project_artifact_dependency
-                        || driver_artifact_dependency,
+                        || driver_artifact_dependency
+                        || localization_dependency
+                        || language_server_transport_dependency,
                     "{} {table} entry is not inherited from the workspace: {line}",
                     manifest_path.display(),
                 );
@@ -1271,7 +1359,58 @@ fn official_language_server_uses_the_pop_lsp_protocol_boundary() {
     let source = fs::read_to_string(root.join("crates/tools/language-server/src/lib.rs"))
         .expect("read language-server source");
     assert!(manifest.contains("pop-extension-lsp.workspace = true"));
+    assert!(manifest.contains("serde.workspace = true"));
+    assert!(manifest.contains("serde_json.workspace = true"));
+    assert!(manifest.contains("[[bin]]"));
+    assert!(manifest.contains("name = \"pop-language-server\""));
     assert!(source.contains("pop_extension_lsp::PACKAGE"));
+
+    let tooling = fs::read_to_string(root.join("architecture/21-cli-tooling-and-code-units.md"))
+        .expect("read tooling architecture");
+    assert!(tooling.contains("bounded LSP 3.17 JSON-RPC"));
+    assert!(tooling.contains("private executable protocol boundary"));
+}
+
+#[test]
+fn toolchain_localization_stays_at_presentation_boundaries() {
+    let root = repository_root();
+    let driver = fs::read_to_string(root.join("crates/compiler/driver/src/main.rs"))
+        .expect("read driver presentation");
+    assert_eq!(
+        driver.matches("eprintln!").count(),
+        0,
+        "the CLI must write stderr only through localized presentation adapters"
+    );
+    assert!(driver.contains("select_process_language"));
+    assert!(driver.contains("rendering().diagnostic(diagnostic)"));
+
+    for directory in [
+        "crates/compiler/backend-api",
+        "crates/compiler/backends",
+        "crates/compiler/compile-time",
+        "crates/compiler/diagnostics",
+        "crates/compiler/foundation",
+        "crates/compiler/hir",
+        "crates/compiler/mir",
+        "crates/compiler/projects",
+        "crates/compiler/query",
+        "crates/compiler/resolve",
+        "crates/compiler/source",
+        "crates/compiler/syntax",
+        "crates/compiler/target",
+        "crates/compiler/types",
+        "crates/libraries",
+        "crates/runtime",
+    ] {
+        for manifest in manifests_below(&root.join(directory)) {
+            let source = fs::read_to_string(&manifest).expect("read Cargo manifest");
+            assert!(
+                !source.contains("pop-localization"),
+                "semantic/base crate must not depend on tool presentation: {}",
+                manifest.display()
+            );
+        }
+    }
 }
 
 #[test]

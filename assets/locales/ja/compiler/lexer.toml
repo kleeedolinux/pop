@@ -1,0 +1,8 @@
+[messages."syntax.invalidCharacter"]
+text = "無効な文字 `{character}`"
+
+[messages."syntax.unterminatedString"]
+text = "文字列リテラルが終了していません"
+
+[messages."syntax.invalidStringEscape"]
+text = "無効な文字列エスケープです"

@@ -1,0 +1,23 @@
+[messages."lsp.ready"]
+text = "Pop Lang 语言服务器已就绪"
+
+[messages."lsp.documentNotOpen"]
+text = "文档 `{uri}` 未打开"
+
+[messages."lsp.documentAlreadyOpen"]
+text = "文档 `{uri}` 已打开"
+
+[messages."lsp.staleDocument"]
+text = "文档 `{uri}` 拒绝了过期版本 {found}；当前版本为 {expected}"
+
+[messages."lsp.sourceRejected"]
+text = "无法加载文档 `{uri}`：{detail}"
+
+[messages."lsp.cancelled"]
+text = "语言服务器请求已取消"
+
+[messages."lsp.tooManyDocuments"]
+text = "语言服务器的文档标识符空间已耗尽"
+
+[messages."lsp.documentTooLarge"]
+text = "文档 `{uri}` 的大小为 {length} 字节；语言服务器限制为 {limit} 字节"

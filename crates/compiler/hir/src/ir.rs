@@ -2807,6 +2807,41 @@ pub fn hir_referenced_call_instances(function: &HirFunction) -> Vec<(SymbolIdent
     referenced
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirSourceCall {
+    target: SymbolId,
+    arguments: Vec<SourceSpan>,
+}
+
+impl HirSourceCall {
+    #[must_use]
+    pub const fn target(&self) -> SymbolId {
+        self.target
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &[SourceSpan] {
+        &self.arguments
+    }
+}
+
+/// Returns source argument spans for statically resolved direct calls.
+#[must_use]
+pub fn hir_source_calls(function: &HirFunction) -> Vec<HirSourceCall> {
+    let mut calls = Vec::new();
+    collect_statement_calls(function.body(), &mut calls);
+    calls
+        .into_iter()
+        .filter_map(|call| match call.target {
+            HirCollectedCallTarget::Direct(target) => Some(HirSourceCall {
+                target,
+                arguments: call.source_arguments,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 #[must_use]
 pub fn hir_direct_data_references(function: &HirFunction) -> (Vec<ClassId>, Vec<MethodId>) {
     let mut calls = Vec::new();
@@ -2835,6 +2870,7 @@ pub fn hir_direct_data_references(function: &HirFunction) -> (Vec<ClassId>, Vec<
 struct HirCollectedCall {
     target: HirCollectedCallTarget,
     arguments: Vec<TypeId>,
+    source_arguments: Vec<SourceSpan>,
 }
 
 enum HirCollectedCallTarget {
@@ -3008,6 +3044,11 @@ fn collect_statement_calls(statements: &[HirStatement], calls: &mut Vec<HirColle
                     calls.push(HirCollectedCall {
                         target,
                         arguments: call.type_arguments().to_vec(),
+                        source_arguments: call
+                            .arguments()
+                            .iter()
+                            .map(HirExpression::span)
+                            .collect(),
                     });
                 }
                 for argument in call.arguments() {
@@ -3155,6 +3196,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             calls.push(HirCollectedCall {
                 target: HirCollectedCallTarget::Class(*class),
                 arguments: Vec::new(),
+                source_arguments: Vec::new(),
             });
             for field in fields {
                 collect_expression_calls(field.value(), calls);
@@ -3224,6 +3266,7 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
                 calls.push(HirCollectedCall {
                     target,
                     arguments: type_arguments.clone(),
+                    source_arguments: arguments.iter().map(HirExpression::span).collect(),
                 });
             }
             for argument in arguments {

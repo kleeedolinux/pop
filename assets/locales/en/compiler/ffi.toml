@@ -1,0 +1,4 @@
+[messages."ffi.invalidForeignContract"]
+text = "invalid foreign contract: {reason}"
+arguments = ["reason"]
+kinds = ["Identifier"]

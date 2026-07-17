@@ -1,0 +1,23 @@
+[messages."resolution.invalidDeclaration"]
+text = "declaração inválida"
+
+[messages."resolution.duplicateDeclaration"]
+text = "declaração duplicada `{name}`"
+
+[messages."resolution.unknownName"]
+text = "nome desconhecido `{name}`"
+
+[messages."resolution.ambiguousName"]
+text = "o nome `{name}` é ambíguo"
+
+[messages."resolution.inaccessibleName"]
+text = "o nome `{name}` não está acessível aqui"
+
+[messages."resolution.originalDeclaration"]
+text = "declaração original"
+
+[messages."resolution.candidate"]
+text = "declaração candidata"
+
+[messages."resolution.declaration"]
+text = "a declaração está aqui"

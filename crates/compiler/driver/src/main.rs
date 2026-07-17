@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::{Arc, OnceLock};
 
 use pop_backend_api::RuntimeProfile;
 use pop_backend_c::{CLoweringOptions, lower_mir_to_c};
@@ -27,7 +28,10 @@ use pop_driver::{
     ReferenceType, analyze_bubble, artifact_sha256_hex, emit_poplib, encode_reference_metadata,
     load_poplib, resolve_native_link_inputs, validate_foreign_link_aliases,
 };
-use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
+use pop_foundation::{BubbleId, Diagnostic, FileId, ModuleId, NamespaceId, SymbolId};
+use pop_localization::{
+    Argument as LocalizedArgument, Language, RenderContext, select_process_language,
+};
 use pop_mir::{lower_hir_bubble_with_fingerprint, optimize_mir};
 use pop_projects::{
     BubbleKind, BubbleLock, DependencySource, LockMode, LockedBubble, LockedBubbleIdentity,
@@ -47,22 +51,18 @@ const INTERNAL_PACKAGE_NAME: &str = "Pop.Internal";
 const STANDARD_PACKAGE_NAME: &str = "Pop.Standard";
 const FFI_PACKAGE_NAME: &str = "Pop.Ffi";
 
-const USAGE: &str = "\
-Usage:
-    pop check <source.pop> [--dump <hir|mir|ll>]...
-    pop check --manifestPath <bubble.toml>
-    pop build <source.pop> --output <executable>
-    pop build <source.pop> --target bpfel-unknown-none --runtime-profile linux-ebpf --bpf-program xdp --emit-object <object.o>
-    pop build --manifestPath <bubble.toml>
-    pop documentation --manifestPath <bubble.toml>
-    pop transpile <source.pop> --to c
-    pop run <source.pop> [-- <arguments>...]
-    pop run --manifestPath <bubble.toml> [-- <arguments>...]
+static CLI_RENDERING: OnceLock<RenderContext> = OnceLock::new();
 
-The direct source path is a bootstrap compiler inspection mode. It checks one
-Module in an ephemeral Bubble and does not define Package or Bubble identity.
-IR dumps are deterministic debug text for this compiler version, not stable
-serialization formats.";
+macro_rules! tool_failure {
+    ($($argument:tt)*) => {{
+        let detail = format!($($argument)*);
+        let detail = detail.strip_prefix("pop: ").unwrap_or(&detail);
+        emit_localized(
+            "cli.toolFailure",
+            &[LocalizedArgument::external("detail", detail)],
+        );
+    }};
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DumpKind {
@@ -74,6 +74,7 @@ enum DumpKind {
 #[derive(Debug, Eq, PartialEq)]
 enum CommandLine {
     Help,
+    Scaffold(ScaffoldOptions),
     Check {
         source_path: PathBuf,
         dumps: Vec<DumpKind>,
@@ -115,9 +116,74 @@ enum CommandLine {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScaffoldMode {
+    New,
+    Initialize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScaffoldKind {
+    Binary,
+    Library,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ScaffoldOptions {
+    mode: ScaffoldMode,
+    path: PathBuf,
+    name: Option<String>,
+    kind: ScaffoldKind,
+}
+
+#[derive(Debug)]
+struct UsageError {
+    key: &'static str,
+    arguments: Vec<LocalizedArgument>,
+}
+
+impl UsageError {
+    fn new(key: &'static str, arguments: Vec<LocalizedArgument>) -> Self {
+        Self { key, arguments }
+    }
+
+    fn simple(key: &'static str) -> Self {
+        Self::new(key, Vec::new())
+    }
+
+    fn render(&self) -> String {
+        localized(self.key, &self.arguments)
+    }
+}
+
 fn main() -> ExitCode {
-    match parse_arguments(std::env::args_os().skip(1)) {
+    let (explicit_language, arguments) = match extract_language(std::env::args_os().skip(1)) {
+        Ok(selection) => selection,
+        Err(LanguageOptionError::Unsupported(requested)) => {
+            let _ = initialize_rendering(None);
+            emit_localized(
+                "cli.unsupportedLanguage",
+                &[LocalizedArgument::text("language", requested)],
+            );
+            return ExitCode::from(2);
+        }
+        Err(LanguageOptionError::MissingValue) => {
+            let _ = initialize_rendering(None);
+            emit_localized("cli.languageNeedsValue", &[]);
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = initialize_rendering(explicit_language.as_deref()) {
+        let _ = initialize_rendering(None);
+        emit_localized(
+            "cli.selectLanguageFailed",
+            &[LocalizedArgument::external("detail", error)],
+        );
+        return ExitCode::from(2);
+    }
+    match parse_arguments(arguments) {
         Ok(CommandLine::Help) => write_help(),
+        Ok(CommandLine::Scaffold(options)) => scaffold_package(&options),
         Ok(CommandLine::Check { source_path, dumps }) => check_source(&source_path, &dumps),
         Ok(CommandLine::PackageCheck {
             manifest_path,
@@ -160,19 +226,86 @@ fn main() -> ExitCode {
             arguments,
         }) => run_manifest(&manifest_path, lock_mode, &arguments),
         Err(error) => {
-            eprintln!("pop: {error}\n\n{USAGE}");
+            let _ = writeln!(
+                io::stderr().lock(),
+                "pop: {}\n\n{}",
+                error.render(),
+                localized("cli.usage", &[])
+            );
             ExitCode::from(2)
         }
     }
 }
 
-fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<CommandLine, String> {
+fn initialize_rendering(explicit: Option<&str>) -> Result<(), pop_localization::LocalizationError> {
+    if CLI_RENDERING.get().is_some() {
+        return Ok(());
+    }
+    let language = select_process_language(explicit)?;
+    let _ = CLI_RENDERING.set(RenderContext::new(language));
+    Ok(())
+}
+
+fn rendering() -> RenderContext {
+    CLI_RENDERING
+        .get()
+        .copied()
+        .unwrap_or_else(|| RenderContext::new(Language::English))
+}
+
+fn localized(key: &str, arguments: &[LocalizedArgument]) -> String {
+    rendering()
+        .message(key, arguments)
+        .unwrap_or_else(|error| format!("localization failure: {error}"))
+}
+
+fn emit_localized(key: &str, arguments: &[LocalizedArgument]) {
+    let _ = writeln!(io::stderr().lock(), "pop: {}", localized(key, arguments));
+}
+
+fn extract_language(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<(Option<String>, Vec<OsString>), LanguageOptionError> {
+    let mut output = Vec::new();
+    let mut explicit = None;
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            output.push(argument);
+            output.extend(arguments);
+            break;
+        }
+        if argument == "--language" {
+            let value = arguments.next().ok_or(LanguageOptionError::MissingValue)?;
+            let value = value.to_string_lossy().into_owned();
+            if Language::from_tag(&value).is_none() {
+                return Err(LanguageOptionError::Unsupported(value));
+            }
+            explicit = Some(value);
+        } else {
+            output.push(argument);
+        }
+    }
+    Ok((explicit, output))
+}
+
+enum LanguageOptionError {
+    MissingValue,
+    Unsupported(String),
+}
+
+fn parse_arguments(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<CommandLine, UsageError> {
     let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
-        return Err("missing command".to_owned());
+        return Err(UsageError::simple("cli.missingCommand"));
     };
     if command == "--help" || command == "-h" {
         return Ok(CommandLine::Help);
+    }
+    if command == "new" || command == "initialize" {
+        return parse_scaffold_arguments(command == "new", arguments);
     }
     if command == "build" {
         return parse_build_arguments(arguments);
@@ -187,26 +320,92 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Comm
         return parse_run_arguments(arguments);
     }
     if command != "check" {
-        return Err(format!(
-            "unsupported command `{}`",
-            command.to_string_lossy()
+        return Err(UsageError::new(
+            "cli.unsupportedCommand",
+            vec![LocalizedArgument::text(
+                "command",
+                command.to_string_lossy(),
+            )],
         ));
     }
 
     parse_check_arguments(arguments)
 }
 
+fn parse_scaffold_arguments(
+    create_new: bool,
+    arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, UsageError> {
+    let mode = if create_new {
+        ScaffoldMode::New
+    } else {
+        ScaffoldMode::Initialize
+    };
+    let mut path = None;
+    let mut name = None;
+    let mut kind = ScaffoldKind::Binary;
+    let mut selected_kind = false;
+    let mut arguments = arguments.peekable();
+    while let Some(argument) = arguments.next() {
+        match argument.to_str() {
+            Some("--name") => {
+                if name.is_some() {
+                    return Err(unsupported_option(&argument));
+                }
+                name = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| option_requires("--name", "<Package.Name>"))?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            Some("--library" | "--binary") => {
+                if selected_kind {
+                    return Err(UsageError::simple("cli.scaffoldKindConflict"));
+                }
+                selected_kind = true;
+                kind = if argument == "--library" {
+                    ScaffoldKind::Library
+                } else {
+                    ScaffoldKind::Binary
+                };
+            }
+            Some(value) if value.starts_with('-') => return Err(unsupported_option(&argument)),
+            _ if path.is_none() => path = Some(PathBuf::from(argument)),
+            _ => {
+                return Err(unexpected_arguments(if create_new {
+                    "new"
+                } else {
+                    "initialize"
+                }));
+            }
+        }
+    }
+    let path = match (mode, path) {
+        (ScaffoldMode::New | ScaffoldMode::Initialize, Some(path)) => path,
+        (ScaffoldMode::Initialize, None) => PathBuf::from("."),
+        (ScaffoldMode::New, None) => return Err(UsageError::simple("cli.newNeedsPath")),
+    };
+    Ok(CommandLine::Scaffold(ScaffoldOptions {
+        mode,
+        path,
+        name,
+        kind,
+    }))
+}
+
 fn parse_documentation_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<CommandLine, String> {
+) -> Result<CommandLine, UsageError> {
     let Some(option) = arguments.next() else {
-        return Err("`pop documentation` requires `--manifestPath <bubble.toml>`".to_owned());
+        return Err(command_requires(
+            "documentation",
+            "--manifestPath <bubble.toml>",
+        ));
     };
     if option != "--manifestPath" {
-        return Err(format!(
-            "unsupported option `{}`; expected --manifestPath",
-            option.to_string_lossy()
-        ));
+        return Err(expected_option(&option, "--manifestPath"));
     }
     let manifest_path = required_manifest_path(arguments.next(), "documentation")?;
     let lock_mode = parse_lock_controls(arguments)?;
@@ -218,9 +417,9 @@ fn parse_documentation_arguments(
 
 fn parse_check_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<CommandLine, String> {
+) -> Result<CommandLine, UsageError> {
     let Some(first) = arguments.next() else {
-        return Err("`pop check` requires a .pop source path or `--manifestPath`".to_owned());
+        return Err(UsageError::simple("cli.checkNeedsSource"));
     };
     if first == "--manifestPath" {
         let manifest_path = required_manifest_path(arguments.next(), "check")?;
@@ -239,7 +438,7 @@ fn parse_check_arguments(
         }
         if argument == "--dump" {
             let Some(kind) = arguments.next() else {
-                return Err("`--dump` requires hir|mir|ll".to_owned());
+                return Err(option_requires("--dump", "hir|mir|ll"));
             };
             let kind = parse_dump_kind(&kind)?;
             if !dumps.contains(&kind) {
@@ -248,52 +447,51 @@ fn parse_check_arguments(
             continue;
         }
         if argument.to_string_lossy().starts_with('-') {
-            return Err(format!(
-                "unsupported option `{}`",
-                argument.to_string_lossy()
-            ));
+            return Err(unsupported_option(&argument));
         }
         if source_path.replace(PathBuf::from(argument)).is_some() {
-            return Err("`pop check` accepts exactly one source path in bootstrap mode".to_owned());
+            return Err(UsageError::new(
+                "cli.oneSource",
+                vec![LocalizedArgument::text("command", "check")],
+            ));
         }
     }
 
-    let source_path =
-        source_path.ok_or_else(|| "`pop check` requires a .pop source path".to_owned())?;
+    let source_path = source_path.ok_or_else(|| source_required("check"))?;
     if source_path.extension() != Some(OsStr::new("pop")) {
-        return Err("`pop check` requires a source path with the .pop extension".to_owned());
+        return Err(source_required("check"));
     }
     Ok(CommandLine::Check { source_path, dumps })
 }
 
 fn parse_transpile_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<CommandLine, String> {
+) -> Result<CommandLine, UsageError> {
     let source_path = required_source_path(arguments.next(), "transpile")?;
     let Some(option) = arguments.next() else {
-        return Err("`pop transpile` requires `--to c`".to_owned());
+        return Err(command_requires("transpile", "--to c"));
     };
     if option != "--to" {
-        return Err(format!("unsupported option `{}`", option.to_string_lossy()));
+        return Err(unsupported_option(&option));
     }
     let Some(target) = arguments.next() else {
-        return Err("`--to` requires a backend source format; expected c".to_owned());
+        return Err(UsageError::simple("cli.transpileNeedsFormat"));
     };
     if target != "c" {
-        return Err(format!(
-            "unsupported transpilation target `{}`; expected c",
-            target.to_string_lossy()
+        return Err(UsageError::new(
+            "cli.unsupportedTranspileTarget",
+            vec![LocalizedArgument::text("value", target.to_string_lossy())],
         ));
     }
     if arguments.next().is_some() {
-        return Err("`pop transpile` received unexpected arguments".to_owned());
+        return Err(unexpected_arguments("transpile"));
     }
     Ok(CommandLine::TranspileToC { source_path })
 }
 
 fn parse_build_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<CommandLine, String> {
+) -> Result<CommandLine, UsageError> {
     let first = arguments.next();
     if first.as_deref() == Some(OsStr::new("--manifestPath")) {
         let manifest_path = required_manifest_path(arguments.next(), "build")?;
@@ -305,65 +503,59 @@ fn parse_build_arguments(
     }
     let source_path = required_source_path(first, "build")?;
     let Some(option) = arguments.next() else {
-        return Err(
-            "`pop build` requires `--output <executable>` or `--target <triple>`".to_owned(),
-        );
+        return Err(UsageError::simple("cli.buildNeedsOutputOrTarget"));
     };
     if option == "--target" {
         let target = arguments
             .next()
-            .ok_or_else(|| "`--target` requires a target triple".to_owned())?
+            .ok_or_else(|| UsageError::simple("cli.targetNeedsTriple"))?
             .to_string_lossy()
             .into_owned();
         let Some(runtime_option) = arguments.next() else {
-            return Err("BPF builds require `--runtime-profile linux-ebpf`".to_owned());
+            return Err(bpf_requires("--runtime-profile linux-ebpf"));
         };
         if runtime_option != "--runtime-profile" {
-            return Err(format!(
-                "unsupported option `{}`; expected --runtime-profile",
-                runtime_option.to_string_lossy()
-            ));
+            return Err(expected_option(&runtime_option, "--runtime-profile"));
         }
         let runtime_profile = arguments
             .next()
-            .ok_or_else(|| "`--runtime-profile` requires a profile name".to_owned())
+            .ok_or_else(|| UsageError::simple("cli.runtimeProfileNeedsName"))
             .and_then(|profile| {
-                RuntimeProfile::parse(&profile.to_string_lossy()).map_err(|error| error.to_string())
+                RuntimeProfile::parse(&profile.to_string_lossy()).map_err(|_| {
+                    UsageError::new(
+                        "cli.unsupportedRuntimeProfile",
+                        vec![LocalizedArgument::text("value", profile.to_string_lossy())],
+                    )
+                })
             })?;
         let Some(program_option) = arguments.next() else {
-            return Err("BPF builds require `--bpf-program xdp`".to_owned());
+            return Err(bpf_requires("--bpf-program xdp"));
         };
         if program_option != "--bpf-program" {
-            return Err(format!(
-                "unsupported option `{}`; expected --bpf-program",
-                program_option.to_string_lossy()
-            ));
+            return Err(expected_option(&program_option, "--bpf-program"));
         }
         let program = match arguments.next().as_deref() {
             Some(value) if value == OsStr::new("xdp") => BpfProgramKind::Xdp,
             Some(value) => {
-                return Err(format!(
-                    "unsupported BPF program `{}`; expected xdp",
-                    value.to_string_lossy()
+                return Err(UsageError::new(
+                    "cli.unsupportedBpfProgram",
+                    vec![LocalizedArgument::text("value", value.to_string_lossy())],
                 ));
             }
-            None => return Err("`--bpf-program` requires xdp".to_owned()),
+            None => return Err(option_requires("--bpf-program", "xdp")),
         };
         let Some(output_option) = arguments.next() else {
-            return Err("BPF builds require `--emit-object <object.o>`".to_owned());
+            return Err(bpf_requires("--emit-object <object.o>"));
         };
         if output_option != "--emit-object" {
-            return Err(format!(
-                "unsupported option `{}`; expected --emit-object",
-                output_option.to_string_lossy()
-            ));
+            return Err(expected_option(&output_option, "--emit-object"));
         }
         let output_path = arguments
             .next()
             .map(PathBuf::from)
-            .ok_or_else(|| "`--emit-object` requires an object path".to_owned())?;
+            .ok_or_else(|| UsageError::simple("cli.emitObjectNeedsPath"))?;
         if arguments.next().is_some() {
-            return Err("`pop build` received unexpected arguments".to_owned());
+            return Err(unexpected_arguments("build"));
         }
         return Ok(CommandLine::BuildBpf {
             source_path,
@@ -374,14 +566,14 @@ fn parse_build_arguments(
         });
     }
     if option != "--output" {
-        return Err(format!("unsupported option `{}`", option.to_string_lossy()));
+        return Err(unsupported_option(&option));
     }
     let output_path = arguments
         .next()
         .map(PathBuf::from)
-        .ok_or_else(|| "`--output` requires an executable path".to_owned())?;
+        .ok_or_else(|| UsageError::simple("cli.outputNeedsExecutablePath"))?;
     if arguments.next().is_some() {
-        return Err("`pop build` received unexpected arguments".to_owned());
+        return Err(unexpected_arguments("build"));
     }
     Ok(CommandLine::Build {
         source_path,
@@ -389,13 +581,20 @@ fn parse_build_arguments(
     })
 }
 
-fn required_manifest_path(argument: Option<OsString>, command: &str) -> Result<PathBuf, String> {
-    let path = argument
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("`pop {command} --manifestPath` requires a bubble.toml path"))?;
+fn required_manifest_path(
+    argument: Option<OsString>,
+    command: &str,
+) -> Result<PathBuf, UsageError> {
+    let path = argument.map(PathBuf::from).ok_or_else(|| {
+        UsageError::new(
+            "cli.manifestRequired",
+            vec![LocalizedArgument::text("command", command)],
+        )
+    })?;
     if path.file_name() != Some(OsStr::new("bubble.toml")) {
-        return Err(format!(
-            "`pop {command} --manifestPath` requires a path named bubble.toml"
+        return Err(UsageError::new(
+            "cli.manifestName",
+            vec![LocalizedArgument::text("command", command)],
         ));
     }
     Ok(path)
@@ -403,9 +602,9 @@ fn required_manifest_path(argument: Option<OsString>, command: &str) -> Result<P
 
 fn parse_run_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<CommandLine, String> {
+) -> Result<CommandLine, UsageError> {
     let Some(first) = arguments.next() else {
-        return Err("`pop run` requires a source path or `--manifestPath`".to_owned());
+        return Err(UsageError::simple("cli.runNeedsInput"));
     };
     if first == "--manifestPath" {
         let manifest_path = required_manifest_path(arguments.next(), "run")?;
@@ -430,7 +629,9 @@ fn parse_run_arguments(
     })
 }
 
-fn parse_lock_controls(arguments: impl IntoIterator<Item = OsString>) -> Result<LockMode, String> {
+fn parse_lock_controls(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<LockMode, UsageError> {
     let mut locked = false;
     let mut offline = false;
     for argument in arguments {
@@ -442,9 +643,12 @@ fn parse_lock_controls(arguments: impl IntoIterator<Item = OsString>) -> Result<
                 offline = true;
             }
             _ => {
-                return Err(format!(
-                    "unsupported manifest option `{}`; expected --locked, --offline, or --frozen",
-                    argument.to_string_lossy()
+                return Err(UsageError::new(
+                    "cli.manifestOption",
+                    vec![LocalizedArgument::text(
+                        "option",
+                        argument.to_string_lossy(),
+                    )],
                 ));
             }
         }
@@ -459,54 +663,331 @@ fn parse_lock_controls(arguments: impl IntoIterator<Item = OsString>) -> Result<
 
 fn parse_program_arguments(
     mut arguments: impl Iterator<Item = OsString>,
-) -> Result<Vec<OsString>, String> {
+) -> Result<Vec<OsString>, UsageError> {
     let Some(separator) = arguments.next() else {
         return Ok(Vec::new());
     };
     if separator != "--" {
-        return Err(format!(
-            "unsupported option `{}`; program arguments must follow `--`",
-            separator.to_string_lossy()
+        return Err(UsageError::new(
+            "cli.programArgumentsSeparator",
+            vec![LocalizedArgument::text(
+                "option",
+                separator.to_string_lossy(),
+            )],
         ));
     }
     Ok(arguments.collect())
 }
 
-fn required_source_path(argument: Option<OsString>, command: &str) -> Result<PathBuf, String> {
+fn required_source_path(argument: Option<OsString>, command: &str) -> Result<PathBuf, UsageError> {
     let path = argument
         .map(PathBuf::from)
-        .ok_or_else(|| format!("`pop {command}` requires a .pop source path"))?;
+        .ok_or_else(|| source_required(command))?;
     if path.extension() != Some(OsStr::new("pop")) {
-        return Err(format!("`pop {command}` requires a .pop source path"));
+        return Err(source_required(command));
     }
     Ok(path)
 }
 
-fn parse_dump_kind(kind: &OsStr) -> Result<DumpKind, String> {
+fn parse_dump_kind(kind: &OsStr) -> Result<DumpKind, UsageError> {
     match kind.to_str() {
         Some("hir") => Ok(DumpKind::Hir),
         Some("mir") => Ok(DumpKind::Mir),
         Some("ll") => Ok(DumpKind::Ll),
-        _ => Err(format!(
-            "unsupported dump kind `{}`; expected hir|mir|ll",
-            kind.to_string_lossy()
+        _ => Err(UsageError::new(
+            "cli.unsupportedDumpKind",
+            vec![LocalizedArgument::text("value", kind.to_string_lossy())],
         )),
     }
 }
 
+fn command_requires(command: &str, option: &str) -> UsageError {
+    UsageError::new(
+        "cli.commandRequiresOption",
+        vec![
+            LocalizedArgument::text("command", command),
+            LocalizedArgument::text("option", option),
+        ],
+    )
+}
+
+fn unsupported_option(option: &OsStr) -> UsageError {
+    UsageError::new(
+        "cli.unsupportedOption",
+        vec![LocalizedArgument::text("option", option.to_string_lossy())],
+    )
+}
+
+fn expected_option(option: &OsStr, expected: &str) -> UsageError {
+    UsageError::new(
+        "cli.expectedOption",
+        vec![
+            LocalizedArgument::text("option", option.to_string_lossy()),
+            LocalizedArgument::text("expected", expected),
+        ],
+    )
+}
+
+fn option_requires(option: &str, value: &str) -> UsageError {
+    UsageError::new(
+        "cli.optionRequiresValue",
+        vec![
+            LocalizedArgument::text("option", option),
+            LocalizedArgument::text("value", value),
+        ],
+    )
+}
+
+fn unexpected_arguments(command: &str) -> UsageError {
+    UsageError::new(
+        "cli.unexpectedArguments",
+        vec![LocalizedArgument::text("command", command)],
+    )
+}
+
+fn source_required(command: &str) -> UsageError {
+    UsageError::new(
+        "cli.sourceRequired",
+        vec![LocalizedArgument::text("command", command)],
+    )
+}
+
+fn bpf_requires(option: &str) -> UsageError {
+    UsageError::new(
+        "cli.bpfRequires",
+        vec![LocalizedArgument::text("option", option)],
+    )
+}
+
 fn write_help() -> ExitCode {
-    if let Err(error) = writeln!(io::stdout().lock(), "{USAGE}") {
-        eprintln!("pop: could not write help: {error}");
+    if let Err(error) = writeln!(io::stdout().lock(), "{}", localized("cli.usage", &[])) {
+        emit_localized(
+            "cli.writeHelpFailed",
+            &[LocalizedArgument::external("detail", error)],
+        );
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+fn scaffold_package(options: &ScaffoldOptions) -> ExitCode {
+    match create_scaffold(options) {
+        Ok((name, destination)) => {
+            let message = localized(
+                "cli.packageCreated",
+                &[
+                    LocalizedArgument::text("name", name),
+                    LocalizedArgument::text("path", destination.display()),
+                ],
+            );
+            if writeln!(io::stdout().lock(), "{message}").is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            emit_localized(
+                "cli.scaffoldFailed",
+                &[LocalizedArgument::external("detail", error)],
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn create_scaffold(options: &ScaffoldOptions) -> Result<(String, PathBuf), String> {
+    let destination = absolute_scaffold_path(&options.path)?;
+    let name = options
+        .name
+        .clone()
+        .or_else(|| scaffold_directory_name(&destination))
+        .ok_or_else(|| "a valid PascalCase Package name is required; use --name".to_owned())?;
+    let (manifest, source, root_name) = scaffold_text(&name, options.kind)?;
+    validate_scaffold(&manifest, &source, options.kind)?;
+
+    match options.mode {
+        ScaffoldMode::New => publish_new_scaffold(&destination, &manifest, &source, root_name)?,
+        ScaffoldMode::Initialize => {
+            publish_initialized_scaffold(&destination, &manifest, &source, root_name)?;
+        }
+    }
+    Ok((name, destination))
+}
+
+fn absolute_scaffold_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .map_err(|error| format!("could not resolve destination: {error}"))
+}
+
+fn scaffold_directory_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn scaffold_text(name: &str, kind: ScaffoldKind) -> Result<(String, String, &'static str), String> {
+    let manifest =
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n");
+    parse_package_manifest(&manifest)
+        .map_err(|_| format!("`{name}` is not a valid PascalCase Package identity"))?;
+    Ok(match kind {
+        ScaffoldKind::Binary => (
+            manifest,
+            format!("namespace {name}\n\nfunction main()\nend\n"),
+            "main.pop",
+        ),
+        ScaffoldKind::Library => (manifest, format!("namespace {name}\n"), "lib.pop"),
+    })
+}
+
+fn validate_scaffold(manifest: &str, source: &str, kind: ScaffoldKind) -> Result<(), String> {
+    parse_package_manifest(manifest)
+        .map_err(|error| format!("generated manifest is invalid: {error}"))?;
+    let file = FileId::from_raw(0);
+    let module = ModuleId::from_raw(0);
+    let source = SourceFile::new(
+        file,
+        Arc::<str>::from("scaffold.pop"),
+        Arc::<str>::from(source),
+    )
+    .map_err(|error| format!("generated source is invalid: {error}"))?;
+    let input = FrontEndBubbleInput::new(
+        BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
+        NamespaceId::from_raw(FIRST_PACKAGE_BUBBLE),
+        Vec::new(),
+        vec![FrontEndModule::new(module, source)],
+    );
+    let input = if kind == ScaffoldKind::Binary {
+        input.with_implicit_main_entry(module)
+    } else {
+        input
+    };
+    let result = analyze_bubble(input);
+    if let Some(diagnostic) = result.diagnostics().first() {
+        return Err(format!(
+            "generated source failed compiler validation with {}",
+            diagnostic.code()
+        ));
+    }
+    Ok(())
+}
+
+fn publish_new_scaffold(
+    destination: &Path,
+    manifest: &str,
+    source: &str,
+    root_name: &str,
+) -> Result<(), String> {
+    if fs::symlink_metadata(destination).is_ok() {
+        return Err(format!(
+            "destination `{}` already exists",
+            destination.display()
+        ));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "destination has no parent directory".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| format!("could not create parent: {error}"))?;
+    let leaf = destination
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "destination must have a UTF-8 directory name".to_owned())?;
+    let staging = parent.join(format!(".{leaf}.pop-new-{}", std::process::id()));
+    if fs::symlink_metadata(&staging).is_ok() {
+        return Err("scaffolding staging path already exists".to_owned());
+    }
+    if let Err(error) = write_scaffold(&staging, manifest, source, root_name) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    fs::rename(&staging, destination).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging);
+        format!("could not publish Package atomically: {error}")
+    })
+}
+
+fn publish_initialized_scaffold(
+    destination: &Path,
+    manifest: &str,
+    source: &str,
+    root_name: &str,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(destination)
+        .map_err(|error| format!("initialization directory is unavailable: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("initialization destination must be a real directory".to_owned());
+    }
+    for protected in ["bubble.toml", "src/lib.pop", "src/main.pop"] {
+        if fs::symlink_metadata(destination.join(protected)).is_ok() {
+            return Err(format!("refusing to overwrite `{protected}`"));
+        }
+    }
+    let existing_source = destination.join("src");
+    if let Ok(metadata) = fs::symlink_metadata(&existing_source)
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err("existing `src` must be a real directory".to_owned());
+    }
+    let staging = destination.join(format!(".pop-initialize-{}", std::process::id()));
+    if fs::symlink_metadata(&staging).is_ok() {
+        return Err("scaffolding staging path already exists".to_owned());
+    }
+    write_scaffold(&staging, manifest, source, root_name)?;
+    let staged_manifest = staging.join("bubble.toml");
+    let staged_source = staging.join("src");
+    let manifest_path = destination.join("bubble.toml");
+    fs::rename(&staged_manifest, &manifest_path)
+        .map_err(|error| format!("could not publish manifest: {error}"))?;
+    let publish_source = if existing_source.is_dir() {
+        fs::rename(
+            staged_source.join(root_name),
+            existing_source.join(root_name),
+        )
+        .map(|()| {
+            let _ = fs::remove_dir(&staged_source);
+        })
+    } else {
+        fs::rename(&staged_source, &existing_source)
+    };
+    if let Err(error) = publish_source {
+        let _ = fs::remove_file(&manifest_path);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("could not publish source directory: {error}"));
+    }
+    let _ = fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+fn write_scaffold(
+    root: &Path,
+    manifest: &str,
+    source: &str,
+    root_name: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(root.join("src"))
+        .map_err(|error| format!("could not create scaffold: {error}"))?;
+    fs::write(root.join("bubble.toml"), manifest)
+        .map_err(|error| format!("could not write manifest: {error}"))?;
+    fs::write(root.join("src").join(root_name), source)
+        .map_err(|error| format!("could not write source: {error}"))
 }
 
 fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
     let source_text = match fs::read_to_string(source_path) {
         Ok(source) => source,
         Err(error) => {
-            eprintln!("pop: could not read `{}`: {error}", source_path.display());
+            emit_localized(
+                "cli.readFailed",
+                &[
+                    LocalizedArgument::text("path", source_path.display()),
+                    LocalizedArgument::external("detail", error),
+                ],
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -517,7 +998,13 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
     ) {
         Ok(source) => source,
         Err(error) => {
-            eprintln!("pop: could not load `{}`: {error}", source_path.display());
+            emit_localized(
+                "cli.loadFailed",
+                &[
+                    LocalizedArgument::text("path", source_path.display()),
+                    LocalizedArgument::external("detail", error),
+                ],
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -534,18 +1021,18 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
         .with_reference_metadata(vec![standard.metadata]),
     );
     if !result.diagnostics().is_empty() {
-        return write_diagnostics(&result.diagnostic_snapshot());
+        return write_diagnostics(result.diagnostics());
     }
     let Some(hir) = result.hir() else {
-        eprintln!("pop: internal compiler error: successful analysis did not publish HIR");
+        tool_failure!("pop: internal compiler error: successful analysis did not publish HIR");
         return ExitCode::from(101);
     };
     let mir = match lower_hir_bubble_with_fingerprint(hir, result.types(), artifact_sha256_hex) {
         Ok(mir) => mir,
         Err(errors) => {
-            eprintln!("pop: internal compiler error: canonical MIR verification failed");
+            tool_failure!("pop: internal compiler error: canonical MIR verification failed");
             for error in errors {
-                eprintln!("  {error:?}");
+                tool_failure!("  {error:?}");
             }
             return ExitCode::from(101);
         }
@@ -559,12 +1046,12 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
         ) {
             Ok(module) => module,
             Err(error) => {
-                eprintln!("pop: internal compiler error: LLVM lowering failed: {error}");
+                tool_failure!("pop: internal compiler error: LLVM lowering failed: {error}");
                 return ExitCode::from(101);
             }
         };
         if let Err(error) = module.verify() {
-            eprintln!("pop: internal compiler error: {error}");
+            tool_failure!("pop: internal compiler error: {error}");
             return ExitCode::from(101);
         }
         Some(module)
@@ -593,16 +1080,35 @@ fn native_target() -> TargetSpec {
         .expect("repository native target is complete")
 }
 
-fn write_diagnostics(diagnostics: &str) -> ExitCode {
-    if let Err(error) = io::stderr().lock().write_all(diagnostics.as_bytes()) {
-        eprintln!("pop: could not write diagnostics: {error}");
+fn write_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
+    let mut output = String::new();
+    for diagnostic in diagnostics {
+        match rendering().diagnostic(diagnostic) {
+            Ok(rendered) => output.push_str(&rendered),
+            Err(error) => {
+                emit_localized(
+                    "cli.renderDiagnosticsFailed",
+                    &[LocalizedArgument::external("detail", error)],
+                );
+                return ExitCode::from(101);
+            }
+        }
+    }
+    if let Err(error) = io::stderr().lock().write_all(output.as_bytes()) {
+        emit_localized(
+            "cli.writeDiagnosticsFailed",
+            &[LocalizedArgument::external("detail", error)],
+        );
     }
     ExitCode::FAILURE
 }
 
 fn write_output(output: &str) -> ExitCode {
     if let Err(error) = io::stdout().lock().write_all(output.as_bytes()) {
-        eprintln!("pop: could not write output: {error}");
+        emit_localized(
+            "cli.writeOutputFailed",
+            &[LocalizedArgument::external("detail", error)],
+        );
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -628,7 +1134,7 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     ) {
         Ok(module) => module,
         Err(error) => {
-            eprintln!("pop: LLVM lowering failed: {error}");
+            tool_failure!("pop: LLVM lowering failed: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -636,7 +1142,7 @@ fn build_source(source_path: &Path, output_path: &Path) -> ExitCode {
     let standard_object_path =
         std::env::temp_dir().join(format!("pop-standard-{}.o", std::process::id()));
     if let Err(error) = module.emit_object(&object_path) {
-        eprintln!("pop: {error}");
+        tool_failure!("pop: {error}");
         return ExitCode::FAILURE;
     }
     if emit_native_object(&standard.program, &standard_object_path).is_none() {
@@ -663,7 +1169,7 @@ fn build_bpf_source(
     let target = match TargetSpec::for_triple(target_triple) {
         Ok(target) => target,
         Err(error) => {
-            eprintln!("pop: {error}: `{target_triple}`");
+            tool_failure!("pop: {error}: `{target_triple}`");
             return ExitCode::FAILURE;
         }
     };
@@ -671,7 +1177,7 @@ fn build_bpf_source(
         return ExitCode::FAILURE;
     };
     let Some(entry) = program_mir.entry else {
-        eprintln!("pop: BPF build requires an explicit entry point");
+        tool_failure!("pop: BPF build requires an explicit entry point");
         return ExitCode::FAILURE;
     };
     let options = match program {
@@ -681,12 +1187,12 @@ fn build_bpf_source(
         match lower_mir_to_bpf_module(&program_mir.mir, &program_mir.types, &target, options) {
             Ok(module) => module,
             Err(error) => {
-                eprintln!("pop: {}: {error}", error.diagnostic_code());
+                tool_failure!("pop: {}: {error}", error.diagnostic_code());
                 return ExitCode::FAILURE;
             }
         };
     if let Err(error) = module.emit_object(output_path) {
-        eprintln!("pop: {}: {error}", error.diagnostic_code());
+        tool_failure!("pop: {}: {error}", error.diagnostic_code());
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -704,7 +1210,7 @@ fn transpile_source_to_c(source_path: &Path) -> ExitCode {
     let translation = match lower_mir_to_c(&mir, &types, options) {
         Ok(translation) => translation,
         Err(error) => {
-            eprintln!("pop: C lowering failed: {error}");
+            tool_failure!("pop: C lowering failed: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -728,7 +1234,7 @@ fn run_source(source_path: &Path, arguments: &[OsString]) -> ExitCode {
                 .unwrap_or(1),
         ),
         Err(error) => {
-            eprintln!("pop: could not execute native program: {error}");
+            tool_failure!("pop: could not execute native program: {error}");
             ExitCode::FAILURE
         }
     }
@@ -757,7 +1263,7 @@ struct LoweredPackageBubble {
 fn lower_package(manifest_path: &Path) -> Option<LoweredPackage> {
     let manifest_path = fs::canonicalize(manifest_path)
         .map_err(|error| {
-            eprintln!(
+            tool_failure!(
                 "pop: could not resolve `{}`: {error}",
                 manifest_path.display()
             );
@@ -822,7 +1328,7 @@ fn lower_package_recursive(
         return Some(resolved.clone());
     }
     if !state.visiting.insert(manifest_path.to_path_buf()) {
-        eprintln!(
+        tool_failure!(
             "pop: Package dependency cycle includes `{}`",
             manifest_path.display()
         );
@@ -831,17 +1337,17 @@ fn lower_package_recursive(
     let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest_text = fs::read_to_string(manifest_path)
         .map_err(|error| {
-            eprintln!("pop: could not read `{}`: {error}", manifest_path.display());
+            tool_failure!("pop: could not read `{}`: {error}", manifest_path.display());
         })
         .ok()?;
     let manifest = parse_package_manifest(&manifest_text)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     if matches!(
         manifest.name(),
         INTERNAL_PACKAGE_NAME | STANDARD_PACKAGE_NAME
     ) {
-        eprintln!(
+        tool_failure!(
             "pop: Package `{}` attempts to replace a reserved foundation identity",
             manifest.name()
         );
@@ -849,7 +1355,7 @@ fn lower_package_recursive(
     }
     let native_link_plan = manifest
         .native_link_plan(native_target().triple())
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     state.native_link_sources.push(NativeLinkPlanSource::new(
         package_root,
@@ -861,21 +1367,21 @@ fn lower_package_recursive(
         let dependency_manifest = match requirement.source() {
             DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
             DependencySource::Registry => {
-                eprintln!(
+                tool_failure!(
                     "pop: registry dependency `{}` requires a resolved bubble.lock",
                     requirement.alias()
                 );
                 return None;
             }
             DependencySource::ExactGit { .. } => {
-                eprintln!(
+                tool_failure!(
                     "pop: exact-Git dependency `{}` requires a resolved bubble.lock",
                     requirement.alias()
                 );
                 return None;
             }
             DependencySource::Workspace => {
-                eprintln!(
+                tool_failure!(
                     "pop: workspace-inherited dependency `{}` requires a Workspace root",
                     requirement.alias()
                 );
@@ -884,7 +1390,7 @@ fn lower_package_recursive(
         };
         let dependency_manifest = fs::canonicalize(&dependency_manifest)
             .map_err(|error| {
-                eprintln!(
+                tool_failure!(
                     "pop: could not resolve dependency `{}` at `{}`: {error}",
                     requirement.alias(),
                     dependency_manifest.display()
@@ -892,7 +1398,7 @@ fn lower_package_recursive(
             })
             .ok()?;
         let Some(library) = lower_package_recursive(&dependency_manifest, false, state)? else {
-            eprintln!(
+            tool_failure!(
                 "pop: dependency `{}` has no public library Bubble",
                 requirement.alias()
             );
@@ -902,7 +1408,7 @@ fn lower_package_recursive(
             .version_requirement()
             .is_some_and(|required| required != library.version)
         {
-            eprintln!(
+            tool_failure!(
                 "pop: dependency `{}` requires version {}, but {} was resolved",
                 requirement.alias(),
                 requirement.version_requirement().unwrap_or(""),
@@ -914,7 +1420,7 @@ fn lower_package_recursive(
             .bubble()
             .is_some_and(|selected| selected != library.bubble)
         {
-            eprintln!(
+            tool_failure!(
                 "pop: dependency `{}` selects Bubble {}, but the Package publishes {}",
                 requirement.alias(),
                 requirement.bubble().unwrap_or(""),
@@ -941,7 +1447,7 @@ fn lower_package_recursive(
         .map(|library| library.metadata.bubble());
     let relative_paths: Vec<_> = source_paths.keys().map(String::as_str).collect();
     let bubbles = discover_conventional_bubbles(&manifest, &relative_paths)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     let selected: Vec<_> = bubbles
         .iter()
@@ -951,7 +1457,7 @@ fn lower_package_recursive(
         })
         .collect();
     if selected.is_empty() {
-        eprintln!("pop: Package has no selected library or binary Bubbles");
+        tool_failure!("pop: Package has no selected library or binary Bubbles");
         return None;
     }
 
@@ -964,7 +1470,7 @@ fn lower_package_recursive(
             .iter()
             .map(|relative| {
                 let source = source_paths.get(relative).cloned().ok_or_else(|| {
-                    eprintln!("pop: discovered Module `{relative}` is missing");
+                    tool_failure!("pop: discovered Module `{relative}` is missing");
                 })?;
                 Ok((PathBuf::from(relative), source))
             })
@@ -988,11 +1494,11 @@ fn lower_package_recursive(
             ffi_dependency,
         )?;
         validate_foreign_link_aliases(&program.mir, &native_link_plan)
-            .map_err(|error| eprintln!("pop: {error}"))
+            .map_err(|error| tool_failure!("pop: {error}"))
             .ok()?;
         if bubble.kind() == BubbleKind::Library {
             let reference = encode_reference_metadata(&program.reference_metadata)
-                .map_err(|error| eprintln!("pop: reference metadata encoding failed: {error}"))
+                .map_err(|error| tool_failure!("pop: reference metadata encoding failed: {error}"))
                 .ok()?;
             library = Some(ResolvedPackageLibrary {
                 package: manifest.name().to_owned(),
@@ -1038,7 +1544,7 @@ fn check_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
             return ExitCode::FAILURE;
         };
         if let Err(error) = resolve_native_link_inputs(&package.native_link_sources, &target) {
-            eprintln!("pop: {error}");
+            tool_failure!("pop: {error}");
             return ExitCode::FAILURE;
         }
     }
@@ -1087,13 +1593,13 @@ fn document_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
             let xml = match render_xml(&bubble.name, &members) {
                 Ok(xml) => xml,
                 Err(error) => {
-                    eprintln!("pop: documentation output failed: {error}");
+                    tool_failure!("pop: documentation output failed: {error}");
                     return ExitCode::FAILURE;
                 }
             };
             let directory = output_root.join(&bubble.name);
             if let Err(error) = fs::create_dir_all(&directory) {
-                eprintln!(
+                tool_failure!(
                     "pop: could not create documentation output `{}`: {error}",
                     directory.display()
                 );
@@ -1101,7 +1607,7 @@ fn document_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
             }
             let output = directory.join("documentation.xml");
             if let Err(error) = fs::write(&output, xml) {
-                eprintln!(
+                tool_failure!(
                     "pop: could not write documentation output `{}`: {error}",
                     output.display()
                 );
@@ -1111,7 +1617,7 @@ fn document_manifest(manifest_path: &Path, lock_mode: LockMode) -> ExitCode {
         }
     }
     if emitted == 0 {
-        eprintln!("pop: `pop documentation` requires a selected library Bubble");
+        tool_failure!("pop: `pop documentation` requires a selected library Bubble");
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -1233,7 +1739,7 @@ fn build_package_to(
     let selected_target = native_target();
     let native_link_resolution =
         resolve_native_link_inputs(&package.native_link_sources, &selected_target)
-            .map_err(|error| eprintln!("pop: {error}"))
+            .map_err(|error| tool_failure!("pop: {error}"))
             .ok()?;
 
     let output_root = selected_output_root
@@ -1241,7 +1747,7 @@ fn build_package_to(
         .unwrap_or_else(|| package.root.join("target/debug"));
     let dependency_root = output_root.join("deps");
     fs::create_dir_all(&dependency_root)
-        .map_err(|error| eprintln!("pop: could not create build output: {error}"))
+        .map_err(|error| tool_failure!("pop: could not create build output: {error}"))
         .ok()?;
     let mut library_objects = Vec::new();
     let mut binary_objects = Vec::new();
@@ -1271,10 +1777,10 @@ fn build_package_to(
         emit_native_object(&bubble.program, lowering_output)?;
         if bubble.kind == BubbleKind::Library {
             let documentation = render_xml(&bubble.name, &documentation_members(&bubble.program))
-                .map_err(|error| eprintln!("pop: documentation output failed: {error}"))
+                .map_err(|error| tool_failure!("pop: documentation output failed: {error}"))
                 .ok()?;
             let implementation = fs::read(&emission_object)
-                .map_err(|error| eprintln!("pop: could not read native object: {error}"))
+                .map_err(|error| tool_failure!("pop: could not read native object: {error}"))
                 .ok()?;
             let target = native_target();
             let provider_aliases = bubble
@@ -1305,25 +1811,27 @@ fn build_package_to(
             .with_target_implementation(target.triple(), implementation);
             let artifact = dependency_root.join(format!("{}.poplib", bubble.name));
             emit_poplib(&artifact, &emission)
-                .map_err(|error| eprintln!("pop: library artifact emission failed: {error}"))
+                .map_err(|error| tool_failure!("pop: library artifact emission failed: {error}"))
                 .ok()?;
             let loaded = load_poplib(&artifact)
-                .map_err(|error| eprintln!("pop: emitted library verification failed: {error:?}"))
+                .map_err(|error| {
+                    tool_failure!("pop: emitted library verification failed: {error:?}");
+                })
                 .ok()?;
             let (selected_target, selected_implementation) =
                 loaded.target_implementation().or_else(|| {
-                    eprintln!("pop: library artifact has no target implementation");
+                    tool_failure!("pop: library artifact has no target implementation");
                     None
                 })?;
             if selected_target != target.triple() {
-                eprintln!(
+                tool_failure!(
                     "pop: library target mismatch: expected {}, found {selected_target}",
                     target.triple()
                 );
                 return None;
             }
             fs::write(&object, selected_implementation)
-                .map_err(|error| eprintln!("pop: could not select library object: {error}"))
+                .map_err(|error| tool_failure!("pop: could not select library object: {error}"))
                 .ok()?;
             let _ = fs::remove_file(&emission_object);
             library_objects.push(object);
@@ -1352,7 +1860,7 @@ fn run_manifest(manifest_path: &Path, lock_mode: LockMode, arguments: &[OsString
         return ExitCode::FAILURE;
     };
     let [executable] = executables.as_slice() else {
-        eprintln!("pop: `pop run` requires exactly one discovered binary Bubble");
+        tool_failure!("pop: `pop run` requires exactly one discovered binary Bubble");
         return ExitCode::FAILURE;
     };
     execute_native(executable, arguments)
@@ -1388,19 +1896,19 @@ fn prepare_lock(selection: &ManifestSelection, mode: LockMode) -> Option<()> {
     });
     let lock = resolve_selection_lock(selection, &root)?;
     let proposed = encode_lock(&lock)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     let lock_path = root.join("bubble.lock");
     let existing = match fs::read(&lock_path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            eprintln!("pop: could not read `{}`: {error}", lock_path.display());
+            tool_failure!("pop: could not read `{}`: {error}", lock_path.display());
             return None;
         }
     };
     let changed = apply_lock_policy(existing.as_deref(), &proposed, mode, false)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     if changed {
         write_lock_atomically(&lock_path, &proposed)?;
@@ -1427,7 +1935,7 @@ fn resolve_selection_lock(selection: &ManifestSelection, root: &Path) -> Option<
         resolve_lock_package(&manifest, &mut state)?;
     }
     BubbleLock::new("1", native_target().triple(), state.packages, state.bubbles)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()
 }
 
@@ -1440,7 +1948,7 @@ fn resolve_lock_package(
         return Some(resolved.clone());
     }
     if !state.visiting.insert(manifest_path.clone()) {
-        eprintln!(
+        tool_failure!(
             "pop: Package dependency cycle includes `{}`",
             manifest_path.display()
         );
@@ -1448,10 +1956,12 @@ fn resolve_lock_package(
     }
     let package_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let manifest_text = fs::read_to_string(&manifest_path)
-        .map_err(|error| eprintln!("pop: could not read `{}`: {error}", manifest_path.display()))
+        .map_err(|error| {
+            tool_failure!("pop: could not read `{}`: {error}", manifest_path.display());
+        })
         .ok()?;
     let manifest = parse_package_manifest(&manifest_text)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
 
     let mut external_libraries = Vec::new();
@@ -1459,21 +1969,21 @@ fn resolve_lock_package(
         let dependency_manifest = match requirement.source() {
             DependencySource::LocalPath(path) => package_root.join(path).join("bubble.toml"),
             DependencySource::Registry => {
-                eprintln!(
+                tool_failure!(
                     "pop: registry dependency `{}` is not available without registry resolution",
                     requirement.alias()
                 );
                 return None;
             }
             DependencySource::ExactGit { .. } => {
-                eprintln!(
+                tool_failure!(
                     "pop: exact-Git dependency `{}` is not available without Git resolution",
                     requirement.alias()
                 );
                 return None;
             }
             DependencySource::Workspace => {
-                eprintln!(
+                tool_failure!(
                     "pop: workspace dependency `{}` has no inherited resolution entry",
                     requirement.alias()
                 );
@@ -1485,11 +1995,11 @@ fn resolve_lock_package(
             .version_requirement()
             .is_some_and(|required| required != dependency.version)
         {
-            eprintln!("pop: dependency version mismatch for `{}`", dependency.name);
+            tool_failure!("pop: dependency version mismatch for `{}`", dependency.name);
             return None;
         }
         let library = dependency.library.clone().or_else(|| {
-            eprintln!(
+            tool_failure!(
                 "pop: dependency `{}` has no library Bubble",
                 dependency.name
             );
@@ -1501,7 +2011,7 @@ fn resolve_lock_package(
     let source_paths = collect_package_sources(package_root).ok()?;
     let relative_paths = source_paths.keys().map(String::as_str).collect::<Vec<_>>();
     let discovered = discover_conventional_bubbles(&manifest, &relative_paths)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     let selected_root = state.selected_roots.contains(&manifest_path);
     let mut library = None;
@@ -1519,7 +2029,7 @@ fn resolve_lock_package(
         }
         state.bubbles.push(
             LockedBubble::new(manifest.name(), bubble.name(), bubble.kind(), dependencies)
-                .map_err(|error| eprintln!("pop: {error}"))
+                .map_err(|error| tool_failure!("pop: {error}"))
                 .ok()?,
         );
         if bubble.kind() == BubbleKind::Library {
@@ -1537,7 +2047,7 @@ fn resolve_lock_package(
             content_hash,
             std::iter::empty::<String>(),
         )
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?,
     );
     let resolved = ResolvedLockPackage {
@@ -1594,11 +2104,11 @@ fn relative_resolution_path(root: &Path, package: &Path) -> Option<String> {
 fn write_lock_atomically(path: &Path, bytes: &[u8]) -> Option<()> {
     let temporary = path.with_extension(format!("lock.tmp-{}", std::process::id()));
     fs::write(&temporary, bytes)
-        .map_err(|error| eprintln!("pop: could not write `{}`: {error}", temporary.display()))
+        .map_err(|error| tool_failure!("pop: could not write `{}`: {error}", temporary.display()))
         .ok()?;
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
-        eprintln!(
+        tool_failure!(
             "pop: could not publish `{}` atomically: {error}",
             path.display()
         );
@@ -1610,14 +2120,16 @@ fn write_lock_atomically(path: &Path, bytes: &[u8]) -> Option<()> {
 fn manifest_selection(manifest_path: &Path) -> Option<ManifestSelection> {
     let manifest_path = fs::canonicalize(manifest_path)
         .map_err(|error| {
-            eprintln!(
+            tool_failure!(
                 "pop: could not resolve `{}`: {error}",
                 manifest_path.display()
             );
         })
         .ok()?;
     let text = fs::read_to_string(&manifest_path)
-        .map_err(|error| eprintln!("pop: could not read `{}`: {error}", manifest_path.display()))
+        .map_err(|error| {
+            tool_failure!("pop: could not read `{}`: {error}", manifest_path.display());
+        })
         .ok()?;
     if !text.lines().any(|line| line.trim() == "[workspace]") {
         return Some(ManifestSelection {
@@ -1627,7 +2139,7 @@ fn manifest_selection(manifest_path: &Path) -> Option<ManifestSelection> {
     }
 
     let workspace = parse_workspace_manifest(&text)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     if text.lines().any(|line| line.trim() == "[package]") {
@@ -1638,7 +2150,7 @@ fn manifest_selection(manifest_path: &Path) -> Option<ManifestSelection> {
     }
     let candidates = workspace_candidates(root, &workspace)?;
     let members = discover_workspace_members(&workspace, &candidates)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()?;
     let selected = if workspace.default_members().is_empty() {
         members
@@ -1661,14 +2173,14 @@ fn workspace_candidates(root: &Path, workspace: &WorkspaceManifest) -> Option<Ve
             let directory = root.join(prefix);
             let mut entries = fs::read_dir(&directory)
                 .map_err(|error| {
-                    eprintln!(
+                    tool_failure!(
                         "pop: could not inspect Workspace member root `{}`: {error}",
                         directory.display()
                     );
                 })
                 .ok()?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| eprintln!("pop: could not inspect Workspace members: {error}"))
+                .map_err(|error| tool_failure!("pop: could not inspect Workspace members: {error}"))
                 .ok()?;
             entries.sort_by_key(std::fs::DirEntry::file_name);
             for entry in entries {
@@ -1693,7 +2205,7 @@ fn execute_native(executable: &Path, arguments: &[OsString]) -> ExitCode {
                 .unwrap_or(1),
         ),
         Err(error) => {
-            eprintln!("pop: could not execute native program: {error}");
+            tool_failure!("pop: could not execute native program: {error}");
             ExitCode::FAILURE
         }
     }
@@ -1716,21 +2228,25 @@ fn collect_sources_in(
         return Ok(());
     }
     let mut entries = fs::read_dir(directory)
-        .map_err(|error| eprintln!("pop: could not inspect `{}`: {error}", directory.display()))?
+        .map_err(|error| {
+            tool_failure!("pop: could not inspect `{}`: {error}", directory.display());
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| eprintln!("pop: could not inspect `{}`: {error}", directory.display()))?;
+        .map_err(|error| {
+            tool_failure!("pop: could not inspect `{}`: {error}", directory.display());
+        })?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let file_type = entry
             .file_type()
-            .map_err(|error| eprintln!("pop: could not inspect source entry: {error}"))?;
+            .map_err(|error| tool_failure!("pop: could not inspect source entry: {error}"))?;
         let path = entry.path();
         if file_type.is_dir() {
             collect_sources_in(package_root, &path, sources)?;
         } else if file_type.is_file() && path.extension() == Some(OsStr::new("pop")) {
             let relative = path
                 .strip_prefix(package_root)
-                .map_err(|_| eprintln!("pop: Package source escaped its root"))?
+                .map_err(|_| tool_failure!("pop: Package source escaped its root"))?
                 .to_string_lossy()
                 .replace('\\', "/");
             sources.insert(relative, path);
@@ -1747,11 +2263,11 @@ fn emit_native_object(program: &NativeProgram, output_path: &Path) -> Option<()>
             LlvmLoweringOptions::default().with_entry_point(entry)
         });
     let module = lower_mir_to_llvm_ir(&program.mir, &program.types, &target, options)
-        .map_err(|error| eprintln!("pop: LLVM lowering failed: {error}"))
+        .map_err(|error| tool_failure!("pop: LLVM lowering failed: {error}"))
         .ok()?;
     module
         .emit_object(output_path)
-        .map_err(|error| eprintln!("pop: {error}"))
+        .map_err(|error| tool_failure!("pop: {error}"))
         .ok()
 }
 
@@ -1787,26 +2303,26 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
     let package_root = repository_root().join("crates/libraries/standard/pop");
     let manifest_path = package_root.join("bubble.toml");
     let manifest_text = fs::read_to_string(&manifest_path)
-        .map_err(|error| eprintln!("pop: could not read reserved Standard manifest: {error}"))
+        .map_err(|error| tool_failure!("pop: could not read reserved Standard manifest: {error}"))
         .ok()?;
     let manifest = parse_package_manifest(&manifest_text)
-        .map_err(|error| eprintln!("pop: invalid reserved Standard manifest: {error}"))
+        .map_err(|error| tool_failure!("pop: invalid reserved Standard manifest: {error}"))
         .ok()?;
     if manifest.name() != STANDARD_PACKAGE_NAME {
-        eprintln!("pop: reserved Standard manifest has the wrong identity");
+        tool_failure!("pop: reserved Standard manifest has the wrong identity");
         return None;
     }
     let source_paths = collect_package_sources(&package_root).ok()?;
     let relative_paths = source_paths.keys().map(String::as_str).collect::<Vec<_>>();
     let discovered = discover_conventional_bubbles(&manifest, &relative_paths)
-        .map_err(|error| eprintln!("pop: could not discover reserved Standard: {error}"))
+        .map_err(|error| tool_failure!("pop: could not discover reserved Standard: {error}"))
         .ok()?;
     let [bubble] = discovered.as_slice() else {
-        eprintln!("pop: reserved Standard must contain exactly one library Bubble");
+        tool_failure!("pop: reserved Standard must contain exactly one library Bubble");
         return None;
     };
     if bubble.kind() != BubbleKind::Library {
-        eprintln!("pop: reserved Standard must be a library Bubble");
+        tool_failure!("pop: reserved Standard must be a library Bubble");
         return None;
     }
     let modules = bubble
@@ -1828,7 +2344,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         None,
     )?;
     let reference = encode_reference_metadata(&program.reference_metadata)
-        .map_err(|error| eprintln!("pop: Standard metadata encoding failed: {error}"))
+        .map_err(|error| tool_failure!("pop: Standard metadata encoding failed: {error}"))
         .ok()?;
     let source_sha256 = package_content_hash(&manifest_path, &source_paths)?;
     let library = ResolvedPackageLibrary {
@@ -1851,7 +2367,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         dependencies: Vec::new(),
         native_link_plan: manifest
             .native_link_plan(native_target().triple())
-            .map_err(|error| eprintln!("pop: invalid Standard native link plan: {error}"))
+            .map_err(|error| tool_failure!("pop: invalid Standard native link plan: {error}"))
             .ok()?,
         program,
     };
@@ -1871,10 +2387,16 @@ fn lower_native_bubble(
         .enumerate()
         .map(|(index, (display_path, source_path))| {
             let source_text = fs::read_to_string(source_path).map_err(|error| {
-                eprintln!("pop: could not read `{}`: {error}", source_path.display());
+                emit_localized(
+                    "cli.readFailed",
+                    &[
+                        LocalizedArgument::text("path", source_path.display()),
+                        LocalizedArgument::external("detail", error),
+                    ],
+                );
             })?;
             let file = u32::try_from(index).map_err(|_| {
-                eprintln!("pop: too many Modules in one Bubble");
+                tool_failure!("pop: too many Modules in one Bubble");
             })?;
             let source = SourceFile::new(
                 FileId::from_raw(file),
@@ -1882,7 +2404,13 @@ fn lower_native_bubble(
                 source_text,
             )
             .map_err(|error| {
-                eprintln!("pop: could not load `{}`: {error}", source_path.display());
+                emit_localized(
+                    "cli.loadFailed",
+                    &[
+                        LocalizedArgument::text("path", source_path.display()),
+                        LocalizedArgument::external("detail", error),
+                    ],
+                );
             })?;
             Ok(FrontEndModule::new(ModuleId::from_raw(file), source))
         })
@@ -1914,7 +2442,7 @@ fn lower_native_bubble(
     };
     let result = analyze_bubble(input);
     if !result.diagnostics().is_empty() {
-        let _ = write_diagnostics(&result.diagnostic_snapshot());
+        let _ = write_diagnostics(result.diagnostics());
         return None;
     }
     let hir = result.hir()?;
@@ -1925,21 +2453,21 @@ fn lower_native_bubble(
     };
     let mir = lower_hir_bubble_with_fingerprint(hir, result.types(), artifact_sha256_hex)
         .map_err(|errors| {
-            eprintln!(
+            tool_failure!(
                 "pop: internal compiler error: canonical MIR verification failed: {errors:?}"
             );
         })
         .ok()?;
     let mir = optimize_mir(mir, result.types())
         .map_err(|errors| {
-            eprintln!(
+            tool_failure!(
                 "pop: internal compiler error: optimized MIR verification failed: {errors:?}"
             );
         })
         .ok()?;
     let reference_metadata = result
         .reference_metadata()
-        .map_err(|error| eprintln!("pop: public reference metadata emission failed: {error:?}"))
+        .map_err(|error| tool_failure!("pop: public reference metadata emission failed: {error:?}"))
         .ok()?
         .clone();
     let checked_documentation = result.checked_documentation().to_vec();
@@ -1983,7 +2511,7 @@ fn select_native_entry(hir: &pop_hir::HirBubble, types: &pop_types::TypeArena) -
 }
 
 fn write_invalid_entry() {
-    eprintln!(
+    tool_failure!(
         "pop: binary entry must be private or implicit `main` with no parameters or `Array<String>`, and with no result or `Int`"
     );
 }
@@ -2030,13 +2558,13 @@ fn link_native_executable(
             command.arg("--release");
         }
         if !matches!(command.status(), Ok(status) if status.success()) {
-            eprintln!("pop: could not build native foundation archives");
+            tool_failure!("pop: could not build native foundation archives");
             return ExitCode::FAILURE;
         }
     }
 
     if !standard.is_file() || !runtime.is_file() {
-        eprintln!("pop: native foundation archives were not produced");
+        tool_failure!("pop: native foundation archives were not produced");
         return ExitCode::FAILURE;
     }
 
@@ -2057,14 +2585,14 @@ fn link_native_executable(
     match link {
         Ok(output) if output.status.success() => ExitCode::SUCCESS,
         Ok(output) => {
-            eprintln!(
+            tool_failure!(
                 "pop: native link failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
             ExitCode::FAILURE
         }
         Err(error) => {
-            eprintln!("pop: could not invoke native linker: {error}");
+            tool_failure!("pop: could not invoke native linker: {error}");
             ExitCode::FAILURE
         }
     }

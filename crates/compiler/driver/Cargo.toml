@@ -24,6 +24,7 @@ pop-documentation-generator.workspace = true
 pop-foundation.workspace = true
 pop-hir.workspace = true
 pop-library-bridge.workspace = true
+pop-localization.workspace = true
 pop-mir.workspace = true
 pop-runtime-native.workspace = true
 pop-standard.workspace = true

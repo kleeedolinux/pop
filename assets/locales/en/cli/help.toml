@@ -1,0 +1,4 @@
+[messages."cli.usage"]
+text = "Usage:\n    pop new <path> [--name <Package.Name>] [--library|--binary]\n    pop initialize [path] [--name <Package.Name>] [--library|--binary]\n    pop check <source.pop> [--dump <hir|mir|ll>]...\n    pop check --manifestPath <bubble.toml>\n    pop build <source.pop> --output <executable>\n    pop build --manifestPath <bubble.toml>\n    pop build --manifestPath <bubble.toml> --bpf-program <xdp> --emit-object <output.o>\n    pop documentation --manifestPath <bubble.toml>\n    pop transpile <source.pop> --to c\n    pop run <source.pop> [-- <arguments>...]\n    pop run --manifestPath <bubble.toml> [-- <arguments>...]\n\nThe direct source path is a bootstrap compiler inspection mode. It checks one Module in an ephemeral Bubble and does not define Package or Bubble identity. IR dumps are deterministic debug text for this compiler version, not stable serialization formats."
+arguments = []
+kinds = []

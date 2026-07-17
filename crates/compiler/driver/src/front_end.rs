@@ -13,6 +13,7 @@ use pop_documentation::{
 };
 use pop_foundation::{
     BubbleId, Diagnostic, DiagnosticSeverity, MethodId, ModuleId, SourceSpan, SymbolId,
+    SymbolIdentity,
 };
 use pop_hir::{
     HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirForeignFunction,
@@ -21,6 +22,7 @@ use pop_hir::{
     specialize_hir_method,
 };
 use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
+use pop_source::SourceFile;
 use pop_syntax::{
     AttributeUseSyntax, NodeKind, parse_attribute_declaration, parse_attribute_use,
     parse_class_declaration, parse_class_method_body, parse_const_declaration,
@@ -73,6 +75,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         })
         .collect();
     let indexed = build_declaration_index(&module_inputs);
+    let tooling_declarations = tooling_declarations(input.bubble, indexed.index(), &parsed);
     let mut diagnostics = indexed.diagnostics().to_vec();
     validate_source_attribute_targets(&parsed, &mut diagnostics);
     let mut namespace_attribute_work = define_namespace_attributes(&parsed, &mut diagnostics);
@@ -282,6 +285,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         .map_or(Err(ReferenceMetadataError::AnalysisUnavailable), |hir| {
             emit_reference_metadata(hir, database.index(), resolver.arena())
         });
+    let tooling_inlay_hints = hir.as_ref().map_or_else(Vec::new, tooling_inlay_hints);
     FrontEndResult {
         hir,
         hir_bubble_error,
@@ -304,7 +308,121 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         diagnostics,
         reference_metadata,
         checked_documentation,
+        tooling_declarations,
+        tooling_inlay_hints,
     }
+}
+
+fn tooling_inlay_hints(hir: &HirBubble) -> Vec<ToolingInlayHint> {
+    let parameters = hir
+        .functions()
+        .iter()
+        .map(|function| (function.symbol(), function.parameters()))
+        .collect::<BTreeMap<_, _>>();
+    let mut hints = hir
+        .functions()
+        .iter()
+        .flat_map(|owner| {
+            pop_hir::hir_source_calls(owner)
+                .into_iter()
+                .filter_map(|call| {
+                    parameters
+                        .get(&call.target())
+                        .map(|parameters| (call, *parameters))
+                })
+                .flat_map(move |(call, parameters)| {
+                    call.arguments()
+                        .iter()
+                        .zip(parameters)
+                        .filter(|(_, parameter)| parameter.name() != "_")
+                        .map(move |(argument, parameter)| ToolingInlayHint {
+                            module: owner.module(),
+                            argument_span: *argument,
+                            parameter_name: parameter.name().to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+        })
+        .collect::<Vec<_>>();
+    hints.sort_by_key(|hint| (hint.module, hint.argument_span.range().start()));
+    hints
+}
+
+fn tooling_declarations(
+    bubble: BubbleId,
+    index: &pop_resolve::DeclarationIndex,
+    modules: &[ParsedModule],
+) -> Vec<ToolingDeclaration> {
+    let mut declarations = index
+        .declarations()
+        .filter(|declaration| declaration.bubble() == bubble)
+        .filter_map(|declaration| {
+            let module = modules
+                .iter()
+                .find(|module| module.module == declaration.module())?;
+            let declaration_node = module.syntax.root().children().iter().find(|node| {
+                let range = node.range();
+                let name = declaration.span().range();
+                range.start() <= name.start() && name.end() <= range.end()
+            })?;
+            let signature_range = declaration_signature_range(
+                &module.source,
+                &module.syntax,
+                declaration_node,
+                declaration.kind(),
+            );
+            Some(ToolingDeclaration {
+                identity: SymbolIdentity::new(bubble, declaration.symbol()),
+                module: declaration.module(),
+                name: declaration.name().to_owned(),
+                kind: match declaration.kind() {
+                    pop_resolve::DeclarationKind::Function => ToolingDeclarationKind::Function,
+                    pop_resolve::DeclarationKind::Constant => ToolingDeclarationKind::Constant,
+                    pop_resolve::DeclarationKind::TypeAlias => ToolingDeclarationKind::TypeAlias,
+                    pop_resolve::DeclarationKind::Attribute => ToolingDeclarationKind::Attribute,
+                    pop_resolve::DeclarationKind::Record => ToolingDeclarationKind::Record,
+                    pop_resolve::DeclarationKind::Union => ToolingDeclarationKind::Union,
+                    pop_resolve::DeclarationKind::Error => ToolingDeclarationKind::Error,
+                    pop_resolve::DeclarationKind::Class => ToolingDeclarationKind::Class,
+                    pop_resolve::DeclarationKind::Interface => ToolingDeclarationKind::Interface,
+                    pop_resolve::DeclarationKind::Enum => ToolingDeclarationKind::Enum,
+                },
+                declaration_span: SourceSpan::new(module.source.id(), declaration_node.range()),
+                selection_span: declaration.span(),
+                signature_span: SourceSpan::new(module.source.id(), signature_range),
+            })
+        })
+        .collect::<Vec<_>>();
+    declarations.sort_by_key(|declaration| declaration.selection_span.range().start());
+    declarations
+}
+
+fn declaration_signature_range(
+    source: &SourceFile,
+    syntax: &pop_syntax::SyntaxTree,
+    declaration: &pop_syntax::SyntaxNode,
+    kind: pop_resolve::DeclarationKind,
+) -> pop_foundation::TextRange {
+    if kind == pop_resolve::DeclarationKind::Function
+        && let Ok(signature) = parse_function_signature(source, syntax, declaration)
+    {
+        return pop_foundation::TextRange::new(
+            declaration.range().start(),
+            signature.range().end(),
+        )
+        .expect("ordered function signature range");
+    }
+    let text = source.text();
+    let start = declaration.range().start().to_usize();
+    let end_limit = declaration.range().end().to_usize().min(text.len());
+    let end = text[start..end_limit]
+        .find('\n')
+        .map_or(end_limit, |relative| start + relative);
+    pop_foundation::TextRange::new(
+        pop_foundation::TextSize::try_from_usize(start).expect("source range fits TextSize"),
+        pop_foundation::TextSize::try_from_usize(end).expect("source range fits TextSize"),
+    )
+    .expect("ordered declaration signature range")
 }
 
 fn validate_documentation(

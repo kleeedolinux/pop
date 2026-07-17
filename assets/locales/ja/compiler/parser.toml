@@ -1,0 +1,8 @@
+[messages."syntax.unexpectedToken"]
+text = "{expectation} が必要ですが、`{found}` が見つかりました"
+
+[messages."syntax.missingNamespace"]
+text = "Module は namespace を宣言する必要があります"
+
+[messages."syntax.unsupportedExport"]
+text = "`{keyword}` は未対応です。宣言の可視性を使用してください"

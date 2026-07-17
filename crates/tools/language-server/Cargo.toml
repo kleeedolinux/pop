@@ -8,13 +8,25 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "pop-language-server"
+path = "src/main.rs"
+
 [dependencies]
 pop-extension-lsp.workspace = true
+pop-localization.workspace = true
+pop-foundation.workspace = true
 pop-diagnostics.workspace = true
+pop-documentation.workspace = true
+pop-driver.workspace = true
 pop-projects.workspace = true
 pop-query.workspace = true
 pop-source.workspace = true
-pop-syntax.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+pop-diagnostics.workspace = true

@@ -1,0 +1,128 @@
+[messages."cli.missingCommand"]
+text = "comando ausente"
+
+[messages."cli.unsupportedCommand"]
+text = "comando não suportado `{command}`"
+
+[messages."cli.unsupportedLanguage"]
+text = "idioma não suportado `{language}`; esperado en, zh-Hans, ja, pt-BR ou es"
+
+[messages."cli.languageNeedsValue"]
+text = "`--language` exige uma tag de idioma"
+
+[messages."cli.selectLanguageFailed"]
+text = "não foi possível selecionar o idioma da ferramenta: {detail}"
+
+[messages."cli.checkNeedsSource"]
+text = "`pop check` exige um caminho de fonte .pop ou `--manifestPath`"
+
+[messages."cli.commandRequiresOption"]
+text = "`pop {command}` exige `{option}`"
+
+[messages."cli.unsupportedOption"]
+text = "opção não suportada `{option}`"
+
+[messages."cli.expectedOption"]
+text = "opção não suportada `{option}`; esperado `{expected}`"
+
+[messages."cli.optionRequiresValue"]
+text = "`{option}` exige {value}"
+
+[messages."cli.unexpectedArguments"]
+text = "`pop {command}` recebeu argumentos inesperados"
+
+[messages."cli.oneSource"]
+text = "`pop {command}` aceita exatamente um caminho de fonte no modo bootstrap"
+
+[messages."cli.sourceRequired"]
+text = "`pop {command}` exige um caminho de fonte .pop"
+
+[messages."cli.manifestRequired"]
+text = "`pop {command} --manifestPath` exige um caminho bubble.toml"
+
+[messages."cli.manifestName"]
+text = "`pop {command} --manifestPath` exige um caminho chamado bubble.toml"
+
+[messages."cli.unsupportedChoice"]
+text = "{choice} não suportado `{value}`; esperado {expected}"
+
+[messages."cli.unsupportedRuntimeProfile"]
+text = "perfil de runtime não suportado `{value}`"
+
+[messages."cli.manifestOption"]
+text = "opção de manifesto não suportada `{option}`; esperado --locked, --offline ou --frozen"
+
+[messages."cli.programArgumentsSeparator"]
+text = "opção não suportada `{option}`; argumentos do programa devem vir após `--`"
+
+[messages."cli.bpfRequires"]
+text = "builds BPF exigem `{option}`"
+
+[messages."cli.readFailed"]
+text = "não foi possível ler `{path}`: {detail}"
+
+[messages."cli.loadFailed"]
+text = "não foi possível carregar `{path}`: {detail}"
+
+[messages."cli.writeHelpFailed"]
+text = "não foi possível escrever a ajuda: {detail}"
+
+[messages."cli.writeDiagnosticsFailed"]
+text = "não foi possível escrever os diagnósticos: {detail}"
+
+[messages."cli.renderDiagnosticsFailed"]
+text = "não foi possível renderizar os diagnósticos: {detail}"
+
+[messages."cli.writeOutputFailed"]
+text = "não foi possível escrever a saída: {detail}"
+
+[messages."cli.internalCompilerError"]
+text = "erro interno do compilador: {detail}"
+
+[messages."cli.externalFailure"]
+text = "{context}: {detail}"
+
+[messages."cli.toolFailure"]
+text = "a operação da ferramenta falhou: {detail}"
+
+[messages."cli.transpileNeedsFormat"]
+text = "`--to` exige um formato de código-fonte de backend (`c`)"
+
+[messages."cli.unsupportedTranspileTarget"]
+text = "destino de transpilação `{value}` não suportado; esperado `c`"
+
+[messages."cli.buildNeedsOutputOrTarget"]
+text = "`pop build` exige um caminho de saída (`--output`) ou uma tripla de destino (`--target`)"
+
+[messages."cli.targetNeedsTriple"]
+text = "`--target` exige uma tripla de destino"
+
+[messages."cli.runtimeProfileNeedsName"]
+text = "`--runtime-profile` exige um nome de perfil"
+
+[messages."cli.unsupportedBpfProgram"]
+text = "programa BPF `{value}` não suportado; esperado `xdp`"
+
+[messages."cli.emitObjectNeedsPath"]
+text = "`--emit-object` exige um caminho de arquivo objeto"
+
+[messages."cli.outputNeedsExecutablePath"]
+text = "`--output` exige um caminho de executável"
+
+[messages."cli.runNeedsInput"]
+text = "`pop run` exige um caminho de fonte .pop ou `--manifestPath`"
+
+[messages."cli.unsupportedDumpKind"]
+text = "tipo de despejo `{value}` não suportado; esperado `hir`, `mir` ou `ll`"
+
+[messages."cli.newNeedsPath"]
+text = "`pop new` requer um caminho de destino"
+
+[messages."cli.scaffoldKindConflict"]
+text = "selecione apenas `--library` ou `--binary`"
+
+[messages."cli.scaffoldFailed"]
+text = "não foi possível criar o Package: {detail}"
+
+[messages."cli.packageCreated"]
+text = "Package `{name}` criado em `{path}`"
