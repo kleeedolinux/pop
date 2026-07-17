@@ -52,7 +52,8 @@ diagnostics.
   Workspace/Package/Bubble metadata.
 - checked `<summary>`/parameter/return/`cref` documentation plus LSP hover;
 - compiler-backed LSP diagnostics, related labels, quick fixes, document
-  symbols, direct-call parameter hints, and dependency-free Package snapshots;
+  symbols, direct-call parameter inlay hints, and dependency-free same-Bubble
+  snapshots;
 - validated canonical binary/library scaffolding through `pop new` and
   `pop initialize`.
 

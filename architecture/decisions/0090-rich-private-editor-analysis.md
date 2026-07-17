@@ -62,6 +62,10 @@ Filesystem discovery reads only `bubble.toml` and conventional `.pop` roots,
 does not follow symlinks, does not scan `target`, dependency caches, or hidden
 directories, and sorts normalized relative paths before assigning typed
 session IDs. Paths select inputs but never become semantic identities.
+An open document retains the selected Package manifest, Bubble kind, and Bubble
+root as its session analysis scope. Changes and closes reuse that scope, so
+same-named target kinds never merge and deleting a Module before closing it
+still reanalyzes the remaining Modules in its former Bubble.
 
 Completion, signature help, cross-Bubble navigation/references, rename,
 formatting, semantic tokens, incremental range edits, and full Workspace or
@@ -106,10 +110,13 @@ versioning and atomic application contracts.
   range and a note remains localized;
 - a safe compiler quick fix becomes one version-matched code action and applies
   the exact edit;
-- stale, unknown-file, review, and unsafe edits are rejected;
+- stale, unknown-file, and unsafe edits are rejected, while review edits remain
+  explicitly non-preferred;
 - direct-call parameter hints use compiler-selected parameter names and
   argument positions, while unresolved and indirect calls produce none;
 - two Modules in one dependency-free Bubble resolve together;
+- same-named Bubbles of different kinds remain isolated, and closing a deleted
+  Module reanalyzes its previously selected Bubble;
 - the nearest nested Package wins and a Workspace never merges Package
   visibility; and
 - advertised capabilities match the implemented requests.
