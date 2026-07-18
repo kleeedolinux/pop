@@ -247,15 +247,18 @@ impl Connection {
         }
         let version = document_version(params.text_document.version)?;
         let server = self.server.as_mut().expect("running server");
-        match server.open(
+        match server.open_with_updates(
             uri.clone(),
             version,
             params.text_document.text,
             &CancellationToken::new(),
         ) {
-            Ok(analysis) => Ok(ConnectionAction::Reply(publish_diagnostics(
-                &uri, &analysis,
-            ))),
+            Ok(updates) => Ok(ConnectionAction::Replies(
+                updates
+                    .iter()
+                    .map(|(uri, analysis)| publish_diagnostics(uri, analysis))
+                    .collect(),
+            )),
             Err(error) => self.log_error(&error),
         }
     }
@@ -275,10 +278,13 @@ impl Connection {
         }
         let version = document_version(params.text_document.version)?;
         let server = self.server.as_mut().expect("running server");
-        match server.change(&uri, version, text, &CancellationToken::new()) {
-            Ok(analysis) => Ok(ConnectionAction::Reply(publish_diagnostics(
-                &uri, &analysis,
-            ))),
+        match server.change_with_updates(&uri, version, text, &CancellationToken::new()) {
+            Ok(updates) => Ok(ConnectionAction::Replies(
+                updates
+                    .iter()
+                    .map(|(uri, analysis)| publish_diagnostics(uri, analysis))
+                    .collect(),
+            )),
             Err(error) => self.log_error(&error),
         }
     }
@@ -288,14 +294,24 @@ impl Connection {
         let uri = DocumentUri::new(params.text_document.uri)
             .map_err(|error| TransportError::InvalidJson(error.to_string()))?;
         let server = self.server.as_mut().expect("running server");
-        if !server.close(&uri) {
-            return self.log_error(&LanguageServerError::DocumentNotOpen { uri });
-        }
-        Ok(ConnectionAction::Reply(json!({
+        let updates = match server.close_with_updates(&uri, &CancellationToken::new()) {
+            Ok(Some(updates)) => updates,
+            Ok(None) => {
+                return self.log_error(&LanguageServerError::DocumentNotOpen { uri });
+            }
+            Err(error) => return self.log_error(&error),
+        };
+        let mut publications = vec![json!({
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
             "params": {"uri": uri.as_str(), "diagnostics": []}
-        })))
+        })];
+        publications.extend(
+            updates
+                .iter()
+                .map(|(uri, analysis)| publish_diagnostics(uri, analysis)),
+        );
+        Ok(ConnectionAction::Replies(publications))
     }
 
     fn hover(&self, id: Option<Value>, params: Value) -> Result<ConnectionAction, TransportError> {
@@ -404,9 +420,14 @@ impl Connection {
             }
         };
         let server = self.server.as_ref().expect("running server");
-        let version = server
-            .document_version(&uri)
-            .map_err(|_| TransportError::InvalidJson("document is not open".to_owned()))?;
+        let version = match server.document_version(&uri) {
+            Ok(version) => version,
+            Err(error) => {
+                return Ok(ConnectionAction::Reply(language_server_error(
+                    server, &id, &error,
+                )?));
+            }
+        };
         let requested_fixes = params
             .context
             .diagnostics
@@ -526,6 +547,7 @@ impl Connection {
 enum ConnectionAction {
     None,
     Reply(Value),
+    Replies(Vec<Value>),
     Exit(ExitStatus),
 }
 
@@ -936,6 +958,11 @@ pub fn serve<R: BufRead, W: Write>(
         match connection.handle(&message)? {
             ConnectionAction::None => {}
             ConnectionAction::Reply(reply) => write_message(&mut writer, &reply)?,
+            ConnectionAction::Replies(replies) => {
+                for reply in replies {
+                    write_message(&mut writer, &reply)?;
+                }
+            }
             ConnectionAction::Exit(status) => return Ok(status),
         }
     }

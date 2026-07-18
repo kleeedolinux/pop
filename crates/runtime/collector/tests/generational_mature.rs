@@ -155,6 +155,38 @@ fn post_scan_initialization_of_a_new_mature_object_shades_its_target() {
 }
 
 #[test]
+fn initialized_mature_objects_remember_nursery_references() {
+    let mut runtime = GenerationalRuntime::new();
+    let young = runtime
+        .allocate_object(&ObjectAllocationRequest::new(
+            RuntimeTypeId::new(42),
+            AllocationClass::NurseryEligible,
+            ObjectMap::new(0, Vec::new()).expect("young map"),
+        ))
+        .expect("young object");
+    let holder = runtime
+        .allocate_object_initialized(&object(1, &[0]), &[young.raw()])
+        .expect("initialized mature holder");
+    let mut roots = no_stack_roots(31);
+
+    runtime.request_minor_collection();
+    assert!(
+        runtime
+            .safe_point(&mut roots)
+            .expect("minor collection")
+            .collection()
+            .is_some()
+    );
+
+    let relocated = runtime
+        .load_reference(holder, ObjectSlot::new(0))
+        .expect("remembered slot")
+        .expect("remembered child");
+    assert_ne!(relocated, young);
+    assert!(runtime.contains(relocated));
+}
+
+#[test]
 fn major_work_is_bounded_per_safe_point() {
     let mut runtime = GenerationalRuntime::with_config(MajorCollectorConfig::new(1));
     let request = object(1, &[0]);

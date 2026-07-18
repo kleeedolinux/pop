@@ -407,3 +407,96 @@ fn outer_package_scan_does_not_absorb_nested_package_sources() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn document_symbols_never_include_sibling_module_declarations() {
+    let root = std::env::temp_dir().join(format!("PopLspSymbols{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Symbols\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let active = "namespace Studio.Symbols\nfunction active(): Int\n    return 1\nend\n";
+    std::fs::write(root.join("src/lib.pop"), active).unwrap();
+    std::fs::write(
+        root.join("src/sibling.pop"),
+        "namespace Studio.Symbols\nfunction siblingWithALongerName(): Int\n    return 2\nend\n",
+    )
+    .unwrap();
+
+    let uri = DocumentUri::new(format!("file://{}", root.join("src/lib.pop").display())).unwrap();
+    let mut server = LanguageServer::initialize(Some("en")).unwrap();
+    server
+        .open(
+            uri.clone(),
+            DocumentVersion::new(1),
+            active,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let symbols = server
+        .document_symbols(&uri, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        symbols
+            .iter()
+            .map(pop_language_server::DocumentSymbol::name)
+            .collect::<Vec<_>>(),
+        ["active"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn closing_a_deleted_module_reanalyzes_its_previous_bubble() {
+    let root = std::env::temp_dir().join(format!("PopLspDeleted{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Deleted\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let library = "namespace Studio.Deleted\nfunction value(): Int\n    return helper()\nend\n";
+    let helper = "namespace Studio.Deleted\nfunction helper(): Int\n    return 1\nend\n";
+    std::fs::write(root.join("src/lib.pop"), library).unwrap();
+    std::fs::write(root.join("src/helper.pop"), helper).unwrap();
+    let library_uri =
+        DocumentUri::new(format!("file://{}", root.join("src/lib.pop").display())).unwrap();
+    let helper_uri =
+        DocumentUri::new(format!("file://{}", root.join("src/helper.pop").display())).unwrap();
+    let mut server = LanguageServer::initialize(Some("en")).unwrap();
+    server
+        .open(
+            library_uri.clone(),
+            DocumentVersion::new(1),
+            library,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    server
+        .open(
+            helper_uri.clone(),
+            DocumentVersion::new(1),
+            helper,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    std::fs::remove_file(root.join("src/helper.pop")).unwrap();
+    assert!(server.close(&helper_uri));
+
+    let analysis = server
+        .analyze(&library_uri, &CancellationToken::new())
+        .unwrap();
+    assert!(
+        analysis
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "POP1002"),
+        "the remaining Module must be reanalyzed without the deleted helper"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

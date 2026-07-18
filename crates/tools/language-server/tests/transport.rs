@@ -355,6 +355,192 @@ fn invalid_rich_request_params_do_not_terminate_the_session() {
 }
 
 #[test]
+fn code_action_for_a_closed_document_returns_an_error_and_keeps_serving() {
+    let uri = "file:///workspace/closed-actions.pop";
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"pop","version":1,"text":"namespace Example\npublic function value(): Int\n    return 1\nend\n"}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":uri}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri},"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":6}},"context":{"diagnostics":[]}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    let status = serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    assert_eq!(status, ExitStatus::Success);
+    let messages = responses(&output);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == 8 && message["error"]["code"] == -32602)
+    );
+    assert!(messages.iter().any(|message| message["id"] == 2));
+}
+
+#[test]
+fn method_calls_receive_compiler_proven_parameter_hints() {
+    let uri = "file:///workspace/method-hints.pop";
+    let source = "namespace Example\nfunction add(left: Int, right: Int): Int\n    return left + right\nend\nclass Calculator\n    function Calculator:value(): Int\n        return add(1, 2)\n    end\nend\n";
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"pop","version":1,"text":source}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    let hints = responses(&output)
+        .into_iter()
+        .find(|message| message["id"] == 8)
+        .unwrap()["result"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(hints.iter().any(|hint| hint["label"] == "left:"));
+    assert!(hints.iter().any(|hint| hint["label"] == "right:"));
+}
+
+#[test]
+fn changing_one_module_republishes_dependent_open_module_diagnostics() {
+    let root = std::env::temp_dir().join(format!("PopLspRepublish{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Republish\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let library = "namespace Studio.Republish\nfunction value(): Int\n    return helper()\nend\n";
+    let helper = "namespace Studio.Republish\nfunction helper(): Int\n    return 1\nend\n";
+    std::fs::write(root.join("src/lib.pop"), library).unwrap();
+    std::fs::write(root.join("src/helper.pop"), helper).unwrap();
+    let library_uri = format!("file://{}", root.join("src/lib.pop").display());
+    let helper_uri = format!("file://{}", root.join("src/helper.pop").display());
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":library_uri,"languageId":"pop","version":1,"text":library}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":helper_uri,"languageId":"pop","version":1,"text":helper}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":helper_uri,"version":2},"contentChanges":[{"text":"namespace Studio.Republish\nfunction renamed(): Int\n    return 1\nend\n"}]}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    let publications = responses(&output)
+        .into_iter()
+        .filter(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == library_uri
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        publications.len() >= 2,
+        "the dependent Module must be republished"
+    );
+    let final_diagnostics = publications.last().unwrap()["params"]["diagnostics"]
+        .as_array()
+        .unwrap();
+    assert!(
+        final_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "POP1002")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unrelated_standalone_documents_are_not_republished() {
+    let first_uri = "untitled:first";
+    let second_uri = "untitled:second";
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":first_uri,"languageId":"pop","version":1,"text":"namespace First\n"}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":second_uri,"languageId":"pop","version":1,"text":"namespace Second\n"}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":second_uri,"version":2},"contentChanges":[{"text":"namespace Second\nfunction value(): Int\n    return 2\nend\n"}]}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    let first_publications = responses(&output)
+        .into_iter()
+        .filter(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == first_uri
+        })
+        .count();
+    assert_eq!(first_publications, 1);
+}
+
+#[test]
+fn same_named_test_and_example_bubbles_are_not_republished_together() {
+    let root = std::env::temp_dir().join(format!("PopLspTargetKinds{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::create_dir_all(root.join("examples")).unwrap();
+    std::fs::write(
+        root.join("bubble.toml"),
+        "[package]\nname = \"Studio.Targets\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let test_uri = format!("file://{}", root.join("tests/foo.pop").display());
+    let example_uri = format!("file://{}", root.join("examples/foo.pop").display());
+    let source = "namespace Studio.Targets\nfunction value(): Int\n    return 1\nend\n";
+    std::fs::write(root.join("tests/foo.pop"), source).unwrap();
+    std::fs::write(root.join("examples/foo.pop"), source).unwrap();
+    let input = session(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":test_uri,"languageId":"pop","version":1,"text":source}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":example_uri,"languageId":"pop","version":1,"text":source}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":example_uri,"version":2},"contentChanges":[{"text":"namespace Studio.Targets\nfunction value(): Int\n    return 2\nend\n"}]}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    ]);
+    let mut output = Vec::new();
+    serve(
+        BufReader::new(Cursor::new(input)),
+        &mut output,
+        TransportLimits::default(),
+    )
+    .expect("serve session");
+    let test_publications = responses(&output)
+        .into_iter()
+        .filter(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == test_uri
+        })
+        .count();
+    assert_eq!(test_publications, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn transport_rejects_frames_over_the_configured_limit() {
     let input = b"Content-Length: 1025\r\n\r\n".to_vec();
     let error = serve(

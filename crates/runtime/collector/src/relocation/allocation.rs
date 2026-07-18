@@ -127,6 +127,17 @@ impl RelocationRuntime {
                 CollectorGeneration::Mature
             }
         };
+        let remembers_nursery = generation == CollectorGeneration::Mature
+            && object_map.reference_slots().iter().any(|slot| {
+                slots[slot.raw() as usize]
+                    .as_reference()
+                    .is_some_and(|child| {
+                        matches!(
+                            self.generation(child),
+                            Some(CollectorGeneration::Nursery { .. })
+                        )
+                    })
+            });
         self.objects.insert(
             reference,
             RelocationAllocation {
@@ -144,6 +155,9 @@ impl RelocationRuntime {
                 mutability: crate::ObjectMutability::Mutable,
             },
         );
+        if remembers_nursery {
+            self.dirty_cards.insert(reference);
+        }
         self.metrics.record_allocation();
         Ok(reference)
     }
