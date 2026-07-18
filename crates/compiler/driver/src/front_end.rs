@@ -314,13 +314,16 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
 }
 
 fn tooling_inlay_hints(hir: &HirBubble) -> Vec<ToolingInlayHint> {
-    let parameters = hir
+    let owners = hir
         .functions()
+        .iter()
+        .chain(hir.methods().iter().map(pop_hir::HirMethod::function))
+        .collect::<Vec<_>>();
+    let parameters = owners
         .iter()
         .map(|function| (function.symbol(), function.parameters()))
         .collect::<BTreeMap<_, _>>();
-    let mut hints = hir
-        .functions()
+    let mut hints = owners
         .iter()
         .flat_map(|owner| {
             pop_hir::hir_source_calls(owner)
