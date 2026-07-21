@@ -26,6 +26,7 @@ pub enum ClassMethodDispatch {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClassDefinition {
     symbol: SymbolId,
+    source_symbol: SymbolId,
     module: ModuleId,
     bubble: BubbleId,
     class: ClassId,
@@ -43,6 +44,11 @@ impl ClassDefinition {
     #[must_use]
     pub const fn symbol(&self) -> SymbolId {
         self.symbol
+    }
+
+    #[must_use]
+    pub const fn source_symbol(&self) -> SymbolId {
+        self.source_symbol
     }
 
     #[must_use]
@@ -272,7 +278,7 @@ impl SignatureResolver<'_> {
     }
 
     #[must_use]
-    pub(crate) fn class_source_identity(&self, class: ClassId) -> Option<SymbolId> {
+    pub fn class_source_identity(&self, class: ClassId) -> Option<SymbolId> {
         let symbol = self
             .class_definitions
             .values()
@@ -409,7 +415,7 @@ impl SignatureResolver<'_> {
         ) && self.type_satisfies_nominal_bound(source, target)
     }
 
-    pub(crate) fn instantiate_class(
+    pub fn instantiate_class(
         &mut self,
         definition: SymbolId,
         arguments: &[TypeId],
@@ -512,6 +518,7 @@ impl SignatureResolver<'_> {
         let (fields, methods, interfaces, builtin_interfaces) = specialized?;
         let instance = ClassDefinition {
             symbol,
+            source_symbol: template.source_symbol,
             module: template.module,
             bubble: template.bubble,
             class,
@@ -644,6 +651,65 @@ impl SignatureResolver<'_> {
         self.define_class_impl(module, symbol, syntax, true)
     }
 
+    /// Reconstructs one artifact-verified public class and its exact nominal
+    /// interface witnesses. Fields, methods, and runtime descriptors remain in
+    /// the linked implementation and are not exposed as reflection metadata.
+    #[must_use]
+    pub fn define_referenced_class(
+        &mut self,
+        module: ModuleId,
+        symbol: SymbolId,
+        type_parameters: Vec<crate::ResolvedTypeParameter>,
+        is_open: bool,
+        interface_types: Vec<TypeId>,
+        span: SourceSpan,
+    ) -> Option<ClassDefinition> {
+        if self.class_definitions.contains_key(&symbol) {
+            return None;
+        }
+        let interfaces = interface_types
+            .into_iter()
+            .map(|interface_type| {
+                let definition = self.interface_definition_for_type(interface_type)?;
+                Some(ClassInterfaceImplementation::referenced(
+                    definition.interface(),
+                    interface_type,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let class = ClassId::from_raw(self.next_class);
+        self.next_class = self.next_class.saturating_add(1);
+        let arguments = type_parameters
+            .iter()
+            .map(crate::ResolvedTypeParameter::type_id)
+            .collect::<Vec<_>>();
+        let type_id = self
+            .arena
+            .intern(SemanticType::Class { class, arguments })
+            .ok()?;
+        let bubble = self.database().index().declaration(symbol)?.bubble();
+        let definition = ClassDefinition {
+            symbol,
+            source_symbol: symbol,
+            module,
+            bubble,
+            class,
+            type_id,
+            type_parameters: type_parameters.clone(),
+            is_open,
+            interfaces,
+            builtin_interfaces: Vec::new(),
+            fields: Vec::new(),
+            methods: Vec::new(),
+            span,
+        };
+        self.class_types.insert(symbol, type_id);
+        self.class_type_parameters.insert(symbol, type_parameters);
+        self.classes_by_type.insert(type_id, symbol);
+        self.class_definitions.insert(symbol, definition.clone());
+        Some(definition)
+    }
+
     fn define_class_impl(
         &mut self,
         module: ModuleId,
@@ -684,6 +750,7 @@ impl SignatureResolver<'_> {
         });
         let definition = diagnostics.is_empty().then(|| ClassDefinition {
             symbol,
+            source_symbol: symbol,
             module,
             bubble: self
                 .database()

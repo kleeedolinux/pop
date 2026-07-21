@@ -8,9 +8,10 @@ use pop_foundation::{
     BuiltinTypeId, ClassId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, IterationCaseId,
     ResultCaseId, SymbolId, UnionCaseId,
 };
+use pop_mir::MirViewKind;
 use pop_runtime_interface::{ForeignAddress, ManagedReference, RuntimeFailure};
-use pop_types::{FloatValue, IntegerValue};
-use std::cell::RefCell;
+use pop_types::{CodecErrorReason, FloatValue, IntegerValue};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,6 +31,10 @@ pub enum MirValue {
     },
     Table(Vec<(Self, Self)>),
     Function(SymbolId),
+    CodecSchema(SymbolId),
+    CodecWriter(MirCodecWriter),
+    CodecReader(MirCodecReader),
+    CodecError(MirCodecError),
     Task(SymbolId),
     CancellationSource(SymbolId),
     CancellationToken(SymbolId),
@@ -37,6 +42,7 @@ pub enum MirValue {
     FfiHandle(u64),
     FfiBuffer(ManagedReference),
     Bytes(ManagedReference),
+    View(MirViewValue),
     FfiPointer(ForeignAddress),
     FfiFunction(u64),
     FfiRegisteredCallback {
@@ -80,9 +86,111 @@ pub enum MirValue {
     },
 }
 
+pub type MirCodecError = CodecErrorReason;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MirCodecEvent {
+    RecordStart(u16),
+    Member {
+        ordinal: u16,
+        label: String,
+    },
+    RecordEnd,
+    EnumCase {
+        ordinal: u16,
+        label: String,
+        discriminant: u32,
+    },
+    UnionStart {
+        ordinal: u16,
+        label: String,
+        payload_count: u16,
+    },
+    Payload(u16),
+    UnionEnd,
+    TupleStart(u16),
+    Element(u16),
+    TupleEnd,
+    SequenceStart(u32),
+    SequenceEnd,
+    OptionalAbsent,
+    OptionalPresent,
+    Boolean(bool),
+    Integer(IntegerValue),
+    Float(FloatValue),
+    String(String),
+    Bytes(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MirCodecWriter(Rc<RefCell<Vec<MirCodecEvent>>>);
+
+impl MirCodecWriter {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[must_use]
+    pub fn events(&self) -> Vec<MirCodecEvent> {
+        self.0.borrow().clone()
+    }
+    pub(crate) fn append_within_limit(
+        &self,
+        mut events: Vec<MirCodecEvent>,
+        maximum_events: usize,
+    ) -> bool {
+        let mut stored = self.0.borrow_mut();
+        if stored
+            .len()
+            .checked_add(events.len())
+            .is_none_or(|count| count > maximum_events)
+        {
+            return false;
+        }
+        stored.append(&mut events);
+        true
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirCodecReader {
+    pub(crate) events: Rc<Vec<MirCodecEvent>>,
+    pub(crate) position: Rc<Cell<usize>>,
+}
+
+impl MirCodecReader {
+    #[must_use]
+    pub fn new(events: Vec<MirCodecEvent>) -> Self {
+        Self {
+            events: Rc::new(events),
+            position: Rc::new(Cell::new(0)),
+        }
+    }
+}
+
+/// Backend-private relocation-safe view descriptor.
+///
+/// It retains the typed lender value and stores checked offsets only; it never
+/// caches an interior payload address or a callee-local SSA identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirViewValue {
+    pub(crate) kind: MirViewKind,
+    pub(crate) lender: MirViewLenderValue,
+    pub(crate) byte_offset: usize,
+    pub(crate) byte_length: usize,
+    pub(crate) scalar_length: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MirViewLenderValue {
+    Bytes(ManagedReference),
+    Text(Rc<str>),
+}
+
 #[derive(Clone, Debug)]
 pub struct MirClassValue {
     pub(crate) class: ClassId,
+    pub(crate) definition: pop_types::CanonicalNominalIdentity,
     pub(crate) reference: ManagedReference,
     pub(crate) fields: Rc<RefCell<Vec<(FieldId, RuntimeValue)>>>,
 }
@@ -90,11 +198,13 @@ pub struct MirClassValue {
 impl MirClassValue {
     pub(crate) fn new(
         class: ClassId,
+        definition: pop_types::CanonicalNominalIdentity,
         reference: ManagedReference,
         fields: Vec<(FieldId, RuntimeValue)>,
     ) -> Self {
         Self {
             class,
+            definition,
             reference,
             fields: Rc::new(RefCell::new(fields)),
         }
@@ -103,6 +213,11 @@ impl MirClassValue {
     #[must_use]
     pub const fn class(&self) -> ClassId {
         self.class
+    }
+
+    #[must_use]
+    pub const fn definition(&self) -> &pop_types::CanonicalNominalIdentity {
+        &self.definition
     }
 }
 
@@ -119,6 +234,10 @@ impl RuntimeValue {
             MirValue::FfiBuffer(reference)
             | MirValue::Bytes(reference)
             | MirValue::FfiRegisteredCallback { reference, .. } => Some(*reference),
+            MirValue::View(MirViewValue {
+                lender: MirViewLenderValue::Bytes(reference),
+                ..
+            }) => Some(*reference),
             _ => None,
         };
         Self { visible, reference }
@@ -139,8 +258,19 @@ impl RuntimeValue {
             return Err(ExecutionError::Runtime(RuntimeFailure::runtime_invariant()));
         }
         self.reference = relocated;
-        if let (MirValue::Class(class), Some(reference)) = (&mut self.visible, relocated) {
-            class.reference = reference;
+        if let Some(reference) = relocated {
+            match &mut self.visible {
+                MirValue::Class(class) => class.reference = reference,
+                MirValue::FfiBuffer(found) | MirValue::Bytes(found) => *found = reference,
+                MirValue::FfiRegisteredCallback {
+                    reference: found, ..
+                } => *found = reference,
+                MirValue::View(MirViewValue {
+                    lender: MirViewLenderValue::Bytes(found),
+                    ..
+                }) => *found = reference,
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -148,7 +278,7 @@ impl RuntimeValue {
 
 impl PartialEq for MirClassValue {
     fn eq(&self, other: &Self) -> bool {
-        self.class == other.class && Rc::ptr_eq(&self.fields, &other.fields)
+        self.definition == other.definition && Rc::ptr_eq(&self.fields, &other.fields)
     }
 }
 

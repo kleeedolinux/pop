@@ -17,3 +17,10 @@ typeId	sourceName	ownerBubble	arity	role	prelude
 114	CancelToken	Pop.Standard	0	Nominal	true
 115	Task.Group	Pop.Standard	0	Nominal	false
 116	Task.CancelSource	Pop.Standard	0	Nominal	false
+117	Metadata.Use	Pop.Standard	0	Nominal	false
+118	Codec.Schema	Pop.Standard	1	Nominal	false
+119	Codec.Writer	Pop.Standard	0	Nominal	false
+120	Codec.Reader	Pop.Standard	0	Nominal	false
+121	Codec.Error	Pop.Standard	0	Nominal	false
+122	Bytes.View	Pop.Standard	0	View	false
+123	Text.View	Pop.Standard	0	View	false

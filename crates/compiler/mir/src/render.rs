@@ -5,11 +5,64 @@
 
 use std::fmt::Write;
 
-use pop_foundation::{FieldId, MethodId, SymbolId, TypeId, ValueId};
+use pop_foundation::{BuiltinTypeId, FieldId, MethodId, ResultCaseId, SymbolId, TypeId, ValueId};
 use pop_runtime_interface::{ArrayElementMap, ObjectMap, PanicPayload, UnwindReason};
-use pop_types::{FloatKind, FloatValue, IntegerKind};
+use pop_types::{
+    CallableLifetimeSummary, FloatKind, FloatValue, IntegerKind, ParameterRetention,
+    ResultProvenance,
+};
 
 use crate::ir::*;
+
+pub(crate) fn dump_nominal_interface_reference(
+    output: &mut String,
+    reference: &MirInterfaceReference,
+) {
+    let identity = reference.identity();
+    let _ = write!(
+        output,
+        "nominal.interface b{}:s{} i{} t{} arguments(",
+        identity.definition().bubble().raw(),
+        identity.definition().symbol().raw(),
+        reference.interface().raw(),
+        reference.type_id().raw(),
+    );
+    dump_type_ids(output, identity.arguments());
+    let _ = writeln!(output, ") canonical({})", identity.canonical().descriptor());
+}
+
+pub(crate) fn dump_nominal_class_reference(output: &mut String, reference: &MirClassReference) {
+    let identity = reference.identity();
+    let _ = write!(
+        output,
+        "nominal.class b{}:s{} c{} t{} open({}) base(",
+        identity.definition().bubble().raw(),
+        identity.definition().symbol().raw(),
+        reference.class().raw(),
+        reference.type_id().raw(),
+        reference.is_open(),
+    );
+    if let Some((base, base_type)) = reference.base().zip(reference.base_type()) {
+        let _ = write!(output, "c{}:t{}", base.raw(), base_type.raw());
+    } else {
+        output.push('-');
+    }
+    output.push_str(") arguments(");
+    dump_type_ids(output, identity.arguments());
+    output.push_str(") interfaces(");
+    for (index, interface) in reference.interfaces().iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        let _ = write!(
+            output,
+            "i{}:t{}",
+            interface.interface().raw(),
+            interface.interface_type().raw()
+        );
+    }
+    let _ = writeln!(output, ") canonical({})", identity.canonical().descriptor());
+}
 
 pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration) {
     match &declaration.kind {
@@ -73,10 +126,12 @@ pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration
         MirDeclarationKind::Class(class) => {
             let _ = write!(
                 output,
-                "type.class s{} c{} t{} fields ",
+                "type.class s{} c{} t{} identity b{}:s{} fields ",
                 declaration.symbol.raw(),
                 class.class.raw(),
-                class.type_id.raw()
+                class.type_id.raw(),
+                class.definition().bubble().raw(),
+                class.definition().symbol().raw(),
             );
             dump_declared_fields(output, &class.fields);
             output.push_str(" methods ");
@@ -85,6 +140,12 @@ pub(crate) fn dump_declaration(output: &mut String, declaration: &MirDeclaration
             dump_interface_implementations(output, &class.interfaces);
             output.push_str(" implementsBuiltin ");
             dump_builtin_interface_implementations(output, &class.builtin_interfaces);
+            if class.is_open() {
+                output.push_str(" open");
+            }
+            if let Some(base) = class.base() {
+                let _ = write!(output, " base c{}", base.raw());
+            }
         }
         MirDeclarationKind::Interface(interface) => {
             let _ = write!(
@@ -113,7 +174,9 @@ fn dump_interface_methods(output: &mut String, methods: &[MirInterfaceMethod]) {
         dump_type_ids(output, &method.parameters);
         output.push_str(")->(");
         dump_type_ids(output, &method.results);
-        output.push(')');
+        output.push_str(")effects[");
+        dump_effects(output, method.effects);
+        output.push(']');
     }
 }
 
@@ -269,7 +332,26 @@ pub(crate) fn dump_function(output: &mut String, function: &MirFunction) {
     }
     output.push_str(") effects[");
     dump_effects(output, function.effects);
-    output.push_str("]\n");
+    output.push(']');
+    dump_callable_lifetime_summary(output, &function.lifetime_summary);
+    if function.parameter_view_borrows.iter().any(Option::is_some) {
+        output.push_str(" viewParameters(");
+        for (index, borrow) in function.parameter_view_borrows.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            let Some(borrow) = borrow else {
+                output.push('-');
+                continue;
+            };
+            output.push_str(view_kind_name(borrow.kind()));
+            output.push(':');
+            dump_view_lender(output, borrow.lender_provenance());
+            let _ = write!(output, ":lifetime#{}", borrow.borrow_lifetime().raw());
+        }
+        output.push(')');
+    }
+    output.push('\n');
     dump_blocks(output, &function.blocks);
 }
 
@@ -306,7 +388,9 @@ pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFu
     }
     output.push_str(") effects[");
     dump_effects(output, function.effects());
-    output.push(']');
+    output.push_str("] callbackPairs(");
+    dump_ffi_callback_pairs(output, declaration.callback_pairs());
+    output.push(')');
     if let Some(identity) = function.reference_identity() {
         let _ = write!(
             output,
@@ -316,6 +400,31 @@ pub(crate) fn dump_foreign_function(output: &mut String, function: &MirForeignFu
         );
     }
     output.push('\n');
+}
+
+fn dump_ffi_callback_pairs(output: &mut String, pairs: &[pop_types::FfiCallbackPairContract]) {
+    if pairs.is_empty() {
+        output.push('-');
+        return;
+    }
+    for (index, pair) in pairs.iter().enumerate() {
+        if index != 0 {
+            output.push(';');
+        }
+        let _ = write!(
+            output,
+            "{}:{}:{:?}:{:?}:{}:{:?}:{:?}:{:?}:{:?}",
+            pair.callback_parameter_index(),
+            pair.context_parameter_index(),
+            pair.lifetime(),
+            pair.callback_abi(),
+            pair.signature_fingerprint(),
+            pair.thread(),
+            pair.concurrency(),
+            pair.reentrancy(),
+            pair.panic_policy()
+        );
+    }
 }
 
 fn dump_optional_ffi_layouts(
@@ -349,7 +458,56 @@ pub(crate) fn dump_function_reference(output: &mut String, reference: &MirFuncti
     dump_type_ids(output, &reference.results);
     output.push_str(") effects[");
     dump_effects(output, reference.effects);
-    output.push_str("]\n");
+    output.push(']');
+    dump_callable_lifetime_summary(output, &reference.lifetime_summary);
+    output.push('\n');
+}
+
+fn dump_callable_lifetime_summary(output: &mut String, summary: &CallableLifetimeSummary) {
+    let conservative = CallableLifetimeSummary::conservative(
+        summary.parameter_retention().len(),
+        summary.result_provenance().len(),
+    );
+    if summary == &conservative {
+        return;
+    }
+    dump_callable_lifetime_summary_exact(output, summary);
+}
+
+fn dump_callable_lifetime_summary_exact(output: &mut String, summary: &CallableLifetimeSummary) {
+    let _ = write!(
+        output,
+        " lifetimeSummary(v{};parameters=",
+        summary.proof_version()
+    );
+    for (index, retention) in summary.parameter_retention().iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        match retention {
+            ParameterRetention::DoesNotRetain => output.push_str("DoesNotRetain"),
+            ParameterRetention::MayRetain => output.push_str("MayRetain"),
+            ParameterRetention::StoresInto(target) => {
+                let _ = write!(output, "StoresInto#{target}");
+            }
+            ParameterRetention::Captures => output.push_str("Captures"),
+            ParameterRetention::Publishes => output.push_str("Publishes"),
+        }
+    }
+    output.push_str(";results=");
+    for (index, provenance) in summary.result_provenance().iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        match provenance {
+            ResultProvenance::Independent => output.push_str("Independent"),
+            ResultProvenance::ReturnsAlias(source) => {
+                let _ = write!(output, "ReturnsAlias#{source}");
+            }
+            ResultProvenance::MayAlias => output.push_str("MayAlias"),
+        }
+    }
+    output.push(')');
 }
 
 pub(crate) fn dump_nested_function(output: &mut String, function: &MirNestedFunction) {
@@ -541,6 +699,73 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
                 result.raw()
             );
         }
+        MirInstructionKind::FfiCallbackOpenScoped {
+            callback,
+            callback_type,
+            owner,
+            function,
+            site,
+            region,
+        } => {
+            let _ = write!(
+                output,
+                "ffiCallbackOpenScoped v{} callbackType t{} owner s{} function nf{} callbackSite#{} region#{}",
+                callback.raw(),
+                callback_type.raw(),
+                owner.raw(),
+                function.raw(),
+                site.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiCallbackOpenOwned {
+            callback,
+            callback_type,
+            owner,
+            function,
+            site,
+            thread,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffiCallbackOpenOwned v{} callbackType t{} owner s{} function nf{} callbackSite#{} thread {} result bt{} success resultCase#{} failure resultCase#{}",
+                callback.raw(),
+                callback_type.raw(),
+                owner.raw(),
+                function.raw(),
+                site.raw(),
+                callback_thread_text(*thread),
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+        }
+        MirInstructionKind::FfiCallbackCloseScoped { callback, region } => {
+            let _ = write!(
+                output,
+                "ffiCallbackCloseScoped v{} region#{}",
+                callback.raw(),
+                region.raw()
+            );
+        }
+        MirInstructionKind::FfiCallbackCloseOwned {
+            callback,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "ffiCallbackCloseOwned v{} result bt{} success resultCase#{} failure resultCase#{}",
+                callback.raw(),
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+        }
         MirInstructionKind::EnumConstant {
             definition,
             case,
@@ -554,8 +779,56 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
                 discriminant
             );
         }
+        MirInstructionKind::CodecErrorConstant { case } => {
+            let name = match case.raw() {
+                0 => "MalformedInput",
+                1 => "LimitExceeded",
+                2 => "CapabilityFailure",
+                _ => "invalid",
+            };
+            let _ = write!(output, "codec.error {}", name);
+        }
         MirInstructionKind::FunctionReference(function) => {
             let _ = write!(output, "functionReference s{}", function.raw());
+        }
+        MirInstructionKind::GeneratedCodecSchema(adapter) => {
+            let _ = write!(output, "codec.schema s{}", adapter.raw());
+        }
+        MirInstructionKind::CodecEncode {
+            adapter,
+            value,
+            writer,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "codecEncode s{} v{} v{} result bt{} success resultCase#{} failure resultCase#{}",
+                adapter.raw(),
+                value.raw(),
+                writer.raw(),
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
+        }
+        MirInstructionKind::CodecDecode {
+            adapter,
+            reader,
+            result,
+            success,
+            failure,
+        } => {
+            let _ = write!(
+                output,
+                "codecDecode s{} v{} result bt{} success resultCase#{} failure resultCase#{}",
+                adapter.raw(),
+                reader.raw(),
+                result.raw(),
+                success.raw(),
+                failure.raw()
+            );
         }
         MirInstructionKind::TaskCreate {
             dispatch,
@@ -1203,11 +1476,14 @@ fn dump_callable_or_schema_instruction(
         MirInstructionKind::CallDirect {
             function,
             arguments,
+            lifetime_summary,
+            view_result,
             declared_effects,
             unwind,
         } => {
             let _ = write!(output, "callDirect s{} ", function.raw());
             dump_value_list(output, arguments);
+            dump_call_lifetime_contract(output, lifetime_summary, *view_result);
             dump_call_contract(output, *declared_effects, *unwind);
         }
         MirInstructionKind::CallForeign {
@@ -1227,6 +1503,8 @@ fn dump_callable_or_schema_instruction(
         MirInstructionKind::CallReferenced {
             function,
             arguments,
+            lifetime_summary,
+            view_result,
             declared_effects,
             unwind,
         } => {
@@ -1237,6 +1515,7 @@ fn dump_callable_or_schema_instruction(
                 function.symbol().raw()
             );
             dump_value_list(output, arguments);
+            dump_call_lifetime_contract(output, lifetime_summary, *view_result);
             dump_call_contract(output, *declared_effects, *unwind);
         }
         MirInstructionKind::CallDirectMethod {
@@ -1309,37 +1588,54 @@ fn dump_callable_or_schema_instruction(
                 function.raw(),
                 region.raw()
             );
-            for (index, capture) in captures.iter().enumerate() {
-                if index != 0 {
-                    output.push(',');
-                }
-                let mode = match capture.mode() {
-                    MirCaptureMode::Value => "value",
-                    MirCaptureMode::Cell => "cell",
-                };
-                if capture.self_reference() {
-                    let _ = write!(
-                        output,
-                        "cap{}:bind{}@{}=self:t{}:{mode}",
-                        capture.capture().raw(),
-                        capture.binding().raw(),
-                        capture.slot(),
-                        capture.type_id().raw()
-                    );
-                } else {
-                    let _ = write!(
-                        output,
-                        "cap{}:bind{}@{}=v{}:t{}:{mode}",
-                        capture.capture().raw(),
-                        capture.binding().raw(),
-                        capture.slot(),
-                        capture.value().raw(),
-                        capture.type_id().raw()
-                    );
-                }
-            }
+            dump_closure_captures(output, captures);
             output.push_str("] ");
             dump_value_list(output, arguments);
+            dump_call_contract(output, *declared_effects, *unwind);
+        }
+        MirInstructionKind::CallCallbackPair {
+            callback,
+            signature,
+            owner,
+            function,
+            captures,
+            region,
+            lifetime,
+            result,
+            success,
+            failure,
+            declared_effects,
+            unwind,
+        } => {
+            let _ = write!(
+                output,
+                "callCallbackPair v{} callbackType t{} abi {} parameterLayouts[",
+                callback.raw(),
+                signature.callback_type().raw(),
+                signature.abi().name()
+            );
+            dump_optional_ffi_layouts(output, signature.parameter_layouts());
+            output.push_str("] resultLayout ");
+            dump_optional_ffi_layout(output, signature.result_layout());
+            let _ = write!(
+                output,
+                " fingerprint {} owner s{} function nf{} captures[",
+                signature.fingerprint().lower_hex(),
+                owner.raw(),
+                function.raw()
+            );
+            dump_closure_captures(output, captures);
+            let _ = write!(
+                output,
+                "] region#{} lifetime {} result ",
+                region.raw(),
+                callback_lifetime_text(*lifetime)
+            );
+            dump_optional_builtin_type(output, *result);
+            output.push_str(" success ");
+            dump_optional_result_case(output, *success);
+            output.push_str(" failure ");
+            dump_optional_result_case(output, *failure);
             dump_call_contract(output, *declared_effects, *unwind);
         }
         MirInstructionKind::RecordMake { record, fields } => {
@@ -1414,6 +1710,104 @@ fn dump_callable_or_schema_instruction(
                 pop_foundation::NominalInterfaceId::Builtin(interface) => ('b', interface.raw()),
             };
             let _ = write!(output, "interface.upcast v{} {prefix}{raw}", value.raw());
+        }
+        MirInstructionKind::CheckedDowncast {
+            value,
+            source_interface,
+            source_type,
+            target_class,
+            target_type,
+        } => {
+            let _ = write!(
+                output,
+                "checkedDowncast v{} i{} t{} c{} t{}",
+                value.raw(),
+                source_interface.raw(),
+                source_type.raw(),
+                target_class.raw(),
+                target_type.raw(),
+            );
+        }
+        MirInstructionKind::ViewCreate {
+            kind,
+            lender,
+            lender_provenance,
+            range_unit,
+            boundary,
+            borrow_lifetime,
+        } => {
+            let _ = write!(
+                output,
+                "viewCreate {} v{} lender ",
+                view_kind_name(*kind),
+                lender.raw()
+            );
+            dump_view_lender(output, *lender_provenance);
+            let _ = write!(
+                output,
+                " unit {} boundary {} lifetime#{}",
+                view_range_unit_name(*range_unit),
+                view_boundary_name(*boundary),
+                borrow_lifetime.raw()
+            );
+        }
+        MirInstructionKind::ViewSlice {
+            kind,
+            view,
+            start,
+            length,
+            lender_provenance,
+            range_unit,
+            boundary,
+            parent_lifetime,
+            borrow_lifetime,
+            bounds_trap,
+        } => {
+            let _ = write!(
+                output,
+                "viewSlice {} v{} v{} v{} lender ",
+                view_kind_name(*kind),
+                view.raw(),
+                start.raw(),
+                length.raw()
+            );
+            dump_view_lender(output, *lender_provenance);
+            let _ = write!(
+                output,
+                " unit {} boundary {} parent lifetime#{} lifetime#{} trap {}",
+                view_range_unit_name(*range_unit),
+                view_boundary_name(*boundary),
+                parent_lifetime.raw(),
+                borrow_lifetime.raw(),
+                bounds_trap
+            );
+        }
+        MirInstructionKind::ViewLength { kind, view } => {
+            let _ = write!(
+                output,
+                "viewLength {} v{}",
+                view_kind_name(*kind),
+                view.raw()
+            );
+        }
+        MirInstructionKind::ViewGetByte { view, index } => {
+            let _ = write!(output, "viewGetByte v{} v{}", view.raw(), index.raw());
+        }
+        MirInstructionKind::ViewMaterialize {
+            kind,
+            view,
+            allocation_site,
+        } => {
+            let _ = write!(
+                output,
+                "viewMaterialize {} v{} allocation#{}",
+                view_kind_name(*kind),
+                view.raw(),
+                allocation_site.raw()
+            );
+        }
+        MirInstructionKind::ViewEnd { borrow_lifetime } => {
+            let _ = write!(output, "viewEnd lifetime#{}", borrow_lifetime.raw());
         }
         MirInstructionKind::CaptureCellAllocate {
             binding,
@@ -1518,6 +1912,61 @@ fn dump_callable_or_schema_instruction(
     true
 }
 
+fn dump_call_lifetime_contract(
+    output: &mut String,
+    summary: &CallableLifetimeSummary,
+    result: Option<MirCallViewResult>,
+) {
+    dump_callable_lifetime_summary_exact(output, summary);
+    if let Some(result) = result {
+        let _ = write!(
+            output,
+            " viewResult({},source#{},lifetime#{})",
+            view_kind_name(result.kind()),
+            result.source_argument(),
+            result.borrow_lifetime().raw(),
+        );
+    }
+}
+
+const fn view_kind_name(kind: MirViewKind) -> &'static str {
+    match kind {
+        MirViewKind::Bytes => "bytes",
+        MirViewKind::Text => "text",
+    }
+}
+
+const fn view_range_unit_name(unit: MirViewRangeUnit) -> &'static str {
+    match unit {
+        MirViewRangeUnit::Bytes => "bytes",
+        MirViewRangeUnit::UnicodeScalars => "scalars",
+    }
+}
+
+const fn view_boundary_name(boundary: MirViewBoundaryProof) -> &'static str {
+    match boundary {
+        MirViewBoundaryProof::NotApplicable => "none",
+        MirViewBoundaryProof::Utf8Scalar => "utf8",
+    }
+}
+
+fn dump_view_lender(output: &mut String, lender: MirViewLender) {
+    match lender {
+        MirViewLender::Allocation { site } => {
+            let _ = write!(output, "allocation#{}", site.raw());
+        }
+        MirViewLender::Parameter { index } => {
+            let _ = write!(output, "parameter#{index}");
+        }
+        MirViewLender::Constant { fingerprint } => {
+            output.push_str("constant#");
+            for byte in fingerprint {
+                let _ = write!(output, "{byte:02x}");
+            }
+        }
+    }
+}
+
 fn dump_binary_instruction(output: &mut String, instruction: &MirInstructionKind) {
     let (name, left, right) = match instruction {
         MirInstructionKind::BooleanAnd { left, right } => ("booleanAnd", left, right),
@@ -1584,6 +2033,16 @@ fn dump_terminator(output: &mut String, terminator: &MirTerminator) {
                     output.push(',');
                 }
                 let _ = write!(output, "errorCase#{}:b{}", arm.case.raw(), arm.target.raw());
+            }
+            output.push(']');
+        }
+        MirTerminator::CodecErrorSwitch { scrutinee, arms } => {
+            let _ = write!(output, "codec.error.discriminant v{} [", scrutinee.raw());
+            for (index, arm) in arms.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                let _ = write!(output, "case#{}:b{}", arm.case.raw(), arm.target.raw());
             }
             output.push(']');
         }
@@ -1780,6 +2239,81 @@ fn dump_call_contract(output: &mut String, effects: MirEffectSummary, unwind: Mi
         MirUnwindAction::Cleanup(block) => {
             let _ = write!(output, "cleanup:b{}", block.raw());
         }
+    }
+}
+
+fn dump_closure_captures(output: &mut String, captures: &[MirClosureCapture]) {
+    for (index, capture) in captures.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        let mode = match capture.mode() {
+            MirCaptureMode::Value => "value",
+            MirCaptureMode::Cell => "cell",
+        };
+        if capture.self_reference() {
+            let _ = write!(
+                output,
+                "cap{}:bind{}@{}=self:t{}:{mode}",
+                capture.capture().raw(),
+                capture.binding().raw(),
+                capture.slot(),
+                capture.type_id().raw()
+            );
+        } else {
+            let _ = write!(
+                output,
+                "cap{}:bind{}@{}=v{}:t{}:{mode}",
+                capture.capture().raw(),
+                capture.binding().raw(),
+                capture.slot(),
+                capture.value().raw(),
+                capture.type_id().raw()
+            );
+        }
+    }
+}
+
+fn dump_optional_ffi_layout(
+    output: &mut String,
+    layout: Option<pop_runtime_interface::FfiAbiLayoutId>,
+) {
+    if let Some(layout) = layout {
+        let _ = write!(output, "layout#{}", layout.raw());
+    } else {
+        output.push('-');
+    }
+}
+
+fn dump_optional_builtin_type(output: &mut String, result: Option<BuiltinTypeId>) {
+    if let Some(result) = result {
+        let _ = write!(output, "bt{}", result.raw());
+    } else {
+        output.push('-');
+    }
+}
+
+fn dump_optional_result_case(output: &mut String, case: Option<ResultCaseId>) {
+    if let Some(case) = case {
+        let _ = write!(output, "resultCase#{}", case.raw());
+    } else {
+        output.push('-');
+    }
+}
+
+const fn callback_lifetime_text(
+    lifetime: pop_runtime_interface::FfiCallbackLifetime,
+) -> &'static str {
+    match lifetime {
+        pop_runtime_interface::FfiCallbackLifetime::CallScoped => "CallScoped",
+        pop_runtime_interface::FfiCallbackLifetime::Registered => "Registered",
+    }
+}
+
+const fn callback_thread_text(thread: pop_runtime_interface::FfiCallbackThread) -> &'static str {
+    match thread {
+        pop_runtime_interface::FfiCallbackThread::CallingThread => "CallingThread",
+        pop_runtime_interface::FfiCallbackThread::AttachedThread => "AttachedThread",
     }
 }
 

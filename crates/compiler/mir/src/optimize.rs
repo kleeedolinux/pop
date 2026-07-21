@@ -830,6 +830,11 @@ fn remap_terminator(terminator: &mut MirTerminator, mapping: &BTreeMap<BlockId, 
                 arm.target = mapping[&arm.target];
             }
         }
+        MirTerminator::CodecErrorSwitch { arms, .. } => {
+            for arm in arms {
+                arm.target = mapping[&arm.target];
+            }
+        }
         MirTerminator::Suspend {
             resume,
             cancellation,
@@ -866,6 +871,7 @@ fn remove_dead_constants(function: &mut super::MirFunction) {
                             | MirInstructionKind::StringConstant(_)
                             | MirInstructionKind::BooleanConstant(_)
                             | MirInstructionKind::NilConstant
+                            | MirInstructionKind::CodecErrorConstant { .. }
                             | MirInstructionKind::FunctionReference(_)
                     );
                 changed |= remove;
@@ -896,6 +902,9 @@ fn used_values(function: &super::MirFunction) -> BTreeSet<ValueId> {
                 used.insert(*scrutinee);
             }
             MirTerminator::ErrorSwitch { scrutinee, .. } => {
+                used.insert(*scrutinee);
+            }
+            MirTerminator::CodecErrorSwitch { scrutinee, .. } => {
                 used.insert(*scrutinee);
             }
             MirTerminator::Suspend {

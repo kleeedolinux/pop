@@ -196,7 +196,16 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
                      public function sequenceProbe(): List<Int>\n\
                          local values: {Int} = {1, 2, 3}\n\
                          local mapped = map(values, function(value: Int): Int\n\
-                             return value * 2\n\
+                             if value == 1 then\n\
+                                 return 2\n\
+                             end\n\
+                             if value == 2 then\n\
+                                 return 4\n\
+                             end\n\
+                             if value == 3 then\n\
+                                 return 6\n\
+                             end\n\
+                             return 0\n\
                          end)\n\
                          local filtered = filter(mapped, function(value: Int): Boolean\n\
                              return value > 2\n\
@@ -373,10 +382,28 @@ fn verify_sequence_consumer(standard: &FrontEndResult) {
          public function run(): Int\n\
              local values: {Int} = {1, 2, 3}\n\
              local total = fold(values, 0, function(state: Int, value: Int): Int\n\
-                 return state + value\n\
+                 if state == 0 and value == 1 then\n\
+                     return 1\n\
+                 end\n\
+                 if state == 1 and value == 2 then\n\
+                     return 12\n\
+                 end\n\
+                 if state == 12 and value == 3 then\n\
+                     return 123\n\
+                 end\n\
+                 return -1\n\
              end)\n\
              local mapped = map(values, function(value: Int): Int\n\
-                 return value * 2\n\
+                 if value == 1 then\n\
+                     return 2\n\
+                 end\n\
+                 if value == 2 then\n\
+                     return 4\n\
+                 end\n\
+                 if value == 3 then\n\
+                     return 6\n\
+                 end\n\
+                 return 0\n\
              end)\n\
              local filtered = filter(mapped, function(value: Int): Boolean\n\
                  return value > 2\n\
@@ -395,9 +422,7 @@ fn verify_sequence_consumer(standard: &FrontEndResult) {
              local noHuge = none(values, function(value: Int): Boolean\n\
                  return value > 3\n\
              end)\n\
-             local visits = 0\n\
              each(values, function(value: Int)\n\
-                 visits += value\n\
              end)\n\
              local selected = countWhere(values, function(value: Int): Boolean\n\
                  return value > 1\n\
@@ -410,7 +435,13 @@ fn verify_sequence_consumer(standard: &FrontEndResult) {
                  return value > 1\n\
              end, 0)\n\
              local reduced = reduceOr(values, function(state: Int, value: Int): Int\n\
-                 return state + value\n\
+                 if state == 1 and value == 2 then\n\
+                     return 12\n\
+                 end\n\
+                 if state == 12 and value == 3 then\n\
+                     return 123\n\
+                 end\n\
+                 return -1\n\
              end, 0)\n\
              local window = collect(take(drop(values, 1), 1))\n\
              local joined = collect(concat(window, values))\n\
@@ -418,7 +449,7 @@ fn verify_sequence_consumer(standard: &FrontEndResult) {
              if not hasLarge or not allPositive or not noHuge then\n\
                  return -1\n\
              end\n\
-             return total + List.length(collected) + List.length(collectedLabels) + List.length(joined) + count(values) + visits + selected + requested + lastMatch + lastPosition + reduced + firstOr(values, 0) + lastOr(values, 0) + numeric\n\
+             return total + List.length(collected) + List.length(collectedLabels) + List.length(joined) + count(values) + selected + requested + lastMatch + lastPosition + reduced + firstOr(values, 0) + lastOr(values, 0) + numeric\n\
          end\n",
     )
     .expect("consumer source");

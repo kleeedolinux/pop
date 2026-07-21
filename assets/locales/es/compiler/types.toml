@@ -117,3 +117,27 @@ text = "caso de match original"
 
 [messages."types.originalBinding"]
 text = "binding original"
+
+[messages."types.invalidCheckedCastTarget"]
+text = "destino no válido para la conversión comprobada `{target}`: {reason}"
+
+[messages."types.invalidCheckedCastOperand"]
+text = "no se puede convertir con comprobación `{source}` a `{target}`: {reason}"
+
+[messages."types.incompatibleCheckedCast"]
+text = "la conversión comprobada de `{source}` a `{target}` es incompatible: {reason}"
+
+[messages."types.checkedCastTarget"]
+text = "el destino de la conversión comprobada se declara aquí"
+
+[messages."types.borrowedViewEscape"]
+text = "la vista prestada `{view}` escapa de su prestador: {reason}"
+
+[messages."types.borrowedViewRetained"]
+text = "se retiene la vista prestada `{view}`: {reason}"
+
+[messages."types.borrowedViewAcrossSuspension"]
+text = "la vista prestada `{view}` no puede atravesar una suspensión"
+
+[messages."types.invalidViewCallableProvenance"]
+text = "el invocable `{callable}` tiene una procedencia de vista no válida: {reason}"

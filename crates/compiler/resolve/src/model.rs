@@ -33,13 +33,16 @@ pub enum DeclarationKind {
     Class,
     Interface,
     Enum,
+    /// Compiler-originated immutable `Codec.Schema<T>` value reserved by an
+    /// exact trusted `@RetainMetadata` attachment.
+    GeneratedCodecSchema,
 }
 
 impl DeclarationKind {
     #[must_use]
     pub const fn symbol_space(self) -> SymbolSpace {
         match self {
-            Self::Function | Self::Constant => SymbolSpace::Value,
+            Self::Function | Self::Constant | Self::GeneratedCodecSchema => SymbolSpace::Value,
             Self::TypeAlias
             | Self::Attribute
             | Self::Record
@@ -404,7 +407,11 @@ impl DeclarationIndex {
             }
             let symbol = SymbolId::from_raw(next);
             next = next
-                .checked_add(1)
+                .checked_add(if reference.kind == DeclarationKind::GeneratedCodecSchema {
+                    3
+                } else {
+                    1
+                })
                 .ok_or(ReferenceIndexError::SymbolArenaExhausted)?;
             identities.insert(reference.identity, symbol);
             self.declarations.insert(
@@ -419,6 +426,57 @@ impl DeclarationIndex {
                     reference.span,
                 ),
             );
+        }
+        Ok(self)
+    }
+
+    /// Reserves compiler-originated same-Module codec-schema Items after the
+    /// trusted attachment identity has been resolved.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a duplicate source name, missing target Module, or exhausted
+    /// local symbol identity space.
+    pub fn with_generated_codec_schemas(
+        mut self,
+        mut schemas: Vec<GeneratedCodecSchemaDeclaration>,
+    ) -> Result<Self, GeneratedDeclarationError> {
+        schemas.sort_by_key(|schema| schema.target);
+        let mut next = self
+            .declarations
+            .keys()
+            .next_back()
+            .map_or(0, |symbol| symbol.raw().saturating_add(1));
+        for schema in schemas {
+            let module = self
+                .modules
+                .get_mut(&schema.module)
+                .ok_or(GeneratedDeclarationError::MissingModule)?;
+            if self.declarations.values().any(|declaration| {
+                declaration.owner.namespace == schema.namespace && declaration.name == schema.name
+            }) {
+                return Err(GeneratedDeclarationError::DuplicateName);
+            }
+            let symbol = SymbolId::from_raw(next);
+            next = next
+                // The two following local identities are private lowering
+                // slots for the sealed encode/decode payload entries. They
+                // are not namespace declarations or public Items.
+                .checked_add(3)
+                .ok_or(GeneratedDeclarationError::SymbolArenaExhausted)?;
+            self.declarations.insert(
+                symbol,
+                Declaration::new_in_namespace(
+                    symbol,
+                    DeclarationOwner::new(schema.module, schema.bubble, schema.namespace),
+                    schema.name,
+                    DeclarationKind::GeneratedCodecSchema,
+                    schema.visibility,
+                    schema.span,
+                ),
+            );
+            module.declarations.push(symbol);
+            module.declarations.sort_unstable();
         }
         Ok(self)
     }
@@ -492,6 +550,47 @@ impl DeclarationIndex {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedCodecSchemaDeclaration {
+    target: SymbolId,
+    module: ModuleId,
+    bubble: BubbleId,
+    namespace: String,
+    name: String,
+    visibility: Visibility,
+    span: SourceSpan,
+}
+
+impl GeneratedCodecSchemaDeclaration {
+    #[must_use]
+    pub fn new(
+        target: SymbolId,
+        module: ModuleId,
+        bubble: BubbleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        visibility: Visibility,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            target,
+            module,
+            bubble,
+            namespace: namespace.into(),
+            name: name.into(),
+            visibility,
+            span,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneratedDeclarationError {
+    MissingModule,
+    DuplicateName,
+    SymbolArenaExhausted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferencedDeclaration {
     identity: SymbolIdentity,
     module: ModuleId,
@@ -502,6 +601,64 @@ pub struct ReferencedDeclaration {
 }
 
 impl ReferencedDeclaration {
+    #[must_use]
+    pub const fn identity(&self) -> SymbolIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub fn generated_codec_schema(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::GeneratedCodecSchema,
+            span,
+        }
+    }
+    #[must_use]
+    pub fn class(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::Class,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub fn interface(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::Interface,
+            span,
+        }
+    }
+
     #[must_use]
     pub fn function(
         identity: SymbolIdentity,
@@ -534,6 +691,42 @@ impl ReferencedDeclaration {
             namespace: namespace.into(),
             name: name.into(),
             kind: DeclarationKind::Record,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub fn enumeration(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::Enum,
+            span,
+        }
+    }
+
+    #[must_use]
+    pub fn union(
+        identity: SymbolIdentity,
+        module: ModuleId,
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        span: SourceSpan,
+    ) -> Self {
+        Self {
+            identity,
+            module,
+            namespace: namespace.into(),
+            name: name.into(),
+            kind: DeclarationKind::Union,
             span,
         }
     }

@@ -135,6 +135,7 @@ fn evaluate_constant(
         | ExpressionSyntaxKind::Function(_)
         | ExpressionSyntaxKind::Call { .. }
         | ExpressionSyntaxKind::GenericCall { .. }
+        | ExpressionSyntaxKind::TargetTypeCall { .. }
         | ExpressionSyntaxKind::MethodCall { .. }
         | ExpressionSyntaxKind::Index { .. }
         | ExpressionSyntaxKind::Construct { .. }

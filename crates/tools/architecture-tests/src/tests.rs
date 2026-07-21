@@ -1350,6 +1350,15 @@ fn standard_bootstrap_preserves_the_adr_0058_prelude() {
             "114\tCancelToken\tPop.Standard\t0\tNominal\ttrue",
             "115\tTask.Group\tPop.Standard\t0\tNominal\tfalse",
             "116\tTask.CancelSource\tPop.Standard\t0\tNominal\tfalse",
+            // ADR 0092 appends the closed retained-codec contract; ADR 0093
+            // appends the two compiler-proven borrowed-view identities.
+            "117\tMetadata.Use\tPop.Standard\t0\tNominal\tfalse",
+            "118\tCodec.Schema\tPop.Standard\t1\tNominal\tfalse",
+            "119\tCodec.Writer\tPop.Standard\t0\tNominal\tfalse",
+            "120\tCodec.Reader\tPop.Standard\t0\tNominal\tfalse",
+            "121\tCodec.Error\tPop.Standard\t0\tNominal\tfalse",
+            "122\tBytes.View\tPop.Standard\t0\tView\tfalse",
+            "123\tText.View\tPop.Standard\t0\tView\tfalse",
         ],
         "ADR 0058 prelude inventory drifted"
     );

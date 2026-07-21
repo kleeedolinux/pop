@@ -57,16 +57,17 @@ pub use attributes::{
 };
 pub use body_checking::{BodyChecker, RuntimeConstant};
 pub use bootstrap::{
-    AttributeIdentity, BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry,
-    BootstrapIterationProtocol, BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError,
-    BootstrapStandardFunctionEntry, BootstrapTypeEntry, BootstrapTypeRole, CompilerAttributeId,
-    CompilerAttributeRole, CompilerAttributeTarget, FFI_ALLOCATION_ERROR_TYPE_ID,
-    FFI_BUFFER_TYPE_ID, FFI_CALLBACK_CLOSED_ERROR_TYPE_ID, FFI_CALLBACK_CONTEXT_TYPE_ID,
-    FFI_CALLBACK_IN_USE_ERROR_TYPE_ID, FFI_CALLBACK_OPEN_ERROR_TYPE_ID,
-    FFI_CALLBACK_THREAD_TYPE_ID, FFI_FUNCTION_TYPE_ID, FFI_HANDLE_TYPE_ID,
-    FFI_NULL_POINTER_ERROR_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID,
+    AttributeIdentity, BYTES_TYPE_ID, BYTES_VIEW_TYPE_ID, BootstrapCodecErrorProtocol,
+    BootstrapCompilerAttributeEntry, BootstrapIntrinsicEntry, BootstrapIterationProtocol,
+    BootstrapPrimitiveEntry, BootstrapSchema, BootstrapSchemaError, BootstrapStandardFunctionEntry,
+    BootstrapTypeEntry, BootstrapTypeRole, CODEC_ERROR_TYPE_ID, CodecErrorReason,
+    CompilerAttributeId, CompilerAttributeRole, CompilerAttributeTarget,
+    FFI_ALLOCATION_ERROR_TYPE_ID, FFI_BUFFER_TYPE_ID, FFI_CALLBACK_CLOSED_ERROR_TYPE_ID,
+    FFI_CALLBACK_CONTEXT_TYPE_ID, FFI_CALLBACK_IN_USE_ERROR_TYPE_ID,
+    FFI_CALLBACK_OPEN_ERROR_TYPE_ID, FFI_CALLBACK_THREAD_TYPE_ID, FFI_FUNCTION_TYPE_ID,
+    FFI_HANDLE_TYPE_ID, FFI_NULL_POINTER_ERROR_TYPE_ID, FFI_OPTIONAL_POINTER_TYPE_ID,
     FFI_OPTIONAL_READ_ONLY_POINTER_TYPE_ID, FFI_POINTER_TYPE_ID, FFI_READ_ONLY_POINTER_TYPE_ID,
-    FFI_REGISTERED_CALLBACK_TYPE_ID, FfiCIntegerKind, embedded_bootstrap_schema,
+    FFI_REGISTERED_CALLBACK_TYPE_ID, FfiCIntegerKind, TEXT_VIEW_TYPE_ID, embedded_bootstrap_schema,
     ffi_c_integer_kind, is_ffi_abi_builtin_type, is_ffi_function_type_constructor,
     is_ffi_integer_abi_builtin_type, is_ffi_pointer_type_constructor,
 };
@@ -253,6 +254,7 @@ pub enum SemanticType {
         parameters: Vec<TypeId>,
         results: Vec<TypeId>,
         effects: EffectSummary,
+        lifetime_summary: CallableLifetimeSummary,
     },
     Record(Vec<(String, TypeId)>),
     TaggedUnion {
@@ -295,6 +297,399 @@ pub enum SemanticType {
     TypeParameter(ParameterId),
     Opaque(OpaqueId),
     Error,
+}
+
+/// Closed structural identity used by runtime nominal descriptors across Bubbles.
+///
+/// Unlike [`TypeId`], every component is stable across independent compilation.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum CanonicalTypeIdentity {
+    Primitive(PrimitiveType),
+    Record(pop_foundation::SymbolIdentity),
+    Class(CanonicalNominalIdentity),
+    Interface(CanonicalNominalIdentity),
+    Tuple(Vec<Self>),
+    Function {
+        is_async: bool,
+        parameters: Vec<Self>,
+        results: Vec<Self>,
+        effects: EffectSummary,
+        lifetime_summary: CallableLifetimeSummary,
+    },
+    Array(Box<Self>),
+    Table {
+        key: Box<Self>,
+        value: Box<Self>,
+    },
+    Optional(Box<Self>),
+    Builtin {
+        definition: BuiltinTypeId,
+        arguments: Vec<Self>,
+    },
+    Union(Vec<Self>),
+}
+
+/// Exact stable nominal definition plus its fully applied canonical arguments.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct CanonicalNominalIdentity {
+    definition: pop_foundation::SymbolIdentity,
+    arguments: Vec<CanonicalTypeIdentity>,
+}
+
+impl CanonicalNominalIdentity {
+    #[must_use]
+    pub fn new(
+        definition: pop_foundation::SymbolIdentity,
+        arguments: Vec<CanonicalTypeIdentity>,
+    ) -> Self {
+        Self {
+            definition,
+            arguments,
+        }
+    }
+
+    #[must_use]
+    pub const fn definition(&self) -> pop_foundation::SymbolIdentity {
+        self.definition
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &[CanonicalTypeIdentity] {
+        &self.arguments
+    }
+
+    #[must_use]
+    pub fn descriptor(&self) -> String {
+        let mut descriptor = format!(
+            "b{}:s{}[",
+            self.definition.bubble().raw(),
+            self.definition.symbol().raw()
+        );
+        write_canonical_type_list(&mut descriptor, &self.arguments);
+        descriptor.push(']');
+        descriptor
+    }
+}
+
+impl CanonicalTypeIdentity {
+    #[must_use]
+    pub fn descriptor(&self) -> String {
+        let mut descriptor = String::new();
+        write_canonical_type(&mut descriptor, self);
+        descriptor
+    }
+}
+
+fn write_canonical_type(output: &mut String, identity: &CanonicalTypeIdentity) {
+    use std::fmt::Write as _;
+    match identity {
+        CanonicalTypeIdentity::Primitive(primitive) => {
+            let _ = write!(output, "P({primitive:?})");
+        }
+        CanonicalTypeIdentity::Record(identity) => {
+            let _ = write!(
+                output,
+                "R(b{}:s{})",
+                identity.bubble().raw(),
+                identity.symbol().raw()
+            );
+        }
+        CanonicalTypeIdentity::Class(identity) => {
+            output.push('C');
+            output.push('(');
+            output.push_str(&identity.descriptor());
+            output.push(')');
+        }
+        CanonicalTypeIdentity::Interface(identity) => {
+            output.push('I');
+            output.push('(');
+            output.push_str(&identity.descriptor());
+            output.push(')');
+        }
+        CanonicalTypeIdentity::Tuple(elements) => {
+            output.push_str("T[");
+            write_canonical_type_list(output, elements);
+            output.push(']');
+        }
+        CanonicalTypeIdentity::Function {
+            is_async,
+            parameters,
+            results,
+            effects,
+            lifetime_summary,
+        } => {
+            let _ = write!(output, "F({};[", u8::from(*is_async));
+            write_canonical_type_list(output, parameters);
+            output.push_str("];[");
+            write_canonical_type_list(output, results);
+            let _ = write!(
+                output,
+                "];E{};L{}:[",
+                effects.bits(),
+                lifetime_summary.proof_version()
+            );
+            for (index, retention) in lifetime_summary.parameter_retention().iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                match retention {
+                    ParameterRetention::DoesNotRetain => output.push('D'),
+                    ParameterRetention::MayRetain => output.push('M'),
+                    ParameterRetention::StoresInto(target) => {
+                        let _ = write!(output, "S{target}");
+                    }
+                    ParameterRetention::Captures => output.push('C'),
+                    ParameterRetention::Publishes => output.push('P'),
+                }
+            }
+            output.push_str("]:[");
+            for (index, provenance) in lifetime_summary.result_provenance().iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                match provenance {
+                    ResultProvenance::Independent => output.push('I'),
+                    ResultProvenance::ReturnsAlias(source) => {
+                        let _ = write!(output, "R{source}");
+                    }
+                    ResultProvenance::MayAlias => output.push('M'),
+                }
+            }
+            output.push_str("])");
+        }
+        CanonicalTypeIdentity::Array(element) => {
+            output.push_str("A(");
+            write_canonical_type(output, element);
+            output.push(')');
+        }
+        CanonicalTypeIdentity::Table { key, value } => {
+            output.push_str("M(");
+            write_canonical_type(output, key);
+            output.push(';');
+            write_canonical_type(output, value);
+            output.push(')');
+        }
+        CanonicalTypeIdentity::Optional(element) => {
+            output.push_str("O(");
+            write_canonical_type(output, element);
+            output.push(')');
+        }
+        CanonicalTypeIdentity::Builtin {
+            definition,
+            arguments,
+        } => {
+            let _ = write!(output, "B{}[", definition.raw());
+            write_canonical_type_list(output, arguments);
+            output.push(']');
+        }
+        CanonicalTypeIdentity::Union(elements) => {
+            output.push_str("U[");
+            write_canonical_type_list(output, elements);
+            output.push(']');
+        }
+    }
+}
+
+fn write_canonical_type_list(output: &mut String, identities: &[CanonicalTypeIdentity]) {
+    for (index, identity) in identities.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        write_canonical_type(output, identity);
+    }
+}
+
+pub const CALLABLE_LIFETIME_PROOF_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ParameterRetention {
+    DoesNotRetain,
+    MayRetain,
+    StoresInto(u16),
+    Captures,
+    Publishes,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ResultProvenance {
+    Independent,
+    ReturnsAlias(u16),
+    MayAlias,
+}
+
+/// Closed, versioned retention and result-alias facts carried by every callable type.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct CallableLifetimeSummary {
+    proof_version: u16,
+    parameter_retention: Vec<ParameterRetention>,
+    result_provenance: Vec<ResultProvenance>,
+}
+
+impl CallableLifetimeSummary {
+    /// Constructs one summary only when its proof version and indexed facts
+    /// form a complete canonical callable contract.
+    #[must_use]
+    pub fn from_parts(
+        proof_version: u16,
+        parameter_retention: Vec<ParameterRetention>,
+        result_provenance: Vec<ResultProvenance>,
+    ) -> Option<Self> {
+        let summary = Self {
+            proof_version,
+            parameter_retention,
+            result_provenance,
+        };
+        summary
+            .is_canonical_for(
+                summary.parameter_retention.len(),
+                summary.result_provenance.len(),
+            )
+            .then_some(summary)
+    }
+
+    #[must_use]
+    pub fn conservative(parameter_count: usize, result_count: usize) -> Self {
+        Self {
+            proof_version: CALLABLE_LIFETIME_PROOF_VERSION,
+            parameter_retention: vec![ParameterRetention::MayRetain; parameter_count],
+            result_provenance: vec![ResultProvenance::MayAlias; result_count],
+        }
+    }
+
+    #[must_use]
+    pub fn non_retaining(parameter_count: usize, result_count: usize) -> Self {
+        Self {
+            proof_version: CALLABLE_LIFETIME_PROOF_VERSION,
+            parameter_retention: vec![ParameterRetention::DoesNotRetain; parameter_count],
+            result_provenance: vec![ResultProvenance::Independent; result_count],
+        }
+    }
+
+    #[must_use]
+    pub fn with_result_alias(mut self, result: usize, source_parameter: u16) -> Self {
+        if let Some(provenance) = self.result_provenance.get_mut(result) {
+            *provenance = ResultProvenance::ReturnsAlias(source_parameter);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_parameter_retention(
+        mut self,
+        parameter: usize,
+        retention: ParameterRetention,
+    ) -> Self {
+        if let Some(current) = self.parameter_retention.get_mut(parameter) {
+            *current = retention;
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_result_provenance(mut self, result: usize, provenance: ResultProvenance) -> Self {
+        if let Some(current) = self.result_provenance.get_mut(result) {
+            *current = provenance;
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn proof_version(&self) -> u16 {
+        self.proof_version
+    }
+
+    #[must_use]
+    pub fn parameter_retention(&self) -> &[ParameterRetention] {
+        &self.parameter_retention
+    }
+
+    #[must_use]
+    pub fn result_provenance(&self) -> &[ResultProvenance] {
+        &self.result_provenance
+    }
+
+    #[must_use]
+    pub fn is_canonical_for(&self, parameter_count: usize, result_count: usize) -> bool {
+        self.proof_version == CALLABLE_LIFETIME_PROOF_VERSION
+            && self.parameter_retention.len() == parameter_count
+            && self.result_provenance.len() == result_count
+            && self
+                .parameter_retention
+                .iter()
+                .all(|retention| match retention {
+                    ParameterRetention::StoresInto(target) => {
+                        usize::from(*target) < parameter_count
+                    }
+                    ParameterRetention::DoesNotRetain
+                    | ParameterRetention::MayRetain
+                    | ParameterRetention::Captures
+                    | ParameterRetention::Publishes => true,
+                })
+            && self
+                .result_provenance
+                .iter()
+                .all(|provenance| match provenance {
+                    ResultProvenance::ReturnsAlias(source) => {
+                        usize::from(*source) < parameter_count
+                    }
+                    ResultProvenance::Independent | ResultProvenance::MayAlias => true,
+                })
+    }
+}
+
+/// The only public non-owning value families accepted by ADR 0093.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ViewKind {
+    Bytes,
+    Text,
+}
+
+impl ViewKind {
+    #[must_use]
+    pub const fn type_definition(self) -> BuiltinTypeId {
+        match self {
+            Self::Bytes => BYTES_VIEW_TYPE_ID,
+            Self::Text => TEXT_VIEW_TYPE_ID,
+        }
+    }
+}
+
+/// Stable provenance of the immutable storage designated by a view.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ViewLenderProvenance {
+    Allocation {
+        site: pop_foundation::AllocationSiteId,
+    },
+    Parameter {
+        index: u32,
+    },
+    Constant {
+        fingerprint: [u8; 32],
+    },
+}
+
+/// One compiler-proven view value's lender and non-lexical borrow identity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ViewBorrow {
+    lender: ViewLenderProvenance,
+    lifetime: pop_foundation::LifetimeId,
+}
+
+impl ViewBorrow {
+    #[must_use]
+    pub const fn new(lender: ViewLenderProvenance, lifetime: pop_foundation::LifetimeId) -> Self {
+        Self { lender, lifetime }
+    }
+
+    #[must_use]
+    pub const fn lender(self) -> ViewLenderProvenance {
+        self.lender
+    }
+
+    #[must_use]
+    pub const fn lifetime(self) -> pop_foundation::LifetimeId {
+        self.lifetime
+    }
 }
 
 #[derive(
@@ -683,6 +1078,20 @@ impl EffectSummary {
     #[must_use]
     pub const fn contains(self, effect: Effect) -> bool {
         self.0 & effect.bit() != 0
+    }
+    #[must_use]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn from_bits(bits: u16) -> Option<Self> {
+        let supported = (1_u16 << 13) - 1;
+        if bits & !supported == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
     }
 }
 

@@ -3,12 +3,10 @@
 //! The runtime sees only a closed numeric site identity and an opaque context
 //! token. It never resolves a callback signature or symbol name dynamically.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{BubbleId, FfiCallbackSiteId, NestedFunctionId, SymbolId, TypeId, ValueId};
-use pop_mir::{
-    MirBubble, MirFfiCallbackAbi, MirFfiCallbackSignature, MirInstruction, MirInstructionKind,
-};
+use pop_mir::{MirBubble, MirFfiCallbackSignature, MirInstruction, MirInstructionKind};
 use pop_runtime_interface::{FfiCallbackLifetime, FfiCallbackThread, RuntimeOperation};
 use pop_target::{PointerWidth, TargetSpec};
 use pop_types::{SemanticType, TypeArena};
@@ -25,17 +23,78 @@ use crate::lowering::{
 pub(crate) const CALLBACK_REGISTRATION_SLOT: u64 = 1;
 pub(crate) const CALLBACK_CONTEXT_SLOT: u64 = 2;
 pub(crate) const CALLBACK_SITE_SLOT: u64 = 3;
-pub(crate) const CALLBACK_THUNK_SLOT: u64 = 4;
 pub(crate) const CALLBACK_CLOSED_SLOT: u64 = 5;
-pub(crate) const CALLBACK_OBJECT_SLOT_COUNT: u32 = 5;
+const CALLBACK_CONTRACT_SLOT_START: u64 = 6;
+const CALLBACK_OBJECT_BASE_SLOT_COUNT: u32 = 5;
 const CALLBACK_SCHEDULER: u32 = 1;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct CallbackSite {
+struct CallbackOpenSite {
     owner: SymbolId,
     function: NestedFunctionId,
     site: FfiCallbackSiteId,
+    callback_type: TypeId,
+    registration: ValueId,
+    lifetime: FfiCallbackLifetime,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CallbackPairUse {
+    owner: SymbolId,
+    callback: ValueId,
+    lifetime: FfiCallbackLifetime,
     signature: MirFfiCallbackSignature,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CallbackThunk {
+    owner: SymbolId,
+    function: NestedFunctionId,
+    site: FfiCallbackSiteId,
+    callback_type: TypeId,
+    signature: MirFfiCallbackSignature,
+}
+
+/// LLVM-private fixed thunk inventory derived entirely from verified MIR.
+///
+/// Contract slots are deterministic compile-time identities. A pair operation
+/// loads one statically selected slot; no ABI, fingerprint, or symbol is
+/// resolved at runtime.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CallbackPlan {
+    contract_slots: BTreeMap<MirFfiCallbackSignature, u64>,
+    thunks: Vec<CallbackThunk>,
+}
+
+impl CallbackPlan {
+    fn slot(&self, signature: &MirFfiCallbackSignature) -> Option<u64> {
+        self.contract_slots.get(signature).copied()
+    }
+
+    fn signatures_for_site(
+        &self,
+        owner: SymbolId,
+        site: FfiCallbackSiteId,
+        callback_type: TypeId,
+    ) -> impl Iterator<Item = (&MirFfiCallbackSignature, u64)> {
+        self.thunks
+            .iter()
+            .filter(move |thunk| {
+                thunk.owner == owner && thunk.site == site && thunk.callback_type == callback_type
+            })
+            .filter_map(|thunk| {
+                self.contract_slots
+                    .get(&thunk.signature)
+                    .map(|slot| (&thunk.signature, *slot))
+            })
+    }
+
+    fn object_slot_count(&self) -> Result<u32, LlvmLoweringError> {
+        u32::try_from(self.contract_slots.len())
+            .ok()
+            .and_then(|count| CALLBACK_OBJECT_BASE_SLOT_COUNT.checked_add(count))
+            .ok_or(LlvmLoweringError::UnsupportedFfiCallbackInventory)
+    }
 }
 
 pub(crate) fn runtime_site(owner: SymbolId, site: FfiCallbackSiteId) -> u64 {
@@ -46,29 +105,35 @@ pub(crate) fn thunk_name(
     bubble: pop_foundation::BubbleId,
     owner: SymbolId,
     site: FfiCallbackSiteId,
+    contract_slot: u64,
 ) -> String {
     format!(
-        "pop_b{}_ffi_callback_thunk_{}_{}",
+        "pop_b{}_ffi_callback_thunk_{}_{}_{}",
         bubble.raw(),
         owner.raw(),
-        site.raw()
+        site.raw(),
+        contract_slot
     )
+}
+
+pub(crate) fn plan_callbacks(bubble: &MirBubble) -> Result<CallbackPlan, LlvmLoweringError> {
+    collect_plan(bubble)
 }
 
 pub(crate) fn lower_thunks(
     bubble: &MirBubble,
+    plan: &CallbackPlan,
     types: &TypeArena,
     target: &TargetSpec,
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
-    let sites = collect_sites(bubble)?;
-    if !sites.is_empty() && target.pointer_width() != PointerWidth::Bits64 {
+    if !plan.thunks.is_empty() && target.pointer_width() != PointerWidth::Bits64 {
         return Err(LlvmLoweringError::UnsupportedFfiCallbackTarget(
             target.triple().to_owned(),
         ));
     }
-    sites
-        .into_iter()
-        .map(|site| lower_thunk(bubble, &site, types, target))
+    plan.thunks
+        .iter()
+        .map(|thunk| lower_thunk(bubble, plan, thunk, types, target))
         .collect()
 }
 
@@ -78,14 +143,27 @@ pub(crate) fn lower_instruction(
     instruction: &MirInstruction,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    plan: &CallbackPlan,
 ) -> Result<Option<String>, LlvmLoweringError> {
     let result = format!("%v{}", instruction.result().raw());
     let lines = match instruction.kind() {
-        MirInstructionKind::FfiCallbackOpenScoped { callback, site, .. } => {
-            lower_open_scoped(&result, bubble, owner, *callback, *site)
-        }
+        MirInstructionKind::FfiCallbackOpenScoped {
+            callback,
+            callback_type,
+            site,
+            ..
+        } => lower_open_scoped(
+            &result,
+            bubble,
+            owner,
+            *callback,
+            *callback_type,
+            *site,
+            plan,
+        )?,
         MirInstructionKind::FfiCallbackOpenOwned {
             callback,
+            callback_type,
             site,
             thread,
             success,
@@ -96,11 +174,13 @@ pub(crate) fn lower_instruction(
             bubble,
             owner,
             *callback,
+            *callback_type,
             *site,
             *thread,
             success.raw(),
             failure.raw(),
-        ),
+            plan,
+        )?,
         MirInstructionKind::CallCallbackPair {
             callback,
             signature,
@@ -125,6 +205,7 @@ pub(crate) fn lower_instruction(
             signature,
             value_types,
             types,
+            plan,
         )?,
         MirInstructionKind::FfiCallbackCloseScoped { callback, .. } => {
             lower_close_scoped(&result, *callback)
@@ -145,8 +226,10 @@ fn lower_open_scoped(
     bubble: BubbleId,
     owner: SymbolId,
     callback: ValueId,
+    callback_type: TypeId,
     site: FfiCallbackSiteId,
-) -> Vec<String> {
+    plan: &CallbackPlan,
+) -> Result<Vec<String>, LlvmLoweringError> {
     let label = result.trim_start_matches('%');
     let mut lines = open_registration(
         result,
@@ -161,8 +244,14 @@ fn lower_open_scoped(
         format!("{label}_open_make:"),
     ]);
     lines.extend(make_registration_object(
-        result, result, bubble, owner, site,
-    ));
+        result,
+        result,
+        bubble,
+        owner,
+        callback_type,
+        site,
+        plan,
+    )?);
     lines.extend([
         format!("br label %{label}_open_ready"),
         format!("{label}_open_trap:"),
@@ -170,7 +259,7 @@ fn lower_open_scoped(
         "unreachable".to_owned(),
         format!("{label}_open_ready:"),
     ]);
-    lines
+    Ok(lines)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,11 +268,13 @@ fn lower_open_owned(
     bubble: BubbleId,
     owner: SymbolId,
     callback: ValueId,
+    callback_type: TypeId,
     site: FfiCallbackSiteId,
     thread: FfiCallbackThread,
     success: u32,
     failure: u32,
-) -> Vec<String> {
+    plan: &CallbackPlan,
+) -> Result<Vec<String>, LlvmLoweringError> {
     let label = result.trim_start_matches('%');
     let registration = format!("{result}_registration_object");
     let mut lines = open_registration(
@@ -207,8 +298,10 @@ fn lower_open_owned(
         result,
         bubble,
         owner,
+        callback_type,
         site,
-    ));
+        plan,
+    )?);
     lines.extend(make_result_object(
         &format!("{result}_success_result"),
         success,
@@ -235,7 +328,7 @@ fn lower_open_owned(
             "{result} = phi i64 [ {result}_success_result, %{label}_open_make ], [ {result}_failure_result, %{label}_open_failure ]"
         ),
     ]);
-    lines
+    Ok(lines)
 }
 
 fn open_registration(
@@ -272,22 +365,32 @@ fn make_registration_object(
     open: &str,
     bubble: BubbleId,
     owner: SymbolId,
+    callback_type: TypeId,
     site: FfiCallbackSiteId,
-) -> Vec<String> {
-    let mut lines = vec![format!(
-        "{result}_thunk = ptrtoint ptr @{} to i64",
-        thunk_name(bubble, owner, site)
-    )];
+    plan: &CallbackPlan,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let signatures = plan
+        .signatures_for_site(owner, site, callback_type)
+        .collect::<Vec<_>>();
+    if signatures.is_empty() {
+        return Err(LlvmLoweringError::InvalidFfiCallbackSite { owner, site });
+    }
+    let mut lines = Vec::new();
+    for (_, slot) in &signatures {
+        lines.push(format!(
+            "{result}_thunk_{slot} = ptrtoint ptr @{} to i64",
+            thunk_name(bubble, owner, site, *slot)
+        ));
+    }
     lines.extend(lower_mapped_allocation(
         result,
-        CALLBACK_OBJECT_SLOT_COUNT,
+        plan.object_slot_count()?,
         &[],
     ));
     for (slot, value) in [
         (CALLBACK_REGISTRATION_SLOT, format!("{open}_registration")),
         (CALLBACK_CONTEXT_SLOT, format!("{open}_context")),
         (CALLBACK_SITE_SLOT, runtime_site(owner, site).to_string()),
-        (CALLBACK_THUNK_SLOT, format!("{result}_thunk")),
         (CALLBACK_CLOSED_SLOT, "0".to_owned()),
     ] {
         lines.push(format!(
@@ -295,7 +398,13 @@ fn make_registration_object(
             native_runtime_symbol(RuntimeOperation::FieldSet)
         ));
     }
-    lines
+    for (_, slot) in signatures {
+        lines.push(format!(
+            "call i8 @{}(i64 {result}, i64 {slot}, i64 {result}_thunk_{slot})",
+            native_runtime_symbol(RuntimeOperation::FieldSet)
+        ));
+    }
+    Ok(lines)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,11 +422,12 @@ fn lower_pair_call(
     signature: &MirFfiCallbackSignature,
     value_types: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    plan: &CallbackPlan,
 ) -> Result<Vec<String>, LlvmLoweringError> {
     let label = result.trim_start_matches('%');
-    let thunk_slot = match signature.abi() {
-        MirFfiCallbackAbi::C | MirFfiCallbackAbi::System => CALLBACK_THUNK_SLOT,
-    };
+    let thunk_slot = plan
+        .slot(signature)
+        .ok_or(LlvmLoweringError::UnsupportedFfiCallbackSignature { owner, function })?;
     let mut lines =
         load_callback_field(&format!("{result}_closed"), callback, CALLBACK_CLOSED_SLOT);
     lines.push(format!("{result}_is_open = icmp eq i64 {result}_closed, 0"));
@@ -593,105 +703,156 @@ fn trap_line() -> String {
     )
 }
 
-fn collect_sites(bubble: &MirBubble) -> Result<Vec<CallbackSite>, LlvmLoweringError> {
-    let mut signatures = BTreeMap::<TypeId, MirFfiCallbackSignature>::new();
-    for instruction in bubble
-        .functions()
-        .iter()
-        .flat_map(pop_mir::MirFunction::blocks)
-        .chain(
-            bubble
-                .methods()
-                .iter()
-                .flat_map(|method| method.function().blocks()),
-        )
-        .chain(
-            bubble
-                .nested_functions()
-                .iter()
-                .flat_map(pop_mir::MirNestedFunction::blocks),
-        )
-        .flat_map(pop_mir::MirBlock::instructions)
-    {
-        let MirInstructionKind::CallCallbackPair {
-            signature,
-            owner,
-            function,
-            ..
-        } = instruction.kind()
-        else {
-            continue;
-        };
-        if signatures
-            .insert(signature.callback_type(), signature.clone())
-            .is_some_and(|existing| existing != *signature)
-        {
-            return Err(LlvmLoweringError::UnsupportedFfiCallbackSignature {
-                owner: *owner,
-                function: *function,
-            });
-        }
-    }
-    let mut sites = BTreeMap::new();
+fn collect_plan(bubble: &MirBubble) -> Result<CallbackPlan, LlvmLoweringError> {
+    let mut pair_uses = Vec::new();
     for function in bubble.functions() {
-        collect_owner_sites(
-            function.symbol(),
-            function.blocks(),
-            &signatures,
-            &mut sites,
-        )?;
+        collect_pair_uses(function.symbol(), function.blocks(), &mut pair_uses);
     }
     for method in bubble.methods() {
-        collect_owner_sites(
+        collect_pair_uses(
             method.function().symbol(),
             method.function().blocks(),
-            &signatures,
-            &mut sites,
+            &mut pair_uses,
+        );
+    }
+    for nested in bubble.nested_functions() {
+        collect_pair_uses(nested.owner(), nested.blocks(), &mut pair_uses);
+    }
+    let signatures = pair_uses
+        .iter()
+        .map(|pair| pair.signature.clone())
+        .collect::<BTreeSet<_>>();
+    let contract_slots = signatures
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, signature)| {
+            u64::try_from(index)
+                .ok()
+                .and_then(|index| CALLBACK_CONTRACT_SLOT_START.checked_add(index))
+                .map(|slot| (signature, slot))
+                .ok_or(LlvmLoweringError::UnsupportedFfiCallbackInventory)
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut opens = BTreeMap::new();
+    for function in bubble.functions() {
+        collect_owner_open_sites(function.symbol(), function.blocks(), &mut opens)?;
+    }
+    for method in bubble.methods() {
+        collect_owner_open_sites(
+            method.function().symbol(),
+            method.function().blocks(),
+            &mut opens,
         )?;
     }
     for nested in bubble.nested_functions() {
-        collect_owner_sites(nested.owner(), nested.blocks(), &signatures, &mut sites)?;
+        collect_owner_open_sites(nested.owner(), nested.blocks(), &mut opens)?;
     }
-    Ok(sites.into_values().collect())
+    let mut thunks = Vec::new();
+    for open in opens.into_values() {
+        let compatible = pair_uses
+            .iter()
+            .filter(|pair| {
+                pair.signature.callback_type() == open.callback_type
+                    && pair.lifetime == open.lifetime
+                    && (open.lifetime == FfiCallbackLifetime::Registered
+                        || (pair.owner == open.owner && pair.callback == open.registration))
+            })
+            .map(|pair| pair.signature.clone())
+            .collect::<BTreeSet<_>>();
+        if compatible.is_empty() {
+            return Err(LlvmLoweringError::UnsupportedFfiCallbackSignature {
+                owner: open.owner,
+                function: open.function,
+            });
+        }
+        thunks.extend(compatible.into_iter().map(|signature| CallbackThunk {
+            owner: open.owner,
+            function: open.function,
+            site: open.site,
+            callback_type: open.callback_type,
+            signature,
+        }));
+    }
+    Ok(CallbackPlan {
+        contract_slots,
+        thunks,
+    })
 }
 
-fn collect_owner_sites(
+fn collect_pair_uses(
     owner: SymbolId,
     blocks: &[pop_mir::MirBlock],
-    signatures: &BTreeMap<TypeId, MirFfiCallbackSignature>,
-    sites: &mut BTreeMap<(SymbolId, FfiCallbackSiteId), CallbackSite>,
+    uses: &mut Vec<CallbackPairUse>,
+) {
+    uses.extend(
+        blocks
+            .iter()
+            .flat_map(pop_mir::MirBlock::instructions)
+            .filter_map(|instruction| {
+                let MirInstructionKind::CallCallbackPair {
+                    callback,
+                    signature,
+                    lifetime,
+                    ..
+                } = instruction.kind()
+                else {
+                    return None;
+                };
+                Some(CallbackPairUse {
+                    owner,
+                    callback: *callback,
+                    lifetime: *lifetime,
+                    signature: signature.clone(),
+                })
+            }),
+    );
+}
+
+fn collect_owner_open_sites(
+    owner: SymbolId,
+    blocks: &[pop_mir::MirBlock],
+    sites: &mut BTreeMap<(SymbolId, FfiCallbackSiteId), CallbackOpenSite>,
 ) -> Result<(), LlvmLoweringError> {
     for instruction in blocks.iter().flat_map(pop_mir::MirBlock::instructions) {
-        let (callback_type, function, site) = match instruction.kind() {
+        let (callback_type, function, site, lifetime) = match instruction.kind() {
             MirInstructionKind::FfiCallbackOpenScoped {
                 callback_type,
                 owner: source_owner,
                 function,
                 site,
                 ..
-            }
-            | MirInstructionKind::FfiCallbackOpenOwned {
+            } if *source_owner == owner => (
+                *callback_type,
+                *function,
+                *site,
+                FfiCallbackLifetime::CallScoped,
+            ),
+            MirInstructionKind::FfiCallbackOpenOwned {
                 callback_type,
                 owner: source_owner,
                 function,
                 site,
                 ..
-            } if *source_owner == owner => (*callback_type, *function, *site),
+            } if *source_owner == owner => (
+                *callback_type,
+                *function,
+                *site,
+                FfiCallbackLifetime::Registered,
+            ),
             MirInstructionKind::FfiCallbackOpenScoped { site, .. }
             | MirInstructionKind::FfiCallbackOpenOwned { site, .. } => {
                 return Err(LlvmLoweringError::InvalidFfiCallbackSite { owner, site: *site });
             }
             _ => continue,
         };
-        let signature = signatures
-            .get(&callback_type)
-            .cloned()
-            .ok_or(LlvmLoweringError::UnsupportedFfiCallbackSignature { owner, function })?;
-        let candidate = CallbackSite {
+        let candidate = CallbackOpenSite {
             owner,
             function,
             site,
-            signature,
+            callback_type,
+            registration: instruction.result(),
+            lifetime,
         };
         if sites
             .insert((owner, site), candidate.clone())
@@ -705,10 +866,12 @@ fn collect_owner_sites(
 
 fn lower_thunk(
     bubble: &MirBubble,
-    site: &CallbackSite,
+    plan: &CallbackPlan,
+    site: &CallbackThunk,
     types: &TypeArena,
     target: &TargetSpec,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
+    debug_assert_eq!(site.callback_type, site.signature.callback_type());
     let callback = bubble
         .nested_functions()
         .iter()
@@ -943,8 +1106,14 @@ fn lower_thunk(
             )
         },
     );
+    let contract_slot =
+        plan.slot(&site.signature)
+            .ok_or(LlvmLoweringError::UnsupportedFfiCallbackSignature {
+                owner: site.owner,
+                function: site.function,
+            })?;
     Ok(PrivateFunction {
-        name: thunk_name(bubble.bubble(), site.owner, site.site),
+        name: thunk_name(bubble.bubble(), site.owner, site.site, contract_slot),
         parameters: physical_parameters
             .iter()
             .enumerate()

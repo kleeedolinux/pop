@@ -4,7 +4,7 @@
 //! operations, and physical types are isolated here. Nothing in this module
 //! is a canonical MIR instruction or a source-language semantic rule.
 
-use pop_foundation::{BubbleId, ClassId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
+use pop_foundation::{BubbleId, FieldId, FunctionId, SymbolId, TypeId, ValueId};
 use pop_mir::{MirFfiLayoutCatalog, MirInstructionKind, MirTerminator};
 use pop_runtime_interface::{ArrayElementMap, RuntimeOperation};
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::api::{LlvmLoweringError, LlvmLoweringOptions};
 use crate::lowering::*;
+use crate::module_lowering::ClassRuntimeKeys;
 
 pub(crate) fn lower_instruction(
     bubble: BubbleId,
@@ -23,17 +24,35 @@ pub(crate) fn lower_instruction(
     ffi_layouts: &MirFfiLayoutCatalog,
     foreign_functions: &BTreeMap<SymbolId, &pop_mir::MirForeignFunction>,
     field_layout: &BTreeMap<FieldId, u32>,
+    class_runtime_keys: &ClassRuntimeKeys,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
     environment: CaptureEnvironment<'_>,
     proven_non_overflow_adds: &BTreeSet<ValueId>,
     direct_scalar_arrays: &DirectScalarArrays,
+    callback_plan: &crate::ffi_callback::CallbackPlan,
+    codec_adapters: &[pop_mir::MirGeneratedCodecAdapter],
+    view_lenders: &BTreeMap<ValueId, ValueId>,
     options: LlvmLoweringOptions,
 ) -> Result<String, LlvmLoweringError> {
-    if let Some(lowered) =
-        crate::ffi_callback::lower_instruction(bubble, owner, instruction, value_types, types)?
-    {
+    if let Some(lowered) = crate::ffi_callback::lower_instruction(
+        bubble,
+        owner,
+        instruction,
+        value_types,
+        types,
+        callback_plan,
+    )? {
+        return Ok(lowered);
+    }
+    if let Some(lowered) = crate::codec::lower_instruction(
+        instruction,
+        codec_adapters,
+        types,
+        field_layout,
+        string_literals,
+    )? {
         return Ok(lowered);
     }
     if let Some(lowered) = crate::ffi_bytes::lower(instruction) {
@@ -63,6 +82,9 @@ pub(crate) fn lower_instruction(
         ),
         MirInstructionKind::BooleanConstant(value) => {
             format!("{result} = xor i1 0, {}", u8::from(*value))
+        }
+        MirInstructionKind::CodecErrorConstant { case } => {
+            format!("{result} = add i64 0, {}", case.raw())
         }
         MirInstructionKind::NilConstant => {
             if let Some(inner) = optional_inner_type(types, instruction.result_type()) {
@@ -356,6 +378,10 @@ pub(crate) fn lower_instruction(
                 direct_function_tag(*symbol)
             ));
             lines.join("\n")
+        }
+        MirInstructionKind::GeneratedCodecSchema(adapter) => {
+            let identity = (u64::from(bubble.raw()) << 32) | u64::from(adapter.raw());
+            format!("{result} = add i64 0, {identity}")
         }
         MirInstructionKind::TaskCreate {
             dispatch,
@@ -682,7 +708,9 @@ pub(crate) fn lower_instruction(
             object_map,
         } => lower_class_make(
             &result,
-            *class,
+            class_runtime_keys
+                .get(&(*class, instruction.result_type()))
+                .ok_or(LlvmLoweringError::InvalidType(instruction.result_type()))?,
             fields,
             object_map.slot_count() + 1,
             value_types,
@@ -1013,6 +1041,29 @@ pub(crate) fn lower_instruction(
         MirInstructionKind::InterfaceUpcast { value, .. } => {
             format!("{result} = add i64 %v{}, 0", value.raw())
         }
+        MirInstructionKind::CheckedDowncast {
+            value,
+            target_class,
+            target_type,
+            ..
+        } => {
+            let payload_type = llvm_type(*target_type, types)?;
+            format!(
+                "{result}_present = call i1 @{}(i64 %v{})\n\
+                 {result}_flag = insertvalue {{ i1, {payload_type} }} zeroinitializer, i1 {result}_present, 0\n\
+                 {result} = insertvalue {{ i1, {payload_type} }} {result}_flag, {payload_type} %v{}, 1",
+                checked_downcast_name(bubble, *target_class, *target_type),
+                value.raw(),
+                value.raw(),
+            )
+        }
+        MirInstructionKind::ViewCreate { .. }
+        | MirInstructionKind::ViewSlice { .. }
+        | MirInstructionKind::ViewLength { .. }
+        | MirInstructionKind::ViewGetByte { .. }
+        | MirInstructionKind::ViewMaterialize { .. }
+        | MirInstructionKind::ViewEnd { .. } => crate::views::lower(instruction, view_lenders)
+            .expect("closed view MIR lowering handles every view instruction"),
         MirInstructionKind::CaptureCellLoad { cell } => lower_runtime_slot_load_from(
             instruction.result(),
             instruction.result_type(),
@@ -1109,7 +1160,9 @@ pub(crate) fn lower_instruction(
         | MirInstructionKind::FfiCallbackOpenOwned { .. }
         | MirInstructionKind::CallCallbackPair { .. }
         | MirInstructionKind::FfiCallbackCloseScoped { .. }
-        | MirInstructionKind::FfiCallbackCloseOwned { .. } => unreachable!("lowered above"),
+        | MirInstructionKind::FfiCallbackCloseOwned { .. }
+        | MirInstructionKind::CodecEncode { .. }
+        | MirInstructionKind::CodecDecode { .. } => unreachable!("lowered above"),
     };
     Ok(line)
 }
@@ -1363,6 +1416,23 @@ pub(crate) fn lower_terminator(
             format!(
                 "{tag} = call i64 @{}(i64 %v{}, i64 1)\n  switch i64 {tag}, label %pop_invalid_union [\n{cases}\n  ]",
                 native_runtime_symbol(RuntimeOperation::FieldGet),
+                scrutinee.raw()
+            )
+        }
+        MirTerminator::CodecErrorSwitch { scrutinee, arms } => {
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "    i64 {}, label %b{}",
+                        arm.case().raw(),
+                        arm.target().raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "switch i64 %v{}, label %pop_invalid_union [\n{cases}\n  ]",
                 scrutinee.raw()
             )
         }
@@ -2855,8 +2925,8 @@ pub(crate) fn lower_object_make(
 }
 
 #[derive(Clone, Copy)]
-enum ObjectInitializer {
-    Constant(u64),
+enum ObjectInitializer<'a> {
+    ConstantExpression(&'a str),
     Value(ValueId),
 }
 
@@ -2865,7 +2935,7 @@ fn lower_initialized_object(
     result: &str,
     fields: &[(FieldId, ValueId)],
     slot_count: u32,
-    class: Option<ClassId>,
+    class: Option<&str>,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
@@ -2892,7 +2962,7 @@ fn lower_initialized_object(
         let Some(slot) = initializers.first_mut() else {
             return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
         };
-        *slot = Some(ObjectInitializer::Constant(u64::from(class.raw())));
+        *slot = Some(ObjectInitializer::ConstantExpression(class));
     }
     for (field, value) in fields {
         let slot = field_layout
@@ -2950,7 +3020,7 @@ fn lower_initialized_object(
                 "{entry} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 {index}"
             ));
             let stored = match initializer.expect("complete initializers were validated") {
-                ObjectInitializer::Constant(value) => value.to_string(),
+                ObjectInitializer::ConstantExpression(value) => value.to_owned(),
                 ObjectInitializer::Value(value) => {
                     let type_id = *values
                         .get(&value)
@@ -3237,7 +3307,7 @@ pub(crate) fn lower_record_update(
 
 pub(crate) fn lower_class_make(
     result: &str,
-    class: ClassId,
+    runtime_key: &str,
     fields: &[(FieldId, ValueId)],
     slot_count: u32,
     values: &BTreeMap<ValueId, TypeId>,
@@ -3248,7 +3318,7 @@ pub(crate) fn lower_class_make(
         result,
         fields,
         slot_count,
-        Some(class),
+        Some(runtime_key),
         values,
         types,
         field_layout,
@@ -3832,6 +3902,17 @@ pub(crate) fn llvm_type(type_id: TypeId, types: &TypeArena) -> Result<String, Ll
         SemanticType::Primitive(PrimitiveType::Float64) => Ok("double".to_owned()),
         SemanticType::Primitive(PrimitiveType::Never) => Ok("void".to_owned()),
         SemanticType::Enum { .. } => Ok("i32".to_owned()),
+        SemanticType::Builtin {
+            definition,
+            arguments,
+        } if arguments.is_empty()
+            && matches!(
+                *definition,
+                pop_types::BYTES_VIEW_TYPE_ID | pop_types::TEXT_VIEW_TYPE_ID
+            ) =>
+        {
+            Ok("{ i64, i64, i64, i64 }".to_owned())
+        }
         _ => Ok("i64".to_owned()),
     }
 }

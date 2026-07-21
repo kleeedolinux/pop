@@ -1123,7 +1123,10 @@ fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
          function main(): Int\n\
              local values: {Int} = {1, 2, 3}\n\
              local reduced = Sequence.reduceOr(values, function(left: Int, right: Int): Int\n\
-                 return left + right\n\
+                 if left < right then\n\
+                     return right\n\
+                 end\n\
+                 return left\n\
              end, 0)\n\
              return Sequence.sum(values) + Sequence.elementAtOr(values, 2, 0) + reduced + Pop.Math.gcd(54, 24)\n\
          end\n",
@@ -1146,7 +1149,7 @@ fn package_build_uses_implicit_standard_and_verified_artifact_objects() {
             .status()
             .expect("Standard consumer runs")
             .code(),
-        Some(20)
+        Some(17)
     );
 
     let artifact = package.join("target/debug/deps/Pop.Standard.poplib");

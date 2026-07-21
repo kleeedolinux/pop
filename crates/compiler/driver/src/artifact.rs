@@ -16,6 +16,9 @@ use sha2::{Digest, Sha256};
 use crate::ResolvedNativeProvider;
 use crate::api::ReferenceMetadata;
 use crate::reference::{invalid_reference_capsule, invalid_reference_foreign_contract};
+use crate::retained_metadata::{
+    validate_public_retained_metadata, validate_reference_retained_metadata,
+};
 
 const REFERENCE_SCHEMA_VERSION: u16 = 1;
 const MAX_REFERENCE_BYTES: usize = 16 * 1024 * 1024;
@@ -40,6 +43,10 @@ pub enum ReferenceMetadataDecodeError {
     InvalidCapsule(SymbolIdentity),
     InvalidForeignDeclaration(SymbolIdentity),
     InvalidFfiLayout,
+    InvalidNominalMetadata,
+    InvalidLifetimeSummary,
+    InvalidEffectSummary,
+    InvalidRetainedMetadata,
 }
 
 impl fmt::Display for ReferenceMetadataDecodeError {
@@ -107,6 +114,14 @@ fn validate_metadata(metadata: &ReferenceMetadata) -> Result<(), ReferenceMetada
     }
     crate::reference::validate_reference_ffi_layouts(metadata)
         .map_err(|()| ReferenceMetadataDecodeError::InvalidFfiLayout)?;
+    crate::reference::validate_reference_nominals(metadata)
+        .map_err(|()| ReferenceMetadataDecodeError::InvalidNominalMetadata)?;
+    crate::reference::validate_reference_lifetime_summaries(metadata)
+        .map_err(|()| ReferenceMetadataDecodeError::InvalidLifetimeSummary)?;
+    crate::reference::validate_reference_effect_summaries(metadata)
+        .map_err(|()| ReferenceMetadataDecodeError::InvalidEffectSummary)?;
+    validate_reference_retained_metadata(metadata)
+        .map_err(|_| ReferenceMetadataDecodeError::InvalidRetainedMetadata)?;
     Ok(())
 }
 
@@ -200,6 +215,7 @@ pub struct PoplibEmission {
     native_link_plans: Vec<NativeLinkPlan>,
     resolved_native_providers: Vec<ResolvedNativeProvider>,
     documentation: Option<Vec<u8>>,
+    retained_adapters_popc: Option<Vec<u8>>,
     target: Option<(String, Vec<u8>)>,
 }
 
@@ -227,6 +243,7 @@ impl PoplibEmission {
             native_link_plans: Vec::new(),
             resolved_native_providers: Vec::new(),
             documentation: None,
+            retained_adapters_popc: None,
             target: None,
         }
     }
@@ -268,6 +285,13 @@ impl PoplibEmission {
         self
     }
 
+    /// Adds the canonical public-only typed retained-adapter descriptor.
+    #[must_use]
+    pub fn with_retained_adapters_popc(mut self, descriptor: Vec<u8>) -> Self {
+        self.retained_adapters_popc = Some(descriptor);
+        self
+    }
+
     #[must_use]
     pub fn with_target_implementation(
         mut self,
@@ -284,6 +308,7 @@ pub struct LoadedPoplib {
     manifest: PoplibManifest,
     reference_metadata: ReferenceMetadata,
     documentation: Option<Vec<u8>>,
+    retained_adapters_popc: Option<Vec<u8>>,
     target_implementation: Option<(String, Vec<u8>)>,
 }
 
@@ -321,6 +346,11 @@ impl LoadedPoplib {
     #[must_use]
     pub fn documentation(&self) -> Option<&[u8]> {
         self.documentation.as_deref()
+    }
+
+    #[must_use]
+    pub fn retained_adapters_popc(&self) -> Option<&[u8]> {
+        self.retained_adapters_popc.as_deref()
     }
 
     #[must_use]
@@ -407,6 +437,7 @@ pub enum PoplibError {
     SizeMismatch,
     HashMismatch,
     InvalidReferenceMetadata,
+    InvalidRetainedMetadata,
     Io,
 }
 
@@ -438,6 +469,9 @@ pub fn emit_poplib(path: &Path, emission: &PoplibEmission) -> Result<(), PoplibE
         .transpose()?;
     if let Some(documentation) = &documentation {
         files.push(documentation.clone());
+    }
+    if let Some(descriptor) = &emission.retained_adapters_popc {
+        files.push(file_reference("retained-adapters.popc", descriptor)?);
     }
     let targets = if let Some((platform_target, bytes)) = &emission.target {
         let target_path = format!("targets/{platform_target}/native.object");
@@ -510,6 +544,9 @@ pub fn emit_poplib(path: &Path, emission: &PoplibEmission) -> Result<(), PoplibE
     if let Some(bytes) = &emission.documentation {
         write_artifact_file(&staging, "documentation.xml", bytes)?;
     }
+    if let Some(bytes) = &emission.retained_adapters_popc {
+        write_artifact_file(&staging, "retained-adapters.popc", bytes)?;
+    }
     if let Some((platform_target, bytes)) = &emission.target {
         write_artifact_file(
             &staging,
@@ -552,6 +589,7 @@ pub fn load_poplib(path: &Path) -> Result<LoadedPoplib, PoplibError> {
     }
     let mut reference_bytes = None;
     let mut documentation = None;
+    let mut retained_adapters_popc = None;
     let mut target_implementation = None;
     for file in &manifest.files {
         let bytes = read_bounded(&path.join(&file.path), MAX_ARTIFACT_FILE_BYTES)?;
@@ -565,6 +603,8 @@ pub fn load_poplib(path: &Path) -> Result<LoadedPoplib, PoplibError> {
             reference_bytes = Some(bytes);
         } else if file.path == "documentation.xml" {
             documentation = Some(bytes);
+        } else if file.path == "retained-adapters.popc" {
+            retained_adapters_popc = Some(bytes);
         } else if let Some(target) = manifest
             .targets
             .iter()
@@ -579,15 +619,23 @@ pub fn load_poplib(path: &Path) -> Result<LoadedPoplib, PoplibError> {
     }
     let reference_metadata = decode_reference_metadata(&reference_bytes)
         .map_err(|_| PoplibError::InvalidReferenceMetadata)?;
+    validate_public_retained_metadata(&reference_metadata, retained_adapters_popc.as_deref())
+        .map_err(|_| PoplibError::InvalidRetainedMetadata)?;
     Ok(LoadedPoplib {
         manifest,
         reference_metadata,
         documentation,
+        retained_adapters_popc,
         target_implementation,
     })
 }
 
 fn validate_emission(emission: &PoplibEmission) -> Result<(), PoplibError> {
+    validate_public_retained_metadata(
+        &emission.reference_metadata,
+        emission.retained_adapters_popc.as_deref(),
+    )
+    .map_err(|_| PoplibError::InvalidRetainedMetadata)?;
     if emission.package.is_empty()
         || emission.version.is_empty()
         || emission.bubble.is_empty()

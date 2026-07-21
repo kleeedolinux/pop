@@ -480,6 +480,32 @@ impl RuntimeAdapter for StableGenerationalRuntime {
             .allocate_immutable_bytes_with_class(bytes, AllocationClass::Mature)
     }
 
+    fn immutable_bytes_length(&self, bytes: ManagedReference) -> Result<u64, RuntimeFailure> {
+        self.inner
+            .immutable_bytes(bytes)
+            .and_then(|payload| u64::try_from(payload.len()).ok())
+            .ok_or_else(RuntimeFailure::runtime_invariant)
+    }
+
+    fn immutable_bytes_read(
+        &self,
+        bytes: ManagedReference,
+        offset: u64,
+        target: &mut [u8],
+    ) -> Result<(), RuntimeFailure> {
+        let payload = self
+            .inner
+            .immutable_bytes(bytes)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let start = usize::try_from(offset).map_err(|_| RuntimeFailure::runtime_invariant())?;
+        let end = start
+            .checked_add(target.len())
+            .filter(|end| *end <= payload.len())
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        target.copy_from_slice(&payload[start..end]);
+        Ok(())
+    }
+
     fn ffi_bytes_borrow(
         &mut self,
         bytes: ManagedReference,

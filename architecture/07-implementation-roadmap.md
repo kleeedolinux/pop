@@ -182,7 +182,8 @@ semantics without C undefined behavior, and is invoked through `pop transpile
 - ADR 0096 opt-in `Metadata.Use.Codec` projections for non-generic records,
   enums, and tagged unions; canonical typed `retained-adapters.popc`; generated
   same-visibility `Codec.Schema<T>` Items; source-free public consumption;
-  reachability-based runtime retention; and interpreter/LLVM conformance;
+  reachability-based runtime retention; the exact typed codec event tape and
+  typed malformed-input contract; and interpreter/LLVM conformance;
 - production concurrent mature GC and latency/benchmark gates, building on the
   implemented cooperative SATB marking and ordered lazy sweeping without a
   full-heap transition inventory, page/TLAB allocation, hard-limit

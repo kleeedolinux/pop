@@ -21,11 +21,115 @@ impl NativeAbiVersion {
     }
 }
 
-pub const NATIVE_ABI_1_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 18);
+pub const NATIVE_ABI_1_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 19);
 pub const NATIVE_ABI_2_VERSION: NativeAbiVersion = NativeAbiVersion::new(2, 0);
 pub const ABI_SUPPORT_SYMBOL: &str = "pop_rt_supports_abi";
 pub const GC_SAFE_POINT_V2_SYMBOL: &str = "pop_rt_gc_safe_point_v2";
 pub const INVALID_HANDLE: u64 = 0;
+
+/// Exact ABI 1.19 writer event function shape.
+pub type CodecWriteEventAbi = unsafe extern "C" fn(u64, u8, u32, *const u8, u64, u64, u64) -> u8;
+
+/// Exact ABI 1.19 reader event function shape.
+pub type CodecReadEventAbi = unsafe extern "C" fn(
+    u64,
+    *mut u8,
+    *mut u32,
+    *mut *const u8,
+    *mut u64,
+    *mut u64,
+    *mut u64,
+) -> u8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CodecEventStatus {
+    Ok = 0,
+    MalformedInput = 1,
+    LimitExceeded = 2,
+    CapabilityFailure = 3,
+}
+
+impl CodecEventStatus {
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        Some(match raw {
+            0 => Self::Ok,
+            1 => Self::MalformedInput,
+            2 => Self::LimitExceeded,
+            3 => Self::CapabilityFailure,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CodecEventTag {
+    RecordStart = 0,
+    Member = 1,
+    RecordEnd = 2,
+    EnumCase = 3,
+    UnionStart = 4,
+    Payload = 5,
+    UnionEnd = 6,
+    TupleStart = 7,
+    Element = 8,
+    TupleEnd = 9,
+    SequenceStart = 10,
+    SequenceEnd = 11,
+    OptionalAbsent = 12,
+    OptionalPresent = 13,
+    Boolean = 14,
+    Int8 = 15,
+    Int16 = 16,
+    Int32 = 17,
+    Int64 = 18,
+    UInt8 = 19,
+    UInt16 = 20,
+    UInt32 = 21,
+    UInt64 = 22,
+    Float32 = 23,
+    Float64 = 24,
+    String = 25,
+    Bytes = 26,
+}
+
+impl CodecEventTag {
+    #[must_use]
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        Some(match raw {
+            0 => Self::RecordStart,
+            1 => Self::Member,
+            2 => Self::RecordEnd,
+            3 => Self::EnumCase,
+            4 => Self::UnionStart,
+            5 => Self::Payload,
+            6 => Self::UnionEnd,
+            7 => Self::TupleStart,
+            8 => Self::Element,
+            9 => Self::TupleEnd,
+            10 => Self::SequenceStart,
+            11 => Self::SequenceEnd,
+            12 => Self::OptionalAbsent,
+            13 => Self::OptionalPresent,
+            14 => Self::Boolean,
+            15 => Self::Int8,
+            16 => Self::Int16,
+            17 => Self::Int32,
+            18 => Self::Int64,
+            19 => Self::UInt8,
+            20 => Self::UInt16,
+            21 => Self::UInt32,
+            22 => Self::UInt64,
+            23 => Self::Float32,
+            24 => Self::Float64,
+            25 => Self::String,
+            26 => Self::Bytes,
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

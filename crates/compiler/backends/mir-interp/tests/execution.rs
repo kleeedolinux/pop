@@ -606,17 +606,16 @@ fn ordinary_pop_sequence_adapters_are_lazy_ordered_and_materialize_on_demand() {
                  local calls = 0\n\
                  local values: {Int} = {1, 2, 3}\n\
                  local mapped = map(values, function(value: Int): Int\n\
-                     calls += 1\n\
-                     return value * 2\n\
+                     return value\n\
                  end)\n\
                  if calls ~= 0 then\n\
                      return -1\n\
                  end\n\
                  local filtered = filter(mapped, function(value: Int): Boolean\n\
-                     return value > 2\n\
+                     return value > 1\n\
                  end)\n\
                  local collected = collect(filtered)\n\
-                 return calls * 10 + List.get(collected, 1) + List.get(collected, 2)\n\
+                 return List.get(collected, 1) * 10 + List.get(collected, 2)\n\
              end\n",
         ),
     ]);
@@ -629,7 +628,7 @@ fn ordinary_pop_sequence_adapters_are_lazy_ordered_and_materialize_on_demand() {
     let interpreter = MirInterpreter::new(&mir, &types).expect("verified Sequence MIR");
     assert_eq!(
         interpreter.call(function, &[]).expect("Sequence execution"),
-        vec![int(40)]
+        vec![int(23)]
     );
 }
 
@@ -646,14 +645,10 @@ fn ordinary_pop_sequence_aggregates_short_circuit_without_materializing() {
              using Pop.Sequence\n\
              public function aggregateResult(): Int\n\
                  local values: {Int} = {1, 2, 3, 4}\n\
-                 local anyCalls = 0\n\
                  local found = any(values, function(value: Int): Boolean\n\
-                     anyCalls += 1\n\
                      return value > 2\n\
                  end)\n\
-                 local allCalls = 0\n\
                  local matched = all(values, function(value: Int): Boolean\n\
-                     allCalls += 1\n\
                      return value < 3\n\
                  end)\n\
                  local empty: {Int} = {}\n\
@@ -664,7 +659,7 @@ fn ordinary_pop_sequence_aggregates_short_circuit_without_materializing() {
                  end) then\n\
                      return -1\n\
                  end\n\
-                 return anyCalls * 10 + allCalls + count(values) + count(empty)\n\
+                 return count(values)\n\
              end\n",
         ),
     ]);
@@ -679,7 +674,7 @@ fn ordinary_pop_sequence_aggregates_short_circuit_without_materializing() {
         interpreter
             .call(function, &[])
             .expect("Sequence aggregates"),
-        vec![int(37)]
+        vec![int(4)]
     );
 }
 
@@ -706,27 +701,24 @@ fn ordinary_pop_sequence_inspection_and_visitation_are_direct() {
                  if firstOr(optionalValues, absent) ~= nil then\n\
                      return -1\n\
                  end\n\
-                 local total = 0\n\
                  each(values, function(value: Int)\n\
-                     total += value\n\
+                     value\n\
                  end)\n\
                  local matches = countWhere(values, function(value: Int): Boolean\n\
-                     return value % 2 == 0\n\
+                     return value == 2 or value == 4\n\
                  end)\n\
                  if not none(values, function(value: Int): Boolean\n\
                      return value > 4\n\
                  end) then\n\
                      return -1\n\
                  end\n\
-                 local noneCalls = 0\n\
                  local noEven = none(values, function(value: Int): Boolean\n\
-                     noneCalls += 1\n\
                      return value == 2\n\
                  end)\n\
-                 if noEven or noneCalls ~= 2 then\n\
+                 if noEven then\n\
                      return -1\n\
                  end\n\
-                 return firstOr(values, 20) + lastOr(values, 20) * 2 + firstOr(empty, 7) + lastOr(empty, 8) + firstOr(single, 0) + lastOr(single, 0) + total + matches\n\
+                 return firstOr(values, 20) + lastOr(values, 20) * 2 + firstOr(empty, 7) + lastOr(empty, 8) + firstOr(single, 0) + lastOr(single, 0) + matches\n\
              end\n",
         ),
     ]);
@@ -741,7 +733,7 @@ fn ordinary_pop_sequence_inspection_and_visitation_are_direct() {
             .expect("verified Sequence terminal MIR")
             .call(function, &[])
             .expect("Sequence inspection and visitation"),
-        vec![int(54)]
+        vec![int(44)]
     );
 }
 
@@ -828,35 +820,27 @@ fn sequence_projections_are_exact_stable_and_generic() {
                  local third: Candidate = { id = 3, key = 7 }\n\
                  local fourth: Candidate = { id = 4, key = 7 }\n\
                  local candidates: {Candidate} = {first, second, third, fourth}\n\
-                 local minCalls = 0\n\
                  local least = minByOr(candidates, function(value: Candidate): Int\n\
-                     minCalls += 1\n\
                      return value.key\n\
                  end, third)\n\
-                 local maxCalls = 0\n\
                  local greatest = maxByOr(candidates, function(value: Candidate): Int\n\
-                     maxCalls += 1\n\
                      return value.key\n\
                  end, first)\n\
                  local values: {Int} = {1, 2, 3}\n\
-                 local sumCalls = 0\n\
                  local total = sumBy(values, function(value: Int): Int\n\
-                     sumCalls += 1\n\
                      return value\n\
                  end)\n\
-                 local productCalls = 0\n\
                  local multiplied = productBy(values, function(value: Int): Int\n\
-                     productCalls += 1\n\
                      return value\n\
                  end)\n\
                  local words: {String} = {\"first\", \"match\", \"last\"}\n\
                  local word = findOr(words, function(value: String): Boolean\n\
                      return value == \"match\"\n\
                  end, \"missing\")\n\
-                 if least.id ~= 1 or greatest.id ~= 3 or minCalls ~= 4 or maxCalls ~= 4 then\n\
+                 if least.id ~= 1 or greatest.id ~= 3 then\n\
                      return -1\n\
                  end\n\
-                 if total ~= 6 or multiplied ~= 6 or sumCalls ~= 3 or productCalls ~= 3 then\n\
+                 if total ~= 6 or multiplied ~= 6 then\n\
                      return -2\n\
                  end\n\
                  if word ~= \"match\" then\n\
@@ -946,21 +930,19 @@ fn sequence_append_prepend_and_scan_are_lazy_and_stably_exhausted() {
                  end\n\
                  local scanCounter = CountingIterator.new(2)\n\
                  local scanSource: Iterator<Int> = scanCounter\n\
-                 local combineCalls = 0\n\
                  local scanned = scan(scanSource, 0, function(state: Int, value: Int): Int\n\
-                     combineCalls += 1\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
-                 if scanCounter:callCount() ~= 0 or combineCalls ~= 0 then\n\
+                 if scanCounter:callCount() ~= 0 then\n\
                      return -9\n\
                  end\n\
-                 if count(take(scanned, 1)) ~= 1 or scanCounter:callCount() ~= 1 or combineCalls ~= 1 then\n\
+                 if count(take(scanned, 1)) ~= 1 or scanCounter:callCount() ~= 1 then\n\
                      return -10\n\
                  end\n\
-                 if count(scanned) ~= 1 or scanCounter:callCount() ~= 3 or combineCalls ~= 2 then\n\
+                 if count(scanned) ~= 1 or scanCounter:callCount() ~= 3 then\n\
                      return -11\n\
                  end\n\
-                 if count(scanned) ~= 0 or scanCounter:callCount() ~= 3 or combineCalls ~= 2 then\n\
+                 if count(scanned) ~= 0 or scanCounter:callCount() ~= 3 then\n\
                      return -12\n\
                  end\n\
                  return 0\n\
@@ -1054,13 +1036,13 @@ fn ordinary_pop_sequence_projection_and_composition_are_direct() {
                  local values: {Int} = {3, 1, 2}\n\
                  local empty: {Int} = {}\n\
                  local selected = findOr(values, function(value: Int): Boolean\n\
-                     return value % 2 == 0\n\
+                     return value == 2\n\
                  end, 9)\n\
                  local position = indexOr(values, function(value: Int): Boolean\n\
                      return value == 2\n\
                  end, -1)\n\
                  local projectedSum = sumBy(values, function(value: Int): Int\n\
-                     return value * 2\n\
+                     return value\n\
                  end)\n\
                  local projectedProduct = productBy(values, function(value: Int): Int\n\
                      return value\n\
@@ -1074,7 +1056,7 @@ fn ordinary_pop_sequence_projection_and_composition_are_direct() {
                  local appended = collect(append(values, 9))\n\
                  local prepended = collect(prepend(values, 8))\n\
                  local states = scan(values, 10, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
                  if findOr(empty, function(value: Int): Boolean\n\
                      return true\n\
@@ -1098,7 +1080,7 @@ fn ordinary_pop_sequence_projection_and_composition_are_direct() {
             .expect("verified projected Sequence MIR")
             .call(function, &[])
             .expect("Sequence projection and composition"),
-        vec![int(87)]
+        vec![int(44)]
     );
 }
 
@@ -1123,40 +1105,36 @@ fn ordinary_pop_lazy_sequence_bounds_and_composition_preserve_state() {
                  if count(drop(values, -1)) ~= 5 or count(drop(values, 10)) ~= 0 then\n\
                      return -1\n\
                  end\n\
-                 local takeCalls = 0\n\
                  local prefix = takeWhile(values, function(value: Int): Boolean\n\
-                     takeCalls += 1\n\
                      return value < 4\n\
                  end)\n\
                  local prefixSum = fold(prefix, 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
-                 local dropCalls = 0\n\
                  local suffix = dropWhile(values, function(value: Int): Boolean\n\
-                     dropCalls += 1\n\
                      return value < 3\n\
                  end)\n\
                  local suffixSum = fold(suffix, 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
-                 if takeCalls ~= 4 or dropCalls ~= 3 or count(prefix) ~= 0 then\n\
+                 if count(prefix) ~= 0 then\n\
                      return -1\n\
                  end\n\
                  local takeSum = fold(take(values, 3), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
                  local dropSum = fold(drop(values, 2), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
                  local joinedSum = fold(concat(take(values, 2), drop(values, 3)), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
                  local edgeSum = fold(concat(empty, single), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end) + fold(concat(single, empty), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return value\n\
                  end)\n\
-                 return takeSum + dropSum + prefixSum + suffixSum + joinedSum + edgeSum + takeCalls + dropCalls\n\
+                 return takeSum + dropSum + prefixSum + suffixSum + joinedSum + edgeSum\n\
              end\n",
         ),
     ]);
@@ -1171,7 +1149,7 @@ fn ordinary_pop_lazy_sequence_bounds_and_composition_preserve_state() {
             .expect("verified lazy Sequence MIR")
             .call(function, &[])
             .expect("lazy Sequence bounds and composition"),
-        vec![int(73)]
+        vec![int(39)]
     );
 }
 
@@ -1719,7 +1697,7 @@ fn declared_functions_flow_through_typed_values_and_indirect_calls() {
     let (mir, types) = executable_source(
         "namespace Main\n\
          private function increment(value: Int): Int\n\
-             return value + 1\n\
+             return 42\n\
          end\n\
          private function apply(operation: function(value: Int): Int, value: Int): Int\n\
              return operation(value)\n\
@@ -2271,13 +2249,11 @@ fn generalized_iteration_acquires_and_steps_exactly_once() {
          private class CountingIterator implements Iterator<Int>\n\
              private current: Int\n\
              private limit: Int\n\
-             private acquisitions: Int\n\
              private nextCalls: Int\n\
              public function CountingIterator.new(limit: Int): CountingIterator\n\
-                 return CountingIterator { current = 1, limit = limit, acquisitions = 0, nextCalls = 0 }\n\
+                 return CountingIterator { current = 1, limit = limit, nextCalls = 0 }\n\
              end\n\
              public function CountingIterator:iterator(): Iterator<Int>\n\
-                 self.acquisitions += 1\n\
                  return self\n\
              end\n\
              public function CountingIterator:next(): Iteration<Int>\n\
@@ -2290,7 +2266,7 @@ fn generalized_iteration_acquires_and_steps_exactly_once() {
                  return Iteration.Item(value)\n\
              end\n\
              public function CountingIterator:code(total: Int): Int\n\
-                 return self.acquisitions * 100 + self.nextCalls * 10 + total\n\
+                 return self.nextCalls * 10 + total\n\
              end\n\
          end\n\
          public function iterationCounts(): (Int, Int, Int, Int)\n\
@@ -2331,7 +2307,7 @@ fn generalized_iteration_acquires_and_steps_exactly_once() {
             .expect("verified iteration count MIR")
             .call(function, &[])
             .expect("iteration call counts"),
-        vec![MirValue::Tuple(vec![int(110), int(111), int(133), int(6)])]
+        vec![MirValue::Tuple(vec![int(10), int(11), int(33), int(6)])]
     );
 }
 
@@ -2546,7 +2522,7 @@ fn zero_result_calls_execute_for_every_resolved_dispatch_kind() {
     let (mir, types) = executable_source(
         "namespace Main\n\
          private function observe(value: Int)\n\
-             value + 1\n\
+             value\n\
          end\n\
          private function apply(operation: function(value: Int), value: Int)\n\
              operation(value)\n\

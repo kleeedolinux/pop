@@ -25,11 +25,13 @@
     clippy::write_with_newline
 )]
 
+mod effects;
 mod ir;
 mod lowering;
 mod text;
 mod verification;
 
+pub use effects::*;
 pub use ir::*;
 pub use lowering::*;
 pub use verification::*;

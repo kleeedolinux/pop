@@ -629,6 +629,18 @@ fn dump_statements(
                 output.push_str(&indentation);
                 output.push_str("end\n");
             }
+            HirStatementKind::CodecErrorMatch { scrutinee, arms } => {
+                output.push_str("codec.error.match ");
+                dump_expression(output, scrutinee, arena);
+                output.push('\n');
+                for arm in arms {
+                    output.push_str(&indentation);
+                    let _ = writeln!(output, "when codecErrorCase#{}", arm.case.raw());
+                    dump_statements(output, &arm.body, arena, depth + 1);
+                }
+                output.push_str(&indentation);
+                output.push_str("end\n");
+            }
             HirStatementKind::Defer { body } => {
                 output.push_str("defer\n");
                 dump_statements(output, body, arena, depth + 1);
@@ -768,6 +780,9 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
         HirExpressionKind::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
         HirExpressionKind::Nil => output.push_str("nil"),
+        HirExpressionKind::GeneratedCodecSchema(adapter) => {
+            let _ = write!(output, "codec.schema sym#{}", adapter.raw());
+        }
         HirExpressionKind::Closure(closure) => {
             let _ = write!(output, "closure nested#{} [", closure.function.raw());
             for (index, capture) in closure.captures.iter().enumerate() {
@@ -989,6 +1004,15 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
                 case.raw(),
                 discriminant
             );
+        }
+        HirExpressionKind::CodecErrorCase(case) => {
+            let name = match case.raw() {
+                0 => "MalformedInput",
+                1 => "LimitExceeded",
+                2 => "CapabilityFailure",
+                _ => "<invalid>",
+            };
+            let _ = write!(output, "codec.error {name}");
         }
         HirExpressionKind::Tuple(elements) => {
             output.push('(');
@@ -1367,6 +1391,84 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             }
             dump_expression(output, value, arena);
         }
+        HirExpressionKind::CheckedNominalCast {
+            value,
+            source_interface,
+            source_type,
+            target_class,
+            target_type,
+        } => {
+            let _ = write!(
+                output,
+                "cast.checked-nominal i{}:{} c{}:{} ",
+                source_interface.raw(),
+                type_text(*source_type, arena),
+                target_class.raw(),
+                type_text(*target_type, arena),
+            );
+            dump_expression(output, value, arena);
+        }
+        HirExpressionKind::ViewCreate {
+            kind,
+            lender,
+            borrow,
+        } => {
+            let _ = write!(
+                output,
+                "view.create.{} lifetime#{} ",
+                view_kind_text(*kind),
+                borrow.lifetime().raw()
+            );
+            dump_expression(output, lender, arena);
+        }
+        HirExpressionKind::ViewSlice {
+            kind,
+            view,
+            start,
+            length,
+            parent,
+            borrow,
+        } => {
+            let _ = write!(
+                output,
+                "view.slice.{} parent#{} lifetime#{}(",
+                view_kind_text(*kind),
+                parent.lifetime().raw(),
+                borrow.lifetime().raw()
+            );
+            dump_expression(output, view, arena);
+            output.push_str(", ");
+            dump_expression(output, start, arena);
+            output.push_str(", ");
+            dump_expression(output, length, arena);
+            output.push(')');
+        }
+        HirExpressionKind::ViewLength { kind, view } => {
+            let _ = write!(output, "view.length.{}(", view_kind_text(*kind));
+            dump_expression(output, view, arena);
+            output.push(')');
+        }
+        HirExpressionKind::ViewGetByte { view, index } => {
+            output.push_str("view.get-byte(");
+            dump_expression(output, view, arena);
+            output.push_str(", ");
+            dump_expression(output, index, arena);
+            output.push(')');
+        }
+        HirExpressionKind::ViewMaterialize {
+            kind,
+            view,
+            allocation_site,
+        } => {
+            let _ = write!(
+                output,
+                "view.materialize.{} allocation#{}(",
+                view_kind_text(*kind),
+                allocation_site.raw()
+            );
+            dump_expression(output, view, arena);
+            output.push(')');
+        }
         HirExpressionKind::NumericConvert { value, conversion } => {
             let _ = write!(output, "convert.{}(", conversion_text(*conversion));
             dump_expression(output, value, arena);
@@ -1374,6 +1476,13 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
     }
     let _ = write!(output, ":{}", type_text(expression.type_id(), arena));
+}
+
+const fn view_kind_text(kind: pop_types::ViewKind) -> &'static str {
+    match kind {
+        pop_types::ViewKind::Bytes => "bytes",
+        pop_types::ViewKind::Text => "text",
+    }
 }
 
 fn dump_ffi_unsafe_operation<'a>(
@@ -1443,6 +1552,7 @@ fn dump_call(
             interface,
             method,
             slot,
+            ..
         } => {
             let _ = write!(
                 output,
@@ -1452,7 +1562,9 @@ fn dump_call(
                 slot
             );
         }
-        HirCallDispatch::BuiltinInterfaceMethod { interface, method } => {
+        HirCallDispatch::BuiltinInterfaceMethod {
+            interface, method, ..
+        } => {
             let _ = write!(
                 output,
                 "call.builtin-interface b{} iterationMethod#{}",

@@ -19,12 +19,13 @@ use pop_types::{
 };
 
 use crate::api::{
-    ReferenceFfiLayout, ReferenceFfiLayoutCatalog, ReferenceFfiLayoutField, ReferenceFfiValueClass,
-    ReferenceFunction, ReferenceFunctionParameter, ReferenceMetadata, ReferenceMetadataError,
-    ReferenceRecord, ReferenceRecordField, ReferenceSpecializationCapsule, ReferenceType,
-    ReferenceTypeParameter,
+    ReferenceClass, ReferenceFfiLayout, ReferenceFfiLayoutCatalog, ReferenceFfiLayoutField,
+    ReferenceFfiValueClass, ReferenceFunction, ReferenceFunctionParameter, ReferenceInterface,
+    ReferenceMetadata, ReferenceMetadataError, ReferenceNominalType, ReferenceRecord,
+    ReferenceRecordField, ReferenceSpecializationCapsule, ReferenceType, ReferenceTypeParameter,
 };
 use crate::artifact::{artifact_sha256_hex, capsule_sha256};
+use crate::retained_metadata::RetainedMetadataArtifacts;
 
 pub(crate) fn invalid_reference_capsule(metadata: &[ReferenceMetadata]) -> Option<SymbolIdentity> {
     metadata
@@ -94,6 +95,360 @@ pub(crate) fn invalid_reference_foreign_contract(
         })
 }
 
+pub(crate) fn validate_reference_nominals(metadata: &ReferenceMetadata) -> Result<(), ()> {
+    if !metadata
+        .interfaces()
+        .windows(2)
+        .all(|pair| pair[0].identity() < pair[1].identity())
+        || !metadata
+            .classes()
+            .windows(2)
+            .all(|pair| pair[0].identity() < pair[1].identity())
+        || metadata.interfaces().iter().any(|interface| {
+            interface.identity().bubble() != metadata.bubble()
+                || interface.name().is_empty()
+                || interface.namespace().is_empty()
+        })
+        || metadata.classes().iter().any(|class| {
+            class.identity().bubble() != metadata.bubble()
+                || class.name().is_empty()
+                || class.namespace().is_empty()
+        })
+    {
+        return Err(());
+    }
+    let interfaces = metadata
+        .interfaces()
+        .iter()
+        .map(|interface| (interface.identity(), interface))
+        .collect::<BTreeMap<_, _>>();
+    let classes = metadata
+        .classes()
+        .iter()
+        .map(|class| (class.identity(), class))
+        .collect::<BTreeMap<_, _>>();
+    if interfaces
+        .keys()
+        .any(|identity| classes.contains_key(identity))
+    {
+        return Err(());
+    }
+    for class in metadata.classes() {
+        let mut witnesses = BTreeSet::new();
+        for witness in class.interface_witnesses() {
+            if !witnesses.insert(witness)
+                || !reference_nominal_exists(
+                    witness,
+                    class.type_parameter_count(),
+                    metadata.bubble(),
+                    &interfaces,
+                )
+            {
+                return Err(());
+            }
+        }
+        if !class
+            .interface_witnesses()
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        {
+            return Err(());
+        }
+        if let Some(base) = class.direct_base()
+            && (!reference_nominal_exists(
+                base,
+                class.type_parameter_count(),
+                metadata.bubble(),
+                &classes,
+            ) || base.definition() == class.identity()
+                || classes
+                    .get(&base.definition())
+                    .is_some_and(|base| !base.is_open()))
+        {
+            return Err(());
+        }
+    }
+    for class in metadata.classes() {
+        let mut visited = BTreeSet::new();
+        let mut cursor = Some(class.identity());
+        while let Some(identity) = cursor {
+            if !visited.insert(identity) {
+                return Err(());
+            }
+            cursor = classes
+                .get(&identity)
+                .and_then(|class| class.direct_base())
+                .filter(|base| base.arguments().is_empty())
+                .map(ReferenceNominalType::definition)
+                .filter(|identity| identity.bubble() == metadata.bubble());
+        }
+    }
+    Ok(())
+}
+
+/// Verifies the complete ADR 0093 callable proof carried by public reference
+/// metadata. Views are admitted only in direct callable positions with exact,
+/// type-consistent retention and result-lender facts.
+pub(crate) fn validate_reference_lifetime_summaries(
+    metadata: &ReferenceMetadata,
+) -> Result<(), ()> {
+    for function in metadata.functions() {
+        let parameters = function
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.parameter_type().clone())
+            .collect::<Vec<_>>();
+        validate_callable_lifetime_summary(
+            &parameters,
+            function.results(),
+            function.lifetime_summary(),
+        )?;
+        if function.foreign_declaration().is_some()
+            && parameters
+                .iter()
+                .chain(function.results())
+                .any(reference_type_contains_view)
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+/// Rejects unknown effect bits at the source-free artifact boundary. Nested
+/// callable types are checked recursively so no operational unknown effect can
+/// enter HIR through a container type.
+pub(crate) fn validate_reference_effect_summaries(metadata: &ReferenceMetadata) -> Result<(), ()> {
+    for function in metadata.functions() {
+        if pop_types::EffectSummary::from_bits(function.effects().bits()).is_none()
+            || function
+                .parameters()
+                .iter()
+                .any(|parameter| !reference_type_effects_are_valid(parameter.parameter_type()))
+            || function
+                .results()
+                .iter()
+                .any(|result| !reference_type_effects_are_valid(result))
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn reference_type_effects_are_valid(reference: &ReferenceType) -> bool {
+    match reference {
+        ReferenceType::Function {
+            parameters,
+            results,
+            effects,
+            ..
+        } => {
+            pop_types::EffectSummary::from_bits(effects.bits()).is_some()
+                && parameters.iter().all(reference_type_effects_are_valid)
+                && results.iter().all(reference_type_effects_are_valid)
+        }
+        ReferenceType::Class(nominal) | ReferenceType::Interface(nominal) => nominal
+            .arguments()
+            .iter()
+            .all(reference_type_effects_are_valid),
+        ReferenceType::Tuple(elements) | ReferenceType::Union(elements) => {
+            elements.iter().all(reference_type_effects_are_valid)
+        }
+        ReferenceType::Array(element) | ReferenceType::Optional(element) => {
+            reference_type_effects_are_valid(element)
+        }
+        ReferenceType::Table { key, value } => {
+            reference_type_effects_are_valid(key) && reference_type_effects_are_valid(value)
+        }
+        ReferenceType::Builtin { arguments, .. } => {
+            arguments.iter().all(reference_type_effects_are_valid)
+        }
+        ReferenceType::Primitive(_)
+        | ReferenceType::TypeParameter(_)
+        | ReferenceType::Record(_) => true,
+    }
+}
+
+fn validate_callable_lifetime_summary(
+    parameters: &[ReferenceType],
+    results: &[ReferenceType],
+    summary: Option<&pop_types::CallableLifetimeSummary>,
+) -> Result<(), ()> {
+    let missing_is_borrowed = parameters
+        .iter()
+        .chain(results)
+        .any(reference_type_contains_view);
+    if summary.is_none() && missing_is_borrowed {
+        return Err(());
+    }
+    let conservative =
+        pop_types::CallableLifetimeSummary::conservative(parameters.len(), results.len());
+    let summary = summary.unwrap_or(&conservative);
+    if !summary.is_canonical_for(parameters.len(), results.len()) {
+        return Err(());
+    }
+    for (index, parameter) in parameters.iter().enumerate() {
+        validate_callable_position_type(parameter)?;
+        if reference_view_kind(parameter).is_some()
+            && summary.parameter_retention()[index] != pop_types::ParameterRetention::DoesNotRetain
+        {
+            return Err(());
+        }
+    }
+    for (index, result) in results.iter().enumerate() {
+        validate_callable_position_type(result)?;
+        match (
+            reference_view_kind(result),
+            &summary.result_provenance()[index],
+        ) {
+            (Some(kind), pop_types::ResultProvenance::ReturnsAlias(source)) => {
+                let lender = parameters.get(usize::from(*source)).ok_or(())?;
+                if !reference_type_is_lender_for(lender, kind) {
+                    return Err(());
+                }
+            }
+            (Some(_), _) | (None, pop_types::ResultProvenance::ReturnsAlias(_)) => {
+                return Err(());
+            }
+            (None, _) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_callable_position_type(reference: &ReferenceType) -> Result<(), ()> {
+    if reference_view_kind(reference).is_some() {
+        return Ok(());
+    }
+    match reference {
+        ReferenceType::Function {
+            parameters,
+            results,
+            lifetime_summary,
+            ..
+        } => validate_callable_lifetime_summary(parameters, results, lifetime_summary.as_ref()),
+        _ if reference_type_contains_view(reference) => Err(()),
+        _ => Ok(()),
+    }
+}
+
+fn reference_view_kind(reference: &ReferenceType) -> Option<pop_types::ViewKind> {
+    match reference {
+        ReferenceType::Builtin {
+            definition,
+            arguments,
+        } if arguments.is_empty() && *definition == pop_types::BYTES_VIEW_TYPE_ID => {
+            Some(pop_types::ViewKind::Bytes)
+        }
+        ReferenceType::Builtin {
+            definition,
+            arguments,
+        } if arguments.is_empty() && *definition == pop_types::TEXT_VIEW_TYPE_ID => {
+            Some(pop_types::ViewKind::Text)
+        }
+        _ => None,
+    }
+}
+
+fn reference_type_is_lender_for(reference: &ReferenceType, kind: pop_types::ViewKind) -> bool {
+    reference_view_kind(reference) == Some(kind)
+        || match (kind, reference) {
+            (pop_types::ViewKind::Text, ReferenceType::Primitive(PrimitiveType::String)) => true,
+            (
+                pop_types::ViewKind::Bytes,
+                ReferenceType::Builtin {
+                    definition,
+                    arguments,
+                },
+            ) => definition.raw() == 0 && arguments.is_empty(),
+            _ => false,
+        }
+}
+
+fn reference_type_contains_view(reference: &ReferenceType) -> bool {
+    if reference_view_kind(reference).is_some() {
+        return true;
+    }
+    match reference {
+        ReferenceType::Class(nominal) | ReferenceType::Interface(nominal) => {
+            nominal.arguments().iter().any(reference_type_contains_view)
+        }
+        ReferenceType::Tuple(elements) | ReferenceType::Union(elements) => {
+            elements.iter().any(reference_type_contains_view)
+        }
+        ReferenceType::Function {
+            parameters,
+            results,
+            ..
+        } => parameters
+            .iter()
+            .chain(results)
+            .any(reference_type_contains_view),
+        ReferenceType::Array(element) | ReferenceType::Optional(element) => {
+            reference_type_contains_view(element)
+        }
+        ReferenceType::Table { key, value } => {
+            reference_type_contains_view(key) || reference_type_contains_view(value)
+        }
+        ReferenceType::Builtin { arguments, .. } => {
+            arguments.iter().any(reference_type_contains_view)
+        }
+        ReferenceType::Primitive(_)
+        | ReferenceType::TypeParameter(_)
+        | ReferenceType::Record(_) => false,
+    }
+}
+
+fn reference_nominal_exists<'reference, T>(
+    nominal: &ReferenceNominalType,
+    type_parameter_count: u16,
+    owner: pop_foundation::BubbleId,
+    declarations: &BTreeMap<SymbolIdentity, &'reference T>,
+) -> bool {
+    (nominal.definition().bubble() != owner || declarations.contains_key(&nominal.definition()))
+        && nominal.arguments().iter().all(|argument| {
+            reference_type_parameter_indices_are_valid(argument, type_parameter_count)
+        })
+}
+
+fn reference_type_parameter_indices_are_valid(
+    reference: &ReferenceType,
+    type_parameter_count: u16,
+) -> bool {
+    match reference {
+        ReferenceType::TypeParameter(index) => *index < type_parameter_count,
+        ReferenceType::Class(nominal) | ReferenceType::Interface(nominal) => {
+            nominal.arguments().iter().all(|argument| {
+                reference_type_parameter_indices_are_valid(argument, type_parameter_count)
+            })
+        }
+        ReferenceType::Tuple(elements) | ReferenceType::Union(elements) => {
+            elements.iter().all(|element| {
+                reference_type_parameter_indices_are_valid(element, type_parameter_count)
+            })
+        }
+        ReferenceType::Function {
+            parameters,
+            results,
+            ..
+        } => parameters.iter().chain(results).all(|element| {
+            reference_type_parameter_indices_are_valid(element, type_parameter_count)
+        }),
+        ReferenceType::Array(element) | ReferenceType::Optional(element) => {
+            reference_type_parameter_indices_are_valid(element, type_parameter_count)
+        }
+        ReferenceType::Table { key, value } => {
+            reference_type_parameter_indices_are_valid(key, type_parameter_count)
+                && reference_type_parameter_indices_are_valid(value, type_parameter_count)
+        }
+        ReferenceType::Builtin { arguments, .. } => arguments.iter().all(|argument| {
+            reference_type_parameter_indices_are_valid(argument, type_parameter_count)
+        }),
+        ReferenceType::Primitive(_) | ReferenceType::Record(_) => true,
+    }
+}
+
 pub(crate) fn validate_reference_ffi_layouts(metadata: &ReferenceMetadata) -> Result<(), ()> {
     if !metadata
         .records()
@@ -111,6 +466,11 @@ pub(crate) fn validate_reference_ffi_layouts(metadata: &ReferenceMetadata) -> Re
         .iter()
         .map(|record| (record.identity(), record))
         .collect::<BTreeMap<_, _>>();
+    let retained_records = metadata
+        .retained_adapters()
+        .iter()
+        .map(|adapter| adapter.identity().target())
+        .collect::<BTreeSet<_>>();
     for record in metadata.records() {
         let mut names = BTreeSet::new();
         if record.name().is_empty()
@@ -140,7 +500,14 @@ pub(crate) fn validate_reference_ffi_layouts(metadata: &ReferenceMetadata) -> Re
         return Err(());
     }
     let Some(catalog) = metadata.ffi_layout_catalog() else {
-        return if records.is_empty() { Ok(()) } else { Err(()) };
+        return if records
+            .keys()
+            .all(|identity| retained_records.contains(identity))
+        {
+            Ok(())
+        } else {
+            Err(())
+        };
     };
     if records.is_empty()
         || pop_target::TargetSpec::for_triple(catalog.target()).is_err()
@@ -214,7 +581,9 @@ pub(crate) fn validate_reference_ffi_layouts(metadata: &ReferenceMetadata) -> Re
             _ => {}
         }
     }
-    if represented_records != records.keys().copied().collect() {
+    if records.keys().any(|identity| {
+        !represented_records.contains(identity) && !retained_records.contains(identity)
+    }) {
         return Err(());
     }
     Ok(())
@@ -226,6 +595,10 @@ fn reference_type_records_exist(
 ) -> bool {
     match reference {
         ReferenceType::Record(identity) => records.contains_key(identity),
+        ReferenceType::Class(nominal) | ReferenceType::Interface(nominal) => nominal
+            .arguments()
+            .iter()
+            .all(|argument| reference_type_records_exist(argument, records)),
         ReferenceType::Tuple(elements) | ReferenceType::Union(elements) => elements
             .iter()
             .all(|element| reference_type_records_exist(element, records)),
@@ -259,11 +632,156 @@ const fn reference_abi_name(abi: pop_types::ForeignAbi) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct NominalIdentityMaps {
+    classes: BTreeMap<TypeId, SymbolIdentity>,
+    interfaces: BTreeMap<TypeId, SymbolIdentity>,
+}
+
+fn nominal_identity_maps(
+    hir: &HirBubble,
+    index: &pop_resolve::DeclarationIndex,
+) -> NominalIdentityMaps {
+    let mut maps = NominalIdentityMaps::default();
+    for declaration in hir.declarations() {
+        let kind = match declaration.kind() {
+            HirDeclarationKind::Class(_) => pop_resolve::DeclarationKind::Class,
+            HirDeclarationKind::Interface(_) => pop_resolve::DeclarationKind::Interface,
+            _ => continue,
+        };
+        let source = index.declarations().find(|source| {
+            source.module() == declaration.module()
+                && source.name() == declaration.name()
+                && source.kind() == kind
+        });
+        let Some(source) = source else {
+            continue;
+        };
+        let identity = SymbolIdentity::new(hir.bubble(), source.symbol());
+        match declaration.kind() {
+            HirDeclarationKind::Class(class) => {
+                maps.classes.insert(class.type_id(), identity);
+            }
+            HirDeclarationKind::Interface(interface) => {
+                maps.interfaces.insert(interface.type_id(), identity);
+            }
+            _ => unreachable!("filtered nominal declaration"),
+        }
+    }
+    maps
+}
+
+fn public_nominal_references(
+    hir: &HirBubble,
+    index: &pop_resolve::DeclarationIndex,
+    arena: &TypeArena,
+    record_identities: &BTreeMap<TypeId, SymbolIdentity>,
+    nominal_identities: &NominalIdentityMaps,
+) -> Result<(Vec<ReferenceInterface>, Vec<ReferenceClass>), ReferenceMetadataError> {
+    let mut interfaces = hir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| {
+            let interface = declaration.as_interface()?;
+            let source = index.declaration(declaration.symbol())?;
+            (declaration.visibility() == pop_resolve::Visibility::Public
+                && source.kind() == pop_resolve::DeclarationKind::Interface)
+                .then_some((declaration, interface, source))
+        })
+        .map(|(declaration, interface, source)| {
+            let type_parameter_count = match arena.get(interface.type_id()) {
+                Some(SemanticType::Interface { arguments, .. }) => {
+                    u16::try_from(arguments.len()).unwrap_or(u16::MAX)
+                }
+                _ => u16::MAX,
+            };
+            ReferenceInterface {
+                identity: SymbolIdentity::new(hir.bubble(), declaration.symbol()),
+                module: declaration.module(),
+                namespace: source.namespace().to_owned(),
+                name: declaration.name().to_owned(),
+                type_parameter_count,
+                span: declaration.span(),
+            }
+        })
+        .collect::<Vec<_>>();
+    interfaces.sort_by_key(ReferenceInterface::identity);
+    let public_interfaces = interfaces
+        .iter()
+        .map(ReferenceInterface::identity)
+        .collect::<BTreeSet<_>>();
+
+    let mut classes = hir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| {
+            let class = declaration.as_class()?;
+            let source = index.declaration(declaration.symbol())?;
+            (declaration.visibility() == pop_resolve::Visibility::Public
+                && source.kind() == pop_resolve::DeclarationKind::Class)
+                .then_some((declaration, class, source))
+        })
+        .map(|(declaration, class, source)| {
+            let type_parameters = match arena.get(class.type_id()) {
+                Some(SemanticType::Class { arguments, .. }) => arguments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, type_id)| (*type_id, u16::try_from(index).unwrap_or(u16::MAX)))
+                    .collect::<BTreeMap<_, _>>(),
+                _ => BTreeMap::new(),
+            };
+            let identity = SymbolIdentity::new(hir.bubble(), declaration.symbol());
+            let mut interface_witnesses = class
+                .interfaces()
+                .iter()
+                .map(|implementation| {
+                    reference_type_with_parameters(
+                        identity,
+                        implementation.interface_type(),
+                        arena,
+                        &type_parameters,
+                        record_identities,
+                        nominal_identities,
+                    )
+                })
+                .filter_map(|reference| match reference {
+                    Ok(ReferenceType::Interface(nominal))
+                        if nominal.definition().bubble() != hir.bubble()
+                            || public_interfaces.contains(&nominal.definition()) =>
+                    {
+                        Some(Ok(nominal))
+                    }
+                    Ok(ReferenceType::Interface(_)) => None,
+                    Ok(_) => Some(Err(ReferenceMetadataError::InvalidNominalMetadata)),
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            interface_witnesses.sort();
+            interface_witnesses.dedup();
+            Ok(ReferenceClass {
+                identity,
+                module: declaration.module(),
+                namespace: source.namespace().to_owned(),
+                name: declaration.name().to_owned(),
+                type_parameter_count: u16::try_from(type_parameters.len()).unwrap_or(u16::MAX),
+                is_open: class.is_open(),
+                direct_base: None,
+                interface_witnesses,
+                span: declaration.span(),
+            })
+        })
+        .collect::<Result<Vec<_>, ReferenceMetadataError>>()?;
+    classes.sort_by_key(ReferenceClass::identity);
+    Ok((interfaces, classes))
+}
+
 pub(crate) fn emit_reference_metadata(
     hir: &HirBubble,
     index: &pop_resolve::DeclarationIndex,
     arena: &TypeArena,
+    retained_metadata: Option<&RetainedMetadataArtifacts>,
 ) -> Result<ReferenceMetadata, ReferenceMetadataError> {
+    let nominal_identities = nominal_identity_maps(hir, index);
     let public_layouts = hir
         .declarations()
         .iter()
@@ -327,6 +845,7 @@ pub(crate) fn emit_reference_metadata(
                         arena,
                         &BTreeMap::new(),
                         &record_identities,
+                        &nominal_identities,
                     )
                     .map(|field_type| ReferenceRecordField {
                         name: field.name().to_owned(),
@@ -345,6 +864,8 @@ pub(crate) fn emit_reference_metadata(
         })
         .collect::<Result<Vec<_>, ReferenceMetadataError>>()?;
     records.sort_by_key(ReferenceRecord::identity);
+    let (interfaces, classes) =
+        public_nominal_references(hir, index, arena, &record_identities, &nominal_identities)?;
 
     let mut functions = Vec::new();
     for function in hir
@@ -376,6 +897,7 @@ pub(crate) fn emit_reference_metadata(
                             arena,
                             &type_parameter_indices,
                             &record_identities,
+                            &nominal_identities,
                         )
                     })
                     .transpose()
@@ -395,6 +917,7 @@ pub(crate) fn emit_reference_metadata(
                     arena,
                     &type_parameter_indices,
                     &record_identities,
+                    &nominal_identities,
                 )
                 .map(|parameter_type| ReferenceFunctionParameter {
                     name: parameter.name().to_owned(),
@@ -412,6 +935,7 @@ pub(crate) fn emit_reference_metadata(
                     arena,
                     &type_parameter_indices,
                     &record_identities,
+                    &nominal_identities,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -425,6 +949,7 @@ pub(crate) fn emit_reference_metadata(
             parameters,
             results,
             effects: function.effects(),
+            lifetime_summary: Some(function.lifetime_summary().clone()),
             foreign_declaration: None,
             span: function
                 .parameters()
@@ -452,6 +977,7 @@ pub(crate) fn emit_reference_metadata(
                     arena,
                     &BTreeMap::new(),
                     &record_identities,
+                    &nominal_identities,
                 )
                 .map(|parameter_type| ReferenceFunctionParameter {
                     name: parameter.name().to_owned(),
@@ -469,6 +995,7 @@ pub(crate) fn emit_reference_metadata(
                     arena,
                     &BTreeMap::new(),
                     &record_identities,
+                    &nominal_identities,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -482,26 +1009,49 @@ pub(crate) fn emit_reference_metadata(
             parameters,
             results,
             effects: function.effects(),
+            lifetime_summary: Some(pop_types::CallableLifetimeSummary::conservative(
+                function.parameters().len(),
+                function.results().len(),
+            )),
             foreign_declaration: Some(function.declaration().clone()),
             span: function.declaration().span(),
             specialization_capsule: None,
         });
     }
     functions.sort_by_key(ReferenceFunction::identity);
+    let ffi_record_identities = record_identities
+        .iter()
+        .filter(|(type_id, _)| {
+            public_layouts
+                .get(type_id)
+                .is_some_and(|(_, record)| record.has_ffi_c_layout())
+        })
+        .map(|(type_id, identity)| (*type_id, *identity))
+        .collect();
     let ffi_layout_catalog = reference_ffi_layout_catalog(
         hir,
         arena,
-        &record_identities,
+        &ffi_record_identities,
+        &nominal_identities,
         &hir.foreign_functions()
             .iter()
             .filter(|function| function.visibility() == pop_resolve::Visibility::Public)
             .map(pop_hir::HirForeignFunction::symbol)
             .collect(),
     )?;
+    let retained_adapters = retained_metadata
+        .map_or_else(
+            || Ok(Vec::new()),
+            |artifacts| artifacts.public_references(hir.bubble(), index),
+        )
+        .map_err(|_| ReferenceMetadataError::InvalidRetainedMetadata)?;
     Ok(ReferenceMetadata {
         bubble: hir.bubble(),
         records,
+        interfaces,
+        classes,
         functions,
+        retained_adapters,
         ffi_layout_catalog,
     })
 }
@@ -541,6 +1091,7 @@ fn reference_ffi_layout_catalog(
     hir: &HirBubble,
     arena: &TypeArena,
     record_identities: &BTreeMap<TypeId, SymbolIdentity>,
+    nominal_identities: &NominalIdentityMaps,
     public_foreign_symbols: &BTreeSet<SymbolId>,
 ) -> Result<Option<ReferenceFfiLayoutCatalog>, ReferenceMetadataError> {
     if record_identities.is_empty() {
@@ -591,6 +1142,7 @@ fn reference_ffi_layout_catalog(
                 arena,
                 &BTreeMap::new(),
                 record_identities,
+                nominal_identities,
             )?;
             let value_class = match entry.value_class() {
                 pop_mir::MirFfiValueClass::Integer => ReferenceFfiValueClass::Integer,
@@ -744,6 +1296,7 @@ fn reference_type_with_parameters(
     arena: &TypeArena,
     type_parameters: &BTreeMap<TypeId, u16>,
     record_identities: &BTreeMap<TypeId, SymbolIdentity>,
+    nominal_identities: &NominalIdentityMaps,
 ) -> Result<ReferenceType, ReferenceMetadataError> {
     match arena.get(type_id) {
         Some(SemanticType::Primitive(primitive)) => Ok(ReferenceType::Primitive(*primitive)),
@@ -751,6 +1304,60 @@ fn reference_type_with_parameters(
             .get(&type_id)
             .copied()
             .map(ReferenceType::Record)
+            .ok_or(ReferenceMetadataError::UnsupportedPublicType { function, type_id }),
+        Some(SemanticType::Class { arguments, .. }) => nominal_identities
+            .classes
+            .get(&type_id)
+            .copied()
+            .map(|definition| {
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        reference_type_with_parameters(
+                            function,
+                            *argument,
+                            arena,
+                            type_parameters,
+                            record_identities,
+                            nominal_identities,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|arguments| {
+                        ReferenceType::Class(ReferenceNominalType {
+                            definition,
+                            arguments,
+                        })
+                    })
+            })
+            .transpose()?
+            .ok_or(ReferenceMetadataError::UnsupportedPublicType { function, type_id }),
+        Some(SemanticType::Interface { arguments, .. }) => nominal_identities
+            .interfaces
+            .get(&type_id)
+            .copied()
+            .map(|definition| {
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        reference_type_with_parameters(
+                            function,
+                            *argument,
+                            arena,
+                            type_parameters,
+                            record_identities,
+                            nominal_identities,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|arguments| {
+                        ReferenceType::Interface(ReferenceNominalType {
+                            definition,
+                            arguments,
+                        })
+                    })
+            })
+            .transpose()?
             .ok_or(ReferenceMetadataError::UnsupportedPublicType { function, type_id }),
         Some(SemanticType::TypeParameter(_)) => type_parameters
             .get(&type_id)
@@ -767,6 +1374,7 @@ fn reference_type_with_parameters(
                         arena,
                         type_parameters,
                         record_identities,
+                        nominal_identities,
                     )
                 })
                 .collect::<Result<_, _>>()?,
@@ -776,6 +1384,7 @@ fn reference_type_with_parameters(
             parameters,
             results,
             effects,
+            lifetime_summary,
         }) => Ok(ReferenceType::Function {
             is_async: *is_async,
             parameters: parameters
@@ -787,6 +1396,7 @@ fn reference_type_with_parameters(
                         arena,
                         type_parameters,
                         record_identities,
+                        nominal_identities,
                     )
                 })
                 .collect::<Result<_, _>>()?,
@@ -799,10 +1409,12 @@ fn reference_type_with_parameters(
                         arena,
                         type_parameters,
                         record_identities,
+                        nominal_identities,
                     )
                 })
                 .collect::<Result<_, _>>()?,
             effects: *effects,
+            lifetime_summary: Some(lifetime_summary.clone()),
         }),
         Some(SemanticType::Array(element)) => Ok(ReferenceType::Array(Box::new(
             reference_type_with_parameters(
@@ -811,6 +1423,7 @@ fn reference_type_with_parameters(
                 arena,
                 type_parameters,
                 record_identities,
+                nominal_identities,
             )?,
         ))),
         Some(SemanticType::Table { key, value }) => Ok(ReferenceType::Table {
@@ -820,6 +1433,7 @@ fn reference_type_with_parameters(
                 arena,
                 type_parameters,
                 record_identities,
+                nominal_identities,
             )?),
             value: Box::new(reference_type_with_parameters(
                 function,
@@ -827,6 +1441,7 @@ fn reference_type_with_parameters(
                 arena,
                 type_parameters,
                 record_identities,
+                nominal_identities,
             )?),
         }),
         Some(SemanticType::Optional(element)) => Ok(ReferenceType::Optional(Box::new(
@@ -836,6 +1451,7 @@ fn reference_type_with_parameters(
                 arena,
                 type_parameters,
                 record_identities,
+                nominal_identities,
             )?,
         ))),
         Some(SemanticType::Builtin {
@@ -852,6 +1468,7 @@ fn reference_type_with_parameters(
                         arena,
                         type_parameters,
                         record_identities,
+                        nominal_identities,
                     )
                 })
                 .collect::<Result<_, _>>()?,
@@ -866,6 +1483,7 @@ fn reference_type_with_parameters(
                         arena,
                         type_parameters,
                         record_identities,
+                        nominal_identities,
                     )
                 })
                 .collect::<Result<_, _>>()?,
@@ -919,6 +1537,384 @@ pub(crate) fn define_reference_records(
         pending = remaining;
     }
     record_types
+}
+
+#[derive(Default)]
+pub(crate) struct ReferenceNominalTypes {
+    classes: BTreeMap<SymbolIdentity, SymbolId>,
+    interfaces: BTreeMap<SymbolIdentity, SymbolId>,
+    direct_bases: BTreeMap<SymbolIdentity, ReferenceNominalType>,
+}
+
+pub(crate) fn define_reference_nominals(
+    metadata: &[ReferenceMetadata],
+    database: &ResolutionDatabase,
+    record_types: &BTreeMap<SymbolIdentity, TypeId>,
+    resolver: &mut SignatureResolver<'_>,
+) -> ReferenceNominalTypes {
+    let mut definitions = ReferenceNominalTypes::default();
+    for interface in metadata.iter().flat_map(ReferenceMetadata::interfaces) {
+        let Some(declaration) = database
+            .index()
+            .declaration_by_reference_identity(interface.identity())
+        else {
+            continue;
+        };
+        let parameters = (0..interface.type_parameter_count())
+            .map(|index| {
+                resolver.referenced_type_parameter(format!("T{index}"), None, interface.span())
+            })
+            .collect();
+        if resolver
+            .define_referenced_interface(
+                interface.module(),
+                declaration.symbol(),
+                parameters,
+                interface.span(),
+            )
+            .is_some()
+        {
+            definitions
+                .interfaces
+                .insert(interface.identity(), declaration.symbol());
+        }
+    }
+    for class in metadata.iter().flat_map(ReferenceMetadata::classes) {
+        let Some(declaration) = database
+            .index()
+            .declaration_by_reference_identity(class.identity())
+        else {
+            continue;
+        };
+        let parameters = (0..class.type_parameter_count())
+            .map(|index| {
+                resolver.referenced_type_parameter(format!("T{index}"), None, class.span())
+            })
+            .collect::<Vec<_>>();
+        let parameter_types = parameters
+            .iter()
+            .map(pop_types::ResolvedTypeParameter::type_id)
+            .collect::<Vec<_>>();
+        let Some(interface_types) = class
+            .interface_witnesses()
+            .iter()
+            .map(|witness| {
+                reference_nominal_type_id(
+                    witness,
+                    resolver,
+                    &parameter_types,
+                    record_types,
+                    &definitions,
+                    true,
+                )
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if resolver
+            .define_referenced_class(
+                class.module(),
+                declaration.symbol(),
+                parameters,
+                class.is_open(),
+                interface_types,
+                class.span(),
+            )
+            .is_some()
+        {
+            definitions
+                .classes
+                .insert(class.identity(), declaration.symbol());
+            if let Some(base) = class.direct_base() {
+                definitions
+                    .direct_bases
+                    .insert(class.identity(), base.clone());
+            }
+        }
+    }
+    definitions
+}
+
+pub(crate) fn hir_reference_nominal_catalog(
+    resolver: &mut SignatureResolver<'_>,
+    definitions: &ReferenceNominalTypes,
+    record_types: &BTreeMap<SymbolIdentity, TypeId>,
+) -> pop_hir::HirNominalReferenceCatalog {
+    let mut nominal_identities = NominalIdentityMaps::default();
+    for (identity, symbol) in &definitions.interfaces {
+        for definition in resolver
+            .interface_definition(*symbol)
+            .into_iter()
+            .chain(resolver.interface_instances(*symbol))
+        {
+            nominal_identities
+                .interfaces
+                .insert(definition.type_id(), *identity);
+        }
+    }
+    for (identity, symbol) in &definitions.classes {
+        for definition in resolver
+            .class_definition(*symbol)
+            .into_iter()
+            .chain(resolver.class_instances(*symbol))
+        {
+            nominal_identities
+                .classes
+                .insert(definition.type_id(), *identity);
+        }
+    }
+    let record_identities = record_types
+        .iter()
+        .map(|(identity, type_id)| (*type_id, *identity))
+        .collect::<BTreeMap<_, _>>();
+    let mut interface_identity_by_type = BTreeMap::new();
+    let mut interfaces = Vec::new();
+    for (identity, symbol) in &definitions.interfaces {
+        let class_definitions = resolver
+            .interface_definition(*symbol)
+            .into_iter()
+            .chain(resolver.interface_instances(*symbol));
+        for definition in class_definitions {
+            if resolver
+                .arena()
+                .contains_type_parameter(definition.type_id())
+            {
+                continue;
+            }
+            let arguments = match resolver.arena().get(definition.type_id()) {
+                Some(SemanticType::Interface { arguments, .. }) => arguments.clone(),
+                _ => continue,
+            };
+            let Some(canonical_arguments) = canonical_runtime_arguments(
+                *identity,
+                &arguments,
+                resolver.arena(),
+                &record_identities,
+                &nominal_identities,
+            ) else {
+                continue;
+            };
+            let nominal =
+                pop_hir::HirNominalIdentity::new(*identity, arguments, canonical_arguments);
+            interface_identity_by_type.insert(definition.type_id(), nominal.clone());
+            interfaces.push(pop_hir::HirInterfaceReference::new(
+                nominal,
+                definition.interface(),
+                definition.type_id(),
+            ));
+        }
+    }
+    let mut classes = Vec::new();
+    for (identity, symbol) in &definitions.classes {
+        let class_definitions = resolver
+            .class_definition(*symbol)
+            .into_iter()
+            .chain(resolver.class_instances(*symbol))
+            .cloned()
+            .collect::<Vec<_>>();
+        for definition in class_definitions {
+            if resolver
+                .arena()
+                .contains_type_parameter(definition.type_id())
+            {
+                continue;
+            }
+            let arguments = match resolver.arena().get(definition.type_id()) {
+                Some(SemanticType::Class { arguments, .. }) => arguments.clone(),
+                _ => continue,
+            };
+            let Some(canonical_arguments) = canonical_runtime_arguments(
+                *identity,
+                &arguments,
+                resolver.arena(),
+                &record_identities,
+                &nominal_identities,
+            ) else {
+                continue;
+            };
+            let interfaces = definition
+                .interfaces()
+                .iter()
+                .filter_map(|implementation| {
+                    let nominal = interface_identity_by_type
+                        .get(&implementation.interface_type())?
+                        .clone();
+                    Some(pop_hir::HirInterfaceReference::new(
+                        nominal,
+                        implementation.interface(),
+                        implementation.interface_type(),
+                    ))
+                })
+                .collect();
+            let base = definitions
+                .direct_bases
+                .get(identity)
+                .and_then(|base| {
+                    reference_nominal_type_id(
+                        base,
+                        resolver,
+                        &arguments,
+                        record_types,
+                        definitions,
+                        false,
+                    )
+                })
+                .and_then(|base_type| match resolver.arena().get(base_type) {
+                    Some(SemanticType::Class { class, .. }) => Some((*class, base_type)),
+                    _ => None,
+                });
+            classes.push(pop_hir::HirClassReference::new(
+                pop_hir::HirNominalIdentity::new(*identity, arguments, canonical_arguments),
+                definition.class(),
+                definition.type_id(),
+                definition.is_open(),
+                base,
+                interfaces,
+            ));
+        }
+    }
+    pop_hir::HirNominalReferenceCatalog::new(interfaces, classes)
+}
+
+fn canonical_runtime_arguments(
+    owner: SymbolIdentity,
+    arguments: &[TypeId],
+    arena: &TypeArena,
+    record_identities: &BTreeMap<TypeId, SymbolIdentity>,
+    nominal_identities: &NominalIdentityMaps,
+) -> Option<Vec<pop_types::CanonicalTypeIdentity>> {
+    arguments
+        .iter()
+        .map(|argument| {
+            reference_type_with_parameters(
+                owner,
+                *argument,
+                arena,
+                &BTreeMap::new(),
+                record_identities,
+                nominal_identities,
+            )
+            .ok()
+            .and_then(|reference| canonical_reference_type(&reference))
+        })
+        .collect()
+}
+
+fn canonical_reference_type(reference: &ReferenceType) -> Option<pop_types::CanonicalTypeIdentity> {
+    use pop_types::{CanonicalNominalIdentity, CanonicalTypeIdentity};
+    Some(match reference {
+        ReferenceType::Primitive(primitive) => CanonicalTypeIdentity::Primitive(*primitive),
+        ReferenceType::TypeParameter(_) => return None,
+        ReferenceType::Record(identity) => CanonicalTypeIdentity::Record(*identity),
+        ReferenceType::Class(nominal) | ReferenceType::Interface(nominal) => {
+            let arguments = nominal
+                .arguments()
+                .iter()
+                .map(canonical_reference_type)
+                .collect::<Option<Vec<_>>>()?;
+            let identity = CanonicalNominalIdentity::new(nominal.definition(), arguments);
+            if matches!(reference, ReferenceType::Class(_)) {
+                CanonicalTypeIdentity::Class(identity)
+            } else {
+                CanonicalTypeIdentity::Interface(identity)
+            }
+        }
+        ReferenceType::Tuple(elements) => CanonicalTypeIdentity::Tuple(
+            elements
+                .iter()
+                .map(canonical_reference_type)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        ReferenceType::Function {
+            is_async,
+            parameters,
+            results,
+            effects,
+            lifetime_summary,
+        } => CanonicalTypeIdentity::Function {
+            is_async: *is_async,
+            parameters: parameters
+                .iter()
+                .map(canonical_reference_type)
+                .collect::<Option<Vec<_>>>()?,
+            results: results
+                .iter()
+                .map(canonical_reference_type)
+                .collect::<Option<Vec<_>>>()?,
+            effects: *effects,
+            lifetime_summary: lifetime_summary.clone().unwrap_or_else(|| {
+                pop_types::CallableLifetimeSummary::conservative(parameters.len(), results.len())
+            }),
+        },
+        ReferenceType::Array(element) => {
+            CanonicalTypeIdentity::Array(Box::new(canonical_reference_type(element)?))
+        }
+        ReferenceType::Table { key, value } => CanonicalTypeIdentity::Table {
+            key: Box::new(canonical_reference_type(key)?),
+            value: Box::new(canonical_reference_type(value)?),
+        },
+        ReferenceType::Optional(element) => {
+            CanonicalTypeIdentity::Optional(Box::new(canonical_reference_type(element)?))
+        }
+        ReferenceType::Builtin {
+            definition,
+            arguments,
+        } => CanonicalTypeIdentity::Builtin {
+            definition: *definition,
+            arguments: arguments
+                .iter()
+                .map(canonical_reference_type)
+                .collect::<Option<Vec<_>>>()?,
+        },
+        ReferenceType::Union(elements) => CanonicalTypeIdentity::Union(
+            elements
+                .iter()
+                .map(canonical_reference_type)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+    })
+}
+
+fn reference_nominal_type_id(
+    nominal: &ReferenceNominalType,
+    resolver: &mut SignatureResolver<'_>,
+    type_parameters: &[TypeId],
+    record_types: &BTreeMap<SymbolIdentity, TypeId>,
+    nominal_types: &ReferenceNominalTypes,
+    interface: bool,
+) -> Option<TypeId> {
+    let arguments = nominal
+        .arguments()
+        .iter()
+        .map(|argument| {
+            try_reference_type_id_with_nominals(
+                argument,
+                resolver,
+                type_parameters,
+                record_types,
+                nominal_types,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let symbol = if interface {
+        nominal_types.interfaces.get(&nominal.definition())
+    } else {
+        nominal_types.classes.get(&nominal.definition())
+    }
+    .copied()?;
+    if arguments.is_empty() {
+        return resolver.declaration_type(symbol);
+    }
+    if interface {
+        resolver
+            .instantiate_interface(symbol, &arguments)
+            .map(|definition| definition.type_id())
+    } else {
+        resolver
+            .instantiate_class(symbol, &arguments)
+            .map(|definition| definition.type_id())
+    }
 }
 
 pub(crate) fn hir_reference_ffi_layout_catalog(
@@ -1034,6 +2030,7 @@ pub(crate) fn reference_signatures(
     database: &ResolutionDatabase,
     resolver: &mut SignatureResolver<'_>,
     record_types: &BTreeMap<SymbolIdentity, TypeId>,
+    nominal_types: &ReferenceNominalTypes,
 ) -> BTreeMap<SymbolId, ResolvedFunctionSignature> {
     metadata
         .iter()
@@ -1047,11 +2044,12 @@ pub(crate) fn reference_signatures(
             let mut parameter_types = Vec::new();
             for parameter in function.type_parameters() {
                 let bound = parameter.bound().map(|bound| {
-                    reference_type_id_with_records(
+                    reference_type_id_with_nominals(
                         bound,
-                        resolver.arena_mut(),
+                        resolver,
                         &parameter_types,
                         record_types,
+                        nominal_types,
                     )
                 });
                 let resolved =
@@ -1065,11 +2063,12 @@ pub(crate) fn reference_signatures(
                 .map(|parameter| {
                     (
                         parameter.name().to_owned(),
-                        reference_type_id_with_records(
+                        reference_type_id_with_nominals(
                             parameter.parameter_type(),
-                            resolver.arena_mut(),
+                            resolver,
                             &parameter_types,
                             record_types,
+                            nominal_types,
                         ),
                         function.span(),
                     )
@@ -1080,11 +2079,12 @@ pub(crate) fn reference_signatures(
                 .iter()
                 .map(|result| {
                     (
-                        reference_type_id_with_records(
+                        reference_type_id_with_nominals(
                             result,
-                            resolver.arena_mut(),
+                            resolver,
                             &parameter_types,
                             record_types,
+                            nominal_types,
                         ),
                         function.span(),
                     )
@@ -1100,6 +2100,14 @@ pub(crate) fn reference_signatures(
                     parameters,
                     results,
                     function.effects(),
+                )
+                .with_lifetime_summary(
+                    function.lifetime_summary().cloned().unwrap_or_else(|| {
+                        pop_types::CallableLifetimeSummary::conservative(
+                            function.parameters().len(),
+                            function.results().len(),
+                        )
+                    }),
                 ),
             )
         })
@@ -1156,6 +2164,7 @@ pub(crate) fn hir_function_references(
                     .filter_map(pop_types::ResolvedType::type_id)
                     .collect(),
                 function.effects(),
+                signature.lifetime_summary().clone(),
             )
             .with_foreign_declaration(function.foreign_declaration().cloned());
             let Some(capsule) = function.specialization_capsule() else {
@@ -1586,6 +2595,7 @@ fn import_capsule_type(
             parameters,
             results,
             effects,
+            lifetime_summary,
         } => SemanticType::Function {
             is_async,
             parameters: parameters
@@ -1597,6 +2607,7 @@ fn import_capsule_type(
                 .map(&mut import)
                 .collect::<Option<_>>()?,
             effects,
+            lifetime_summary,
         },
         SemanticType::Record(fields) => SemanticType::Record(
             fields
@@ -1701,14 +2712,184 @@ mod capsule_tests {
     }
 }
 
-fn reference_type_id_with_records(
+fn reference_type_id_with_nominals(
     reference: &ReferenceType,
-    arena: &mut TypeArena,
+    resolver: &mut SignatureResolver<'_>,
     type_parameters: &[TypeId],
     record_types: &BTreeMap<SymbolIdentity, TypeId>,
+    nominal_types: &ReferenceNominalTypes,
 ) -> TypeId {
-    try_reference_type_id(reference, arena, type_parameters, record_types)
-        .expect("verified reference metadata type")
+    try_reference_type_id_with_nominals(
+        reference,
+        resolver,
+        type_parameters,
+        record_types,
+        nominal_types,
+    )
+    .expect("verified nominal reference metadata type")
+}
+
+fn try_reference_type_id_with_nominals(
+    reference: &ReferenceType,
+    resolver: &mut SignatureResolver<'_>,
+    type_parameters: &[TypeId],
+    record_types: &BTreeMap<SymbolIdentity, TypeId>,
+    nominal_types: &ReferenceNominalTypes,
+) -> Option<TypeId> {
+    match reference {
+        ReferenceType::Primitive(primitive) => {
+            let source_name = PrimitiveType::source_schema()
+                .iter()
+                .copied()
+                .find(|entry| entry.primitive() == *primitive && !entry.is_alias())?
+                .source_name();
+            resolver.arena().source_type(source_name)
+        }
+        ReferenceType::TypeParameter(index) => type_parameters.get(usize::from(*index)).copied(),
+        ReferenceType::Record(identity) => record_types.get(identity).copied(),
+        ReferenceType::Class(nominal) => reference_nominal_type_id(
+            nominal,
+            resolver,
+            type_parameters,
+            record_types,
+            nominal_types,
+            false,
+        ),
+        ReferenceType::Interface(nominal) => reference_nominal_type_id(
+            nominal,
+            resolver,
+            type_parameters,
+            record_types,
+            nominal_types,
+            true,
+        ),
+        ReferenceType::Tuple(elements) | ReferenceType::Union(elements) => {
+            let elements = elements
+                .iter()
+                .map(|element| {
+                    try_reference_type_id_with_nominals(
+                        element,
+                        resolver,
+                        type_parameters,
+                        record_types,
+                        nominal_types,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let semantic = if matches!(reference, ReferenceType::Tuple(_)) {
+                SemanticType::Tuple(elements)
+            } else {
+                SemanticType::Union(elements)
+            };
+            resolver.arena_mut().intern(semantic).ok()
+        }
+        ReferenceType::Function {
+            is_async,
+            parameters,
+            results,
+            effects,
+            lifetime_summary,
+        } => {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| {
+                    try_reference_type_id_with_nominals(
+                        parameter,
+                        resolver,
+                        type_parameters,
+                        record_types,
+                        nominal_types,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let results = results
+                .iter()
+                .map(|result| {
+                    try_reference_type_id_with_nominals(
+                        result,
+                        resolver,
+                        type_parameters,
+                        record_types,
+                        nominal_types,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let lifetime_summary = lifetime_summary.clone().unwrap_or_else(|| {
+                pop_types::CallableLifetimeSummary::conservative(parameters.len(), results.len())
+            });
+            resolver
+                .arena_mut()
+                .intern(SemanticType::Function {
+                    is_async: *is_async,
+                    parameters,
+                    results,
+                    effects: *effects,
+                    lifetime_summary,
+                })
+                .ok()
+        }
+        ReferenceType::Array(element) | ReferenceType::Optional(element) => {
+            let element = try_reference_type_id_with_nominals(
+                element,
+                resolver,
+                type_parameters,
+                record_types,
+                nominal_types,
+            )?;
+            if matches!(reference, ReferenceType::Array(_)) {
+                resolver
+                    .arena_mut()
+                    .intern(SemanticType::Array(element))
+                    .ok()
+            } else {
+                resolver.arena_mut().optional(element).ok()
+            }
+        }
+        ReferenceType::Table { key, value } => {
+            let key = try_reference_type_id_with_nominals(
+                key,
+                resolver,
+                type_parameters,
+                record_types,
+                nominal_types,
+            )?;
+            let value = try_reference_type_id_with_nominals(
+                value,
+                resolver,
+                type_parameters,
+                record_types,
+                nominal_types,
+            )?;
+            resolver
+                .arena_mut()
+                .intern(SemanticType::Table { key, value })
+                .ok()
+        }
+        ReferenceType::Builtin {
+            definition,
+            arguments,
+        } => {
+            let arguments = arguments
+                .iter()
+                .map(|argument| {
+                    try_reference_type_id_with_nominals(
+                        argument,
+                        resolver,
+                        type_parameters,
+                        record_types,
+                        nominal_types,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            resolver
+                .arena_mut()
+                .intern(SemanticType::Builtin {
+                    definition: *definition,
+                    arguments,
+                })
+                .ok()
+        }
+    }
 }
 
 fn try_reference_type_id(
@@ -1728,6 +2909,7 @@ fn try_reference_type_id(
         }
         ReferenceType::TypeParameter(index) => type_parameters.get(usize::from(*index)).copied(),
         ReferenceType::Record(identity) => record_types.get(identity).copied(),
+        ReferenceType::Class(_) | ReferenceType::Interface(_) => None,
         ReferenceType::Tuple(elements) => {
             let elements = elements
                 .iter()
@@ -1740,6 +2922,7 @@ fn try_reference_type_id(
             parameters,
             results,
             effects,
+            lifetime_summary,
         } => {
             let parameters = parameters
                 .iter()
@@ -1751,12 +2934,16 @@ fn try_reference_type_id(
                 .iter()
                 .map(|result| try_reference_type_id(result, arena, type_parameters, record_types))
                 .collect::<Option<Vec<_>>>()?;
+            let lifetime_summary = lifetime_summary.clone().unwrap_or_else(|| {
+                pop_types::CallableLifetimeSummary::conservative(parameters.len(), results.len())
+            });
             arena
                 .intern(SemanticType::Function {
                     is_async: *is_async,
                     parameters,
                     results,
                     effects: *effects,
+                    lifetime_summary,
                 })
                 .ok()
         }

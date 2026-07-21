@@ -21,6 +21,7 @@
 mod api;
 mod async_lowering;
 mod bpf;
+mod codec;
 mod ffi_buffer;
 mod ffi_bytes;
 mod ffi_callback;
@@ -28,6 +29,7 @@ mod ffi_unsafe;
 mod instruction_lowering;
 mod lowering;
 mod module_lowering;
+mod views;
 
 pub use api::*;
 pub use bpf::*;

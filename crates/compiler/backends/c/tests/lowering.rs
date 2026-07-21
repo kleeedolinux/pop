@@ -4,9 +4,10 @@ use std::process::Command;
 
 use pop_backend_c::{CBackendError, CLoweringOptions, lower_mir_to_c};
 use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
-use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{lower_hir_bubble, optimize_mir};
+use pop_foundation::{BubbleId, BuiltinTypeId, FileId, ModuleId, NamespaceId};
+use pop_mir::{MirDeclarationKind, lower_hir_bubble, optimize_mir, parse_mir_dump};
 use pop_source::SourceFile;
+use pop_types::SemanticType;
 
 fn lower(source_text: &str) -> (pop_mir::MirBubble, pop_types::TypeArena) {
     let source = SourceFile::new(FileId::from_raw(0), "src/main.pop", source_text).expect("source");
@@ -61,6 +62,134 @@ fn experimental_c_backend_rejects_callback_operations_without_a_fallback() {
              return Ffi.Callback.close(callback)\n\
          end\n",
     );
+
+    assert!(matches!(
+        lower_mir_to_c(&mir, &types, CLoweringOptions::default()),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
+}
+
+#[test]
+fn experimental_c_backend_rejects_complete_view_mir_before_emission() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public function inspect(bytes: Bytes): Int\n\
+             local whole = Bytes.view(bytes)\n\
+             local part = Bytes.slice(whole, 1, 1)\n\
+             local present: Byte? = Bytes.get(part, 1)\n\
+             local copy = Bytes.toBytes(part)\n\
+             return Bytes.length(Bytes.view(copy))\n\
+         end\n",
+    );
+    let dump = mir.dump();
+    for operation in [
+        "viewCreate",
+        "viewSlice",
+        "viewLength",
+        "viewGetByte",
+        "viewMaterialize",
+        "viewEnd",
+    ] {
+        assert!(dump.contains(operation), "missing {operation}:\n{dump}");
+    }
+
+    assert!(matches!(
+        lower_mir_to_c(&mir, &types, CLoweringOptions::default()),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
+}
+
+#[test]
+fn experimental_c_backend_rejects_generated_codec_operations_without_a_fallback() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/codec.pop",
+        "namespace Example.Models\n\
+         @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+         public record Payload\n\
+             age: UInt32\n\
+         end\n\
+         public function schema(): Codec.Schema<Payload>\n\
+             return PayloadSchema\n\
+         end\n",
+    )
+    .expect("codec source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(7),
+        NamespaceId::from_raw(7),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let base = lower_hir_bubble(front_end.hir().expect("codec HIR"), front_end.types())
+        .expect("codec MIR");
+    let adapter = base.generated_codec_adapters()[0].symbol();
+    let target_type = base
+        .declarations()
+        .iter()
+        .find_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Record(record) => Some(record.type_id()),
+            _ => None,
+        })
+        .expect("retained record type");
+    let mut types = front_end.types().clone();
+    let writer = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(119),
+            arguments: Vec::new(),
+        })
+        .expect("Codec.Writer");
+    let reader = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(120),
+            arguments: Vec::new(),
+        })
+        .expect("Codec.Reader");
+    let error = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(121),
+            arguments: Vec::new(),
+        })
+        .expect("Codec.Error");
+    let nil = types.source_type("nil").expect("nil");
+    let encode_result = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(100),
+            arguments: vec![nil, error],
+        })
+        .expect("encode Result");
+    let decode_result = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(100),
+            arguments: vec![target_type, error],
+        })
+        .expect("decode Result");
+    let mut dump = base.dump();
+    write!(
+        dump,
+        "function s900 f900(t{}, t{}) -> (t{}) effects[Allocates,GcSafePoint,Roots]\n  b0(v0:t{}, v1:t{}):\n    do v2 gcSafePoint sp0 roots (v1)\n    v3:t{} = codecEncode s{} v0 v1 result bt100 success resultCase#0 failure resultCase#1\n    return (v3)\n\
+         function s901 f901(t{}) -> (t{}) effects[Allocates,GcSafePoint,Roots]\n  b0(v0:t{}):\n    do v1 gcSafePoint sp1 roots (v0)\n    v2:t{} = codecDecode s{} v0 result bt100 success resultCase#0 failure resultCase#1\n    return (v2)\n",
+        target_type.raw(),
+        writer.raw(),
+        encode_result.raw(),
+        target_type.raw(),
+        writer.raw(),
+        encode_result.raw(),
+        adapter.raw(),
+        reader.raw(),
+        decode_result.raw(),
+        reader.raw(),
+        decode_result.raw(),
+        adapter.raw(),
+    )
+    .expect("append canonical codec operations");
+    let mir = parse_mir_dump(&dump).expect("verified generated-codec MIR");
+    assert!(dump.contains("codecEncode"), "{dump}");
+    assert!(dump.contains("codecDecode"), "{dump}");
 
     assert!(matches!(
         lower_mir_to_c(&mir, &types, CLoweringOptions::default()),
@@ -340,6 +469,32 @@ fn rejects_managed_declarations_without_emitting_a_fallback() {
 
     assert!(matches!(error, CBackendError::UnsupportedDeclarations));
     assert!(error.to_string().contains("requires the Pop runtime"));
+}
+
+#[test]
+fn rejects_checked_downcast_before_managed_declaration_fallback() {
+    let (mir, types) = lower(
+        "namespace Main\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 1\n\
+             end\n\
+         end\n\
+         private function cast(reader: Reader): FileReader?\n\
+             return FileReader(reader)\n\
+         end\n\
+         function main(): Int\n\
+             return 0\n\
+         end\n",
+    );
+
+    assert!(matches!(
+        lower_mir_to_c(&mir, &types, CLoweringOptions::default()),
+        Err(CBackendError::UnsupportedInstruction { .. })
+    ));
 }
 
 #[test]

@@ -251,6 +251,7 @@ pub enum LlvmLoweringError {
         owner: SymbolId,
         function: NestedFunctionId,
     },
+    UnsupportedFfiCallbackInventory,
     InvalidFfiCallbackSite {
         owner: SymbolId,
         site: FfiCallbackSiteId,
@@ -316,6 +317,12 @@ impl fmt::Display for LlvmLoweringError {
                 owner.raw(),
                 function.raw()
             ),
+            Self::UnsupportedFfiCallbackInventory => {
+                write!(
+                    formatter,
+                    "FFI callback contract inventory exceeds LLVM limits"
+                )
+            }
             Self::InvalidFfiCallbackSite { owner, site } => write!(
                 formatter,
                 "invalid or colliding FFI callback site s{}:{}",

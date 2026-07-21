@@ -125,6 +125,14 @@ fn finalize_statement_captures(statement: &mut TypedStatement, written: &BTreeSe
                 }
             }
         }
+        TypedStatementKind::CodecErrorMatch { scrutinee, arms } => {
+            finalize_expression_captures(scrutinee, written);
+            for arm in arms {
+                for statement in &mut arm.body {
+                    finalize_statement_captures(statement, written);
+                }
+            }
+        }
         TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
             for statement in body {
                 finalize_statement_captures(statement, written);
@@ -230,6 +238,7 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::GeneratedCodecSchema(_)
         | TypedExpressionKind::TaskCancellationSource
         | TypedExpressionKind::FfiPointerNone { .. }
         | TypedExpressionKind::EnumCase { .. } => {}
@@ -323,6 +332,7 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
                 finalize_expression_captures(argument, written);
             }
         }
+        TypedExpressionKind::CodecErrorCase(_) => {}
         TypedExpressionKind::Unary { operand, .. }
         | TypedExpressionKind::Await { task: operand }
         | TypedExpressionKind::TaskCancelToken { source: operand }
@@ -514,8 +524,28 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
                 finalize_expression_captures(argument, written);
             }
         }
-        TypedExpressionKind::InterfaceUpcast { value, .. } => {
+        TypedExpressionKind::InterfaceUpcast { value, .. }
+        | TypedExpressionKind::CheckedNominalCast { value, .. } => {
             finalize_expression_captures(value, written);
+        }
+        TypedExpressionKind::ViewCreate { lender: value, .. }
+        | TypedExpressionKind::ViewLength { view: value, .. }
+        | TypedExpressionKind::ViewMaterialize { view: value, .. } => {
+            finalize_expression_captures(value, written);
+        }
+        TypedExpressionKind::ViewSlice {
+            view,
+            start,
+            length,
+            ..
+        } => {
+            finalize_expression_captures(view, written);
+            finalize_expression_captures(start, written);
+            finalize_expression_captures(length, written);
+        }
+        TypedExpressionKind::ViewGetByte { view, index } => {
+            finalize_expression_captures(view, written);
+            finalize_expression_captures(index, written);
         }
         TypedExpressionKind::NumericConvert { value, .. } => {
             finalize_expression_captures(value, written);

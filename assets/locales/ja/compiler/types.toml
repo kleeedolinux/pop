@@ -117,3 +117,27 @@ text = "元の match ケース"
 
 [messages."types.originalBinding"]
 text = "元の binding"
+
+[messages."types.invalidCheckedCastTarget"]
+text = "チェック付きキャストの対象 `{target}` が無効です: {reason}"
+
+[messages."types.invalidCheckedCastOperand"]
+text = "`{source}` を `{target}` にチェック付きキャストできません: {reason}"
+
+[messages."types.incompatibleCheckedCast"]
+text = "`{source}` から `{target}` へのチェック付きキャストは互換性がありません: {reason}"
+
+[messages."types.checkedCastTarget"]
+text = "チェック付きキャストの対象はここで宣言されています"
+
+[messages."types.borrowedViewEscape"]
+text = "借用ビュー `{view}` が貸し手からエスケープします: {reason}"
+
+[messages."types.borrowedViewRetained"]
+text = "借用ビュー `{view}` が保持されます: {reason}"
+
+[messages."types.borrowedViewAcrossSuspension"]
+text = "借用ビュー `{view}` は中断点を越えられません"
+
+[messages."types.invalidViewCallableProvenance"]
+text = "呼び出し可能値 `{callable}` のビュー来歴が無効です: {reason}"

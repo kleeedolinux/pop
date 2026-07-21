@@ -48,6 +48,35 @@ impl TypeArena {
     }
 
     #[must_use]
+    pub fn view_kind(&self, type_id: TypeId) -> Option<crate::ViewKind> {
+        match self.get(type_id) {
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }) if arguments.is_empty() => {
+                if *definition == crate::BYTES_VIEW_TYPE_ID {
+                    Some(crate::ViewKind::Bytes)
+                } else if *definition == crate::TEXT_VIEW_TYPE_ID {
+                    Some(crate::ViewKind::Text)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn contains_view(&self, type_id: TypeId) -> bool {
+        self.view_kind(type_id).is_some()
+            || self.get(type_id).is_some_and(|semantic| {
+                referenced_types(semantic)
+                    .into_iter()
+                    .any(|nested| self.contains_view(nested))
+            })
+    }
+
+    #[must_use]
     pub fn get(&self, id: TypeId) -> Option<&SemanticType> {
         self.types.get(id.raw() as usize)
     }
@@ -183,11 +212,13 @@ impl TypeArena {
                 parameters,
                 results,
                 effects,
+                lifetime_summary,
             } => SemanticType::Function {
                 is_async,
                 parameters: parameters.into_iter().map(map).collect::<Option<_>>()?,
                 results: results.into_iter().map(map).collect::<Option<_>>()?,
                 effects,
+                lifetime_summary,
             },
             SemanticType::Class { class, arguments } => {
                 let arguments = arguments.into_iter().map(map).collect::<Option<Vec<_>>>()?;

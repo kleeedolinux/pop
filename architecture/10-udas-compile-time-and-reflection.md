@@ -335,6 +335,15 @@ not provide an untyped `T` field iterator. Input data labels are compared only
 against that adapter's bounded closed label set and select fixed ordinals; they
 cannot resolve a program symbol or another schema.
 
+Protocol 1 lowers those entries to ADR 0092's exact `CodecEncode` and
+`CodecDecode` MIR operations over a closed typed event tape. Record/enum/union,
+tuple, sequence, optional, and scalar events carry only bounded counts, numeric
+ordinals, data labels, discriminants, and statically typed values. Malformed
+event sequencing is a typed `Codec.Error`, never reflection or a trap. Protocol
+1 permits at most 32 nested levels, 65,536 tape events, and 65,535 elements in
+one sequence or `Bytes` payload; readers check limits before allocation and
+writers return typed `LimitExceeded` without publishing a partial tape.
+
 This boundary gives Pop Lang:
 
 - dead-strippable metadata;

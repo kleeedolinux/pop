@@ -11,6 +11,23 @@ pub(crate) fn validate_bubble(
     types: &TypeArena,
     options: CLoweringOptions,
 ) -> Result<(), CBackendError> {
+    for function in bubble.functions() {
+        for block in function.blocks() {
+            if let Some(instruction) = block.instructions().iter().find(|instruction| {
+                matches!(
+                    instruction.kind(),
+                    MirInstructionKind::CheckedDowncast { .. }
+                        | MirInstructionKind::CodecEncode { .. }
+                        | MirInstructionKind::CodecDecode { .. }
+                ) || is_view_instruction(instruction.kind())
+            }) {
+                return Err(CBackendError::UnsupportedInstruction {
+                    function: function.function(),
+                    value: instruction.result(),
+                });
+            }
+        }
+    }
     if !bubble.declarations().is_empty()
         || !bubble.methods().is_empty()
         || !bubble.nested_functions().is_empty()
@@ -35,6 +52,18 @@ pub(crate) fn validate_bubble(
         }
     }
     Ok(())
+}
+
+fn is_view_instruction(kind: &MirInstructionKind) -> bool {
+    matches!(
+        kind,
+        MirInstructionKind::ViewCreate { .. }
+            | MirInstructionKind::ViewSlice { .. }
+            | MirInstructionKind::ViewLength { .. }
+            | MirInstructionKind::ViewGetByte { .. }
+            | MirInstructionKind::ViewMaterialize { .. }
+            | MirInstructionKind::ViewEnd { .. }
+    )
 }
 
 fn validate_function(function: &MirFunction, types: &TypeArena) -> Result<(), CBackendError> {

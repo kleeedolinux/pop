@@ -32,7 +32,7 @@ public function scopedRecord(): Ffi.C.Int
             return value
         end,
         function(callbackFunction: Ffi.Function<RecordCallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
-            return Native.Callbacks.Unsafe.visitDRecordScoped(callbackFunction, context)
+            return Native.Callbacks.Unsafe.visitERecordScoped(callbackFunction, context)
         end
     )
 end
@@ -43,7 +43,7 @@ public function scopedSystem(captured: Ffi.C.Long): Ffi.C.Int
             return captured
         end,
         function(callbackFunction: Ffi.Function<SystemCallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
-            return Native.Callbacks.Unsafe.visitESystemScoped(callbackFunction, context)
+            return Native.Callbacks.Unsafe.visitFSystemScoped(callbackFunction, context)
         end
     )
 end
@@ -62,6 +62,15 @@ public function useCallback(callback: Ffi.RegisteredCallback<CallbackSignature>,
         callback,
         function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
             return Native.Callbacks.Unsafe.visitCRegistered(callbackFunction, value, context)
+        end
+    )
+end
+
+public function useCallbackSystem(callback: Ffi.RegisteredCallback<CallbackSignature>, value: Ffi.C.Int): Result<Ffi.C.Int, Ffi.CallbackClosedError>
+    return Ffi.Callback.withPair(
+        callback,
+        function(callbackFunction: Ffi.Function<CallbackSignature>, context: Ffi.CallbackContext): Ffi.C.Int
+            return Native.Callbacks.Unsafe.visitDRegisteredSystem(callbackFunction, value, context)
         end
     )
 end

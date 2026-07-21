@@ -16,6 +16,10 @@ ABI 1.18 adds failure-atomic callback registration, managed entry/leave, and
 deterministic close entries. Callback contexts are opaque lookup tokens paired
 with a compile-time site identity; they are never dereferenced managed-object
 addresses.
+ABI 1.19 adds the exact `pop_rt_codec_write_event` and
+`pop_rt_codec_read_event` entries for ADR 0092's closed typed codec tape. Their
+fixed-width tags and statuses carry no descriptor pointer, registry key,
+runtime Item name, or variadic payload.
 
 [ADR 0078](../../../architecture/decisions/0078-native-abi-2-writable-root-coexistence.md)
 adds distinct immutable ABI 1.11 and ABI 2.0 descriptors. ABI 2 owns the

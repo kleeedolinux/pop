@@ -538,6 +538,7 @@ enum ArgumentKind {
     SyntaxExpectation,
     Text,
     Token,
+    Type,
     Unsigned,
 }
 
@@ -550,6 +551,7 @@ impl ArgumentKind {
             Self::SyntaxExpectation => "SyntaxExpectation",
             Self::Text => "Text",
             Self::Token => "Token",
+            Self::Type => "Type",
             Self::Unsigned => "Unsigned",
         }
     }
@@ -596,6 +598,9 @@ impl Argument {
             DiagnosticArgument::Character(value) => Self::new(name, ArgumentKind::Character, value),
             DiagnosticArgument::Identifier(value) => {
                 Self::new(name, ArgumentKind::Identifier, value)
+            }
+            DiagnosticArgument::Type { display, .. } => {
+                Self::new(name, ArgumentKind::Type, display)
             }
             DiagnosticArgument::Unsigned(value) => Self::new(name, ArgumentKind::Unsigned, value),
             DiagnosticArgument::SyntaxExpectation(value) => {

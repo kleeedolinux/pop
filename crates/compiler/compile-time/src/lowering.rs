@@ -434,7 +434,9 @@ fn unsupported_statement_error(statement: &TypedStatement) -> Option<CompileTime
         | TypedStatementKind::TableSet { .. }
         | TypedStatementKind::CompoundArraySet { .. } => UnsupportedCompileTimeConstruct::Mutation,
         TypedStatementKind::Match { .. } => UnsupportedCompileTimeConstruct::Match,
-        TypedStatementKind::ErrorMatch { .. } | TypedStatementKind::ResultMatch { .. } => {
+        TypedStatementKind::ErrorMatch { .. }
+        | TypedStatementKind::ResultMatch { .. }
+        | TypedStatementKind::CodecErrorMatch { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
         TypedStatementKind::Defer { .. } | TypedStatementKind::AsyncDefer { .. } => {
@@ -481,7 +483,9 @@ fn unsupported_compile_time_construct(
     match expression {
         TypedExpressionKind::Closure(_) => UnsupportedCompileTimeConstruct::Closure,
         TypedExpressionKind::Capture(_) => UnsupportedCompileTimeConstruct::Capture,
-        TypedExpressionKind::Function(_) => UnsupportedCompileTimeConstruct::FunctionReference,
+        TypedExpressionKind::Function(_) | TypedExpressionKind::GeneratedCodecSchema(_) => {
+            UnsupportedCompileTimeConstruct::FunctionReference
+        }
         TypedExpressionKind::Field { .. } => UnsupportedCompileTimeConstruct::FieldAccess,
         TypedExpressionKind::ArrayGet { .. }
         | TypedExpressionKind::ArrayLength { .. }
@@ -513,6 +517,7 @@ fn unsupported_compile_time_construct(
         }
         TypedExpressionKind::ResultCase { .. }
         | TypedExpressionKind::ErrorCase { .. }
+        | TypedExpressionKind::CodecErrorCase(_)
         | TypedExpressionKind::ResultPropagate { .. } => {
             UnsupportedCompileTimeConstruct::TypedFailure
         }
@@ -551,13 +556,21 @@ fn unsupported_compile_time_construct(
         | TypedExpressionKind::FfiUnsafePointerFromAddress { .. } => {
             UnsupportedCompileTimeConstruct::ResultlessCall
         }
+        TypedExpressionKind::ViewCreate { .. }
+        | TypedExpressionKind::ViewSlice { .. }
+        | TypedExpressionKind::ViewLength { .. }
+        | TypedExpressionKind::ViewGetByte { .. }
+        | TypedExpressionKind::ViewMaterialize { .. } => {
+            UnsupportedCompileTimeConstruct::ResultlessCall
+        }
         TypedExpressionKind::EnumCase { .. } => UnsupportedCompileTimeConstruct::UnionCase,
         TypedExpressionKind::DirectMethodCall { .. } => UnsupportedCompileTimeConstruct::MethodCall,
         TypedExpressionKind::InterfaceMethodCall { .. }
         | TypedExpressionKind::BuiltinInterfaceMethodCall { .. } => {
             UnsupportedCompileTimeConstruct::InterfaceDispatch
         }
-        TypedExpressionKind::InterfaceUpcast { .. } => {
+        TypedExpressionKind::InterfaceUpcast { .. }
+        | TypedExpressionKind::CheckedNominalCast { .. } => {
             UnsupportedCompileTimeConstruct::InterfaceConversion
         }
         TypedExpressionKind::IndirectCall { .. } => UnsupportedCompileTimeConstruct::IndirectCall,

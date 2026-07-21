@@ -314,6 +314,30 @@ fn parses_typed_attribute_queries_without_string_names() {
 }
 
 #[test]
+fn parses_checked_generic_target_calls_with_single_angle_arguments() {
+    let body = parse_body(
+        "namespace Example\n\
+         public function narrow(reader: Reader<Int>): Box<Int>?\n\
+             return Box<Int>(reader)\n\
+         end\n",
+    );
+    let StatementSyntaxKind::Return { values } = body.statements()[0].kind() else {
+        panic!("checked-cast return");
+    };
+    let ExpressionSyntaxKind::TargetTypeCall {
+        callee,
+        type_arguments,
+        arguments,
+    } = values[0].kind()
+    else {
+        panic!("checked generic target call");
+    };
+    assert!(matches!(callee.kind(), ExpressionSyntaxKind::Name(path) if path == &["Box"]));
+    assert_eq!(type_arguments.len(), 1);
+    assert_eq!(arguments.len(), 1);
+}
+
+#[test]
 fn equality_uses_luau_tokens_and_comparison_precedence() {
     let body = parse_body(
         "namespace Example\n\

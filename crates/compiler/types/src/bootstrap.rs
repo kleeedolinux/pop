@@ -2,10 +2,11 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    AttributeId, BuiltinTypeId, IterationCaseId, IterationProtocolMethodId, StandardFunctionId,
+    AttributeId, BuiltinTypeId, EnumCaseId, IterationCaseId, IterationProtocolMethodId,
+    StandardFunctionId,
 };
 
-use crate::PrimitiveType;
+use crate::{Effect, EffectSummary, PrimitiveType};
 
 const PRIMITIVES: &str = include_str!("../../../../libraries/internal/bootstrap/primitives.tsv");
 const INTRINSICS: &str = include_str!("../../../../libraries/internal/bootstrap/intrinsics.tsv");
@@ -95,6 +96,7 @@ pub enum CompilerAttributeRole {
     CompileTime,
     AttributeUsage,
     AttributeValidator,
+    RetainMetadata,
     FfiLink,
     FfiForeign,
     FfiNonblocking,
@@ -107,6 +109,7 @@ pub enum CompilerAttributeTarget {
     Attribute,
     Namespace,
     Record,
+    DataType,
 }
 
 #[derive(Clone, Copy)]
@@ -297,6 +300,30 @@ impl BootstrapIterationProtocol {
     pub const fn next_method(self) -> IterationProtocolMethodId {
         IterationProtocolMethodId::from_raw(1)
     }
+
+    /// Returns ADR 0053's closed ADR 0022 upper summary for one exact reserved
+    /// protocol member. Implementations may be subsets but never widen it.
+    #[must_use]
+    pub const fn method_effects(
+        self,
+        interface: BuiltinTypeId,
+        method: IterationProtocolMethodId,
+    ) -> Option<EffectSummary> {
+        if method.raw() == 0
+            && (interface.raw() == self.iterable.raw() || interface.raw() == self.iterator.raw())
+        {
+            Some(EffectSummary::empty())
+        } else if interface.raw() == self.iterator.raw() && method.raw() == 1 {
+            Some(
+                EffectSummary::empty()
+                    .with(Effect::WritesManagedReference)
+                    .with(Effect::MayTrap)
+                    .with(Effect::GcSafePoint),
+            )
+        } else {
+            None
+        }
+    }
 }
 
 impl BootstrapTypeEntry {
@@ -428,12 +455,95 @@ pub const FFI_CALLBACK_IN_USE_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from
 /// Stable bootstrap identity of `Ffi.CallbackClosedError`.
 pub const FFI_CALLBACK_CLOSED_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(228);
 
+/// Stable compiler-known identity of the owning `Bytes` value kind.
+pub const BYTES_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(0);
+/// Stable compiler-known identity of the non-owning `Bytes.View` value kind.
+pub const BYTES_VIEW_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(122);
+/// Stable compiler-known identity of the non-owning `Text.View` value kind.
+pub const TEXT_VIEW_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(123);
+/// Stable compiler-known identity of the sealed `Codec.Error` value kind.
+pub const CODEC_ERROR_TYPE_ID: BuiltinTypeId = BuiltinTypeId::from_raw(121);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CodecErrorReason {
+    MalformedInput,
+    LimitExceeded,
+    CapabilityFailure,
+}
+
+impl CodecErrorReason {
+    #[must_use]
+    pub const fn case(self) -> EnumCaseId {
+        EnumCaseId::from_raw(match self {
+            Self::MalformedInput => 0,
+            Self::LimitExceeded => 1,
+            Self::CapabilityFailure => 2,
+        })
+    }
+
+    #[must_use]
+    pub const fn source_name(self) -> &'static str {
+        match self {
+            Self::MalformedInput => "MalformedInput",
+            Self::LimitExceeded => "LimitExceeded",
+            Self::CapabilityFailure => "CapabilityFailure",
+        }
+    }
+
+    #[must_use]
+    pub const fn protocol_status(self) -> u8 {
+        match self {
+            Self::MalformedInput => 1,
+            Self::LimitExceeded => 2,
+            Self::CapabilityFailure => 3,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_protocol_status(status: u8) -> Option<Self> {
+        match status {
+            1 => Some(Self::MalformedInput),
+            2 => Some(Self::LimitExceeded),
+            3 => Some(Self::CapabilityFailure),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapCodecErrorProtocol {
+    error: BuiltinTypeId,
+}
+
+impl BootstrapCodecErrorProtocol {
+    #[must_use]
+    pub const fn error(self) -> BuiltinTypeId {
+        self.error
+    }
+
+    #[must_use]
+    pub const fn malformed_input_case(self) -> EnumCaseId {
+        CodecErrorReason::MalformedInput.case()
+    }
+
+    #[must_use]
+    pub const fn limit_exceeded_case(self) -> EnumCaseId {
+        CodecErrorReason::LimitExceeded.case()
+    }
+
+    #[must_use]
+    pub const fn capability_failure_case(self) -> EnumCaseId {
+        CodecErrorReason::CapabilityFailure.case()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapTypeRole {
     Array,
     Table,
     Nominal,
     Interface,
+    View,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -496,6 +606,17 @@ impl BootstrapSchema {
                 list: list.id,
                 range: range.id,
             })
+    }
+
+    #[must_use]
+    pub fn codec_error_protocol(&self) -> Option<BootstrapCodecErrorProtocol> {
+        let error = self.type_by_source_name("Codec.Error")?;
+        (error.id == CODEC_ERROR_TYPE_ID
+            && error.owner_bubble == "Pop.Standard"
+            && error.arity == 0
+            && error.role == BootstrapTypeRole::Nominal
+            && !error.prelude)
+            .then_some(BootstrapCodecErrorProtocol { error: error.id })
     }
 
     #[must_use]
@@ -725,6 +846,7 @@ fn parse_types(
             "Table" => BootstrapTypeRole::Table,
             "Nominal" => BootstrapTypeRole::Nominal,
             "Interface" => BootstrapTypeRole::Interface,
+            "View" => BootstrapTypeRole::View,
             _ => return Err(error(document, index + 3, "invalid type role")),
         };
         let prelude = match fields[5] {
@@ -778,6 +900,7 @@ fn parse_compiler_attributes(
             "Attribute" => CompilerAttributeTarget::Attribute,
             "Namespace" => CompilerAttributeTarget::Namespace,
             "Record" => CompilerAttributeTarget::Record,
+            "DataType" => CompilerAttributeTarget::DataType,
             _ => {
                 return Err(error(document, index + 3, "invalid attachment target"));
             }
@@ -786,6 +909,7 @@ fn parse_compiler_attributes(
             "CompileTime" => CompilerAttributeRole::CompileTime,
             "AttributeUsage" => CompilerAttributeRole::AttributeUsage,
             "AttributeValidator" => CompilerAttributeRole::AttributeValidator,
+            "RetainMetadata" => CompilerAttributeRole::RetainMetadata,
             "FfiLink" => CompilerAttributeRole::FfiLink,
             "FfiForeign" => CompilerAttributeRole::FfiForeign,
             "FfiNonblocking" => CompilerAttributeRole::FfiNonblocking,
@@ -993,13 +1117,33 @@ fn validate_types(entries: &[BootstrapTypeEntry]) -> Result<(), BootstrapSchemaE
             return Err(error("FFI type", 2, "invalid trusted FFI type contract"));
         }
     }
+    for (id, source_name) in [(122, "Bytes.View"), (123, "Text.View")] {
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.source_name == source_name)
+        else {
+            return Err(error("standard type", 2, "missing required view type"));
+        };
+        if entry.id.raw() != id
+            || entry.owner_bubble != "Pop.Standard"
+            || entry.arity != 0
+            || entry.role != BootstrapTypeRole::View
+            || entry.prelude
+        {
+            return Err(error(
+                "standard type",
+                2,
+                "invalid trusted view type contract",
+            ));
+        }
+    }
     Ok(())
 }
 
 fn validate_compiler_attributes(
     entries: &[BootstrapCompilerAttributeEntry],
 ) -> Result<(), BootstrapSchemaError> {
-    if entries.len() != 7 {
+    if entries.len() != 8 {
         return Err(error(
             "compiler attribute",
             2,
@@ -1066,6 +1210,18 @@ fn validate_compiler_attributes(
             owner_bubble: "Pop.Standard",
             argument_count: 1,
             target: CompilerAttributeTarget::Attribute,
+            prelude: true,
+        },
+    )?;
+    validate_compiler_attribute_contract(
+        entries,
+        ExpectedCompilerAttribute {
+            role: CompilerAttributeRole::RetainMetadata,
+            id: 3,
+            source_name: "RetainMetadata",
+            owner_bubble: "Pop.Standard",
+            argument_count: 2,
+            target: CompilerAttributeTarget::DataType,
             prelude: true,
         },
     )?;

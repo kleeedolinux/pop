@@ -17,9 +17,9 @@ use crate::instruction_lowering::{
 };
 use crate::lowering::{
     PrivateBlock, PrivateFunction, async_function_create_name, async_indirect_create_name,
-    async_nested_create_name, builtin_interface_name, direct_scalar_array_fill_name, function_name,
-    indirect_name, interface_name, llvm_memory_none_instruction, method_name,
-    native_runtime_symbol, nested_name,
+    async_nested_create_name, builtin_interface_name, checked_downcast_name,
+    direct_scalar_array_fill_name, function_name, indirect_name, interface_name,
+    llvm_memory_none_instruction, method_name, native_runtime_symbol, nested_name,
 };
 
 pub(crate) fn direct_scalar_array_fill_function(bubble: BubbleId) -> PrivateFunction {
@@ -77,6 +77,201 @@ pub(crate) fn checked_integer_declarations() -> Vec<String> {
     declarations
 }
 
+pub(crate) type ClassRuntimeKeys = BTreeMap<(ClassId, TypeId), String>;
+
+pub(crate) fn lower_checked_downcast_helpers(
+    bubble: &MirBubble,
+    class_runtime_keys: &ClassRuntimeKeys,
+) -> Vec<PrivateFunction> {
+    let targets = bubble
+        .functions()
+        .iter()
+        .flat_map(pop_mir::MirFunction::blocks)
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .flat_map(|method| method.function().blocks()),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .flat_map(pop_mir::MirNestedFunction::blocks),
+        )
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::CheckedDowncast {
+                target_class,
+                target_type,
+                ..
+            } => Some((*target_class, *target_type)),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let classes = bubble
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Class(class) => Some((class.class(), class)),
+            _ => None,
+        })
+        .chain(
+            bubble
+                .nominal_references()
+                .classes()
+                .iter()
+                .map(|reference| (reference.class(), reference.declaration())),
+        )
+        .collect::<BTreeMap<_, _>>();
+    targets
+        .into_iter()
+        .map(|(target, target_type)| {
+            let accepted = class_runtime_keys
+                .iter()
+                .filter(|((class, type_id), _)| {
+                    class_specialization_descends_from(
+                        bubble,
+                        &classes,
+                        *class,
+                        *type_id,
+                        target,
+                        target_type,
+                    )
+                })
+                .map(|(_, key)| key)
+                .collect::<Vec<_>>();
+            let mut instructions = vec![format!(
+                "%class = call i64 @{}(i64 %v0, i64 1)",
+                native_runtime_symbol(RuntimeOperation::FieldGet)
+            )];
+            let mut matched = "false".to_owned();
+            for (index, class) in accepted.iter().enumerate() {
+                let comparison = format!("%match_{index}");
+                instructions.push(format!("{comparison} = icmp eq i64 %class, {class}",));
+                if index == 0 {
+                    matched = comparison;
+                } else {
+                    let combined = format!("%matched_{index}");
+                    instructions.push(format!("{combined} = or i1 {matched}, {comparison}"));
+                    matched = combined;
+                }
+            }
+            PrivateFunction {
+                name: checked_downcast_name(bubble.bubble(), target, target_type),
+                parameters: vec!["i64 %v0".to_owned()],
+                result: "i1".to_owned(),
+                blocks: vec![PrivateBlock {
+                    label: "entry".to_owned(),
+                    instructions,
+                    terminator: format!("ret i1 {matched}"),
+                }],
+                attributes: vec!["nounwind"],
+                internal: true,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn collect_class_runtime_keys(
+    bubble: &MirBubble,
+    types: &pop_types::TypeArena,
+) -> ClassRuntimeKeys {
+    (0..types.len())
+        .filter_map(|raw| {
+            let type_id = TypeId::from_raw(u32::try_from(raw).ok()?);
+            let pop_types::SemanticType::Class { class, .. } = types.get(type_id)? else {
+                return None;
+            };
+            let identity = bubble.canonical_class_identity(types, *class, type_id)?;
+            Some(((*class, type_id), nominal_runtime_key(&identity)))
+        })
+        .collect()
+}
+
+pub(crate) fn render_class_runtime_descriptors(
+    class_runtime_keys: &ClassRuntimeKeys,
+) -> Vec<String> {
+    class_runtime_keys
+        .values()
+        .map(|key| {
+            let symbol = key
+                .strip_prefix("ptrtoint (ptr @")
+                .and_then(|key| key.strip_suffix(" to i64)"))
+                .expect("runtime key uses one exact descriptor symbol");
+            format!("@{symbol} = linkonce_odr constant i8 0")
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn nominal_runtime_key(identity: &pop_types::CanonicalNominalIdentity) -> String {
+    let encoded = identity
+        .descriptor()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("ptrtoint (ptr @pop_nominal_{encoded} to i64)")
+}
+
+fn class_descends_from(
+    classes: &BTreeMap<ClassId, &pop_mir::MirClassDeclaration>,
+    concrete: ClassId,
+    target: ClassId,
+) -> bool {
+    let mut current = concrete;
+    let mut visited = BTreeSet::new();
+    while visited.insert(current) {
+        if current == target {
+            return true;
+        }
+        let Some(base) = classes.get(&current).and_then(|class| class.base()) else {
+            return false;
+        };
+        current = base;
+    }
+    false
+}
+
+fn class_specialization_descends_from(
+    bubble: &MirBubble,
+    classes: &BTreeMap<ClassId, &pop_mir::MirClassDeclaration>,
+    concrete: ClassId,
+    concrete_type: TypeId,
+    target: ClassId,
+    target_type: TypeId,
+) -> bool {
+    if concrete == target {
+        return concrete_type == target_type;
+    }
+    if let Some(reference) = bubble
+        .nominal_references()
+        .classes()
+        .iter()
+        .find(|candidate| candidate.class() == concrete && candidate.type_id() == concrete_type)
+    {
+        let mut current = reference.base().zip(reference.base_type());
+        let mut visited = BTreeSet::new();
+        while let Some((class, type_id)) = current {
+            if !visited.insert((class, type_id)) {
+                return false;
+            }
+            if class == target {
+                return type_id == target_type;
+            }
+            current = bubble
+                .nominal_references()
+                .classes()
+                .iter()
+                .find(|candidate| candidate.class() == class && candidate.type_id() == type_id)
+                .and_then(|candidate| candidate.base().zip(candidate.base_type()));
+        }
+        return false;
+    }
+    class_descends_from(classes, concrete, target)
+}
+
 pub(crate) fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, String> {
     let values = bubble
         .functions()
@@ -98,9 +293,19 @@ pub(crate) fn collect_string_literals(bubble: &MirBubble) -> BTreeMap<String, St
             MirInstructionKind::StringConstant(value) => Some(value.clone()),
             _ => None,
         });
+    let codec_labels = bubble
+        .generated_codec_adapters()
+        .iter()
+        .flat_map(|adapter| {
+            adapter
+                .members()
+                .iter()
+                .map(|member| member.name().to_owned())
+        });
     let values = values
         .into_iter()
         .chain(nested_values)
+        .chain(codec_labels)
         .collect::<BTreeSet<_>>();
     values
         .into_iter()
@@ -222,6 +427,13 @@ pub(crate) fn render_string_literals(literals: &BTreeMap<String, String>) -> Vec
 
 pub(crate) fn runtime_declarations() -> Vec<String> {
     vec![
+        "declare { i64, i64 } @pop_rt_bytes_view_lengths(i64) nounwind".to_owned(),
+        "declare { i64, i64 } @pop_rt_text_view_lengths(i64) nounwind".to_owned(),
+        "declare { i1, i64, i64, i64 } @pop_rt_bytes_view_slice(i64, i64, i64, i64, i64, i64) nounwind".to_owned(),
+        "declare { i1, i64, i64, i64 } @pop_rt_text_view_slice(i64, i64, i64, i64, i64, i64) nounwind".to_owned(),
+        "declare { i1, i8 } @pop_rt_bytes_view_get(i64, i64, i64, i64) nounwind".to_owned(),
+        "declare i64 @pop_rt_bytes_view_materialize(i64, i64, i64) nounwind".to_owned(),
+        "declare i64 @pop_rt_text_view_materialize(i64, i64, i64) nounwind".to_owned(),
         format!(
             "declare i8 @{}(i64, i64, i1, ptr) nounwind",
             pop_runtime_native_abi::TABLE_GET_CHECKED_SYMBOL
@@ -352,6 +564,7 @@ pub(crate) fn collect_record_field_types(bubble: &MirBubble) -> BTreeMap<TypeId,
 pub(crate) fn lower_interface_dispatchers(
     bubble: &MirBubble,
     types: &TypeArena,
+    class_runtime_keys: &ClassRuntimeKeys,
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     let classes = bubble
         .declarations()
@@ -384,7 +597,13 @@ pub(crate) fn lower_interface_dispatchers(
                                 implementation.interface_method() == method.method()
                             })
                         })
-                        .map(|implementation| (class.class(), implementation.class_method()))
+                        .map(|implementation| {
+                            (
+                                class.class(),
+                                class.type_id(),
+                                implementation.class_method(),
+                            )
+                        })
                 })
                 .collect::<Vec<_>>();
             dispatchers.push(lower_interface_dispatcher(
@@ -393,6 +612,7 @@ pub(crate) fn lower_interface_dispatchers(
                 method,
                 &implementations,
                 types,
+                class_runtime_keys,
             )?);
         }
     }
@@ -402,6 +622,7 @@ pub(crate) fn lower_interface_dispatchers(
 pub(crate) fn lower_builtin_interface_dispatchers(
     bubble: &MirBubble,
     types: &TypeArena,
+    class_runtime_keys: &ClassRuntimeKeys,
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     let protocol = pop_types::embedded_bootstrap_schema()
         .ok()
@@ -442,7 +663,14 @@ pub(crate) fn lower_builtin_interface_dispatchers(
     calls
         .into_iter()
         .map(|(receiver, method, result)| {
-            lower_builtin_interface_dispatcher(bubble, receiver, method, result, types)
+            lower_builtin_interface_dispatcher(
+                bubble,
+                receiver,
+                method,
+                result,
+                types,
+                class_runtime_keys,
+            )
         })
         .collect()
 }
@@ -453,6 +681,7 @@ fn lower_builtin_interface_dispatcher(
     method: pop_foundation::IterationProtocolMethodId,
     result: TypeId,
     types: &TypeArena,
+    class_runtime_keys: &ClassRuntimeKeys,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     let Some(SemanticType::Builtin { definition, .. }) = types.get(receiver) else {
         return Err(LlvmLoweringError::InvalidType(receiver));
@@ -474,26 +703,53 @@ fn lower_builtin_interface_dispatcher(
                         .iter()
                         .find(|implementation| implementation.protocol_method() == method)
                 })
-                .map(|implementation| (class.class(), implementation.class_method())),
+                .map(|implementation| {
+                    (
+                        class.class(),
+                        class.type_id(),
+                        implementation.class_method(),
+                    )
+                }),
             _ => None,
         })
         .collect::<Vec<_>>();
-    let cases = implementations
-        .iter()
-        .map(|(class, _)| format!("    i64 {}, label %class_{}", class.raw(), class.raw()))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let first_check = if implementations.is_empty() {
+        "native".to_owned()
+    } else {
+        "class_check_0".to_owned()
+    };
     let mut blocks = vec![PrivateBlock {
         label: "dispatch".to_owned(),
         instructions: vec![format!(
             "%dispatch_tag = call i64 @{}(i64 %v0, i64 1)",
             native_runtime_symbol(RuntimeOperation::FieldGet)
         )],
-        terminator: format!("switch i64 %dispatch_tag, label %native [\n{cases}\n  ]"),
+        terminator: format!("br label %{first_check}"),
     }];
-    for (class, class_method) in implementations {
+    for (index, (class, class_type, _)) in implementations.iter().enumerate() {
+        let key = class_runtime_keys
+            .get(&(*class, *class_type))
+            .ok_or(LlvmLoweringError::InvalidType(*class_type))?;
+        let otherwise = if index + 1 == implementations.len() {
+            "native".to_owned()
+        } else {
+            format!("class_check_{}", index + 1)
+        };
         blocks.push(PrivateBlock {
-            label: format!("class_{}", class.raw()),
+            label: format!("class_check_{index}"),
+            instructions: vec![format!(
+                "%class_match_{index} = icmp eq i64 %dispatch_tag, {key}"
+            )],
+            terminator: format!(
+                "br i1 %class_match_{index}, label %class_{}_t{}, label %{otherwise}",
+                class.raw(),
+                class_type.raw()
+            ),
+        });
+    }
+    for (class, class_type, class_method) in implementations {
+        blocks.push(PrivateBlock {
+            label: format!("class_{}_t{}", class.raw(), class_type.raw()),
             instructions: vec![format!(
                 "%class_result_{} = call i64 @{}(i64 %v0)",
                 class.raw(),
@@ -529,8 +785,9 @@ pub(crate) fn lower_interface_dispatcher(
     bubble: BubbleId,
     interface: pop_foundation::InterfaceId,
     method: &pop_mir::MirInterfaceMethod,
-    implementations: &[(ClassId, pop_foundation::MethodId)],
+    implementations: &[(ClassId, TypeId, pop_foundation::MethodId)],
     types: &TypeArena,
+    class_runtime_keys: &ClassRuntimeKeys,
 ) -> Result<PrivateFunction, LlvmLoweringError> {
     let result_type = llvm_results(method.results(), types)?;
     let mut parameters = vec!["i64 %v0".to_owned()];
@@ -544,19 +801,40 @@ pub(crate) fn lower_interface_dispatcher(
             })
             .collect::<Result<Vec<_>, _>>()?,
     );
-    let cases = implementations
-        .iter()
-        .map(|(class, _)| format!("    i64 {}, label %class_{}", class.raw(), class.raw()))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let first_check = if implementations.is_empty() {
+        "invalid_dispatch".to_owned()
+    } else {
+        "class_check_0".to_owned()
+    };
     let mut blocks = vec![PrivateBlock {
         label: "dispatch".to_owned(),
         instructions: vec![format!(
             "%dispatch_tag = call i64 @{}(i64 %v0, i64 1)",
             native_runtime_symbol(RuntimeOperation::FieldGet)
         )],
-        terminator: format!("switch i64 %dispatch_tag, label %invalid_dispatch [\n{cases}\n  ]"),
+        terminator: format!("br label %{first_check}"),
     }];
+    for (index, (class, class_type, _)) in implementations.iter().enumerate() {
+        let key = class_runtime_keys
+            .get(&(*class, *class_type))
+            .ok_or(LlvmLoweringError::InvalidType(*class_type))?;
+        let otherwise = if index + 1 == implementations.len() {
+            "invalid_dispatch".to_owned()
+        } else {
+            format!("class_check_{}", index + 1)
+        };
+        blocks.push(PrivateBlock {
+            label: format!("class_check_{index}"),
+            instructions: vec![format!(
+                "%class_match_{index} = icmp eq i64 %dispatch_tag, {key}"
+            )],
+            terminator: format!(
+                "br i1 %class_match_{index}, label %class_{}_t{}, label %{otherwise}",
+                class.raw(),
+                class_type.raw()
+            ),
+        });
+    }
     let arguments = std::iter::once("i64 %v0".to_owned())
         .chain(
             method
@@ -570,8 +848,8 @@ pub(crate) fn lower_interface_dispatcher(
         )
         .collect::<Vec<_>>()
         .join(", ");
-    for (class, class_method) in implementations {
-        let dispatch_result = format!("%dispatch_result_{}", class.raw());
+    for (class, class_type, class_method) in implementations {
+        let dispatch_result = format!("%dispatch_result_{}_t{}", class.raw(), class_type.raw());
         let (instructions, terminator) = if method.results().is_empty() {
             (
                 vec![format!(
@@ -590,7 +868,7 @@ pub(crate) fn lower_interface_dispatcher(
             )
         };
         blocks.push(PrivateBlock {
-            label: format!("class_{}", class.raw()),
+            label: format!("class_{}_t{}", class.raw(), class_type.raw()),
             instructions,
             terminator,
         });

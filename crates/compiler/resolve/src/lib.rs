@@ -11,7 +11,8 @@ mod resolution;
 
 pub use index::{IndexResult, ModuleInput, build_declaration_index};
 pub use model::{
-    Declaration, DeclarationIndex, DeclarationKind, DeclarationOwner, ModuleIndex,
-    ReferenceIndexError, ReferencedDeclaration, SymbolSpace, UsingDirective, Visibility,
+    Declaration, DeclarationIndex, DeclarationKind, DeclarationOwner,
+    GeneratedCodecSchemaDeclaration, GeneratedDeclarationError, ModuleIndex, ReferenceIndexError,
+    ReferencedDeclaration, SymbolSpace, UsingDirective, Visibility,
 };
 pub use resolution::{PreludeNamespaceError, Resolution, ResolutionDatabase};

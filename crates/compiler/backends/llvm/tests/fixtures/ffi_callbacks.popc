@@ -74,6 +74,26 @@ internal function visitCRegistered(
 ): Ffi.C.Int
 end
 
+@Ffi.Foreign("visit_registered_system", abi = "System")
+@Ffi.Binding.CallPolicy(nonblocking = false)
+@Ffi.Binding.CallbackPair(
+    callbackParameterIndex = 0,
+    contextParameterIndex = 2,
+    lifetime = Ffi.Binding.CallbackLifetime.Registered,
+    callbackAbi = Ffi.Binding.CallbackAbi.System,
+    signatureFingerprint = "2beb2c45d821699608324693b75c59ed238fcaa80ea31b1d7de18a69317fa8c5",
+    thread = Ffi.Binding.CallbackThread.AttachedThread,
+    concurrency = Ffi.Binding.CallbackConcurrency.Serialized,
+    reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
+    panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
+)
+internal function visitDRegisteredSystem(
+    callback: Ffi.Function<function(value: Ffi.C.Int, context: Ffi.CallbackContext): Ffi.C.Int>,
+    value: Ffi.C.Int,
+    context: Ffi.CallbackContext,
+): Ffi.C.Int
+end
+
 @Ffi.Foreign("visit_record_scoped", abi = "C")
 @Ffi.Binding.CallPolicy(nonblocking = false)
 @Ffi.Binding.CallbackPair(
@@ -87,7 +107,7 @@ end
     reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
     panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
 )
-internal function visitDRecordScoped(
+internal function visitERecordScoped(
     callback: Ffi.Function<function(value: Pair, context: Ffi.CallbackContext): Pair>,
     context: Ffi.CallbackContext,
 ): Ffi.C.Int
@@ -106,7 +126,7 @@ end
     reentrancy = Ffi.Binding.CallbackReentrancy.Forbidden,
     panicPolicy = Ffi.Binding.CallbackPanic.AbortProcess,
 )
-internal function visitESystemScoped(
+internal function visitFSystemScoped(
     callback: Ffi.Function<function(value: Ffi.C.Long, context: Ffi.CallbackContext): Ffi.C.Long>,
     context: Ffi.CallbackContext,
 ): Ffi.C.Int

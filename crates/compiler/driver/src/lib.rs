@@ -34,6 +34,7 @@ mod ffi_generate;
 mod front_end;
 mod native_link;
 mod reference;
+mod retained_metadata;
 mod work;
 
 pub use api::*;
@@ -47,3 +48,4 @@ pub use native_link::{
     NativeLinkInput, NativeLinkPlanSource, NativeLinkResolution, NativeLinkResolutionError,
     ResolvedNativeProvider, resolve_native_link_inputs, validate_foreign_link_aliases,
 };
+pub use retained_metadata::*;

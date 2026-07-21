@@ -5,6 +5,8 @@ use pop_driver::{
     analyze_bubble, emit_poplib, load_poplib, resolve_native_link_inputs,
 };
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
+use pop_hir::HirGeneratedCodecEntryRole;
+use pop_mir::{MirInstructionKind, lower_hir_bubble};
 use pop_projects::{BubbleKind, parse_package_manifest};
 use pop_source::SourceFile;
 use pop_target::TargetSpec;
@@ -131,6 +133,236 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
     emit_poplib(&artifact, &emission).expect("restore artifact");
     std::fs::write(artifact.join("unexpected"), b"extra").expect("extra file");
     assert_eq!(load_poplib(&artifact), Err(PoplibError::UnexpectedFile));
+
+    std::fs::remove_dir_all(root).expect("remove artifact fixture");
+}
+
+#[test]
+fn poplib_inventories_and_verifies_public_typed_retained_adapters() {
+    let bubble = BubbleId::from_raw(9);
+    let library = analyze_bubble(FrontEndBubbleInput::new(
+        bubble,
+        NamespaceId::from_raw(9),
+        Vec::new(),
+        vec![module(
+            "namespace Example.Models\n\
+             @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+             public record User\n\
+                 name: String\n\
+             end\n\
+             @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+             public enum State\n\
+                 Ready\n\
+                 Closed\n\
+             end\n\
+             @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+             public union Choice\n\
+                 Item(value: Int)\n\
+                 Empty\n\
+             end\n\
+             @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+             private record Secret\n\
+                 value: String\n\
+             end\n",
+        )],
+    ));
+    assert!(
+        library.diagnostics().is_empty(),
+        "{}",
+        library.diagnostic_snapshot()
+    );
+    let producer_entries = library
+        .hir()
+        .expect("producer adapter HIR")
+        .generated_codec_adapters()
+        .iter()
+        .filter(|adapter| adapter.visibility() == pop_resolve::Visibility::Public)
+        .map(|adapter| {
+            (
+                adapter.name().to_owned(),
+                (
+                    adapter.encode_entry().identity(),
+                    adapter.decode_entry().identity(),
+                    adapter.provenance(),
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let public_popc = library
+        .retained_metadata()
+        .expect("retained metadata")
+        .public_popc()
+        .expect("public descriptor");
+    let emission = PoplibEmission::new(
+        "Example.Models",
+        "1.0.0",
+        ZERO_SHA256,
+        "Models",
+        BubbleKind::Library,
+        "2026",
+        library
+            .reference_metadata()
+            .expect("reference metadata")
+            .clone(),
+    )
+    .with_retained_adapters_popc(public_popc.clone());
+    let root = temporary_root();
+    let artifact = root.join("Models.poplib");
+
+    emit_poplib(&artifact, &emission).expect("typed adapter artifact emission");
+    assert_eq!(bytes(&artifact.join("retained-adapters.popc")), public_popc);
+    assert!(!String::from_utf8_lossy(&public_popc).contains("Secret"));
+    let loaded = load_poplib(&artifact).expect("typed adapter artifact load");
+    assert_eq!(
+        loaded.retained_adapters_popc(),
+        Some(public_popc.as_slice())
+    );
+    assert_eq!(loaded.reference_metadata().retained_adapters().len(), 3);
+    assert_eq!(loaded.reference_metadata().records().len(), 0);
+    let consumer_source = "namespace Consumer\n\
+         public function userSchema(): Codec.Schema<Example.Models.User>\n\
+             return Example.Models.UserSchema\n\
+         end\n\
+         public function stateSchema(): Codec.Schema<Example.Models.State>\n\
+             return Example.Models.StateSchema\n\
+         end\n\
+         public function choiceSchema(): Codec.Schema<Example.Models.Choice>\n\
+             return Example.Models.ChoiceSchema\n\
+         end\n";
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(10),
+            NamespaceId::from_raw(10),
+            vec![bubble],
+            vec![module(consumer_source)],
+        )
+        .with_reference_metadata(vec![loaded.reference_metadata().clone()])
+        .with_reference_retained_adapters_popc(vec![(
+            bubble,
+            loaded
+                .retained_adapters_popc()
+                .expect("loaded public descriptor")
+                .to_vec(),
+        )]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty() && consumer.hir().is_some(),
+        "{} {:?} {:#?}",
+        consumer.diagnostic_snapshot(),
+        consumer.hir_bubble_error(),
+        consumer.hir_build_errors(),
+    );
+    let consumer_hir = consumer.hir().expect("source-free consumer HIR");
+    assert_eq!(consumer_hir.generated_codec_adapters().len(), 3);
+    let entry_symbols = consumer_hir
+        .generated_codec_adapters()
+        .iter()
+        .map(|adapter| {
+            let producer = producer_entries
+                .get(adapter.name())
+                .expect("producer public typed entries");
+            assert_eq!(adapter.encode_entry().identity(), producer.0);
+            assert_eq!(adapter.decode_entry().identity(), producer.1);
+            assert_eq!(adapter.provenance(), producer.2);
+            assert_eq!(adapter.encode_entry().identity().adapter().bubble(), bubble);
+            assert_eq!(adapter.decode_entry().identity().adapter().bubble(), bubble);
+            assert_eq!(
+                adapter.encode_entry().identity().role(),
+                HirGeneratedCodecEntryRole::Encode
+            );
+            assert_eq!(
+                adapter.decode_entry().identity().role(),
+                HirGeneratedCodecEntryRole::Decode
+            );
+            assert_eq!(adapter.encode_entry().parameters().len(), 2);
+            assert_eq!(adapter.decode_entry().parameters().len(), 1);
+            (
+                adapter.symbol(),
+                adapter.encode_entry().symbol(),
+                adapter.decode_entry().symbol(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        consumer_hir
+            .generated_codec_adapters()
+            .iter()
+            .map(|adapter| (adapter.name(), adapter.members().len()))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        std::collections::BTreeMap::from([
+            ("ChoiceSchema", 2),
+            ("StateSchema", 2),
+            ("UserSchema", 1),
+        ])
+    );
+    let consumer_mir =
+        lower_hir_bubble(consumer_hir, consumer.types()).expect("source-free imported adapter MIR");
+    assert_eq!(consumer_mir.generated_codec_adapters().len(), 3);
+    for (adapter, encode, decode) in entry_symbols {
+        let encode = consumer_mir
+            .functions()
+            .iter()
+            .find(|function| function.symbol() == encode)
+            .expect("reconstructed encode entry MIR");
+        assert!(encode.blocks().iter().flat_map(|block| block.instructions()).any(
+            |instruction| matches!(instruction.kind(), MirInstructionKind::CodecEncode { adapter: found, .. } if *found == adapter)
+        ));
+        let decode = consumer_mir
+            .functions()
+            .iter()
+            .find(|function| function.symbol() == decode)
+            .expect("reconstructed decode entry MIR");
+        assert!(decode.blocks().iter().flat_map(|block| block.instructions()).any(
+            |instruction| matches!(instruction.kind(), MirInstructionKind::CodecDecode { adapter: found, .. } if *found == adapter)
+        ));
+    }
+
+    let missing_descriptor = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(11),
+            NamespaceId::from_raw(11),
+            vec![bubble],
+            vec![module(consumer_source)],
+        )
+        .with_reference_metadata(vec![loaded.reference_metadata().clone()]),
+    );
+    assert!(
+        missing_descriptor.hir().is_none(),
+        "public adapter structure must never fall back to JSON reference metadata"
+    );
+
+    let mut wrong_descriptor = public_popc.clone();
+    let wrong_index = wrong_descriptor
+        .windows(4)
+        .position(|window| window == b"name")
+        .expect("field label");
+    wrong_descriptor[wrong_index] = b'N';
+    let mismatched_descriptor = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(12),
+            NamespaceId::from_raw(12),
+            vec![bubble],
+            vec![module(consumer_source)],
+        )
+        .with_reference_metadata(vec![loaded.reference_metadata().clone()])
+        .with_reference_retained_adapters_popc(vec![(bubble, wrong_descriptor)]),
+    );
+    assert!(
+        mismatched_descriptor.hir().is_none(),
+        "descriptor bytes must match the full reference-metadata digest"
+    );
+
+    let mut tampered = public_popc;
+    let index = tampered
+        .windows(4)
+        .position(|window| window == b"name")
+        .expect("field label");
+    tampered[index] = b'N';
+    std::fs::write(artifact.join("retained-adapters.popc"), tampered).expect("tamper descriptor");
+    assert!(matches!(
+        load_poplib(&artifact),
+        Err(PoplibError::HashMismatch | PoplibError::InvalidRetainedMetadata)
+    ));
 
     std::fs::remove_dir_all(root).expect("remove artifact fixture");
 }

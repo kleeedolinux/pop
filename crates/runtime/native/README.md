@@ -30,6 +30,11 @@ serialized non-reentrant state before restoring managed execution; leave
 restores the exact foreign state or detaches an entry-created binding. Close
 invalidates the context before releasing the rooted managed environment.
 
+ABI 1.19 adds the two fixed-width codec event operations. Generated adapters
+select exact schemas statically; the native facade carries only sealed
+writer/reader capability events and never parses `.popc`, resolves runtime
+names, or maintains an adapter registry.
+
 Heap storage, reachability, roots, pins, and collection policy remain in
 `pop-runtime-collector`; symbol/version vocabulary remains in
 `pop-runtime-native-abi`. See

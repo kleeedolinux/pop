@@ -83,6 +83,29 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                             expected.span(),
                         );
                     }
+                    if let Some(kind) = self.resolver.arena().view_kind(typed.type_id()) {
+                        match self
+                            .view_borrow_for_expression(&typed)
+                            .map(crate::ViewBorrow::lender)
+                        {
+                            Some(crate::ViewLenderProvenance::Parameter { .. }) => {}
+                            Some(_) => {
+                                self.diagnostics
+                                    .push(type_diagnostics::borrowed_view_escape(
+                                        typed.span(),
+                                        format!("{kind:?}.View"),
+                                        "LocalOwnerReturn",
+                                    ))
+                            }
+                            None => self.diagnostics.push(
+                                type_diagnostics::invalid_view_callable_provenance(
+                                    typed.span(),
+                                    signature.name(),
+                                    "MissingResultLender",
+                                ),
+                            ),
+                        }
+                    }
                     typed_values.push(typed);
                 }
                 TypedStatementKind::Return {
@@ -656,6 +679,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         } else {
             initializer.type_id()
         };
+        let view_borrow = self.view_borrow_for_expression(&initializer);
+        let lender = self
+            .type_is_view_lender(local_type)
+            .then(|| self.lender_for_expression(&initializer));
         let local = LocalId::from_raw(self.next_local);
         self.next_local = self.next_local.saturating_add(1);
         let binding = BindingId::from_raw(self.next_binding);
@@ -672,6 +699,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     function_depth: self.function_depth,
                 },
             );
+        if let Some(view_borrow) = view_borrow {
+            self.local_view_borrows.insert(local, view_borrow);
+        }
+        if let Some(lender) = lender {
+            self.local_lenders.insert(local, lender);
+        }
         Some(TypedStatementKind::Local {
             binding,
             local,
@@ -912,6 +945,10 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 parameters: parameters.iter().map(|(_, type_id, _)| *type_id).collect(),
                 results: results.iter().map(|(type_id, _)| *type_id).collect(),
                 effects: crate::EffectSummary::empty(),
+                lifetime_summary: crate::CallableLifetimeSummary::conservative(
+                    parameters.len(),
+                    results.len(),
+                ),
             })
             .ok()?;
         Some(ResolvedClosureShape {
@@ -1011,7 +1048,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     CaptureMode::Value
                 },
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if captures
+            .iter()
+            .any(|capture| self.resolver.arena().contains_view(capture.type_id()))
+        {
+            self.diagnostics
+                .push(type_diagnostics::borrowed_view_escape(
+                    function.span(),
+                    "View",
+                    "ClosureCapture",
+                ));
+            return None;
+        }
         Some(TypedExpression {
             kind: TypedExpressionKind::Closure(TypedClosure {
                 function: nested,
@@ -1668,6 +1717,13 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         span: SourceSpan,
     ) -> Option<TypedStatementKind> {
         let scrutinee = self.check_expression(scrutinee)?;
+        if matches!(
+            self.resolver.arena().get(scrutinee.type_id()),
+            Some(SemanticType::Builtin { definition, arguments })
+                if *definition == crate::CODEC_ERROR_TYPE_ID && arguments.is_empty()
+        ) {
+            return self.check_codec_error_match(signature, scrutinee, arms, span);
+        }
         if let Some((success, error)) = self.resolver.result_parts(scrutinee.type_id()) {
             return self.check_result_match(signature, scrutinee, success, error, arms, span);
         }
@@ -1834,6 +1890,105 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         Some(TypedStatementKind::Match {
             scrutinee,
             union: definition.symbol(),
+            arms: typed_arms,
+        })
+    }
+
+    fn check_codec_error_match(
+        &mut self,
+        signature: &ResolvedFunctionSignature,
+        scrutinee: TypedExpression,
+        arms: &[MatchArmSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedStatementKind> {
+        let mut seen = BTreeMap::new();
+        let mut typed_arms = Vec::new();
+        for arm in arms {
+            let reason = match arm.case_path() {
+                [codec, error, case] if codec == "Codec" && error == "Error" => {
+                    match case.as_str() {
+                        "MalformedInput" => crate::CodecErrorReason::MalformedInput,
+                        "LimitExceeded" => crate::CodecErrorReason::LimitExceeded,
+                        "CapabilityFailure" => crate::CodecErrorReason::CapabilityFailure,
+                        _ => {
+                            self.diagnostics.push(type_diagnostics::foreign_match_case(
+                                arm.span(),
+                                arm.case_path().join("."),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    self.diagnostics.push(type_diagnostics::foreign_match_case(
+                        arm.span(),
+                        arm.case_path().join("."),
+                    ));
+                    continue;
+                }
+            };
+            if let Some(original) = seen.insert(reason, arm.span()) {
+                self.diagnostics
+                    .push(type_diagnostics::duplicate_match_case(
+                        arm.span(),
+                        reason.source_name(),
+                        original,
+                    ));
+                continue;
+            }
+            if !arm.bindings().is_empty() {
+                self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                    arm.span(),
+                    "Codec.Error match case payload",
+                    0,
+                    arm.bindings().len(),
+                ));
+                continue;
+            }
+            self.scopes.push(BTreeMap::new());
+            let body = arm
+                .body()
+                .iter()
+                .filter_map(|statement| self.check_statement(signature, statement))
+                .collect();
+            self.scopes.pop().expect("codec error match scope");
+            typed_arms.push(TypedCodecErrorMatchArm {
+                reason,
+                body,
+                span: arm.span(),
+            });
+        }
+        let missing = [
+            crate::CodecErrorReason::MalformedInput,
+            crate::CodecErrorReason::LimitExceeded,
+            crate::CodecErrorReason::CapabilityFailure,
+        ]
+        .into_iter()
+        .filter(|reason| !seen.contains_key(reason))
+        .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let replacement = missing
+                .iter()
+                .map(|reason| format!("when Codec.Error.{} then\n", reason.source_name()))
+                .collect::<String>();
+            let insert_offset = span.range().end().to_u32().saturating_sub(3);
+            let insertion = SourceSpan::new(
+                span.file(),
+                TextRange::empty(TextSize::from_u32(insert_offset)),
+            );
+            let names = missing
+                .iter()
+                .map(|reason| reason.source_name())
+                .collect::<Vec<_>>();
+            self.diagnostics.push(type_diagnostics::missing_match_cases(
+                span,
+                &names,
+                insertion,
+                replacement,
+            ));
+        }
+        Some(TypedStatementKind::CodecErrorMatch {
+            scrutinee,
             arms: typed_arms,
         })
     }
@@ -2370,6 +2525,9 @@ fn expression_contains_await(expression: &ExpressionSyntax) -> bool {
         ExpressionSyntaxKind::Call { callee, arguments }
         | ExpressionSyntaxKind::GenericCall {
             callee, arguments, ..
+        }
+        | ExpressionSyntaxKind::TargetTypeCall {
+            callee, arguments, ..
         } => expression_contains_await(callee) || arguments.iter().any(expression_contains_await),
         ExpressionSyntaxKind::MethodCall {
             receiver,
@@ -2423,6 +2581,9 @@ fn expression_contains_result_propagation(expression: &ExpressionSyntax) -> bool
         ExpressionSyntaxKind::ResultPropagate { .. } => true,
         ExpressionSyntaxKind::Call { callee, arguments }
         | ExpressionSyntaxKind::GenericCall {
+            callee, arguments, ..
+        }
+        | ExpressionSyntaxKind::TargetTypeCall {
             callee, arguments, ..
         } => {
             expression_contains_result_propagation(callee)

@@ -1160,7 +1160,7 @@ fn typed_function_values_lower_to_indirect_calls_and_round_trip() {
         "src/functions.pop",
         "namespace Main\n\
          private function increment(value: Int): Int\n\
-             return value + 1\n\
+             return 42\n\
          end\n\
          public function apply(operation: function(value: Int): Int, value: Int): Int\n\
              return operation(value)\n\

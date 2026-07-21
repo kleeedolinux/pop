@@ -36,11 +36,21 @@ type:113	Type	Pop.Standard	Pop	Iteration	Iteration<T>	prelude	implemented	true	a
 type:114	Type	Pop.Standard	Pop	CancelToken	CancelToken	prelude	implemented	true	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md
 type:115	Type	Pop.Standard	Pop.Task	Group	Task.Group	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
 type:116	Type	Pop.Standard	Pop.Task	CancelSource	Task.CancelSource	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
+type:117	Type	Pop.Standard	Pop.Metadata	Use	Metadata.Use	standard	implemented	false	architecture/decisions/0092-generated-retained-metadata-adapters.md
+type:118	Type	Pop.Standard	Pop.Codec	Schema	Codec.Schema<T>	standard	implemented	false	architecture/decisions/0092-generated-retained-metadata-adapters.md
+type:119	Type	Pop.Standard	Pop.Codec	Writer	Codec.Writer	standard	implemented	false	architecture/decisions/0092-generated-retained-metadata-adapters.md
+type:120	Type	Pop.Standard	Pop.Codec	Reader	Codec.Reader	standard	implemented	false	architecture/decisions/0092-generated-retained-metadata-adapters.md
+type:121	Type	Pop.Standard	Pop.Codec	Error	Codec.Error	standard	implemented	false	architecture/decisions/0092-generated-retained-metadata-adapters.md
+type:122	Type	Pop.Standard	Pop.Bytes	View	Bytes.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+type:123	Type	Pop.Standard	Pop.Text	View	Text.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
 attribute:0	Attribute	Pop.Standard	Pop	CompileTime	@CompileTime	prelude	implemented	true	architecture/10-udas-compile-time-and-reflection.md
 attribute:1	Attribute	Pop.Standard	Pop	AttributeUsage	@AttributeUsage	prelude	implemented	true	architecture/10-udas-compile-time-and-reflection.md
 attribute:2	Attribute	Pop.Standard	Pop	AttributeValidator	@AttributeValidator	prelude	implemented	true	architecture/10-udas-compile-time-and-reflection.md
+attribute:3	Attribute	Pop.Standard	Pop	RetainMetadata	@RetainMetadata	prelude	implemented	true	architecture/decisions/0092-generated-retained-metadata-adapters.md
 namespace:0	Namespace	Pop.Standard	Pop	Sequence	namespace Pop.Sequence	prelude	prototype	true	architecture/decisions/0053-nominal-iteration-sequences-and-growable-lists.md
 namespace:1	Namespace	Pop.Standard	Pop	Math	namespace Pop.Math	standard	prototype	false	architecture/decisions/0062-first-portable-integer-math.md
+namespace:2	Namespace	Pop.Standard	Pop	Metadata	namespace Pop.Metadata	prelude	implemented	true	architecture/decisions/0092-generated-retained-metadata-adapters.md
+namespace:3	Namespace	Pop.Standard	Pop	Codec	namespace Pop.Codec	prelude	implemented	true	architecture/decisions/0092-generated-retained-metadata-adapters.md
 function:0	Function	Pop.Standard	Pop	print	print(Int)->()	prelude	prototype	true	architecture/16-base-libraries.md
 function:1	Function	Pop.Standard	Pop	print	print(String)->()	prelude	prototype	true	architecture/16-base-libraries.md
 api:0	Api	Pop.Standard	Pop.Sequence	map	map<T,TSource:Iterable<T>,U>(TSource,function(T)->U)->Iterator<U>	standard	prototype	false	architecture/decisions/0053-nominal-iteration-sequences-and-growable-lists.md
@@ -90,3 +100,14 @@ api:43	Api	Pop.Standard	Pop.Task	cancelToken	cancelToken(Task.CancelSource)->Can
 api:44	Api	Pop.Standard	Pop.Task	cancel	cancel(Task.CancelSource)->()	standard	implemented	false	architecture/decisions/0079-native-task-frame-and-cancellation-abi.md
 api:45	Api	Pop.Standard	Pop.Task	group	group<T>(CancelToken,async function(Task.Group):T)->Task<T>	standard	implemented	false	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md
 api:46	Api	Pop.Standard	Pop.Task	start	start<T>(Task.Group,Task<T>)->Task<T>	standard	implemented	false	architecture/decisions/0068-typed-async-tasks-actors-and-distribution.md
+api:47	Api	Pop.Standard	Pop.Bytes	view	view(Bytes)->Bytes.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:48	Api	Pop.Standard	Pop.Bytes	slice	slice(Bytes,Int,Int)->Bytes.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:49	Api	Pop.Standard	Pop.Bytes	slice	slice(Bytes.View,Int,Int)->Bytes.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:50	Api	Pop.Standard	Pop.Bytes	length	length(Bytes.View)->Int	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:51	Api	Pop.Standard	Pop.Bytes	get	get(Bytes.View,Int)->Byte?	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:52	Api	Pop.Standard	Pop.Bytes	toBytes	toBytes(Bytes.View)->Bytes	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:53	Api	Pop.Standard	Pop.Text	view	view(String)->Text.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:54	Api	Pop.Standard	Pop.Text	slice	slice(String,Int,Int)->Text.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:55	Api	Pop.Standard	Pop.Text	slice	slice(Text.View,Int,Int)->Text.View	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:56	Api	Pop.Standard	Pop.Text	length	length(Text.View)->Int	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md
+api:57	Api	Pop.Standard	Pop.Text	toString	toString(Text.View)->String	standard	implemented	false	architecture/decisions/0093-compiler-proven-text-and-bytes-views.md

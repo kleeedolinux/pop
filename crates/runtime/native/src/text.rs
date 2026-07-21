@@ -90,7 +90,7 @@ pub unsafe extern "C" fn pop_rt_string_read(reference: u64, target: *mut u8, cap
     encoded_length
 }
 
-fn allocate_utf8_string(
+pub(crate) fn allocate_utf8_string(
     runtime: &mut StableGenerationalRuntime,
     bytes: &[u8],
 ) -> Result<ManagedReference, RuntimeFailure> {
@@ -109,6 +109,20 @@ fn allocate_utf8_string(
         runtime.store_scalar(reference, ObjectSlot::new(index), u64::from(byte))?;
     }
     Ok(reference)
+}
+
+pub(crate) fn utf8_string_bytes(
+    runtime: &StableGenerationalRuntime,
+    reference: ManagedReference,
+) -> Option<Vec<u8>> {
+    let values = runtime.scalar_array_values(reference, RuntimeTypeId::new(1))?;
+    let bytes = values
+        .into_iter()
+        .map(u8::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    std::str::from_utf8(&bytes).ok()?;
+    Some(bytes)
 }
 
 /// Materializes the valid UTF-8 arguments that follow the executable path.

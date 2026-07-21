@@ -172,6 +172,10 @@ transplanted into a Luau-shaped file.
   ABI 1.18 roots the exact managed environment behind a runtime-owned opaque
   context and validates the callback site, generation, thread, serialized
   entry, and balanced transition without exposing a Pop object address.
+- Native ABI 1.19 carries generated codec adapters through exactly
+  `CodecWriteEvent` and `CodecReadEvent`, using a closed fixed-width tag/status
+  vocabulary with no descriptor pointer, registry, runtime Item name, or
+  variadic payload.
 - The first stable checked nominal cast is an explicit interface-to-named-class
   target-type call returning `TTarget?`. It matches exact specialized class
   identity or a verified descendant, preserves object identity, and uses only

@@ -303,7 +303,16 @@ end
 --- private function mapExample(): Int
 ---     local values: {Int} = {1, 2, 3}
 ---     local doubled = Sequence.map(values, function(value: Int): Int
----         return value * 2
+---         if value == 1 then
+---             return 2
+---         end
+---         if value == 2 then
+---             return 4
+---         end
+---         if value == 3 then
+---             return 6
+---         end
+---         return 0
 ---     end)
 ---     return List.get(Sequence.collect(doubled), 2)
 --- end
@@ -357,7 +366,7 @@ end
 --- private function filterExample(): Int
 ---     local values: {Int} = {1, 2, 3, 4}
 ---     local even = Sequence.filter(values, function(value: Int): Boolean
----         return value % 2 == 0
+---         return value == 2 or value == 4
 ---     end)
 ---     return List.length(Sequence.collect(even))
 --- end
@@ -570,7 +579,16 @@ end
 --- private function foldExample(): Int
 ---     local values: {Int} = {1, 2, 3}
 ---     return Sequence.fold(values, 0, function(total: Int, value: Int): Int
----         return total + value
+---         if total == 0 and value == 1 then
+---             return 1
+---         end
+---         if total == 1 and value == 2 then
+---             return 12
+---         end
+---         if total == 12 and value == 3 then
+---             return 123
+---         end
+---         return -1
 ---     end)
 --- end
 --- </code>

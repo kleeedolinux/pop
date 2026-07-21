@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pop_diagnostics::{resolution as resolution_diagnostics, types as type_diagnostics};
 use pop_foundation::{
-    BindingId, CaptureId, Diagnostic, FieldId, LocalId, ModuleId, NestedFunctionId,
-    NominalInterfaceId, ResultCaseId, SourceSpan, SymbolId, TypeId, ValueParameterId,
+    AllocationSiteId, BindingId, CaptureId, Diagnostic, FieldId, LifetimeId, LocalId, ModuleId,
+    NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan, SymbolId, TypeId,
+    ValueParameterId,
 };
 use pop_resolve::SymbolSpace;
 use pop_syntax::{
@@ -14,20 +15,39 @@ use pop_syntax::{
 use crate::capture_analysis::finalize_capture_modes;
 use crate::typed_body::*;
 use crate::{
-    AttributeConstant, AttributeQuerySubject, FloatKind, FloatValue, IntegerKind, IntegerValue,
-    PrimitiveType, ResolvedFunctionSignature, ResolvedTypeKind, SemanticType, SignatureResolver,
+    AttributeConstant, AttributeQuerySubject, CODEC_ERROR_TYPE_ID, FloatKind, FloatValue,
+    IntegerKind, IntegerValue, PrimitiveType, ResolvedFunctionSignature, ResolvedTypeKind,
+    SemanticType, SignatureResolver,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConstant {
     type_id: TypeId,
-    value: AttributeConstant,
+    value: RuntimeConstantValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RuntimeConstantValue {
+    Attribute(AttributeConstant),
+    GeneratedCodecSchema(SymbolId),
 }
 
 impl RuntimeConstant {
     #[must_use]
     pub const fn new(type_id: TypeId, value: AttributeConstant) -> Self {
-        Self { type_id, value }
+        Self {
+            type_id,
+            value: RuntimeConstantValue::Attribute(value),
+        }
+    }
+
+    /// Creates one compiler-originated sealed `Codec.Schema<T>` value.
+    #[must_use]
+    pub const fn generated_codec_schema(type_id: TypeId, symbol: SymbolId) -> Self {
+        Self {
+            type_id,
+            value: RuntimeConstantValue::GeneratedCodecSchema(symbol),
+        }
     }
 
     #[must_use]
@@ -36,7 +56,7 @@ impl RuntimeConstant {
     }
 
     #[must_use]
-    pub const fn value(&self) -> &AttributeConstant {
+    const fn value(&self) -> &RuntimeConstantValue {
         &self.value
     }
 }
@@ -170,6 +190,12 @@ pub struct BodyChecker<'resolver, 'index> {
     pub(crate) next_nested_function: u32,
     pub(crate) next_borrow_region: u32,
     pub(crate) next_callback_site: u32,
+    pub(crate) next_view_lifetime: u32,
+    pub(crate) next_allocation_site: u32,
+    pub(crate) local_view_borrows: BTreeMap<LocalId, crate::ViewBorrow>,
+    pub(crate) parameter_view_borrows: BTreeMap<ValueParameterId, crate::ViewBorrow>,
+    pub(crate) local_lenders: BTreeMap<LocalId, crate::ViewLenderProvenance>,
+    pub(crate) parameter_lenders: BTreeMap<ValueParameterId, crate::ViewLenderProvenance>,
     pub(crate) function_depth: u32,
     pub(crate) active_functions: Vec<ActiveFunction>,
     pub(crate) written_bindings: BTreeSet<BindingId>,
@@ -180,6 +206,94 @@ pub struct BodyChecker<'resolver, 'index> {
 }
 
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
+    pub(crate) fn type_is_view_lender(&self, type_id: TypeId) -> bool {
+        matches!(
+            self.resolver.arena().get(type_id),
+            Some(SemanticType::Primitive(PrimitiveType::String))
+        ) || self
+            .resolver
+            .schema()
+            .type_by_source_name("Bytes")
+            .is_some_and(|entry| {
+                matches!(
+                    self.resolver.arena().get(type_id),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == entry.id() && arguments.is_empty()
+                )
+            })
+    }
+
+    pub(crate) fn fresh_view_borrow(
+        &mut self,
+        lender: crate::ViewLenderProvenance,
+    ) -> crate::ViewBorrow {
+        let lifetime = LifetimeId::from_raw(self.next_view_lifetime);
+        self.next_view_lifetime = self
+            .next_view_lifetime
+            .checked_add(1)
+            .expect("view lifetime identity space exhausted");
+        crate::ViewBorrow::new(lender, lifetime)
+    }
+
+    pub(crate) fn fresh_allocation_site(&mut self) -> AllocationSiteId {
+        let site = AllocationSiteId::from_raw(self.next_allocation_site);
+        self.next_allocation_site = self
+            .next_allocation_site
+            .checked_add(1)
+            .expect("allocation-site identity space exhausted");
+        site
+    }
+
+    pub(crate) fn view_borrow_for_expression(
+        &self,
+        expression: &TypedExpression,
+    ) -> Option<crate::ViewBorrow> {
+        match expression.kind() {
+            TypedExpressionKind::ViewCreate { borrow, .. }
+            | TypedExpressionKind::ViewSlice { borrow, .. } => Some(*borrow),
+            TypedExpressionKind::Local(local) => self.local_view_borrows.get(local).copied(),
+            TypedExpressionKind::Parameter(parameter) => {
+                self.parameter_view_borrows.get(parameter).copied()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn lender_for_expression(
+        &mut self,
+        expression: &TypedExpression,
+    ) -> crate::ViewLenderProvenance {
+        match expression.kind() {
+            TypedExpressionKind::Parameter(parameter) => {
+                self.parameter_lenders.get(parameter).copied().unwrap_or(
+                    crate::ViewLenderProvenance::Parameter {
+                        index: parameter.raw(),
+                    },
+                )
+            }
+            TypedExpressionKind::Local(local) => {
+                if let Some(lender) = self.local_lenders.get(local).copied() {
+                    lender
+                } else {
+                    crate::ViewLenderProvenance::Allocation {
+                        site: self.fresh_allocation_site(),
+                    }
+                }
+            }
+            TypedExpressionKind::String(value) => crate::ViewLenderProvenance::Constant {
+                fingerprint: view_constant_fingerprint(value.as_bytes()),
+            },
+            TypedExpressionKind::ViewMaterialize {
+                allocation_site, ..
+            } => crate::ViewLenderProvenance::Allocation {
+                site: *allocation_site,
+            },
+            _ => crate::ViewLenderProvenance::Allocation {
+                site: self.fresh_allocation_site(),
+            },
+        }
+    }
+
     pub(crate) fn call_result_types(
         &mut self,
         is_async: bool,
@@ -237,6 +351,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 return None;
             }
         };
+        if !self.local_view_borrows.is_empty() || !self.parameter_view_borrows.is_empty() {
+            self.diagnostics
+                .push(type_diagnostics::borrowed_view_across_suspension(
+                    span, "View",
+                ));
+        }
         self.invalidate_flow_narrowings();
         Some(TypedExpression {
             kind: TypedExpressionKind::Await {
@@ -266,6 +386,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             next_nested_function: 0,
             next_borrow_region: 0,
             next_callback_site: 1,
+            next_view_lifetime: 1,
+            next_allocation_site: 1,
+            local_view_borrows: BTreeMap::new(),
+            parameter_view_borrows: BTreeMap::new(),
+            local_lenders: BTreeMap::new(),
+            parameter_lenders: BTreeMap::new(),
             function_depth: 0,
             active_functions: Vec::new(),
             written_bindings: BTreeSet::new(),
@@ -316,6 +442,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                         function_depth: 0,
                     },
                 );
+                let parameter = ValueParameterId::from_raw(raw);
+                let provenance = crate::ViewLenderProvenance::Parameter { index: raw };
+                if self.resolver.arena().view_kind(type_id).is_some() {
+                    let lifetime = LifetimeId::from_raw(self.next_view_lifetime);
+                    self.next_view_lifetime = self
+                        .next_view_lifetime
+                        .checked_add(1)
+                        .expect("view lifetime identity space exhausted");
+                    self.parameter_view_borrows
+                        .insert(parameter, crate::ViewBorrow::new(provenance, lifetime));
+                } else if self.type_is_view_lender(type_id) {
+                    self.parameter_lenders.insert(parameter, provenance);
+                }
             }
         }
         let mut statements = Vec::new();
@@ -600,6 +739,37 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 arguments,
             } => {
                 let result = self.check_generic_call(callee, type_arguments, arguments, span);
+                self.invalidate_flow_narrowings();
+                result
+            }
+            ExpressionSyntaxKind::TargetTypeCall {
+                callee,
+                type_arguments,
+                arguments,
+            } => {
+                let result = if let ExpressionSyntaxKind::Name(path) = callee.kind() {
+                    match self.check_generic_checked_nominal_cast_invocation(
+                        path,
+                        type_arguments,
+                        callee.span(),
+                        arguments,
+                        span,
+                    ) {
+                        crate::call_checking::CheckedNominalCastInvocation::Accepted(value) => {
+                            Some(value)
+                        }
+                        crate::call_checking::CheckedNominalCastInvocation::Rejected => None,
+                        crate::call_checking::CheckedNominalCastInvocation::NotCast => {
+                            self.diagnostics.push(resolution_diagnostics::unknown_name(
+                                callee.span(),
+                                "checked nominal cast target",
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.invalidate_flow_narrowings();
                 result
             }
@@ -920,6 +1090,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     return None;
                 };
                 return self.check_error_case_call(&definition, &case, arguments, span);
+            }
+        }
+        match self.check_generic_checked_nominal_cast_invocation(
+            path,
+            type_arguments,
+            callee.span(),
+            arguments,
+            span,
+        ) {
+            crate::call_checking::CheckedNominalCastInvocation::NotCast => {}
+            crate::call_checking::CheckedNominalCastInvocation::Rejected => return None,
+            crate::call_checking::CheckedNominalCastInvocation::Accepted(value) => {
+                return Some(value);
             }
         }
         let name = path.join(".");
@@ -1308,6 +1491,53 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         expected: Option<ExpectedExpressionType>,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
+        if let [codec, error, case] = path
+            && codec == "Codec"
+            && error == "Error"
+            && {
+                let resolution = self.resolver.database().resolve(
+                    self.module,
+                    "Codec.Error",
+                    SymbolSpace::Type,
+                    span,
+                );
+                resolution.symbol().is_none()
+                    && resolution
+                        .diagnostics()
+                        .iter()
+                        .all(|diagnostic| diagnostic.code().as_str() == "POP1002")
+            }
+        {
+            let reason = match case.as_str() {
+                "MalformedInput" => crate::CodecErrorReason::MalformedInput,
+                "LimitExceeded" => crate::CodecErrorReason::LimitExceeded,
+                "CapabilityFailure" => crate::CodecErrorReason::CapabilityFailure,
+                _ => {
+                    self.diagnostics.push(type_diagnostics::invalid_operator(
+                        span,
+                        "Codec.Error case",
+                        case,
+                    ));
+                    return None;
+                }
+            };
+            let type_id = self
+                .resolver
+                .arena_mut()
+                .intern(SemanticType::Builtin {
+                    definition: CODEC_ERROR_TYPE_ID,
+                    arguments: Vec::new(),
+                })
+                .ok()?;
+            if let Some(expected) = expected {
+                self.require_same_type(expected.type_id, type_id, span, span);
+            }
+            return Some(TypedExpression {
+                kind: TypedExpressionKind::CodecErrorCase(reason),
+                type_id,
+                span,
+            });
+        }
         match self.check_bound_path(path, span) {
             BoundPathLookup::Found(bound) => return Some(bound),
             BoundPathLookup::Error => return None,
@@ -1473,6 +1703,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 parameters: parameters?,
                 results: results?,
                 effects: crate::EffectSummary::empty(),
+                lifetime_summary: signature.lifetime_summary().clone(),
             })
             .ok()?;
         Some(TypedExpression {
@@ -1487,7 +1718,16 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         constant: &RuntimeConstant,
         span: SourceSpan,
     ) -> Option<TypedExpression> {
-        self.runtime_constant_value(constant.value(), constant.type_id(), span)
+        match constant.value() {
+            RuntimeConstantValue::Attribute(value) => {
+                self.runtime_constant_value(value, constant.type_id(), span)
+            }
+            RuntimeConstantValue::GeneratedCodecSchema(adapter) => Some(TypedExpression {
+                kind: TypedExpressionKind::GeneratedCodecSchema(*adapter),
+                type_id: constant.type_id(),
+                span,
+            }),
+        }
     }
 
     fn runtime_constant_value(
@@ -1804,6 +2044,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     }
 }
 
+fn view_constant_fingerprint(bytes: &[u8]) -> [u8; 32] {
+    let mut result = [0_u8; 32];
+    for quarter in 0..4_u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ quarter;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let start = usize::try_from(quarter).unwrap_or(0) * 8;
+        result[start..start + 8].copy_from_slice(&hash.to_be_bytes());
+    }
+    result
+}
+
 fn typed_field_access(
     base: TypedExpression,
     field: FieldId,
@@ -1869,6 +2123,12 @@ pub(crate) fn statements_definitely_return(statements: &[TypedStatement]) -> boo
                     .all(|arm| statements_definitely_return(arm.body()))
         }
         TypedStatementKind::ResultMatch { arms, .. } => {
+            !arms.is_empty()
+                && arms
+                    .iter()
+                    .all(|arm| statements_definitely_return(arm.body()))
+        }
+        TypedStatementKind::CodecErrorMatch { arms, .. } => {
             !arms.is_empty()
                 && arms
                     .iter()

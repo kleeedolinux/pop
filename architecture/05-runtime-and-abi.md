@@ -393,6 +393,11 @@ field/case IDs and closed typed codec operations. Runtime input labels are data
 compared only with one exact adapter's bounded label set; they cannot resolve a
 program Item or schema.
 
+The runtime-facing protocol is ADR 0092's closed typed event tape. It preserves
+exact container nesting, ordinals, labels, discriminants, scalar kinds, and
+typed `Codec.Error` results across the MIR interpreter, LLVM, and a future VM;
+it never parses `.popc` or maintains a schema registry.
+
 Runtime metadata follows these rules:
 
 - no process-wide “all types” registry is required;
@@ -496,11 +501,25 @@ invalid entry are contained at the generated panic boundary and never unwind
 through foreign frames. See
 [ADR 0092](./decisions/0092-typed-ffi-callbacks-and-native-transition-abi.md).
 
-The compact nonzero `FfiAbiLayoutId` used by those operations is the first
-eight big-endian bytes of ADR 0086's full canonical SHA-256 layout fingerprint.
-Artifacts and generated metadata retain and compare the full fingerprint and
-all descriptor facts; zero or a compact collision between unequal full
-fingerprints fails before native execution.
+Native ABI 1.19 adds exactly `pop_rt_codec_write_event` and
+`pop_rt_codec_read_event` for generated retained-metadata adapters. Both use
+the closed ADR 0092 event tag and status sets. Write carries fixed-width
+capability, ordinal, bounded static label, auxiliary, and scalar inputs. Read
+returns actual tag, ordinal, capability-owned borrowed label pointer/length,
+auxiliary, and scalar through separate exact output slots; generated code
+checks one exact tag or the optional protocol's exact absent/present pair and
+performs bounded comparison with its static MIR catalog. The label borrow ends
+at the next reader event and is never a managed object pointer. Managed
+`String` and `Bytes` payloads remain precisely rooted across calls. No `.popc`
+parser, descriptor pointer, registry key, runtime Item name, or variadic value
+crosses the runtime boundary. See
+[ADR 0096](./decisions/0096-generated-retained-metadata-adapters.md).
+
+The compact nonzero `FfiAbiLayoutId` used by FFI buffer and foreign-call
+operations is the first eight big-endian bytes of ADR 0086's full canonical
+SHA-256 layout fingerprint. Artifacts and generated metadata retain and compare
+the full fingerprint and all descriptor facts; zero or a compact collision
+between unequal full fingerprints fails before native execution.
 
 ## Versioning
 

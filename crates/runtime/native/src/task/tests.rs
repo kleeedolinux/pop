@@ -8,6 +8,7 @@ mod tests {
 
     #[test]
     fn collection_prunes_an_unreachable_cold_task_and_its_external_roots() {
+        let _guard = crate::state::lock_native_runtime_test();
         let capture = crate::pop_rt_allocate_object(0);
         let frame =
             NativeTaskFrame::new(vec![capture], SafePointId::new(90), vec![RootSlot::new(0)])

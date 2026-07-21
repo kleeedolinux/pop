@@ -7,6 +7,15 @@ private record Candidate
     selected: Boolean
 end
 
+private enum ReductionStep
+    A
+    B
+    C
+    AB
+    ABC
+    Invalid
+end
+
 private class CountingIterator implements Iterator<Int>
     private current: Int
     private calls: Int
@@ -29,6 +38,34 @@ private class CountingIterator implements Iterator<Int>
     end
 
     public function CountingIterator:callCount(): Int
+        return self.calls
+    end
+end
+
+private class CandidateIterator implements Iterator<Candidate>
+    private values: {Candidate}
+    private index: Int
+    private calls: Int
+
+    public function CandidateIterator.new(values: {Candidate}): CandidateIterator
+        return CandidateIterator { values = values, index = 1, calls = 0 }
+    end
+
+    public function CandidateIterator:iterator(): Iterator<Candidate>
+        return self
+    end
+
+    public function CandidateIterator:next(): Iteration<Candidate>
+        self.calls += 1
+        if self.index > Array.length(self.values) then
+            return Iteration.End
+        end
+        local value = Array.get(self.values, self.index)
+        self.index += 1
+        return Iteration.Item(value)
+    end
+
+    public function CandidateIterator:callCount(): Int
         return self.calls
     end
 end
@@ -60,31 +97,31 @@ private function main(): Int
         return 3
     end
 
-    local findCalls = 0
-    local found = findLastOr(candidates, function(value: Candidate): Boolean
-        findCalls += 1
+    local findCounter = CandidateIterator.new(candidates)
+    local findSource: Iterator<Candidate> = findCounter
+    local found = findLastOr(findSource, function(value: Candidate): Boolean
         return value.selected
     end, fallback)
-    local indexCalls = 0
-    local foundIndex = indexLastOr(candidates, function(value: Candidate): Boolean
-        indexCalls += 1
+    local indexCounter = CandidateIterator.new(candidates)
+    local indexSource: Iterator<Candidate> = indexCounter
+    local foundIndex = indexLastOr(indexSource, function(value: Candidate): Boolean
         return value.selected
     end, 0)
-    if found.id ~= 3 or foundIndex ~= 3 or findCalls ~= 4 or indexCalls ~= 4 then
+    if found.id ~= 3 or foundIndex ~= 3 or findCounter:callCount() ~= 5 or indexCounter:callCount() ~= 5 then
         return 4
     end
 
-    local missingFindCalls = 0
-    local missing = findLastOr(candidates, function(value: Candidate): Boolean
-        missingFindCalls += 1
+    local missingFindCounter = CandidateIterator.new(candidates)
+    local missingFindSource: Iterator<Candidate> = missingFindCounter
+    local missing = findLastOr(missingFindSource, function(value: Candidate): Boolean
         return value.id == 8
     end, fallback)
-    local missingIndexCalls = 0
-    local missingIndex = indexLastOr(candidates, function(value: Candidate): Boolean
-        missingIndexCalls += 1
+    local missingIndexCounter = CandidateIterator.new(candidates)
+    local missingIndexSource: Iterator<Candidate> = missingIndexCounter
+    local missingIndex = indexLastOr(missingIndexSource, function(value: Candidate): Boolean
         return value.id == 8
     end, -1)
-    if missing.id ~= 9 or missingIndex ~= -1 or missingFindCalls ~= 4 or missingIndexCalls ~= 4 then
+    if missing.id ~= 9 or missingIndex ~= -1 or missingFindCounter:callCount() ~= 5 or missingIndexCounter:callCount() ~= 5 then
         return 5
     end
 
@@ -94,25 +131,29 @@ private function main(): Int
         return 6
     end
 
-    local combineCalls = 0
-    local words: {String} = {"a", "b", "c"}
-    local reduced = reduceOr(words, function(left: String, right: String): String
-        combineCalls += 1
-        return left .. right
-    end, "fallback")
-    local empty: {String} = {}
-    local single: {String} = {"only"}
-    if reduced ~= "abc" or combineCalls ~= 2 then
+    local steps: {ReductionStep} = {ReductionStep.A, ReductionStep.B, ReductionStep.C}
+    local reduced = reduceOr(steps, function(left: ReductionStep, right: ReductionStep): ReductionStep
+        if left == ReductionStep.A and right == ReductionStep.B then
+            return ReductionStep.AB
+        end
+        if left == ReductionStep.AB and right == ReductionStep.C then
+            return ReductionStep.ABC
+        end
+        return ReductionStep.Invalid
+    end, ReductionStep.Invalid)
+    local empty: {ReductionStep} = {}
+    local single: {ReductionStep} = {ReductionStep.B}
+    if reduced ~= ReductionStep.ABC then
         return 7
     end
-    if reduceOr(empty, function(left: String, right: String): String
-        return left .. right
-    end, "empty") ~= "empty" then
+    if reduceOr(empty, function(left: ReductionStep, right: ReductionStep): ReductionStep
+        return right
+    end, ReductionStep.Invalid) ~= ReductionStep.Invalid then
         return 8
     end
-    if reduceOr(single, function(left: String, right: String): String
-        return left .. right
-    end, "fallback") ~= "only" then
+    if reduceOr(single, function(left: ReductionStep, right: ReductionStep): ReductionStep
+        return right
+    end, ReductionStep.Invalid) ~= ReductionStep.B then
         return 9
     end
     return 0

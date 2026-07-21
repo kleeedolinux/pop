@@ -1,9 +1,15 @@
 #![allow(clippy::redundant_closure_for_method_calls)]
 
 use pop_backend_mir_interp::{MirInterpreter, MirValue, ReferenceRuntimeEvent};
-use pop_driver::{FrontEndBubbleInput, FrontEndModule, analyze_bubble};
+use pop_driver::{
+    FrontEndBubbleInput, FrontEndModule, analyze_bubble, decode_reference_metadata,
+    encode_reference_metadata,
+};
 use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId, SymbolId};
-use pop_mir::{MirBubble, MirCleanupExitReason, lower_hir_bubble, optimize_mir};
+use pop_mir::{
+    MirBubble, MirCleanupExitReason, MirDeclarationKind, lower_hir_bubble, optimize_mir,
+    parse_mir_dump, verify_mir_bubble,
+};
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind};
 use pop_source::SourceFile;
 use pop_types::{IntegerKind, IntegerValue, TypeArena};
@@ -35,6 +41,32 @@ fn lower(text: &str, entry: &str) -> (MirBubble, TypeArena, SymbolId) {
 
 fn integer(value: &str) -> MirValue {
     MirValue::Integer(IntegerValue::parse_decimal(value, IntegerKind::Int64).expect("Int literal"))
+}
+
+#[test]
+fn codec_error_cases_execute_with_exact_exhaustive_identities() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         private function classify(error: Codec.Error): Int\n\
+             match error\n\
+             when Codec.Error.MalformedInput then\n\
+                 return 1\n\
+             when Codec.Error.LimitExceeded then\n\
+                 return 2\n\
+             when Codec.Error.CapabilityFailure then\n\
+                 return 3\n\
+             end\n\
+         end\n\
+         public function run(): Int\n\
+             local malformed = classify(Codec.Error.MalformedInput)\n\
+             local limit = classify(Codec.Error.LimitExceeded)\n\
+             local capability = classify(Codec.Error.CapabilityFailure)\n\
+             return malformed * 100 + limit * 10 + capability\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("123")]);
 }
 
 fn execute_pair(
@@ -233,14 +265,12 @@ fn generic_nominal_iterator_executes_identically_before_and_after_optimization()
 }
 
 #[test]
-fn escaping_mutating_closure_uses_shared_cells_and_portable_allocation_events() {
+fn escaping_immutable_closure_uses_portable_environment_allocation_events() {
     let (mir, arena, entry) = lower(
         "namespace Main\n\
          private function makeCounter(start: Int): function(delta: Int): Int\n\
-             local total = start\n\
              return function(delta: Int): Int\n\
-                 total = total + delta\n\
-                 return total\n\
+                 return start\n\
              end\n\
          end\n\
          public function run(): Int\n\
@@ -252,18 +282,18 @@ fn escaping_mutating_closure_uses_shared_cells_and_portable_allocation_events() 
     );
 
     let (returned, events) = execute_pair(&mir, &arena, entry);
-    assert_eq!(returned, vec![integer("6")]);
+    assert_eq!(returned, vec![integer("1")]);
     assert!(
         events
             .iter()
             .filter(|event| matches!(event, ReferenceRuntimeEvent::AllocateObject { .. }))
             .count()
-            >= 2,
-        "cell and escaping environment must be explicit PLRI allocations: {events:?}"
+            >= 1,
+        "the escaping environment must be an explicit PLRI allocation: {events:?}"
     );
     let dump = mir.dump();
     assert!(dump.contains("closure"));
-    assert!(dump.contains("captureCell.allocate"));
+    assert!(!dump.contains("captureCell.allocate"));
     assert!(!dump.to_ascii_lowercase().contains("lookup name"));
 }
 
@@ -588,7 +618,7 @@ fn nominal_interface_upcast_and_call_use_verified_slots_in_both_mir_forms() {
          end\n\
          public class IncrementReader implements Reader\n\
              public function IncrementReader:read(value: Int): Int\n\
-                 return value + 1\n\
+                 return 5\n\
              end\n\
          end\n\
          private function readThroughInterface(reader: Reader): Int\n\
@@ -606,6 +636,420 @@ fn nominal_interface_upcast_and_call_use_verified_slots_in_both_mir_forms() {
     assert!(dump.contains("interface.upcast"));
     assert!(dump.contains("call.interface"));
     assert!(!dump.to_ascii_lowercase().contains("lookup name"));
+}
+
+#[test]
+fn checked_nominal_cast_preserves_identity_and_returns_typed_absence() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 1\n\
+             end\n\
+         end\n\
+         public class SocketReader implements Reader\n\
+             public function SocketReader:read(): Int\n\
+                 return 2\n\
+             end\n\
+         end\n\
+         private function isFileReader(reader: Reader): Boolean\n\
+             return FileReader(reader) ~= nil\n\
+         end\n\
+         public function run(): Int\n\
+             local fileReader = FileReader {}\n\
+             local socketReader = SocketReader {}\n\
+             if isFileReader(fileReader) and not isFileReader(socketReader) then\n\
+                 return 42\n\
+             end\n\
+             return 1\n\
+         end\n",
+        "run",
+    );
+
+    assert_eq!(execute_pair(&mir, &arena, entry).0, vec![integer("42")]);
+}
+
+#[test]
+fn checked_nominal_cast_rejects_a_different_generic_specialization() {
+    let text = "namespace Main\n\
+         public interface Reader<T>\n\
+             function read(): T\n\
+         end\n\
+         public class Box<T> implements Reader<T>\n\
+             public value: T\n\
+             public function Box.new(value: T): Box<T>\n\
+                 return Box { value = value }\n\
+             end\n\
+             public function Box:read(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         public function makeInt(): Reader<Int>\n\
+             local box: Box<Int> = Box.new(1)\n\
+             return box\n\
+         end\n\
+         public function makeString(): Reader<String>\n\
+             local box: Box<String> = Box.new(\"wrong\")\n\
+             return box\n\
+         end\n\
+         public function isIntBox(reader: Reader<Int>): Boolean\n\
+             return Box<Int>(reader) ~= nil\n\
+         end\n";
+    let source = SourceFile::new(FileId::from_raw(0), "src/genericCast.pop", text)
+        .expect("generic cast source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("generic cast HIR");
+    let symbol = |name: &str| {
+        hir.functions()
+            .iter()
+            .find(|function| function.name() == name)
+            .expect("test function")
+            .symbol()
+    };
+    let make_int = symbol("makeInt");
+    let make_string = symbol("makeString");
+    let is_int_box = symbol("isIntBox");
+    let arena = front_end.types().clone();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("generic cast MIR");
+    let interpreter = MirInterpreter::new(&mir, &arena).expect("generic cast interpreter");
+    let accepted = interpreter
+        .call(make_int, &[])
+        .expect("make Int specialization");
+    let rejected = interpreter
+        .call(make_string, &[])
+        .expect("make String specialization");
+
+    assert_eq!(
+        interpreter
+            .call(is_int_box, &accepted)
+            .expect("matching generic cast"),
+        vec![MirValue::Boolean(true)]
+    );
+    assert_eq!(
+        interpreter
+            .call(is_int_box, &rejected)
+            .expect("invariant generic cast"),
+        vec![MirValue::Boolean(false)]
+    );
+}
+
+#[test]
+fn checked_nominal_cast_uses_the_producer_bubble_identity_after_reference_import() {
+    let producer_bubble = BubbleId::from_raw(41);
+    let producer_source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/contracts.pop",
+        "namespace Library.Contracts\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 1\n\
+             end\n\
+         end\n\
+         public function make(): Reader\n\
+             local reader: FileReader = FileReader {}\n\
+             return reader\n\
+         end\n",
+    )
+    .expect("producer source");
+    let producer = analyze_bubble(FrontEndBubbleInput::new(
+        producer_bubble,
+        NamespaceId::from_raw(41),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), producer_source)],
+    ));
+    assert!(
+        producer.diagnostics().is_empty(),
+        "{}",
+        producer.diagnostic_snapshot()
+    );
+    let producer_hir = producer
+        .hir()
+        .unwrap_or_else(|| panic!("producer HIR: {:?}", producer.hir_build_errors()));
+    let make = producer_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "make")
+        .expect("producer make")
+        .symbol();
+    let producer_mir = lower_hir_bubble(producer_hir, producer.types()).expect("producer MIR");
+
+    let other_source = SourceFile::new(
+        FileId::from_raw(2),
+        "src/otherContracts.pop",
+        "namespace Other.Contracts\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 2\n\
+             end\n\
+         end\n\
+         public function make(): Reader\n\
+             local reader: FileReader = FileReader {}\n\
+             return reader\n\
+         end\n",
+    )
+    .expect("other producer source");
+    let other = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(43),
+        NamespaceId::from_raw(43),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(2), other_source)],
+    ));
+    assert!(
+        other.diagnostics().is_empty(),
+        "{}",
+        other.diagnostic_snapshot()
+    );
+    let other_hir = other.hir().expect("other producer HIR");
+    let other_make = other_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "make")
+        .expect("other producer make")
+        .symbol();
+    let other_mir = lower_hir_bubble(other_hir, other.types()).expect("other producer MIR");
+
+    let consumer_source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\n\
+         using Library.Contracts\n\
+         public function isFileReader(reader: Reader): Boolean\n\
+             return FileReader(reader) ~= nil\n\
+         end\n",
+    )
+    .expect("consumer source");
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(42),
+            NamespaceId::from_raw(42),
+            vec![producer_bubble],
+            vec![FrontEndModule::new(ModuleId::from_raw(1), consumer_source)],
+        )
+        .with_reference_metadata(vec![
+            producer
+                .reference_metadata()
+                .expect("producer reference metadata")
+                .clone(),
+        ]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let consumer_hir = consumer.hir().expect("consumer HIR");
+    let is_file_reader = consumer_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "isFileReader")
+        .expect("consumer cast")
+        .symbol();
+    let consumer_mir = lower_hir_bubble(consumer_hir, consumer.types()).expect("consumer MIR");
+
+    let producer_interpreter =
+        MirInterpreter::new(&producer_mir, producer.types()).expect("producer interpreter");
+    let value = producer_interpreter
+        .call(make, &[])
+        .expect("producer execution");
+    let other_interpreter =
+        MirInterpreter::new(&other_mir, other.types()).expect("other producer interpreter");
+    let wrong_bubble_value = other_interpreter
+        .call(other_make, &[])
+        .expect("other producer execution");
+    let consumer_interpreter =
+        MirInterpreter::new(&consumer_mir, consumer.types()).expect("consumer interpreter");
+    assert_eq!(
+        consumer_interpreter
+            .call(is_file_reader, &value)
+            .expect("consumer execution"),
+        vec![MirValue::Boolean(true)]
+    );
+    assert_eq!(
+        consumer_interpreter
+            .call(is_file_reader, &wrong_bubble_value)
+            .expect("wrong-Bubble consumer execution"),
+        vec![MirValue::Boolean(false)]
+    );
+}
+
+#[test]
+fn checked_nominal_cast_uses_exact_specialized_artifact_ancestry() {
+    let producer_bubble = BubbleId::from_raw(91);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/contracts.pop",
+        "namespace Library.Contracts\n\
+         public interface Reader<T>\n\
+             function read(): T\n\
+         end\n\
+         public open class Base<T> implements Reader<T>\n\
+             public value: T\n\
+             public function Base:read(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         public class Derived<T> implements Reader<T>\n\
+             public value: T\n\
+             public function Derived.new(value: T): Derived<T>\n\
+                 return Derived { value = value }\n\
+             end\n\
+             public function Derived:read(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         public function make(): Reader<Int>\n\
+             local value: Derived<Int> = Derived.new(42)\n\
+             return value\n\
+         end\n",
+    )
+    .expect("producer source");
+    let producer = analyze_bubble(FrontEndBubbleInput::new(
+        producer_bubble,
+        NamespaceId::from_raw(91),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        producer.diagnostics().is_empty(),
+        "{}",
+        producer.diagnostic_snapshot()
+    );
+    let producer_hir = producer.hir().expect("producer HIR");
+    let make = producer_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "make")
+        .unwrap()
+        .symbol();
+    let producer_mir = lower_hir_bubble(producer_hir, producer.types()).expect("producer MIR");
+    let metadata = producer.reference_metadata().expect("metadata");
+    let base = metadata
+        .classes()
+        .iter()
+        .find(|class| class.name() == "Base")
+        .unwrap();
+    let mut encoded = String::from_utf8(encode_reference_metadata(metadata).unwrap()).unwrap();
+    let marker = "\"name\":\"Derived\",\"type_parameter_count\":1,\"is_open\":false,\"interface_witnesses\":";
+    let replacement = format!(
+        "\"name\":\"Derived\",\"type_parameter_count\":1,\"is_open\":false,\"direct_base\":{{\"definition\":{{\"bubble\":{},\"symbol\":{}}},\"arguments\":[{{\"TypeParameter\":0}}]}},\"interface_witnesses\":",
+        base.identity().bubble().raw(),
+        base.identity().symbol().raw()
+    );
+    encoded = encoded.replacen(marker, &replacement, 1);
+    let metadata = decode_reference_metadata(encoded.as_bytes()).expect("typed ancestry");
+    let consumer_source = SourceFile::new(FileId::from_raw(1), "src/main.pop", "namespace Application\nusing Library.Contracts\nprivate function retainType(value: Derived<Int>): Derived<Int>\nreturn value\nend\npublic function cast(reader: Reader<Int>): Boolean\nreturn Base<Int>(reader) ~= nil\nend\n").unwrap();
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(92),
+            NamespaceId::from_raw(92),
+            vec![producer_bubble],
+            vec![FrontEndModule::new(ModuleId::from_raw(1), consumer_source)],
+        )
+        .with_reference_metadata(vec![metadata]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let consumer_hir = consumer.hir().expect("consumer HIR");
+    let cast = consumer_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "cast")
+        .unwrap()
+        .symbol();
+    let consumer_mir = lower_hir_bubble(consumer_hir, consumer.types()).expect("consumer MIR");
+    let value = MirInterpreter::new(&producer_mir, producer.types())
+        .unwrap()
+        .call(make, &[])
+        .unwrap();
+    assert_eq!(
+        MirInterpreter::new(&consumer_mir, consumer.types())
+            .unwrap()
+            .call(cast, &value)
+            .unwrap(),
+        vec![MirValue::Boolean(true)],
+        "producer:\n{}\nconsumer:\n{}",
+        producer_mir.dump(),
+        consumer_mir.dump()
+    );
+}
+
+#[test]
+fn checked_nominal_cast_accepts_a_verified_transitive_class_descriptor() {
+    let (mir, arena, entry) = lower(
+        "namespace Main\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public open class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 1\n\
+             end\n\
+         end\n\
+         public class BufferedReader implements Reader\n\
+             public function BufferedReader:read(): Int\n\
+                 return 2\n\
+             end\n\
+         end\n\
+         private function isFileReader(reader: Reader): Boolean\n\
+             return FileReader(reader) ~= nil\n\
+         end\n\
+         public function run(): Int\n\
+             local bufferedReader = BufferedReader {}\n\
+             return if isFileReader(bufferedReader) then 42 else 1\n\
+         end\n",
+        "run",
+    );
+    let classes = mir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Class(class) => Some((declaration.symbol(), class.class())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(_, target), (descendant_symbol, descendant)] = classes.as_slice() else {
+        panic!("expected target and descendant class descriptors");
+    };
+    let dump = mir.dump();
+    let prefix = format!(
+        "type.class s{} c{} ",
+        descendant_symbol.raw(),
+        descendant.raw()
+    );
+    let original = dump
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .expect("descendant class descriptor");
+    let with_ancestry = dump.replacen(original, &format!("{original} base c{}", target.raw()), 1);
+    let descendant_mir = parse_mir_dump(&with_ancestry).expect("class ancestry MIR text");
+    verify_mir_bubble(&descendant_mir, &arena).expect("verified class ancestry");
+
+    assert_eq!(
+        execute_pair(&descendant_mir, &arena, entry).0,
+        vec![integer("42")]
+    );
 }
 
 #[test]

@@ -12,33 +12,38 @@ use pop_documentation::{
     TypedReturnsDocumentationContract,
 };
 use pop_foundation::{
-    BubbleId, Diagnostic, DiagnosticSeverity, MethodId, ModuleId, SourceSpan, SymbolId,
-    SymbolIdentity,
+    BubbleId, Diagnostic, DiagnosticSeverity, FileId, MethodId, ModuleId, SourceSpan, SymbolId,
+    SymbolIdentity, TextRange, TextSize,
 };
 use pop_hir::{
     HirBubble, HirDataSpecialization, HirDeclaration, HirDeclarationKind, HirForeignFunction,
     HirFunction, HirFunctionContext, HirKnownCallables, HirMethod, build_hir_foreign_function,
-    build_hir_function_with_known_callables_and_attributes, build_hir_method,
+    build_hir_function_with_known_callables_and_attributes, build_hir_method, infer_hir_effects,
     specialize_hir_method,
 };
-use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaration_index};
+use pop_resolve::{
+    GeneratedCodecSchemaDeclaration, ModuleInput, ResolutionDatabase, SymbolSpace,
+    build_declaration_index,
+};
 use pop_source::SourceFile;
 use pop_syntax::{
-    AttributeUseSyntax, NodeKind, parse_attribute_declaration, parse_attribute_use,
+    AttributeUseSyntax, ExpressionSyntax, ExpressionSyntaxKind, FunctionBodySyntax, NodeKind,
+    StatementSyntax, StatementSyntaxKind, parse_attribute_declaration, parse_attribute_use,
     parse_class_declaration, parse_class_method_body, parse_const_declaration,
     parse_enum_declaration, parse_error_declaration, parse_file, parse_function_body,
     parse_function_signature, parse_interface_declaration, parse_record_declaration,
     parse_type_alias_declaration, parse_union_declaration,
 };
 use pop_types::{
-    AttributeTarget, BodyChecker, BootstrapSchema, ResolvedFunctionSignature, SemanticType,
-    SignatureResolver, embedded_bootstrap_schema,
+    AttributeTarget, BodyChecker, BootstrapSchema, CompilerAttributeRole,
+    ResolvedFunctionSignature, SemanticType, SignatureResolver, embedded_bootstrap_schema,
 };
 
 use crate::api::*;
 use crate::attributes::{
-    FfiAttributeInputs, classify_function_attributes, resolve_ffi_attributes,
-    resolve_ffi_layout_attributes, resolve_source_attributes,
+    FfiAttributeInputs, classify_function_attributes, parse_retained_metadata_request,
+    resolve_ffi_attributes, resolve_ffi_layout_attributes, resolve_retained_metadata_attributes,
+    resolve_source_attributes, trusted_compiler_attribute_role,
 };
 use crate::compile_time::{
     build_compile_time_context, check_compile_time_function_bodies,
@@ -91,7 +96,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let mut diagnostics = indexed.diagnostics().to_vec();
     validate_source_attribute_targets(&parsed, &mut diagnostics);
     let mut namespace_attribute_work = define_namespace_attributes(&parsed, &mut diagnostics);
-    let referenced_declarations = input
+    let mut referenced_declarations = input
         .reference_metadata
         .iter()
         .flat_map(|metadata| {
@@ -107,6 +112,24 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
                         record.span(),
                     )
                 })
+                .chain(metadata.interfaces().iter().map(|interface| {
+                    pop_resolve::ReferencedDeclaration::interface(
+                        interface.identity(),
+                        interface.module(),
+                        interface.namespace(),
+                        interface.name(),
+                        interface.span(),
+                    )
+                }))
+                .chain(metadata.classes().iter().map(|class| {
+                    pop_resolve::ReferencedDeclaration::class(
+                        class.identity(),
+                        class.module(),
+                        class.namespace(),
+                        class.name(),
+                        class.span(),
+                    )
+                }))
                 .chain(metadata.functions().iter().map(|function| {
                     pop_resolve::ReferencedDeclaration::function(
                         function.identity(),
@@ -116,8 +139,34 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
                         function.span(),
                     )
                 }))
+                .chain(metadata.retained_adapters().iter().map(|adapter| {
+                    pop_resolve::ReferencedDeclaration::generated_codec_schema(
+                        adapter.identity().adapter(),
+                        adapter.module(),
+                        adapter.namespace(),
+                        adapter.name(),
+                        SourceSpan::new(
+                            FileId::from_raw(0),
+                            TextRange::empty(TextSize::from_u32(0)),
+                        ),
+                    )
+                }))
         })
         .collect::<Vec<_>>();
+    if let Ok(retained) = crate::retained_metadata::reference_retained_declarations(
+        &input.reference_metadata,
+        &input.reference_retained_adapters_popc,
+    ) {
+        let existing = referenced_declarations
+            .iter()
+            .map(pop_resolve::ReferencedDeclaration::identity)
+            .collect::<BTreeSet<_>>();
+        referenced_declarations.extend(
+            retained
+                .into_iter()
+                .filter(|declaration| !existing.contains(&declaration.identity())),
+        );
+    }
     for metadata in &input.reference_metadata {
         assert!(
             input.dependencies.contains(&metadata.bubble()),
@@ -131,6 +180,25 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     let bootstrap = embedded_bootstrap_schema().expect("repository-validated bootstrap schema");
     let standard_baseline = pop_standard::standard_api_baseline()
         .expect("repository-validated Pop.Standard API baseline");
+    let provisional_database = standard_baseline
+        .entries()
+        .iter()
+        .filter(|entry| entry.prelude() && entry.kind() == pop_standard::ApiKind::Namespace)
+        .fold(ResolutionDatabase::new(index), |database, entry| {
+            database
+                .with_prelude_namespace_root(
+                    entry.name(),
+                    entry.signature().trim_start_matches("namespace "),
+                )
+                .expect("repository-validated prelude namespace root")
+        });
+    let generated_codec_schemas =
+        generated_codec_schema_reservations(&parsed, &provisional_database, &bootstrap);
+    let index = provisional_database
+        .index()
+        .clone()
+        .with_generated_codec_schemas(generated_codec_schemas)
+        .expect("collision-free generated codec schema reservations");
     let database = standard_baseline
         .entries()
         .iter()
@@ -151,6 +219,20 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
     }
     let reference_record_types =
         define_reference_records(&input.reference_metadata, &database, &mut resolver);
+    let reference_generated_codec_adapters =
+        crate::retained_metadata::generate_reference_codec_adapter_hir(
+            &input.reference_metadata,
+            &input.reference_retained_adapters_popc,
+            database.index(),
+            &reference_record_types,
+            &mut resolver,
+        );
+    let reference_nominal_types = crate::reference::define_reference_nominals(
+        &input.reference_metadata,
+        &database,
+        &reference_record_types,
+        &mut resolver,
+    );
     define_type_aliases(&parsed, &database, &mut resolver, &mut diagnostics);
     let (mut declarations, methods, mut declaration_attributes) = define_declarations(
         &parsed,
@@ -178,6 +260,15 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
+    let retained_metadata_requests = resolve_retained_metadata_attributes(
+        &mut namespace_attribute_work,
+        &mut declaration_attributes,
+        &mut functions,
+        &database,
+        &bootstrap,
+        &mut resolver,
+        &mut diagnostics,
+    );
     resolve_ffi_attributes(
         &mut namespace_attribute_work,
         &mut functions,
@@ -196,6 +287,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &database,
         &mut resolver,
         &reference_record_types,
+        &reference_nominal_types,
     );
     let reference_ffi_layout_catalog = hir_reference_ffi_layout_catalog(
         &input.reference_metadata,
@@ -284,7 +376,34 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut compile_time_evaluations,
         &mut diagnostics,
     );
-    let runtime_constants: BTreeMap<_, _> = constants
+    declarations = refresh_declarations(declarations, &resolver);
+    let retained_metadata = crate::retained_metadata::build_retained_metadata_artifacts(
+        &retained_metadata_requests,
+        &declarations,
+        database.index(),
+        resolver.arena(),
+        &module_origins,
+        &mut diagnostics,
+    );
+    let local_generated_codec_adapters = retained_metadata
+        .as_ref()
+        .map_err(|error| *error)
+        .and_then(|artifacts| {
+            crate::retained_metadata::generate_codec_adapter_hir(
+                artifacts,
+                &declarations,
+                database.index(),
+                resolver.arena_mut(),
+            )
+        });
+    let generated_codec_adapters = local_generated_codec_adapters.and_then(|mut local| {
+        reference_generated_codec_adapters.map(|mut imported| {
+            local.append(&mut imported);
+            local.sort_by_key(pop_hir::HirGeneratedCodecAdapter::symbol);
+            local
+        })
+    });
+    let mut runtime_constants: BTreeMap<_, _> = constants
         .iter()
         .filter_map(|constant| {
             compile_time_attribute_constant(constant.value.clone()).map(|value| {
@@ -295,6 +414,48 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
             })
         })
         .collect();
+    if let Ok(adapters) = &generated_codec_adapters {
+        runtime_constants.extend(adapters.iter().map(|adapter| {
+            (
+                adapter.symbol(),
+                pop_types::RuntimeConstant::generated_codec_schema(
+                    adapter.schema_type(),
+                    adapter.symbol(),
+                ),
+            )
+        }));
+    }
+    for adapter in input
+        .reference_metadata
+        .iter()
+        .flat_map(ReferenceMetadata::retained_adapters)
+    {
+        let Some(target_type) = reference_record_types
+            .get(&adapter.identity().target())
+            .copied()
+        else {
+            continue;
+        };
+        let Some(local) = database
+            .index()
+            .declaration_by_reference_identity(adapter.identity().adapter())
+        else {
+            continue;
+        };
+        let Ok(schema_type) = resolver
+            .arena_mut()
+            .intern(pop_types::SemanticType::Builtin {
+                definition: adapter.schema_definition(),
+                arguments: vec![target_type],
+            })
+        else {
+            continue;
+        };
+        runtime_constants.insert(
+            local.symbol(),
+            pop_types::RuntimeConstant::generated_codec_schema(schema_type, local.symbol()),
+        );
+    }
     let (hir_functions, hir_foreign_functions, hir_methods, hir_build_errors) = build_runtime_hir(
         input.bubble,
         &mut functions,
@@ -307,7 +468,11 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut resolver,
         &mut diagnostics,
     );
-    declarations = refresh_declarations(declarations, &resolver);
+    let reference_nominal_catalog = crate::reference::hir_reference_nominal_catalog(
+        &mut resolver,
+        &reference_nominal_types,
+        &reference_record_types,
+    );
     let referenced_call_instances = hir_functions
         .iter()
         .flat_map(pop_hir::hir_referenced_call_instances)
@@ -341,11 +506,47 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
                 &referenced_call_instances,
             ))
         })
+        .and_then(|bubble| bubble.with_nominal_references(reference_nominal_catalog))
+        .and_then(|bubble| {
+            generated_codec_adapters
+                .clone()
+                .map_err(|_| pop_hir::HirBubbleError::InvalidGeneratedCodecAdapter)
+                .and_then(|adapters| bubble.with_generated_codec_adapters(adapters))
+        })
         .and_then(|bubble| {
             reference_ffi_layout_catalog
                 .map(|catalog| bubble.with_reference_ffi_layout_catalog(catalog))
         })
-        .map(Some)
+        .map(|mut bubble| {
+            let violations = infer_hir_effects(&mut bubble, resolver.arena_mut());
+            for violation in &violations {
+                match violation {
+                    pop_hir::EffectInferenceViolation::InterfaceImplementationWidening {
+                        class,
+                        interface,
+                        method,
+                        span,
+                    } => diagnostics.push(type_diagnostics::incompatible_interface_method(
+                        *span,
+                        class,
+                        interface,
+                        method,
+                        "EffectWidening",
+                    )),
+                    pop_hir::EffectInferenceViolation::CallableParameterWidening {
+                        expected,
+                        found,
+                        span,
+                    } => diagnostics.push(type_diagnostics::type_mismatch(
+                        *span,
+                        format!("closed function contract t{}", expected.raw()),
+                        format!("wider function value t{}", found.raw()),
+                        *span,
+                    )),
+                }
+            }
+            violations.is_empty().then_some(bubble)
+        })
     } else {
         Ok(None)
     };
@@ -353,12 +554,18 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         Ok(hir) => (hir, None),
         Err(error) => (None, Some(error)),
     };
-    let reference_metadata = hir
-        .as_ref()
-        .map_or(Err(ReferenceMetadataError::AnalysisUnavailable), |hir| {
-            emit_reference_metadata(hir, database.index(), resolver.arena())
-        });
+    let reference_metadata =
+        hir.as_ref()
+            .map_or(Err(ReferenceMetadataError::AnalysisUnavailable), |hir| {
+                emit_reference_metadata(
+                    hir,
+                    database.index(),
+                    resolver.arena(),
+                    retained_metadata.as_ref().ok(),
+                )
+            });
     let tooling_inlay_hints = hir.as_ref().map_or_else(Vec::new, tooling_inlay_hints);
+    sort_diagnostics(&mut diagnostics);
     FrontEndResult {
         hir,
         hir_bubble_error,
@@ -380,6 +587,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         constants,
         diagnostics,
         reference_metadata,
+        retained_metadata,
         checked_documentation,
         tooling_declarations,
         tooling_inlay_hints,
@@ -462,6 +670,7 @@ fn tooling_declarations(
                     pop_resolve::DeclarationKind::Class => ToolingDeclarationKind::Class,
                     pop_resolve::DeclarationKind::Interface => ToolingDeclarationKind::Interface,
                     pop_resolve::DeclarationKind::Enum => ToolingDeclarationKind::Enum,
+                    pop_resolve::DeclarationKind::GeneratedCodecSchema => return None,
                 },
                 declaration_span: SourceSpan::new(module.source.id(), declaration_node.range()),
                 selection_span: declaration.span(),
@@ -499,6 +708,91 @@ fn declaration_signature_range(
         pop_foundation::TextSize::try_from_usize(end).expect("source range fits TextSize"),
     )
     .expect("ordered declaration signature range")
+}
+
+fn generated_codec_schema_reservations(
+    modules: &[ParsedModule],
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+) -> Vec<GeneratedCodecSchemaDeclaration> {
+    let mut reservations = Vec::new();
+    for module in modules {
+        let mut pending = Vec::new();
+        for node in module.syntax.root().children() {
+            if node.kind() == NodeKind::AttributeUse {
+                if let Ok(attribute) = parse_attribute_use(&module.source, &module.syntax, node) {
+                    pending.push(attribute);
+                }
+                continue;
+            }
+            let target = match node.kind() {
+                NodeKind::RecordDeclaration => {
+                    parse_record_declaration(&module.source, &module.syntax, node)
+                        .ok()
+                        .map(|syntax| (syntax.name().to_owned(), syntax.span()))
+                }
+                NodeKind::UnionDeclaration => {
+                    parse_union_declaration(&module.source, &module.syntax, node)
+                        .ok()
+                        .map(|syntax| (syntax.name().to_owned(), syntax.span()))
+                }
+                NodeKind::EnumDeclaration => {
+                    parse_enum_declaration(&module.source, &module.syntax, node)
+                        .ok()
+                        .map(|syntax| (syntax.name().to_owned(), syntax.span()))
+                }
+                _ => None,
+            };
+            let Some((target_name, target_span)) = target else {
+                pending.clear();
+                continue;
+            };
+            let trusted = pending.iter().find(|attribute| {
+                trusted_compiler_attribute_role(database, bootstrap, module.module, attribute)
+                    == Some(CompilerAttributeRole::RetainMetadata)
+                    && parse_retained_metadata_request(attribute).is_some()
+            });
+            let Some(attribute) = trusted else {
+                pending.clear();
+                continue;
+            };
+            let Some(target) = database
+                .resolve(module.module, &target_name, SymbolSpace::Type, target_span)
+                .symbol()
+                .and_then(|symbol| database.index().declaration(symbol))
+            else {
+                pending.clear();
+                continue;
+            };
+            let name = format!("{}Schema", target.name());
+            let qualified = if target.namespace().is_empty() {
+                name.clone()
+            } else {
+                format!("{}.{}", target.namespace(), name)
+            };
+            let collision = [SymbolSpace::Type, SymbolSpace::Value]
+                .into_iter()
+                .any(|space| {
+                    !database
+                        .index()
+                        .declaration_by_qualified_name(&qualified, space)
+                        .is_empty()
+                });
+            if !collision {
+                reservations.push(GeneratedCodecSchemaDeclaration::new(
+                    target.symbol(),
+                    target.module(),
+                    target.bubble(),
+                    target.namespace(),
+                    name,
+                    target.visibility(),
+                    attribute.span(),
+                ));
+            }
+            pending.clear();
+        }
+    }
+    reservations
 }
 
 fn validate_documentation(
@@ -809,6 +1103,7 @@ fn validate_source_attribute_targets(modules: &[ParsedModule], diagnostics: &mut
                         | NodeKind::ConstDeclaration
                         | NodeKind::RecordDeclaration
                         | NodeKind::UnionDeclaration
+                        | NodeKind::EnumDeclaration
                         | NodeKind::ErrorDeclaration
                         | NodeKind::ClassDeclaration
                         | NodeKind::InterfaceDeclaration
@@ -935,6 +1230,41 @@ fn build_runtime_hir(
     Vec<HirMethod>,
     Vec<pop_hir::HirBuildError>,
 ) {
+    let mut local_signatures = signatures.clone();
+    for function in functions
+        .iter()
+        .filter(|function| !function.is_compile_time && function.foreign.is_none())
+    {
+        let parameter_count = function.signature.parameters().len();
+        let result_count = function.signature.results().len();
+        let view_parameters = function
+            .signature
+            .parameters()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                parameter
+                    .parameter_type()
+                    .type_id()
+                    .filter(|type_id| resolver.arena().view_kind(*type_id).is_some())
+                    .map(|_| index)
+            })
+            .collect::<Vec<_>>();
+        if !view_parameters.is_empty() && body_proves_no_view_retention(&function.body) {
+            let mut summary =
+                pop_types::CallableLifetimeSummary::conservative(parameter_count, result_count);
+            for parameter in view_parameters {
+                summary = summary.with_parameter_retention(
+                    parameter,
+                    pop_types::ParameterRetention::DoesNotRetain,
+                );
+            }
+            local_signatures.insert(
+                function.signature.symbol(),
+                function.signature.clone().with_lifetime_summary(summary),
+            );
+        }
+    }
     let known_functions: BTreeSet<_> = functions
         .iter()
         .filter(|function| !function.is_compile_time)
@@ -966,7 +1296,7 @@ fn build_runtime_hir(
         if function.is_compile_time || function.foreign.is_some() {
             continue;
         }
-        let typed = BodyChecker::new(function.module, resolver, signatures)
+        let typed = BodyChecker::new(function.module, resolver, &local_signatures)
             .with_runtime_constants(contracts.constants)
             .with_foreign_declarations(contracts.foreign_declarations)
             .check(&function.signature, &function.body);
@@ -998,7 +1328,7 @@ fn build_runtime_hir(
     }
     let mut hir_methods = Vec::new();
     for method in methods {
-        let typed = BodyChecker::new(method.module, resolver, signatures)
+        let typed = BodyChecker::new(method.module, resolver, &local_signatures)
             .with_runtime_constants(contracts.constants)
             .with_foreign_declarations(contracts.foreign_declarations)
             .check(&method.signature, &method.body);
@@ -1113,6 +1443,75 @@ fn build_runtime_hir(
         hir_methods,
         hir_build_errors,
     )
+}
+
+fn body_proves_no_view_retention(body: &FunctionBodySyntax) -> bool {
+    body.statements()
+        .iter()
+        .all(statement_proves_no_view_retention)
+}
+
+fn statement_proves_no_view_retention(statement: &StatementSyntax) -> bool {
+    match statement.kind() {
+        StatementSyntaxKind::Local { initializer, .. } => {
+            expression_proves_no_view_retention(initializer)
+        }
+        StatementSyntaxKind::Return { values } => {
+            values.iter().all(expression_proves_no_view_retention)
+        }
+        StatementSyntaxKind::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            expression_proves_no_view_retention(condition)
+                && then_body.iter().all(statement_proves_no_view_retention)
+                && else_body.iter().all(statement_proves_no_view_retention)
+        }
+        StatementSyntaxKind::Expression(expression) => {
+            expression_proves_no_view_retention(expression)
+        }
+        _ => false,
+    }
+}
+
+fn expression_proves_no_view_retention(expression: &ExpressionSyntax) -> bool {
+    match expression.kind() {
+        ExpressionSyntaxKind::Integer(_)
+        | ExpressionSyntaxKind::Float(_)
+        | ExpressionSyntaxKind::String(_)
+        | ExpressionSyntaxKind::Boolean(_)
+        | ExpressionSyntaxKind::Nil
+        | ExpressionSyntaxKind::Name(_) => true,
+        ExpressionSyntaxKind::Call { callee, arguments } => {
+            matches!(
+                callee.kind(),
+                ExpressionSyntaxKind::Name(path)
+                    if matches!(path.as_slice(), [namespace, operation]
+                        if matches!(namespace.as_str(), "Bytes" | "Text")
+                            && matches!(operation.as_str(),
+                                "view" | "slice" | "length" | "get" | "toBytes" | "toString"))
+            ) && arguments.iter().all(expression_proves_no_view_retention)
+        }
+        ExpressionSyntaxKind::Unary { operand, .. }
+        | ExpressionSyntaxKind::OptionalPropagate { operand }
+        | ExpressionSyntaxKind::ResultPropagate { operand } => {
+            expression_proves_no_view_retention(operand)
+        }
+        ExpressionSyntaxKind::Binary { left, right, .. } => {
+            expression_proves_no_view_retention(left) && expression_proves_no_view_retention(right)
+        }
+        ExpressionSyntaxKind::Conditional {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            expression_proves_no_view_retention(condition)
+                && expression_proves_no_view_retention(when_true)
+                && expression_proves_no_view_retention(when_false)
+        }
+        _ => false,
+    }
 }
 
 fn define_declarations(

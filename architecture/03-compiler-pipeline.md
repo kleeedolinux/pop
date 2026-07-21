@@ -145,6 +145,11 @@ or a dynamic value. Its reachability controls runtime retention. A library's
 canonical JSON `reference.metadata` may identify a public adapter and the full
 `.popc` digest, but cannot copy the structural projection into JSON.
 
+Adapter protocol 1's closed operations are `CodecEncode` and `CodecDecode` over
+the exact typed event vocabulary and deterministic malformed-input rules in ADR
+0092. Their adapter operand selects one verified catalog entry by stable
+identity; it is never a runtime name or descriptor-parser handle.
+
 Statically bound foreign declarations are the exception to ordinary UDA
 erasure: their trusted ADR 0081 consequence becomes a typed foreign identity
 and exact ABI/effect contract in HIR/MIR. The original attribute value does not

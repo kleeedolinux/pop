@@ -1393,6 +1393,7 @@ struct ResolvedPackageLibrary {
     bubble: String,
     public_api_sha256: String,
     metadata: ReferenceMetadata,
+    retained_adapters_popc: Option<Vec<u8>>,
 }
 
 impl ResolvedPackageLibrary {
@@ -1453,7 +1454,7 @@ fn lower_package_recursive(
     }
     let verified_ffi_bindings =
         verify_ffi_generated_bindings(package_root, &manifest, native_target().triple())
-            .map_err(|error| eprintln!("pop: {error}"))
+            .map_err(|error| tool_failure!("pop: {error}"))
             .ok()?;
     let native_link_plan = manifest
         .native_link_plan(native_target().triple())
@@ -1539,6 +1540,15 @@ fn lower_package_recursive(
         .iter()
         .map(|library| library.metadata.clone())
         .collect::<Vec<_>>();
+    let external_retained_adapters = external_libraries
+        .iter()
+        .filter_map(|library| {
+            library
+                .retained_adapters_popc
+                .clone()
+                .map(|bytes| (library.metadata.bubble(), bytes))
+        })
+        .collect::<Vec<_>>();
     let artifact_dependencies = external_libraries
         .iter()
         .map(ResolvedPackageLibrary::artifact_dependency)
@@ -1559,7 +1569,7 @@ fn lower_package_recursive(
                 .any(|module| module == bindings.source_path())
         })
     }) {
-        eprintln!("pop: generated FFI callback metadata does not name a discovered Module");
+        tool_failure!("pop: generated FFI callback metadata does not name a discovered Module");
         return None;
     }
     let selected: Vec<_> = bubbles
@@ -1574,7 +1584,7 @@ fn lower_package_recursive(
         return None;
     }
 
-    let mut library = None;
+    let mut library: Option<ResolvedPackageLibrary> = None;
     for bubble in selected {
         let bubble_id = BubbleId::from_raw(state.next_bubble);
         state.next_bubble = state.next_bubble.checked_add(1)?;
@@ -1590,19 +1600,22 @@ fn lower_package_recursive(
             .collect::<Result<Vec<_>, ()>>()
             .ok()?;
         let mut dependency_metadata = external_metadata.clone();
+        let mut dependency_retained_adapters = external_retained_adapters.clone();
         if bubble.depends_on_library() {
-            dependency_metadata.push(
-                library
-                    .as_ref()
-                    .map(|library: &ResolvedPackageLibrary| library.metadata.clone())
-                    .expect("sorted conventional discovery lowers the library first"),
-            );
+            let library = library
+                .as_ref()
+                .expect("sorted conventional discovery lowers the library first");
+            dependency_metadata.push(library.metadata.clone());
+            if let Some(bytes) = &library.retained_adapters_popc {
+                dependency_retained_adapters.push((library.metadata.bubble(), bytes.clone()));
+            }
         }
         let program = lower_native_bubble(
             bubble_id,
             &modules,
             bubble.kind() == BubbleKind::Binary,
             dependency_metadata,
+            dependency_retained_adapters,
             Vec::new(),
             ffi_dependency,
             verified_ffi_bindings
@@ -1630,6 +1643,7 @@ fn lower_package_recursive(
                 bubble: bubble.name().to_owned(),
                 public_api_sha256: sha256_hex(&reference),
                 metadata: program.reference_metadata.clone(),
+                retained_adapters_popc: program.retained_adapters_popc.clone(),
             });
         }
         state.bubbles.push(LoweredPackageBubble {
@@ -1802,6 +1816,24 @@ fn reference_type_text(reference: &ReferenceType, type_parameters: &[&str]) -> S
             identity.bubble().raw(),
             identity.symbol().raw()
         ),
+        ReferenceType::Class(nominal) | ReferenceType::Interface(nominal) => {
+            let arguments = nominal
+                .arguments()
+                .iter()
+                .map(|argument| reference_type_text(argument, type_parameters))
+                .collect::<Vec<_>>()
+                .join(",");
+            let kind = if matches!(reference, ReferenceType::Class(_)) {
+                "class"
+            } else {
+                "interface"
+            };
+            format!(
+                "{kind}:b{}:s{}<{arguments}>",
+                nominal.definition().bubble().raw(),
+                nominal.definition().symbol().raw()
+            )
+        }
         ReferenceType::Tuple(elements) => format!(
             "({})",
             elements
@@ -1923,7 +1955,7 @@ fn build_package_to(
                 .filter(|provider| provider_aliases.contains(provider.alias()))
                 .cloned()
                 .collect();
-            let emission = PoplibEmission::new(
+            let mut emission = PoplibEmission::new(
                 &bubble.package,
                 &bubble.version,
                 &bubble.source_sha256,
@@ -1937,6 +1969,9 @@ fn build_package_to(
             .with_resolved_native_providers(resolved_native_providers)
             .with_documentation(documentation.into_bytes())
             .with_target_implementation(target.triple(), implementation);
+            if let Some(descriptor) = &bubble.program.retained_adapters_popc {
+                emission = emission.with_retained_adapters_popc(descriptor.clone());
+            }
             let artifact = dependency_root.join(format!("{}.poplib", bubble.name));
             emit_poplib(&artifact, &emission)
                 .map_err(|error| tool_failure!("pop: library artifact emission failed: {error}"))
@@ -2404,16 +2439,22 @@ struct NativeProgram {
     types: pop_types::TypeArena,
     entry: Option<SymbolId>,
     reference_metadata: ReferenceMetadata,
+    retained_adapters_popc: Option<Vec<u8>>,
     checked_documentation: Vec<CheckedDocumentation>,
 }
 
 fn lower_native_source(source_path: &Path) -> Option<NativeProgram> {
     let (standard, _) = lower_toolchain_standard()?;
+    let retained_adapters = standard
+        .retained_adapters_popc
+        .map(|bytes| vec![(STANDARD_BUBBLE, bytes)])
+        .unwrap_or_default();
     lower_native_bubble(
         BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
         &[(source_path.to_path_buf(), source_path.to_path_buf())],
         true,
         vec![standard.metadata],
+        retained_adapters,
         Vec::new(),
         None,
         Vec::new(),
@@ -2469,6 +2510,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         &modules,
         false,
         Vec::new(),
+        Vec::new(),
         vec![INTERNAL_BUBBLE],
         None,
         Vec::new(),
@@ -2484,6 +2526,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
         bubble: bubble.name().to_owned(),
         public_api_sha256: sha256_hex(&reference),
         metadata: program.reference_metadata.clone(),
+        retained_adapters_popc: program.retained_adapters_popc.clone(),
     };
     let lowered = LoweredPackageBubble {
         bubble: STANDARD_BUBBLE,
@@ -2509,6 +2552,7 @@ fn lower_native_bubble(
     modules: &[(PathBuf, PathBuf)],
     requires_entry: bool,
     dependency_metadata: Vec<ReferenceMetadata>,
+    dependency_retained_adapters_popc: Vec<(BubbleId, Vec<u8>)>,
     additional_dependencies: Vec<BubbleId>,
     ffi_dependency: Option<BubbleId>,
     verified_ffi_bindings: Vec<VerifiedFfiGeneratedBindings>,
@@ -2560,7 +2604,8 @@ fn lower_native_bubble(
         dependencies,
         modules,
     )
-    .with_reference_metadata(dependency_metadata);
+    .with_reference_metadata(dependency_metadata)
+    .with_reference_retained_adapters_popc(dependency_retained_adapters_popc);
     let input = if let Some(ffi_dependency) = ffi_dependency {
         input.with_ffi_dependency(ffi_dependency)
     } else {
@@ -2602,12 +2647,25 @@ fn lower_native_bubble(
         .map_err(|error| tool_failure!("pop: public reference metadata emission failed: {error:?}"))
         .ok()?
         .clone();
+    let retained_adapters_popc = result
+        .retained_metadata()
+        .map_err(|error| {
+            tool_failure!("pop: retained metadata emission failed: {error:?}");
+        })
+        .ok()?
+        .public_popc()
+        .map_err(|error| {
+            tool_failure!("pop: retained metadata filtering failed: {error:?}");
+        })
+        .ok()
+        .filter(|descriptor| !descriptor.is_empty());
     let checked_documentation = result.checked_documentation().to_vec();
     Some(NativeProgram {
         mir,
         types: result.types().clone(),
         entry,
         reference_metadata,
+        retained_adapters_popc,
         checked_documentation,
     })
 }

@@ -117,3 +117,27 @@ text = "原始 match case"
 
 [messages."types.originalBinding"]
 text = "原始 binding"
+
+[messages."types.invalidCheckedCastTarget"]
+text = "无效的检查转换目标 `{target}`：{reason}"
+
+[messages."types.invalidCheckedCastOperand"]
+text = "无法将 `{source}` 检查转换为 `{target}`：{reason}"
+
+[messages."types.incompatibleCheckedCast"]
+text = "从 `{source}` 到 `{target}` 的检查转换不兼容：{reason}"
+
+[messages."types.checkedCastTarget"]
+text = "检查转换目标在此处声明"
+
+[messages."types.borrowedViewEscape"]
+text = "借用视图 `{view}` 逸出其借出者：{reason}"
+
+[messages."types.borrowedViewRetained"]
+text = "借用视图 `{view}` 被保留：{reason}"
+
+[messages."types.borrowedViewAcrossSuspension"]
+text = "借用视图 `{view}` 不能跨越挂起点"
+
+[messages."types.invalidViewCallableProvenance"]
+text = "可调用项 `{callable}` 的视图来源无效：{reason}"

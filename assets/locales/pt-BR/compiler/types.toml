@@ -117,3 +117,27 @@ text = "caso de match original"
 
 [messages."types.originalBinding"]
 text = "binding original"
+
+[messages."types.invalidCheckedCastTarget"]
+text = "destino inválido para conversão verificada `{target}`: {reason}"
+
+[messages."types.invalidCheckedCastOperand"]
+text = "não é possível converter com verificação `{source}` para `{target}`: {reason}"
+
+[messages."types.incompatibleCheckedCast"]
+text = "a conversão verificada de `{source}` para `{target}` é incompatível: {reason}"
+
+[messages."types.checkedCastTarget"]
+text = "o destino da conversão verificada é declarado aqui"
+
+[messages."types.borrowedViewEscape"]
+text = "a visão emprestada `{view}` escapa do cedente: {reason}"
+
+[messages."types.borrowedViewRetained"]
+text = "a visão emprestada `{view}` é retida: {reason}"
+
+[messages."types.borrowedViewAcrossSuspension"]
+text = "a visão emprestada `{view}` não pode atravessar uma suspensão"
+
+[messages."types.invalidViewCallableProvenance"]
+text = "o chamável `{callable}` tem proveniência de visão inválida: {reason}"

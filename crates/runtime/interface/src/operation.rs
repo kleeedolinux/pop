@@ -39,6 +39,8 @@ pub enum RuntimeOperation {
     FfiCallbackEnter,
     FfiCallbackLeave,
     FfiCallbackClose,
+    CodecWriteEvent,
+    CodecReadEvent,
     RecordUpdate,
     UnionMake,
     CaptureLoad,

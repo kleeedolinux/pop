@@ -25,6 +25,7 @@ use crate::compile_time::{
     evaluate_required_expression,
 };
 use crate::ffi_generate::VerifiedFfiGeneratedFunction;
+use crate::retained_metadata::RetainedMetadataRequest;
 use crate::work::{
     AttributeResolutionContext, CompileTimeContext, DeclarationAttributeWork, FunctionWork,
     NamespaceAttributeWork,
@@ -234,6 +235,136 @@ pub(crate) fn resolve_ffi_layout_attributes(
             ));
         }
     }
+}
+
+pub(crate) fn resolve_retained_metadata_attributes(
+    namespaces: &mut [NamespaceAttributeWork],
+    declarations: &mut [DeclarationAttributeWork],
+    functions: &mut [FunctionWork],
+    database: &ResolutionDatabase,
+    bootstrap: &BootstrapSchema,
+    resolver: &SignatureResolver<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<RetainedMetadataRequest> {
+    for (module, attribute_uses) in namespaces
+        .iter_mut()
+        .map(|namespace| (namespace.module, &mut namespace.attribute_uses))
+        .chain(
+            functions
+                .iter_mut()
+                .map(|function| (function.module, &mut function.attribute_uses)),
+        )
+    {
+        let mut ordinary = Vec::new();
+        for attribute in std::mem::take(attribute_uses) {
+            if trusted_compiler_attribute_role(database, bootstrap, module, &attribute)
+                == Some(CompilerAttributeRole::RetainMetadata)
+            {
+                diagnostics.push(compile_time_diagnostics::ineligible_constant_expression(
+                    attribute.span(),
+                    "RetainMetadata has the wrong attachment target",
+                ));
+            } else {
+                ordinary.push(attribute);
+            }
+        }
+        *attribute_uses = ordinary;
+    }
+    let mut requests = Vec::new();
+    let mut requested = BTreeSet::new();
+    for declaration in declarations {
+        let mut ordinary = Vec::new();
+        for attribute in std::mem::take(&mut declaration.attribute_uses) {
+            if trusted_compiler_attribute_role(database, bootstrap, declaration.module, &attribute)
+                != Some(CompilerAttributeRole::RetainMetadata)
+            {
+                ordinary.push(attribute);
+                continue;
+            }
+            let valid_target = matches!(
+                declaration.target,
+                AttributeTarget::Record | AttributeTarget::Union | AttributeTarget::Enum
+            );
+            let generic = match declaration.target {
+                AttributeTarget::Record => resolver.record_is_generic(declaration.symbol),
+                AttributeTarget::Union => resolver.union_is_generic(declaration.symbol),
+                _ => false,
+            };
+            let parsed = parse_retained_metadata_request(&attribute);
+            if !valid_target || generic || parsed.is_none() || !requested.insert(declaration.symbol)
+            {
+                diagnostics.push(compile_time_diagnostics::ineligible_constant_expression(
+                    attribute.span(),
+                    "RetainMetadata requires one non-generic record, enum, or tagged union and exact ordered `use = Metadata.Use.Codec, schemaVersion = <nonzero UInt32>` arguments",
+                ));
+                continue;
+            }
+            let schema_version = parsed.expect("checked retained metadata request");
+            let Some(target) = database.index().declaration(declaration.symbol) else {
+                diagnostics.push(compile_time_diagnostics::ineligible_constant_expression(
+                    attribute.span(),
+                    "RetainMetadata target declaration",
+                ));
+                continue;
+            };
+            let adapter_name = format!("{}Schema", target.name());
+            let adapter_qualified_name = if target.namespace().is_empty() {
+                adapter_name.clone()
+            } else {
+                format!("{}.{}", target.namespace(), adapter_name)
+            };
+            let collision = [SymbolSpace::Type, SymbolSpace::Value]
+                .into_iter()
+                .any(|space| {
+                    database
+                        .index()
+                        .declaration_by_qualified_name(&adapter_qualified_name, space)
+                        .into_iter()
+                        .any(|declaration| {
+                            declaration.kind() != pop_resolve::DeclarationKind::GeneratedCodecSchema
+                        })
+                });
+            if collision {
+                diagnostics.push(compile_time_diagnostics::ineligible_constant_expression(
+                    attribute.span(),
+                    "RetainMetadata generated schema Item name collision",
+                ));
+                continue;
+            }
+            requests.push(RetainedMetadataRequest::new(
+                declaration.symbol,
+                declaration.module,
+                schema_version,
+                attribute.span(),
+            ));
+        }
+        declaration.attribute_uses = ordinary;
+    }
+    requests.sort_by_key(RetainedMetadataRequest::symbol);
+    requests
+}
+
+pub(crate) fn parse_retained_metadata_request(attribute: &AttributeUseSyntax) -> Option<u32> {
+    let [use_argument, version_argument] = attribute.arguments() else {
+        return None;
+    };
+    if use_argument.name() != Some("use")
+        || version_argument.name() != Some("schemaVersion")
+        || !matches!(
+            use_argument.value().kind(),
+            ExpressionSyntaxKind::Name(path)
+                if path == &["Metadata".to_owned(), "Use".to_owned(), "Codec".to_owned()]
+        )
+    {
+        return None;
+    }
+    let ExpressionSyntaxKind::Integer(version) = version_argument.value().kind() else {
+        return None;
+    };
+    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    version.parse::<u32>().ok().filter(|version| *version != 0)
 }
 
 fn resolve_foreign_function(
@@ -674,7 +805,7 @@ pub(crate) fn classify_function_attributes(
     (marked, ordinary)
 }
 
-fn trusted_compiler_attribute_role(
+pub(crate) fn trusted_compiler_attribute_role(
     database: &ResolutionDatabase,
     bootstrap: &BootstrapSchema,
     module: ModuleId,

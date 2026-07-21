@@ -2,33 +2,40 @@ use std::error::Error;
 use std::fmt;
 
 use pop_foundation::{
-    BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
-    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FieldId, FileId,
-    FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId,
-    MethodId, NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
-    StandardFunctionId, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId,
-    ValueId,
+    AllocationSiteId, BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId,
+    ClassId, CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FfiCallbackSiteId,
+    FieldId, FileId, FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId,
+    IterationProtocolMethodId, LifetimeId, MethodId, ModuleId, NamespaceId, NestedFunctionId,
+    NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
+    TextRange, TextSize, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
-    ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, PanicKind, PanicPayload, RootSlot,
-    SafePointId, StackMap, Trap, TrapKind, UnwindReason,
+    ArrayElementMap, FfiAbiLayoutId, FfiCallbackLifetime, FfiCallbackThread, ObjectMap, ObjectSlot,
+    PanicKind, PanicPayload, RootSlot, SafePointId, StackMap, Trap, TrapKind, UnwindReason,
 };
 use pop_target::TargetSpec;
 use pop_types::{
-    FloatKind, FloatValue, ForeignAbi, ForeignFunctionDeclaration, IntegerKind, IntegerValue,
+    CallableLifetimeSummary, CanonicalNominalIdentity, CanonicalTypeIdentity, FfiCallbackAbi,
+    FfiCallbackLifetime as TypeFfiCallbackLifetime, FfiCallbackPairContract,
+    FfiCallbackThreadPolicy, FloatKind, FloatValue, ForeignAbi, ForeignFunctionDeclaration,
+    IntegerKind, IntegerValue, ParameterRetention, PrimitiveType, ResultProvenance,
 };
 
 use super::{
     BarrierElisionProof, MirBlock, MirBlockArgument, MirBubble, MirBuiltinInterfaceImplementation,
-    MirBuiltinInterfaceMethodImplementation, MirCancellationMode, MirCapture, MirCaptureMode,
-    MirClassDeclaration, MirCleanupBlock, MirCleanupExitReason, MirClosureCapture, MirDeclaration,
-    MirDeclarationKind, MirEffect, MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase,
-    MirErrorDeclaration, MirErrorSwitchArm, MirField, MirForeignFunction, MirFrameSlot,
-    MirFunction, MirFunctionReference, MirInstruction, MirInstructionKind, MirInterfaceDeclaration,
-    MirInterfaceImplementation, MirInterfaceMethod, MirInterfaceMethodImplementation, MirLiveFrame,
-    MirMethod, MirNestedFunction, MirRecordDeclaration, MirSuspendOperation, MirTaskDispatch,
-    MirTerminator, MirUnionCase, MirUnionDeclaration, MirUnionSwitchArm, MirUnwindAction,
-    local_instruction_effects,
+    MirBuiltinInterfaceMethodImplementation, MirCallViewResult, MirCancellationMode, MirCapture,
+    MirCaptureMode, MirClassDeclaration, MirClassReference, MirCleanupBlock, MirCleanupExitReason,
+    MirClosureCapture, MirCodecErrorSwitchArm, MirDeclaration, MirDeclarationKind, MirEffect,
+    MirEffectSummary, MirEnumCase, MirEnumDeclaration, MirErrorCase, MirErrorDeclaration,
+    MirErrorSwitchArm, MirFfiCallbackAbi, MirFfiCallbackFingerprint, MirFfiCallbackSignature,
+    MirField, MirForeignFunction, MirFrameSlot, MirFunction, MirFunctionReference,
+    MirGeneratedCodecAdapter, MirGeneratedCodecMember, MirGeneratedCodecMemberId, MirInstruction,
+    MirInstructionKind, MirInterfaceDeclaration, MirInterfaceImplementation, MirInterfaceMethod,
+    MirInterfaceMethodImplementation, MirInterfaceReference, MirLiveFrame, MirMethod,
+    MirNestedFunction, MirNominalIdentity, MirNominalReferenceCatalog, MirRecordDeclaration,
+    MirSuspendOperation, MirTaskDispatch, MirTerminator, MirUnionCase, MirUnionDeclaration,
+    MirUnionSwitchArm, MirUnwindAction, MirViewBoundaryProof, MirViewKind, MirViewLender,
+    MirViewRangeUnit, MirViewTrap, local_instruction_effects,
 };
 use crate::MirFfiLayoutCatalog;
 
@@ -90,8 +97,30 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
     let mut methods = Vec::new();
     let mut nested_functions = Vec::new();
     let mut function_references = Vec::new();
+    let mut nominal_interfaces = Vec::new();
+    let mut nominal_classes = Vec::new();
+    let mut generated_codec_adapters = Vec::new();
     while position < lines.len() {
-        if lines[position].starts_with("reference ")
+        if lines[position].starts_with("codec.schema ") {
+            generated_codec_adapters.push(parse_generated_codec_adapter(
+                lines[position],
+                position + 1,
+            )?);
+            position += 1;
+        } else if lines[position].starts_with("nominal.interface ") {
+            nominal_interfaces.push(parse_nominal_interface_reference(
+                lines[position],
+                position + 1,
+            )?);
+            position += 1;
+        } else if lines[position].starts_with("nominal.class ") {
+            nominal_classes.push(parse_nominal_class_reference(
+                lines[position],
+                position + 1,
+                &nominal_interfaces,
+            )?);
+            position += 1;
+        } else if lines[position].starts_with("reference ")
             || lines[position].starts_with("async reference ")
         {
             function_references.push(parse_function_reference(lines[position], position + 1)?);
@@ -138,23 +167,527 @@ pub fn parse_mir_dump(text: &str) -> Result<MirBubble, MirParseError> {
         methods,
         nested_functions,
         function_references,
+        nominal_references: MirNominalReferenceCatalog::new(nominal_interfaces, nominal_classes),
         ffi_layouts: MirFfiLayoutCatalog::empty(
             &TargetSpec::for_triple("x86_64-unknown-linux-gnu")
                 .expect("the accepted native FFI target is part of the target inventory"),
         ),
+        generated_codec_adapters,
     })
+}
+
+fn parse_generated_codec_adapter(
+    line: &str,
+    number: usize,
+) -> Result<MirGeneratedCodecAdapter, MirParseError> {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 22
+        || parts[0] != "codec.schema"
+        || parts[2] != "target"
+        || parts[4] != "module"
+        || parts[6] != "visibility"
+        || parts[8] != "name"
+        || parts[10] != "targetName"
+        || parts[12] != "targetType"
+        || parts[14] != "schemaType"
+        || parts[16] != "version"
+        || parts[18] != "sha256"
+        || parts[20] != "members"
+    {
+        return Err(error(number, "generated codec adapter"));
+    }
+    let target = parts[3]
+        .strip_prefix('b')
+        .and_then(|value| value.split_once(":s"))
+        .ok_or_else(|| error(number, "generated codec target"))?;
+    let visibility = match parts[7] {
+        "Public" => pop_resolve::Visibility::Public,
+        "Internal" => pop_resolve::Visibility::Internal,
+        "Private" => pop_resolve::Visibility::Private,
+        _ => return Err(error(number, "generated codec visibility")),
+    };
+    let members = if parts[21].is_empty() {
+        Vec::new()
+    } else {
+        parts[21]
+            .split(';')
+            .map(|member| {
+                let values = member.split(':').collect::<Vec<_>>();
+                if values.len() != 6 {
+                    return Err(error(number, "generated codec member"));
+                }
+                let raw = parse_u32(values[1], number)?;
+                let member = match values[0] {
+                    "field" => MirGeneratedCodecMemberId::Field(FieldId::from_raw(raw)),
+                    "enum" => MirGeneratedCodecMemberId::EnumCase(EnumCaseId::from_raw(raw)),
+                    "union" => MirGeneratedCodecMemberId::UnionCase(UnionCaseId::from_raw(raw)),
+                    _ => return Err(error(number, "generated codec member kind")),
+                };
+                let discriminant = if values[4] == "-" {
+                    None
+                } else {
+                    Some(parse_u32(values[4], number)?)
+                };
+                let types = if values[5].is_empty() {
+                    Vec::new()
+                } else {
+                    values[5]
+                        .split(',')
+                        .map(|value| Ok(TypeId::from_raw(parse_prefixed(value, 't', number)?)))
+                        .collect::<Result<Vec<_>, MirParseError>>()?
+                };
+                Ok(MirGeneratedCodecMember {
+                    ordinal: u16::try_from(parse_u32(values[2], number)?)
+                        .map_err(|_| error(number, "generated codec ordinal"))?,
+                    name: values[3].to_owned(),
+                    member,
+                    types,
+                    discriminant,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(MirGeneratedCodecAdapter {
+        symbol: SymbolId::from_raw(parse_prefixed(parts[1], 's', number)?),
+        target: SymbolIdentity::new(
+            BubbleId::from_raw(parse_u32(target.0, number)?),
+            SymbolId::from_raw(parse_u32(target.1, number)?),
+        ),
+        module: ModuleId::from_raw(parse_prefixed(parts[5], 'm', number)?),
+        visibility,
+        name: parts[9].to_owned(),
+        target_name: parts[11].to_owned(),
+        target_type: TypeId::from_raw(parse_prefixed(parts[13], 't', number)?),
+        schema_type: TypeId::from_raw(parse_prefixed(parts[15], 't', number)?),
+        schema_version: parse_u32(parts[17], number)?,
+        projection_sha256: parts[19].to_owned(),
+        members,
+    })
+}
+
+fn parse_nominal_interface_reference(
+    line: &str,
+    number: usize,
+) -> Result<MirInterfaceReference, MirParseError> {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 6 || parts[0] != "nominal.interface" {
+        return Err(error(number, "malformed nominal interface reference"));
+    }
+    Ok(MirInterfaceReference::new(
+        {
+            let definition = parse_nominal_identity(parts[1], number)?;
+            let canonical = parse_canonical_nominal(parts[5], number)?;
+            if canonical.definition() != definition {
+                return Err(error(number, "nominal interface canonical identity"));
+            }
+            MirNominalIdentity::new(
+                definition,
+                parse_wrapped_types(parts[4], "arguments(", number)?,
+                canonical.arguments().to_vec(),
+            )
+        },
+        InterfaceId::from_raw(parse_prefixed(parts[2], 'i', number)?),
+        TypeId::from_raw(parse_prefixed(parts[3], 't', number)?),
+    ))
+}
+
+fn parse_nominal_class_reference(
+    line: &str,
+    number: usize,
+    interfaces: &[MirInterfaceReference],
+) -> Result<MirClassReference, MirParseError> {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 9 || parts[0] != "nominal.class" {
+        return Err(error(number, "malformed nominal class reference"));
+    }
+    let is_open = parts[4]
+        .strip_prefix("open(")
+        .and_then(|value| value.strip_suffix(')'))
+        .and_then(|value| match value {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+        .ok_or_else(|| error(number, "nominal class openness"))?;
+    let base = parts[5]
+        .strip_prefix("base(")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| error(number, "nominal class base"))?;
+    let base = if base == "-" {
+        None
+    } else {
+        let (class, type_id) = base
+            .split_once(":t")
+            .ok_or_else(|| error(number, "nominal class specialized base"))?;
+        Some((
+            ClassId::from_raw(parse_prefixed(class, 'c', number)?),
+            TypeId::from_raw(parse_u32(type_id, number)?),
+        ))
+    };
+    let implementations = parts[7]
+        .strip_prefix("interfaces(")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| error(number, "nominal class interfaces"))?;
+    let implementations = if implementations.is_empty() {
+        Vec::new()
+    } else {
+        implementations
+            .split(',')
+            .map(|implementation| {
+                let (interface, type_id) = implementation
+                    .split_once(":t")
+                    .ok_or_else(|| error(number, "nominal class interface witness"))?;
+                let interface = InterfaceId::from_raw(parse_prefixed(interface, 'i', number)?);
+                let type_id = TypeId::from_raw(parse_u32(type_id, number)?);
+                interfaces
+                    .iter()
+                    .find(|candidate| {
+                        candidate.interface() == interface && candidate.type_id() == type_id
+                    })
+                    .cloned()
+                    .ok_or_else(|| error(number, "unknown nominal class interface witness"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let definition = parse_nominal_identity(parts[1], number)?;
+    let canonical = parse_canonical_nominal(parts[8], number)?;
+    if canonical.definition() != definition {
+        return Err(error(number, "nominal class canonical identity"));
+    }
+    Ok(MirClassReference::new(
+        MirNominalIdentity::new(
+            definition,
+            parse_wrapped_types(parts[6], "arguments(", number)?,
+            canonical.arguments().to_vec(),
+        ),
+        ClassId::from_raw(parse_prefixed(parts[2], 'c', number)?),
+        TypeId::from_raw(parse_prefixed(parts[3], 't', number)?),
+        is_open,
+        base,
+        implementations,
+    ))
+}
+
+fn parse_nominal_identity(text: &str, number: usize) -> Result<SymbolIdentity, MirParseError> {
+    let (bubble, symbol) = text
+        .strip_prefix('b')
+        .and_then(|identity| identity.split_once(":s"))
+        .ok_or_else(|| error(number, "nominal reference identity"))?;
+    Ok(SymbolIdentity::new(
+        BubbleId::from_raw(parse_u32(bubble, number)?),
+        SymbolId::from_raw(parse_u32(symbol, number)?),
+    ))
+}
+
+fn parse_canonical_nominal(
+    text: &str,
+    number: usize,
+) -> Result<CanonicalNominalIdentity, MirParseError> {
+    let descriptor = text
+        .strip_prefix("canonical(")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| error(number, "canonical nominal descriptor"))?;
+    let mut parser = CanonicalTypeParser::new(descriptor, number);
+    let identity = parser.parse_nominal()?;
+    if !parser.is_complete() {
+        return Err(error(number, "canonical nominal descriptor suffix"));
+    }
+    Ok(identity)
+}
+
+struct CanonicalTypeParser<'a> {
+    text: &'a str,
+    position: usize,
+    line: usize,
+}
+
+impl<'a> CanonicalTypeParser<'a> {
+    const fn new(text: &'a str, line: usize) -> Self {
+        Self {
+            text,
+            position: 0,
+            line,
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.position == self.text.len()
+    }
+
+    fn parse_nominal(&mut self) -> Result<CanonicalNominalIdentity, MirParseError> {
+        self.expect("b")?;
+        let bubble = self.parse_u32_until(":s")?;
+        self.expect(":s")?;
+        let symbol = self.parse_u32_until("[")?;
+        self.expect("[")?;
+        let arguments = self.parse_type_list(']')?;
+        Ok(CanonicalNominalIdentity::new(
+            SymbolIdentity::new(BubbleId::from_raw(bubble), SymbolId::from_raw(symbol)),
+            arguments,
+        ))
+    }
+
+    fn parse_type(&mut self) -> Result<CanonicalTypeIdentity, MirParseError> {
+        if self.consume("P(") {
+            let name = self.take_until(")")?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Primitive(match name {
+                "Nil" => PrimitiveType::Nil,
+                "Boolean" => PrimitiveType::Boolean,
+                "Int8" => PrimitiveType::Integer(IntegerKind::Int8),
+                "Int16" => PrimitiveType::Integer(IntegerKind::Int16),
+                "Int32" => PrimitiveType::Integer(IntegerKind::Int32),
+                "Int64" => PrimitiveType::Integer(IntegerKind::Int64),
+                "UInt8" => PrimitiveType::Integer(IntegerKind::UInt8),
+                "UInt16" => PrimitiveType::Integer(IntegerKind::UInt16),
+                "UInt32" => PrimitiveType::Integer(IntegerKind::UInt32),
+                "UInt64" => PrimitiveType::Integer(IntegerKind::UInt64),
+                "Float32" => PrimitiveType::Float32,
+                "Float64" => PrimitiveType::Float64,
+                "String" => PrimitiveType::String,
+                "Never" => PrimitiveType::Never,
+                _ => return Err(error(self.line, "canonical primitive descriptor")),
+            }));
+        }
+        if self.consume("R(") {
+            let identity = self.parse_symbol_identity()?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Record(identity));
+        }
+        if self.consume("C(") {
+            let identity = self.parse_nominal()?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Class(identity));
+        }
+        if self.consume("I(") {
+            let identity = self.parse_nominal()?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Interface(identity));
+        }
+        if self.consume("T[") {
+            return self.parse_type_list(']').map(CanonicalTypeIdentity::Tuple);
+        }
+        if self.consume("A(") {
+            let element = self.parse_type()?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Array(Box::new(element)));
+        }
+        if self.consume("M(") {
+            let key = self.parse_type()?;
+            self.expect(";")?;
+            let value = self.parse_type()?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Table {
+                key: Box::new(key),
+                value: Box::new(value),
+            });
+        }
+        if self.consume("O(") {
+            let element = self.parse_type()?;
+            self.expect(")")?;
+            return Ok(CanonicalTypeIdentity::Optional(Box::new(element)));
+        }
+        if self.consume("B") {
+            let definition = self.parse_u32_until("[")?;
+            self.expect("[")?;
+            return Ok(CanonicalTypeIdentity::Builtin {
+                definition: BuiltinTypeId::from_raw(definition),
+                arguments: self.parse_type_list(']')?,
+            });
+        }
+        if self.consume("U[") {
+            return self.parse_type_list(']').map(CanonicalTypeIdentity::Union);
+        }
+        if self.consume("F(") {
+            let is_async = match self.take_until(";")? {
+                "0" => false,
+                "1" => true,
+                _ => return Err(error(self.line, "canonical function async marker")),
+            };
+            self.expect(";[")?;
+            let parameters = self.parse_type_list(']')?;
+            self.expect(";[")?;
+            let results = self.parse_type_list(']')?;
+            self.expect(";E")?;
+            let effects = self.parse_u32_until(";L")?;
+            let effects = u16::try_from(effects)
+                .ok()
+                .and_then(pop_types::EffectSummary::from_bits)
+                .ok_or_else(|| error(self.line, "canonical function effects"))?;
+            self.expect(";L")?;
+            let proof = self.parse_u32_until(":[")?;
+            let proof =
+                u16::try_from(proof).map_err(|_| error(self.line, "canonical lifetime proof"))?;
+            self.expect(":[")?;
+            let retention = self.parse_retention_list()?;
+            self.expect(":")?;
+            self.expect("[")?;
+            let provenance = self.parse_provenance_list()?;
+            self.expect(")")?;
+            let lifetime_summary =
+                CallableLifetimeSummary::from_parts(proof, retention, provenance)
+                    .ok_or_else(|| error(self.line, "canonical lifetime summary"))?;
+            return Ok(CanonicalTypeIdentity::Function {
+                is_async,
+                parameters,
+                results,
+                effects,
+                lifetime_summary,
+            });
+        }
+        Err(error(self.line, "canonical type descriptor"))
+    }
+
+    fn parse_symbol_identity(&mut self) -> Result<SymbolIdentity, MirParseError> {
+        self.expect("b")?;
+        let bubble = self.parse_u32_until(":s")?;
+        self.expect(":s")?;
+        let symbol = self.parse_digits()?;
+        Ok(SymbolIdentity::new(
+            BubbleId::from_raw(bubble),
+            SymbolId::from_raw(symbol),
+        ))
+    }
+
+    fn parse_type_list(
+        &mut self,
+        terminator: char,
+    ) -> Result<Vec<CanonicalTypeIdentity>, MirParseError> {
+        let mut identities = Vec::new();
+        if self.consume_char(terminator) {
+            return Ok(identities);
+        }
+        loop {
+            identities.push(self.parse_type()?);
+            if self.consume_char(terminator) {
+                return Ok(identities);
+            }
+            self.expect(",")?;
+        }
+    }
+
+    fn parse_retention_list(&mut self) -> Result<Vec<ParameterRetention>, MirParseError> {
+        let mut values = Vec::new();
+        if self.consume("]") {
+            return Ok(values);
+        }
+        loop {
+            values.push(match self.next_char() {
+                Some('D') => ParameterRetention::DoesNotRetain,
+                Some('M') => ParameterRetention::MayRetain,
+                Some('C') => ParameterRetention::Captures,
+                Some('P') => ParameterRetention::Publishes,
+                Some('S') => ParameterRetention::StoresInto(
+                    u16::try_from(self.parse_digits()?)
+                        .map_err(|_| error(self.line, "canonical retention target"))?,
+                ),
+                _ => return Err(error(self.line, "canonical retention")),
+            });
+            if self.consume("]") {
+                return Ok(values);
+            }
+            self.expect(",")?;
+        }
+    }
+
+    fn parse_provenance_list(&mut self) -> Result<Vec<ResultProvenance>, MirParseError> {
+        let mut values = Vec::new();
+        if self.consume("]") {
+            return Ok(values);
+        }
+        loop {
+            values.push(match self.next_char() {
+                Some('I') => ResultProvenance::Independent,
+                Some('M') => ResultProvenance::MayAlias,
+                Some('R') => ResultProvenance::ReturnsAlias(
+                    u16::try_from(self.parse_digits()?)
+                        .map_err(|_| error(self.line, "canonical provenance source"))?,
+                ),
+                _ => return Err(error(self.line, "canonical provenance")),
+            });
+            if self.consume("]") {
+                return Ok(values);
+            }
+            self.expect(",")?;
+        }
+    }
+
+    fn parse_u32_until(&mut self, terminator: &str) -> Result<u32, MirParseError> {
+        let value = self.take_until(terminator)?;
+        parse_u32(value, self.line)
+    }
+
+    fn parse_digits(&mut self) -> Result<u32, MirParseError> {
+        let start = self.position;
+        while self
+            .text
+            .as_bytes()
+            .get(self.position)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.position += 1;
+        }
+        if start == self.position {
+            return Err(error(self.line, "canonical descriptor number"));
+        }
+        parse_u32(&self.text[start..self.position], self.line)
+    }
+
+    fn take_until(&mut self, terminator: &str) -> Result<&'a str, MirParseError> {
+        let suffix = &self.text[self.position..];
+        let length = suffix
+            .find(terminator)
+            .ok_or_else(|| error(self.line, "truncated canonical descriptor"))?;
+        let start = self.position;
+        self.position += length;
+        Ok(&self.text[start..self.position])
+    }
+
+    fn expect(&mut self, expected: &str) -> Result<(), MirParseError> {
+        if self.consume(expected) {
+            Ok(())
+        } else {
+            Err(error(self.line, "canonical descriptor token"))
+        }
+    }
+
+    fn consume(&mut self, expected: &str) -> bool {
+        if self.text[self.position..].starts_with(expected) {
+            self.position += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_char(&mut self, expected: char) -> bool {
+        if self.text[self.position..].starts_with(expected) {
+            self.position += expected.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn next_char(&mut self) -> Option<char> {
+        let character = self.text[self.position..].chars().next()?;
+        self.position += character.len_utf8();
+        Some(character)
+    }
 }
 
 fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunction, MirParseError> {
     let parts: Vec<_> = line.split_whitespace().collect();
-    if !matches!(parts.len(), 9..=12) || parts[0] != "foreign" {
+    if parts.len() < 9 || parts[0] != "foreign" {
         return Err(error(number, "malformed foreign function"));
     }
     let symbol = parts[1];
     let function = parts[2];
     let parameters = parts[3];
     let results = parts[4];
-    let has_layouts = matches!(parts.len(), 11 | 12);
+    let has_layouts = parts
+        .get(5)
+        .is_some_and(|part| part.starts_with("paramLayouts("));
     let parameter_layouts = has_layouts.then_some(parts[5]);
     let result_layouts = has_layouts.then_some(parts[6]);
     let offset = usize::from(has_layouts) * 2;
@@ -192,6 +725,15 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         .and_then(|value| value.strip_suffix(']'))
         .ok_or_else(|| error(number, "foreign effects"))?;
     let effects = parse_effects(effects, number)?;
+    let callback_pairs = parts
+        .get(9 + offset..)
+        .unwrap_or_default()
+        .iter()
+        .find(|part| part.starts_with("callbackPairs("))
+        .map_or_else(
+            || Ok(Vec::new()),
+            |pairs| parse_ffi_callback_pairs(pairs, number),
+        )?;
     let declaration = ForeignFunctionDeclaration::new(
         symbol,
         external_symbol,
@@ -199,7 +741,8 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         links,
         !effects.contains(MirEffect::Blocks),
         SourceSpan::new(FileId::from_raw(0), TextRange::empty(TextSize::from_u32(0))),
-    );
+    )
+    .with_callback_pairs(callback_pairs);
     let parameters = parse_wrapped_types(parameters, "params(", number)?;
     let results = parse_wrapped_types(results, "results(", number)?;
     let parameter_layouts = parameter_layouts.map_or_else(
@@ -211,7 +754,10 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         |layouts| parse_optional_ffi_layouts(layouts, "resultLayouts(", number),
     )?;
     let reference_identity = parts
-        .get(9 + offset)
+        .get(9 + offset..)
+        .unwrap_or_default()
+        .iter()
+        .find(|part| part.starts_with("reference("))
         .map(|reference| {
             let identity = reference
                 .strip_prefix("reference(b")
@@ -235,6 +781,68 @@ fn parse_foreign_function(line: &str, number: usize) -> Result<MirForeignFunctio
         declaration,
         reference_identity,
     })
+}
+
+fn parse_ffi_callback_pairs(
+    text: &str,
+    line: usize,
+) -> Result<Vec<FfiCallbackPairContract>, MirParseError> {
+    let pairs = text
+        .strip_prefix("callbackPairs(")
+        .and_then(|pairs| pairs.strip_suffix(')'))
+        .ok_or_else(|| error(line, "foreign callback pairs"))?;
+    if pairs == "-" {
+        return Ok(Vec::new());
+    }
+    pairs
+        .split(';')
+        .map(|pair| {
+            let fields = pair.split(':').collect::<Vec<_>>();
+            let [
+                callback,
+                context,
+                lifetime,
+                abi,
+                fingerprint,
+                thread,
+                concurrency,
+                reentrancy,
+                panic,
+            ] = fields.as_slice()
+            else {
+                return Err(error(line, "foreign callback pair"));
+            };
+            if *concurrency != "Serialized"
+                || *reentrancy != "Forbidden"
+                || *panic != "AbortProcess"
+                || MirFfiCallbackFingerprint::from_lower_hex(fingerprint).is_none()
+            {
+                return Err(error(line, "foreign callback policy"));
+            }
+            Ok(FfiCallbackPairContract::new(
+                u16::try_from(parse_u32(callback, line)?)
+                    .map_err(|_| error(line, "callback parameter index"))?,
+                u16::try_from(parse_u32(context, line)?)
+                    .map_err(|_| error(line, "callback context index"))?,
+                match *lifetime {
+                    "CallScoped" => TypeFfiCallbackLifetime::CallScoped,
+                    "Registered" => TypeFfiCallbackLifetime::Registered,
+                    _ => return Err(error(line, "foreign callback lifetime")),
+                },
+                match *abi {
+                    "C" => FfiCallbackAbi::C,
+                    "System" => FfiCallbackAbi::System,
+                    _ => return Err(error(line, "foreign callback ABI")),
+                },
+                *fingerprint,
+                match *thread {
+                    "CallingThread" => FfiCallbackThreadPolicy::CallingThread,
+                    "AttachedThread" => FfiCallbackThreadPolicy::AttachedThread,
+                    _ => return Err(error(line, "foreign callback thread")),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn parse_optional_ffi_layouts(
@@ -269,7 +877,7 @@ fn parse_function_reference(
         .strip_prefix("async ")
         .map_or((false, line), |line| (true, line));
     let parts: Vec<_> = line.split_whitespace().collect();
-    if parts.len() != 5 || parts[0] != "reference" {
+    if !(5..=6).contains(&parts.len()) || parts[0] != "reference" {
         return Err(error(number, "malformed function reference"));
     }
     let identity = parts[1]
@@ -280,16 +888,93 @@ fn parse_function_reference(
         .strip_prefix("effects[")
         .and_then(|effects| effects.strip_suffix(']'))
         .ok_or_else(|| error(number, "function reference effects"))?;
+    let parameters = parse_wrapped_types(parts[2], "params(", number)?;
+    let results = parse_wrapped_types(parts[3], "results(", number)?;
+    let lifetime_summary = parts.get(5).map_or_else(
+        || {
+            Ok(CallableLifetimeSummary::conservative(
+                parameters.len(),
+                results.len(),
+            ))
+        },
+        |summary| parse_callable_lifetime_summary(summary, parameters.len(), results.len(), number),
+    )?;
     Ok(MirFunctionReference {
         identity: SymbolIdentity::new(
             BubbleId::from_raw(parse_u32(identity.0, number)?),
             SymbolId::from_raw(parse_u32(identity.1, number)?),
         ),
         is_async,
-        parameters: parse_wrapped_types(parts[2], "params(", number)?,
-        results: parse_wrapped_types(parts[3], "results(", number)?,
+        parameters,
+        results,
         effects: parse_effects(effects, number)?,
+        lifetime_summary,
     })
+}
+
+fn parse_callable_lifetime_summary(
+    text: &str,
+    parameter_count: usize,
+    result_count: usize,
+    line: usize,
+) -> Result<CallableLifetimeSummary, MirParseError> {
+    let body = text
+        .strip_prefix("lifetimeSummary(v")
+        .and_then(|body| body.strip_suffix(')'))
+        .ok_or_else(|| error(line, "callable lifetime summary"))?;
+    let (version, body) = body
+        .split_once(";parameters=")
+        .ok_or_else(|| error(line, "callable lifetime summary version"))?;
+    let (parameters, results) = body
+        .split_once(";results=")
+        .ok_or_else(|| error(line, "callable lifetime summary results"))?;
+    let parameters = if parameters.is_empty() {
+        Vec::new()
+    } else {
+        parameters
+            .split(',')
+            .map(|retention| match retention {
+                "DoesNotRetain" => Ok(ParameterRetention::DoesNotRetain),
+                "MayRetain" => Ok(ParameterRetention::MayRetain),
+                "Captures" => Ok(ParameterRetention::Captures),
+                "Publishes" => Ok(ParameterRetention::Publishes),
+                _ => retention
+                    .strip_prefix("StoresInto#")
+                    .ok_or_else(|| error(line, "callable parameter retention"))
+                    .and_then(|target| parse_u32(target, line))
+                    .and_then(|target| {
+                        u16::try_from(target)
+                            .map(ParameterRetention::StoresInto)
+                            .map_err(|_| error(line, "callable parameter retention index"))
+                    }),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let results = if results.is_empty() {
+        Vec::new()
+    } else {
+        results
+            .split(',')
+            .map(|provenance| match provenance {
+                "Independent" => Ok(ResultProvenance::Independent),
+                "MayAlias" => Ok(ResultProvenance::MayAlias),
+                _ => provenance
+                    .strip_prefix("ReturnsAlias#")
+                    .ok_or_else(|| error(line, "callable result provenance"))
+                    .and_then(|source| parse_u32(source, line))
+                    .and_then(|source| {
+                        u16::try_from(source)
+                            .map(ResultProvenance::ReturnsAlias)
+                            .map_err(|_| error(line, "callable result provenance index"))
+                    }),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let version = u16::try_from(parse_u32(version, line)?)
+        .map_err(|_| error(line, "callable lifetime proof version"))?;
+    CallableLifetimeSummary::from_parts(version, parameters, results)
+        .filter(|summary| summary.is_canonical_for(parameter_count, result_count))
+        .ok_or_else(|| error(line, "non-canonical callable lifetime summary"))
 }
 
 fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirParseError> {
@@ -329,6 +1014,8 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             symbol,
             class,
             type_id,
+            "identity",
+            identity,
             "fields",
             fields,
             "methods",
@@ -337,11 +1024,15 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
             implementations,
             "implementsBuiltin",
             builtin_implementations,
+            suffix @ ..,
         ] => Ok(MirDeclaration {
             symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
             kind: MirDeclarationKind::Class(MirClassDeclaration {
+                definition: parse_nominal_identity(identity, number)?,
                 class: ClassId::from_raw(parse_prefixed(class, 'c', number)?),
                 type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                is_open: parse_class_open(suffix, number)?,
+                base: parse_class_base(suffix, number)?,
                 fields: parse_declared_fields(fields, number)?,
                 methods: parse_method_ids(methods, number)?,
                 interfaces: parse_interface_implementations(implementations, number)?,
@@ -365,8 +1056,14 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
         ] => Ok(MirDeclaration {
             symbol: SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
             kind: MirDeclarationKind::Class(MirClassDeclaration {
+                definition: SymbolIdentity::new(
+                    BubbleId::from_raw(0),
+                    SymbolId::from_raw(parse_prefixed(symbol, 's', number)?),
+                ),
                 class: ClassId::from_raw(parse_prefixed(class, 'c', number)?),
                 type_id: TypeId::from_raw(parse_prefixed(type_id, 't', number)?),
+                is_open: false,
+                base: None,
                 fields: parse_declared_fields(fields, number)?,
                 methods: parse_method_ids(methods, number)?,
                 interfaces: parse_interface_implementations(implementations, number)?,
@@ -392,6 +1089,36 @@ fn parse_declaration(line: &str, number: usize) -> Result<MirDeclaration, MirPar
     }
 }
 
+fn parse_class_open(suffix: &[&str], number: usize) -> Result<bool, MirParseError> {
+    if suffix
+        .iter()
+        .all(|part| matches!(*part, "open" | "base") || part.starts_with('c'))
+        && suffix.iter().filter(|part| **part == "open").count() <= 1
+    {
+        Ok(suffix.contains(&"open"))
+    } else {
+        Err(error(number, "class descriptor suffix"))
+    }
+}
+
+fn parse_class_base(suffix: &[&str], number: usize) -> Result<Option<ClassId>, MirParseError> {
+    let mut base = None;
+    let mut parts = suffix.iter().copied();
+    while let Some(part) = parts.next() {
+        match part {
+            "open" => {}
+            "base" if base.is_none() => {
+                let identity = parts
+                    .next()
+                    .ok_or_else(|| error(number, "class base identity"))?;
+                base = Some(ClassId::from_raw(parse_prefixed(identity, 'c', number)?));
+            }
+            _ => return Err(error(number, "class descriptor suffix")),
+        }
+    }
+    Ok(base)
+}
+
 fn parse_interface_methods(
     text: &str,
     line: usize,
@@ -401,6 +1128,12 @@ fn parse_interface_methods(
     }
     text.split(',')
         .map(|method| {
+            let (method, effects) = method
+                .split_once("effects[")
+                .ok_or_else(|| error(line, "interface method effects"))?;
+            let effects = effects
+                .strip_suffix(']')
+                .ok_or_else(|| error(line, "interface method effects"))?;
             let (identity, signature) = method
                 .split_once('(')
                 .ok_or_else(|| error(line, "interface method"))?;
@@ -418,6 +1151,7 @@ fn parse_interface_methods(
                 slot: parse_u32(slot, line)?,
                 parameters: parse_semicolon_types(parameters, line)?,
                 results: parse_semicolon_types(results, line)?,
+                effects: parse_effects(effects, line)?,
             })
         })
         .collect()
@@ -672,20 +1406,63 @@ fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), 
     let (parameters, rest) = rest
         .split_once(") -> (")
         .ok_or_else(|| error(number, "malformed signature"))?;
-    let (results, effects) = if let Some((results, effects)) = rest.split_once(") effects[") {
-        let effects = effects
-            .strip_suffix(']')
-            .ok_or_else(|| error(number, "malformed effect summary"))?;
-        (results, parse_effects(effects, number)?)
-    } else {
-        (
-            rest.strip_suffix(')')
-                .ok_or_else(|| error(number, "malformed result list"))?,
-            MirEffectSummary::empty(),
-        )
-    };
+    let (results, effects, lifetime_summary, parameter_view_borrows) =
+        if let Some((results, tail)) = rest.split_once(") effects[") {
+            let (effects, mut suffix) = tail
+                .split_once(']')
+                .ok_or_else(|| error(number, "malformed effect summary"))?;
+            let lifetime_summary = if let Some(summary) = suffix.strip_prefix(" lifetimeSummary(") {
+                let (summary, remaining) = summary
+                    .split_once(')')
+                    .ok_or_else(|| error(number, "malformed callable lifetime summary"))?;
+                suffix = remaining;
+                Some(format!("lifetimeSummary({summary})"))
+            } else {
+                None
+            };
+            let view_borrows = if let Some(view_borrows) = suffix.strip_prefix(" viewParameters(") {
+                Some(
+                    view_borrows
+                        .strip_suffix(')')
+                        .ok_or_else(|| error(number, "malformed view parameter summary"))?,
+                )
+            } else if suffix.is_empty() {
+                None
+            } else {
+                return Err(error(number, "malformed function summary suffix"));
+            };
+            (
+                results,
+                parse_effects(effects, number)?,
+                lifetime_summary,
+                view_borrows
+                    .map(|borrows| parse_view_parameter_borrows(borrows, number))
+                    .transpose()?,
+            )
+        } else {
+            (
+                rest.strip_suffix(')')
+                    .ok_or_else(|| error(number, "malformed result list"))?,
+                MirEffectSummary::empty(),
+                None,
+                None,
+            )
+        };
     let parameters = parse_types(parameters, number)?;
+    let parameter_view_borrows =
+        parameter_view_borrows.unwrap_or_else(|| vec![None; parameters.len()]);
     let results = parse_types(results, number)?;
+    let lifetime_summary = lifetime_summary.map_or_else(
+        || {
+            Ok(CallableLifetimeSummary::conservative(
+                parameters.len(),
+                results.len(),
+            ))
+        },
+        |summary| {
+            parse_callable_lifetime_summary(&summary, parameters.len(), results.len(), number)
+        },
+    )?;
     let mut position = start + 1;
     let mut blocks = Vec::new();
     while position < lines.len() && lines[position].starts_with("  b") {
@@ -702,7 +1479,9 @@ fn parse_function(lines: &[&str], start: usize) -> Result<(MirFunction, usize), 
             symbol: SymbolId::from_raw(symbol),
             is_async,
             parameters,
+            parameter_view_borrows,
             results,
+            lifetime_summary,
             effects,
             effects_explicit: true,
             blocks,
@@ -947,6 +1726,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::CallBuiltinInterface { .. }
                 | MirInstructionKind::CallIndirect { .. }
                 | MirInstructionKind::CallScopedBorrow { .. }
+                | MirInstructionKind::CallCallbackPair { .. }
                 | MirInstructionKind::GcSafePoint { .. }
                 | MirInstructionKind::RetainRoot { .. }
                 | MirInstructionKind::ReleaseRoot { .. }
@@ -955,6 +1735,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::FfiBufferEndBorrow { .. }
                 | MirInstructionKind::FfiBufferClose { .. }
                 | MirInstructionKind::FfiBytesEndBorrow { .. }
+                | MirInstructionKind::FfiCallbackCloseScoped { .. }
                 | MirInstructionKind::FfiUnsafeStore { .. }
                 | MirInstructionKind::FfiUnsafeCopy { .. }
                 | MirInstructionKind::Pin { .. }
@@ -962,6 +1743,7 @@ fn parse_instruction(text: &str, line: usize) -> Result<MirInstruction, MirParse
                 | MirInstructionKind::WriteBarrier { .. }
                 | MirInstructionKind::CaptureCellStore { .. }
                 | MirInstructionKind::CaptureStore { .. }
+                | MirInstructionKind::ViewEnd { .. }
         ) {
             return Err(error(line, "instruction does not have effect form"));
         }
@@ -1008,6 +1790,7 @@ fn parse_instruction_unwind(
         "callInterface ",
         "callIndirect ",
         "callScopedBorrow ",
+        "callCallbackPair ",
     ]
     .iter()
     .any(|prefix| operation.starts_with(prefix));
@@ -1032,6 +1815,76 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         return Ok(MirInstructionKind::FunctionReference(SymbolId::from_raw(
             parse_prefixed(function, 's', line)?,
         )));
+    }
+    if let Some(adapter) = text.strip_prefix("codec.schema ") {
+        return Ok(MirInstructionKind::GeneratedCodecSchema(
+            SymbolId::from_raw(parse_prefixed(adapter, 's', line)?),
+        ));
+    }
+    if let Some(rest) = text.strip_prefix("codecEncode ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        if parts.len() != 9
+            || parts[3] != "result"
+            || parts[5] != "success"
+            || parts[7] != "failure"
+        {
+            return Err(error(line, "codec encode operation"));
+        }
+        return Ok(MirInstructionKind::CodecEncode {
+            adapter: SymbolId::from_raw(parse_prefixed(parts[0], 's', line)?),
+            value: ValueId::from_raw(parse_prefixed(parts[1], 'v', line)?),
+            writer: ValueId::from_raw(parse_prefixed(parts[2], 'v', line)?),
+            result: BuiltinTypeId::from_raw(parse_u32(
+                parts[4]
+                    .strip_prefix("bt")
+                    .ok_or_else(|| error(line, "codec result type"))?,
+                line,
+            )?),
+            success: ResultCaseId::from_raw(parse_u32(
+                parts[6]
+                    .strip_prefix("resultCase#")
+                    .ok_or_else(|| error(line, "codec success case"))?,
+                line,
+            )?),
+            failure: ResultCaseId::from_raw(parse_u32(
+                parts[8]
+                    .strip_prefix("resultCase#")
+                    .ok_or_else(|| error(line, "codec failure case"))?,
+                line,
+            )?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("codecDecode ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        if parts.len() != 8
+            || parts[2] != "result"
+            || parts[4] != "success"
+            || parts[6] != "failure"
+        {
+            return Err(error(line, "codec decode operation"));
+        }
+        return Ok(MirInstructionKind::CodecDecode {
+            adapter: SymbolId::from_raw(parse_prefixed(parts[0], 's', line)?),
+            reader: ValueId::from_raw(parse_prefixed(parts[1], 'v', line)?),
+            result: BuiltinTypeId::from_raw(parse_u32(
+                parts[3]
+                    .strip_prefix("bt")
+                    .ok_or_else(|| error(line, "codec result type"))?,
+                line,
+            )?),
+            success: ResultCaseId::from_raw(parse_u32(
+                parts[5]
+                    .strip_prefix("resultCase#")
+                    .ok_or_else(|| error(line, "codec success case"))?,
+                line,
+            )?),
+            failure: ResultCaseId::from_raw(parse_u32(
+                parts[7]
+                    .strip_prefix("resultCase#")
+                    .ok_or_else(|| error(line, "codec failure case"))?,
+                line,
+            )?),
+        });
     }
     if let Some(rest) = text.strip_prefix("task.create ") {
         let (dispatch, rest) = rest
@@ -1365,6 +2218,7 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         || text.starts_with("callReference")
         || text.starts_with("callIndirect")
         || text.starts_with("callScopedBorrow")
+        || text.starts_with("callCallbackPair")
         || text.starts_with("call.interface")
         || text.starts_with("call.builtinInterface")
     {
@@ -1409,6 +2263,120 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         };
         return Ok(MirInstructionKind::InterfaceUpcast { value, interface });
     }
+    if let Some(rest) = text.strip_prefix("checkedDowncast ") {
+        let mut parts = rest.split_whitespace();
+        let value = ValueId::from_raw(parse_prefixed(required(&mut parts, line)?, 'v', line)?);
+        let source_interface =
+            InterfaceId::from_raw(parse_prefixed(required(&mut parts, line)?, 'i', line)?);
+        let source_type = TypeId::from_raw(parse_prefixed(required(&mut parts, line)?, 't', line)?);
+        let target_class =
+            ClassId::from_raw(parse_prefixed(required(&mut parts, line)?, 'c', line)?);
+        let target_type = TypeId::from_raw(parse_prefixed(required(&mut parts, line)?, 't', line)?);
+        if parts.next().is_some() {
+            return Err(error(line, "checkedDowncast operands"));
+        }
+        return Ok(MirInstructionKind::CheckedDowncast {
+            value,
+            source_interface,
+            source_type,
+            target_class,
+            target_type,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("viewCreate ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [
+            kind,
+            lender,
+            "lender",
+            provenance,
+            "unit",
+            unit,
+            "boundary",
+            boundary,
+            lifetime,
+        ] = parts.as_slice()
+        else {
+            return Err(error(line, "view creation"));
+        };
+        return Ok(MirInstructionKind::ViewCreate {
+            kind: parse_view_kind(kind, line)?,
+            lender: ValueId::from_raw(parse_prefixed(lender, 'v', line)?),
+            lender_provenance: parse_view_lender(provenance, line)?,
+            range_unit: parse_view_range_unit(unit, line)?,
+            boundary: parse_view_boundary(boundary, line)?,
+            borrow_lifetime: LifetimeId::from_raw(parse_hash(lifetime, "lifetime#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("viewSlice ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [
+            kind,
+            view,
+            start,
+            length,
+            "lender",
+            provenance,
+            "unit",
+            unit,
+            "boundary",
+            boundary,
+            "parent",
+            parent_lifetime,
+            borrow_lifetime,
+            "trap",
+            bounds_trap,
+        ] = parts.as_slice()
+        else {
+            return Err(error(line, "view slice"));
+        };
+        return Ok(MirInstructionKind::ViewSlice {
+            kind: parse_view_kind(kind, line)?,
+            view: ValueId::from_raw(parse_prefixed(view, 'v', line)?),
+            start: ValueId::from_raw(parse_prefixed(start, 'v', line)?),
+            length: ValueId::from_raw(parse_prefixed(length, 'v', line)?),
+            lender_provenance: parse_view_lender(provenance, line)?,
+            range_unit: parse_view_range_unit(unit, line)?,
+            boundary: parse_view_boundary(boundary, line)?,
+            parent_lifetime: LifetimeId::from_raw(parse_hash(parent_lifetime, "lifetime#", line)?),
+            borrow_lifetime: LifetimeId::from_raw(parse_hash(borrow_lifetime, "lifetime#", line)?),
+            bounds_trap: parse_view_trap(bounds_trap, line)?,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("viewLength ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [kind, view] = parts.as_slice() else {
+            return Err(error(line, "view length"));
+        };
+        return Ok(MirInstructionKind::ViewLength {
+            kind: parse_view_kind(kind, line)?,
+            view: ValueId::from_raw(parse_prefixed(view, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("viewGetByte ") {
+        let (view, index) = parse_two_values(rest, line)?;
+        return Ok(MirInstructionKind::ViewGetByte { view, index });
+    }
+    if let Some(rest) = text.strip_prefix("viewMaterialize ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [kind, view, allocation] = parts.as_slice() else {
+            return Err(error(line, "view materialization"));
+        };
+        return Ok(MirInstructionKind::ViewMaterialize {
+            kind: parse_view_kind(kind, line)?,
+            view: ValueId::from_raw(parse_prefixed(view, 'v', line)?),
+            allocation_site: AllocationSiteId::from_raw(parse_hash(
+                allocation,
+                "allocation#",
+                line,
+            )?),
+        });
+    }
+    if let Some(lifetime) = text.strip_prefix("viewEnd ") {
+        return Ok(MirInstructionKind::ViewEnd {
+            borrow_lifetime: LifetimeId::from_raw(parse_hash(lifetime, "lifetime#", line)?),
+        });
+    }
     if let Some(rest) = text.strip_prefix("gcSafePoint ") {
         let (safe_point, roots) = rest
             .split_once(" roots ")
@@ -1436,6 +2404,43 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     if let Some(value) = text.strip_prefix("releaseRoot ") {
         return Ok(MirInstructionKind::ReleaseRoot {
             handle: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiCallbackOpenScoped ") {
+        return parse_ffi_callback_open_scoped(rest, line);
+    }
+    if let Some(rest) = text.strip_prefix("ffiCallbackOpenOwned ") {
+        return parse_ffi_callback_open_owned(rest, line);
+    }
+    if let Some(rest) = text.strip_prefix("ffiCallbackCloseScoped ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [callback, region] = parts.as_slice() else {
+            return Err(error(line, "scoped FFI callback close"));
+        };
+        return Ok(MirInstructionKind::FfiCallbackCloseScoped {
+            callback: ValueId::from_raw(parse_prefixed(callback, 'v', line)?),
+            region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("ffiCallbackCloseOwned ") {
+        let parts = rest.split_whitespace().collect::<Vec<_>>();
+        let [
+            callback,
+            "result",
+            result,
+            "success",
+            success,
+            "failure",
+            failure,
+        ] = parts.as_slice()
+        else {
+            return Err(error(line, "owned FFI callback close"));
+        };
+        return Ok(MirInstructionKind::FfiCallbackCloseOwned {
+            callback: ValueId::from_raw(parse_prefixed(callback, 'v', line)?),
+            result: parse_builtin_type_id(result, line)?,
+            success: ResultCaseId::from_raw(parse_hash(success, "resultCase#", line)?),
+            failure: ResultCaseId::from_raw(parse_hash(failure, "resultCase#", line)?),
         });
     }
     if let Some(value) = text.strip_prefix("ffiHandleOpen ") {
@@ -1877,6 +2882,15 @@ fn parse_constant_operation(
         }
         return Err(error(line, "malformed enum constant"));
     }
+    if let Some(name) = text.strip_prefix("codec.error ") {
+        let case = match name {
+            "MalformedInput" => EnumCaseId::from_raw(0),
+            "LimitExceeded" => EnumCaseId::from_raw(1),
+            "CapabilityFailure" => EnumCaseId::from_raw(2),
+            _ => return Err(error(line, "invalid Codec.Error case")),
+        };
+        return Ok(Some(MirInstructionKind::CodecErrorConstant { case }));
+    }
     Ok(None)
 }
 
@@ -1910,13 +2924,21 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
         } else {
             (text, MirEffectSummary::empty(), MirUnwindAction::Propagate)
         };
+    if let Some(rest) = text.strip_prefix("callCallbackPair ") {
+        return parse_callback_pair(rest, declared_effects, unwind, line);
+    }
     if let Some(rest) = text.strip_prefix("callDirect s") {
         let (function, values) = rest
             .split_once(' ')
             .ok_or_else(|| error(line, "malformed direct call"))?;
+        let (arguments, lifetime_summary, view_result) =
+            parse_call_lifetime_contract(values, line)?;
         return Ok(MirInstructionKind::CallDirect {
             function: SymbolId::from_raw(parse_u32(function, line)?),
-            arguments: parse_values(values, line)?,
+            lifetime_summary: lifetime_summary
+                .unwrap_or_else(|| CallableLifetimeSummary::conservative(arguments.len(), 1)),
+            view_result,
+            arguments,
             declared_effects,
             unwind,
         });
@@ -1947,12 +2969,17 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
         let (bubble, symbol) = identity
             .split_once(":s")
             .ok_or_else(|| error(line, "referenced call identity"))?;
+        let (arguments, lifetime_summary, view_result) =
+            parse_call_lifetime_contract(values, line)?;
         return Ok(MirInstructionKind::CallReferenced {
             function: SymbolIdentity::new(
                 BubbleId::from_raw(parse_u32(bubble, line)?),
                 SymbolId::from_raw(parse_u32(symbol, line)?),
             ),
-            arguments: parse_values(values, line)?,
+            lifetime_summary: lifetime_summary
+                .unwrap_or_else(|| CallableLifetimeSummary::conservative(arguments.len(), 1)),
+            view_result,
+            arguments,
             declared_effects,
             unwind,
         });
@@ -2038,6 +3065,280 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
         declared_effects,
         unwind,
     })
+}
+
+fn parse_call_lifetime_contract(
+    text: &str,
+    line: usize,
+) -> Result<
+    (
+        Vec<ValueId>,
+        Option<CallableLifetimeSummary>,
+        Option<MirCallViewResult>,
+    ),
+    MirParseError,
+> {
+    let Some((arguments, contract)) = text.split_once(" lifetimeSummary(") else {
+        return parse_values(text, line).map(|arguments| (arguments, None, None));
+    };
+    let arguments = parse_values(arguments, line)?;
+    let (summary, suffix) = contract
+        .split_once(')')
+        .ok_or_else(|| error(line, "call lifetime summary"))?;
+    let result_count = summary
+        .split_once(";results=")
+        .map(|(_, results)| {
+            if results.is_empty() {
+                0
+            } else {
+                results.split(',').count()
+            }
+        })
+        .ok_or_else(|| error(line, "call lifetime summary results"))?;
+    let summary = parse_callable_lifetime_summary(
+        &format!("lifetimeSummary({summary})"),
+        arguments.len(),
+        result_count,
+        line,
+    )?;
+    let view_result = if suffix.is_empty() {
+        None
+    } else {
+        let body = suffix
+            .strip_prefix(" viewResult(")
+            .and_then(|body| body.strip_suffix(')'))
+            .ok_or_else(|| error(line, "call view result"))?;
+        let components = body.split(',').collect::<Vec<_>>();
+        let [kind, source, lifetime] = components.as_slice() else {
+            return Err(error(line, "call view result"));
+        };
+        let kind = match *kind {
+            "bytes" => MirViewKind::Bytes,
+            "text" => MirViewKind::Text,
+            _ => return Err(error(line, "call view result kind")),
+        };
+        Some(MirCallViewResult::new(
+            kind,
+            u16::try_from(parse_hash(source, "source#", line)?)
+                .map_err(|_| error(line, "call view source argument"))?,
+            LifetimeId::from_raw(parse_hash(lifetime, "lifetime#", line)?),
+        ))
+    };
+    Ok((arguments, Some(summary), view_result))
+}
+
+fn parse_ffi_callback_open_scoped(
+    text: &str,
+    line: usize,
+) -> Result<MirInstructionKind, MirParseError> {
+    let parts = text.split_whitespace().collect::<Vec<_>>();
+    let [
+        callback,
+        "callbackType",
+        callback_type,
+        "owner",
+        owner,
+        "function",
+        function,
+        site,
+        region,
+    ] = parts.as_slice()
+    else {
+        return Err(error(line, "scoped FFI callback open"));
+    };
+    Ok(MirInstructionKind::FfiCallbackOpenScoped {
+        callback: ValueId::from_raw(parse_prefixed(callback, 'v', line)?),
+        callback_type: TypeId::from_raw(parse_prefixed(callback_type, 't', line)?),
+        owner: SymbolId::from_raw(parse_prefixed(owner, 's', line)?),
+        function: NestedFunctionId::from_raw(parse_named_prefix(function, "nf", line)?),
+        site: FfiCallbackSiteId::from_raw(parse_hash(site, "callbackSite#", line)?),
+        region: BorrowRegionId::from_raw(parse_hash(region, "region#", line)?),
+    })
+}
+
+fn parse_ffi_callback_open_owned(
+    text: &str,
+    line: usize,
+) -> Result<MirInstructionKind, MirParseError> {
+    let parts = text.split_whitespace().collect::<Vec<_>>();
+    let [
+        callback,
+        "callbackType",
+        callback_type,
+        "owner",
+        owner,
+        "function",
+        function,
+        site,
+        "thread",
+        thread,
+        "result",
+        result,
+        "success",
+        success,
+        "failure",
+        failure,
+    ] = parts.as_slice()
+    else {
+        return Err(error(line, "owned FFI callback open"));
+    };
+    Ok(MirInstructionKind::FfiCallbackOpenOwned {
+        callback: ValueId::from_raw(parse_prefixed(callback, 'v', line)?),
+        callback_type: TypeId::from_raw(parse_prefixed(callback_type, 't', line)?),
+        owner: SymbolId::from_raw(parse_prefixed(owner, 's', line)?),
+        function: NestedFunctionId::from_raw(parse_named_prefix(function, "nf", line)?),
+        site: FfiCallbackSiteId::from_raw(parse_hash(site, "callbackSite#", line)?),
+        thread: parse_callback_thread(thread, line)?,
+        result: parse_builtin_type_id(result, line)?,
+        success: ResultCaseId::from_raw(parse_hash(success, "resultCase#", line)?),
+        failure: ResultCaseId::from_raw(parse_hash(failure, "resultCase#", line)?),
+    })
+}
+
+fn parse_callback_pair(
+    text: &str,
+    declared_effects: MirEffectSummary,
+    unwind: MirUnwindAction,
+    line: usize,
+) -> Result<MirInstructionKind, MirParseError> {
+    let (header, captures_and_tail) = text
+        .split_once(" captures[")
+        .ok_or_else(|| error(line, "FFI callback pair captures"))?;
+    let (captures, tail) = captures_and_tail
+        .split_once("] region#")
+        .ok_or_else(|| error(line, "FFI callback pair region"))?;
+    let parts = header.split_whitespace().collect::<Vec<_>>();
+    let [
+        callback,
+        "callbackType",
+        callback_type,
+        "abi",
+        abi,
+        parameter_layouts,
+        "resultLayout",
+        result_layout,
+        "fingerprint",
+        fingerprint,
+        "owner",
+        owner,
+        "function",
+        function,
+    ] = parts.as_slice()
+    else {
+        return Err(error(line, "FFI callback pair signature"));
+    };
+    let tail = tail.split_whitespace().collect::<Vec<_>>();
+    let [
+        region,
+        "lifetime",
+        lifetime,
+        "result",
+        result,
+        "success",
+        success,
+        "failure",
+        failure,
+    ] = tail.as_slice()
+    else {
+        return Err(error(line, "FFI callback pair contract"));
+    };
+    let parameter_layouts = parameter_layouts
+        .strip_prefix("parameterLayouts[")
+        .and_then(|layouts| layouts.strip_suffix(']'))
+        .ok_or_else(|| error(line, "FFI callback parameter layouts"))?;
+    let signature = MirFfiCallbackSignature::new(
+        TypeId::from_raw(parse_prefixed(callback_type, 't', line)?),
+        parse_callback_abi(abi, line)?,
+        parse_callback_layouts(parameter_layouts, line)?,
+        parse_optional_ffi_layout(result_layout, line)?,
+        MirFfiCallbackFingerprint::from_lower_hex(fingerprint)
+            .ok_or_else(|| error(line, "FFI callback fingerprint"))?,
+    );
+    Ok(MirInstructionKind::CallCallbackPair {
+        callback: ValueId::from_raw(parse_prefixed(callback, 'v', line)?),
+        signature,
+        owner: SymbolId::from_raw(parse_prefixed(owner, 's', line)?),
+        function: NestedFunctionId::from_raw(parse_named_prefix(function, "nf", line)?),
+        captures: parse_closure_captures(captures, line)?,
+        region: BorrowRegionId::from_raw(parse_u32(region, line)?),
+        lifetime: parse_callback_lifetime(lifetime, line)?,
+        result: parse_optional_builtin_type(result, line)?,
+        success: parse_optional_result_case(success, line)?,
+        failure: parse_optional_result_case(failure, line)?,
+        declared_effects,
+        unwind,
+    })
+}
+
+fn parse_callback_abi(text: &str, line: usize) -> Result<MirFfiCallbackAbi, MirParseError> {
+    match text {
+        "C" => Ok(MirFfiCallbackAbi::C),
+        "System" => Ok(MirFfiCallbackAbi::System),
+        _ => Err(error(line, "FFI callback ABI")),
+    }
+}
+
+fn parse_callback_lifetime(text: &str, line: usize) -> Result<FfiCallbackLifetime, MirParseError> {
+    match text {
+        "CallScoped" => Ok(FfiCallbackLifetime::CallScoped),
+        "Registered" => Ok(FfiCallbackLifetime::Registered),
+        _ => Err(error(line, "FFI callback lifetime")),
+    }
+}
+
+fn parse_callback_thread(text: &str, line: usize) -> Result<FfiCallbackThread, MirParseError> {
+    match text {
+        "CallingThread" => Ok(FfiCallbackThread::CallingThread),
+        "AttachedThread" => Ok(FfiCallbackThread::AttachedThread),
+        _ => Err(error(line, "FFI callback thread")),
+    }
+}
+
+fn parse_callback_layouts(
+    text: &str,
+    line: usize,
+) -> Result<Vec<Option<FfiAbiLayoutId>>, MirParseError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|layout| parse_optional_ffi_layout(layout, line))
+        .collect()
+}
+
+fn parse_optional_ffi_layout(
+    text: &str,
+    line: usize,
+) -> Result<Option<FfiAbiLayoutId>, MirParseError> {
+    if text == "-" {
+        Ok(None)
+    } else {
+        parse_ffi_layout(text, line).map(Some)
+    }
+}
+
+fn parse_optional_builtin_type(
+    text: &str,
+    line: usize,
+) -> Result<Option<BuiltinTypeId>, MirParseError> {
+    if text == "-" {
+        Ok(None)
+    } else {
+        parse_builtin_type_id(text, line).map(Some)
+    }
+}
+
+fn parse_optional_result_case(
+    text: &str,
+    line: usize,
+) -> Result<Option<ResultCaseId>, MirParseError> {
+    if text == "-" {
+        Ok(None)
+    } else {
+        parse_hash(text, "resultCase#", line)
+            .map(ResultCaseId::from_raw)
+            .map(Some)
+    }
 }
 
 fn parse_effects(text: &str, line: usize) -> Result<MirEffectSummary, MirParseError> {
@@ -2362,6 +3663,27 @@ fn parse_terminator(text: &str, line: usize) -> Result<MirTerminator, MirParseEr
             arms,
         });
     }
+    if let Some(rest) = text.strip_prefix("codec.error.discriminant ") {
+        let (scrutinee, arms_text) = rest
+            .split_once(" [")
+            .and_then(|(head, arms)| arms.strip_suffix(']').map(|arms| (head, arms)))
+            .ok_or_else(|| error(line, "malformed Codec.Error switch"))?;
+        let arms = comma_parts(arms_text)
+            .map(|arm| {
+                let (case, target) = arm
+                    .split_once(':')
+                    .ok_or_else(|| error(line, "malformed Codec.Error switch arm"))?;
+                Ok(MirCodecErrorSwitchArm {
+                    case: EnumCaseId::from_raw(parse_hash(case, "case#", line)?),
+                    target: BlockId::from_raw(parse_prefixed(target, 'b', line)?),
+                })
+            })
+            .collect::<Result<Vec<_>, MirParseError>>()?;
+        return Ok(MirTerminator::CodecErrorSwitch {
+            scrutinee: ValueId::from_raw(parse_prefixed(scrutinee, 'v', line)?),
+            arms,
+        });
+    }
     Err(error(line, "unknown terminator"))
 }
 
@@ -2626,6 +3948,101 @@ fn parse_float_kind(text: &str, line: usize) -> Result<FloatKind, MirParseError>
         "Float32" => Ok(FloatKind::Float32),
         "Float64" => Ok(FloatKind::Float64),
         _ => Err(error(line, "float kind")),
+    }
+}
+
+fn parse_view_kind(text: &str, line: usize) -> Result<MirViewKind, MirParseError> {
+    match text {
+        "bytes" => Ok(MirViewKind::Bytes),
+        "text" => Ok(MirViewKind::Text),
+        _ => Err(error(line, "view kind")),
+    }
+}
+
+fn parse_view_range_unit(text: &str, line: usize) -> Result<MirViewRangeUnit, MirParseError> {
+    match text {
+        "bytes" => Ok(MirViewRangeUnit::Bytes),
+        "scalars" => Ok(MirViewRangeUnit::UnicodeScalars),
+        _ => Err(error(line, "view range unit")),
+    }
+}
+
+fn parse_view_boundary(text: &str, line: usize) -> Result<MirViewBoundaryProof, MirParseError> {
+    match text {
+        "none" => Ok(MirViewBoundaryProof::NotApplicable),
+        "utf8" => Ok(MirViewBoundaryProof::Utf8Scalar),
+        _ => Err(error(line, "view boundary proof")),
+    }
+}
+
+fn parse_view_trap(text: &str, line: usize) -> Result<MirViewTrap, MirParseError> {
+    match text {
+        "BoundsViolation" => Ok(MirViewTrap::BoundsViolation),
+        _ => Err(error(line, "view bounds trap")),
+    }
+}
+
+fn parse_view_lender(text: &str, line: usize) -> Result<MirViewLender, MirParseError> {
+    if let Some(index) = text.strip_prefix("parameter#") {
+        return Ok(MirViewLender::Parameter {
+            index: parse_u32(index, line)?,
+        });
+    }
+    if let Some(site) = text.strip_prefix("allocation#") {
+        return Ok(MirViewLender::Allocation {
+            site: AllocationSiteId::from_raw(parse_u32(site, line)?),
+        });
+    }
+    if let Some(fingerprint) = text.strip_prefix("constant#") {
+        return Ok(MirViewLender::Constant {
+            fingerprint: parse_view_fingerprint(fingerprint, line)?,
+        });
+    }
+    Err(error(line, "view lender"))
+}
+
+fn parse_view_parameter_borrows(
+    text: &str,
+    line: usize,
+) -> Result<Vec<Option<super::MirViewParameterBorrow>>, MirParseError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(',')
+        .map(|entry| {
+            if entry == "-" {
+                return Ok(None);
+            }
+            let parts = entry.split(':').collect::<Vec<_>>();
+            let [kind, lender, lifetime] = parts.as_slice() else {
+                return Err(error(line, "view parameter borrow"));
+            };
+            Ok(Some(super::MirViewParameterBorrow::new(
+                parse_view_kind(kind, line)?,
+                parse_view_lender(lender, line)?,
+                LifetimeId::from_raw(parse_hash(lifetime, "lifetime#", line)?),
+            )))
+        })
+        .collect()
+}
+
+fn parse_view_fingerprint(text: &str, line: usize) -> Result<[u8; 32], MirParseError> {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(error(line, "view lender fingerprint"));
+    }
+    let mut fingerprint = [0_u8; 32];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        fingerprint[index] = (hex_nibble(pair[0], line)? << 4) | hex_nibble(pair[1], line)?;
+    }
+    Ok(fingerprint)
+}
+
+const fn hex_nibble(byte: u8, line: usize) -> Result<u8, MirParseError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(error(line, "view lender fingerprint")),
     }
 }
 

@@ -145,6 +145,14 @@ pub struct ClassInterfaceImplementation {
 }
 
 impl ClassInterfaceImplementation {
+    pub(crate) const fn referenced(interface: InterfaceId, interface_type: TypeId) -> Self {
+        Self {
+            interface,
+            interface_type,
+            methods: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub const fn interface(&self) -> InterfaceId {
         self.interface
@@ -369,6 +377,55 @@ impl SignatureResolver<'_> {
         }
     }
 
+    /// Reconstructs one artifact-verified public interface declaration in an
+    /// isolated consumer arena. Member lookup is deliberately absent: this
+    /// closed projection exists only to retain nominal type and cast-witness
+    /// identity, never runtime reflection.
+    #[must_use]
+    pub fn define_referenced_interface(
+        &mut self,
+        module: ModuleId,
+        symbol: SymbolId,
+        type_parameters: Vec<ResolvedTypeParameter>,
+        span: SourceSpan,
+    ) -> Option<InterfaceDefinition> {
+        if self.interface_definitions.contains_key(&symbol) {
+            return None;
+        }
+        let interface = InterfaceId::from_raw(self.next_interface);
+        self.next_interface = self.next_interface.saturating_add(1);
+        let arguments = type_parameters
+            .iter()
+            .map(ResolvedTypeParameter::type_id)
+            .collect();
+        let type_id = self
+            .arena
+            .intern(SemanticType::Interface {
+                interface,
+                arguments,
+            })
+            .ok()?;
+        let bubble = self.database().index().declaration(symbol)?.bubble();
+        let definition = InterfaceDefinition {
+            symbol,
+            module,
+            bubble,
+            interface,
+            type_id,
+            type_parameters: type_parameters.clone(),
+            methods: Vec::new(),
+            span,
+        };
+        self.interface_types.insert(symbol, type_id);
+        self.interface_type_parameters
+            .insert(symbol, type_parameters);
+        self.interface_sources_by_id.insert(interface, symbol);
+        self.interfaces_by_type.insert(type_id, symbol);
+        self.interface_definitions
+            .insert(symbol, definition.clone());
+        Some(definition)
+    }
+
     fn resolve_interface_methods(
         &mut self,
         module: ModuleId,
@@ -430,7 +487,7 @@ impl SignatureResolver<'_> {
         methods
     }
 
-    pub(crate) fn instantiate_interface(
+    pub fn instantiate_interface(
         &mut self,
         definition: SymbolId,
         arguments: &[TypeId],
@@ -554,7 +611,7 @@ impl SignatureResolver<'_> {
     }
 
     #[must_use]
-    pub(crate) fn interface_source_identity(&self, interface: InterfaceId) -> Option<SymbolId> {
+    pub fn interface_source_identity(&self, interface: InterfaceId) -> Option<SymbolId> {
         self.interface_sources_by_id.get(&interface).copied()
     }
 

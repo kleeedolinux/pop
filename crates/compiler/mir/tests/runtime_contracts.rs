@@ -636,19 +636,24 @@ fn call_effects_are_exact_and_cleanup_edges_are_verified_cfg_edges() {
         ))
     ));
 
-    let underdeclared = parse_mir_dump(&valid.dump().replacen(
-        "callDirect s0 () effects[MayUnwind]",
-        "callDirect s0 () effects[]",
-        1,
-    ))
-    .expect("underdeclared call MIR");
-    assert!(matches!(
-        verify_mir_bubble(&underdeclared, &types),
-        Err(errors) if errors.iter().any(|error| matches!(
+    let valid_dump = valid.dump();
+    let direct_call = valid_dump
+        .lines()
+        .find(|line| line.contains("callDirect s0"))
+        .expect("direct call text");
+    let underdeclared_call = direct_call.replacen("effects[MayUnwind]", "effects[]", 1);
+    assert_ne!(underdeclared_call, direct_call);
+    let underdeclared = parse_mir_dump(&valid_dump.replacen(direct_call, &underdeclared_call, 1))
+        .expect("underdeclared call MIR");
+    let underdeclared_errors =
+        verify_mir_bubble(&underdeclared, &types).expect_err("underdeclared call effects");
+    assert!(
+        underdeclared_errors.iter().any(|error| matches!(
             error,
             MirVerificationError::InstructionEffectMismatch { .. }
-        ))
-    ));
+        )),
+        "{underdeclared_errors:?}"
+    );
 
     let invalid_cleanup = parse_mir_dump(&valid.dump().replacen(
         "unwind cleanup:b1",

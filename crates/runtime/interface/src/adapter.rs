@@ -219,6 +219,36 @@ pub trait RuntimeAdapter {
         Err(RuntimeFailure::runtime_invariant())
     }
 
+    /// Returns the exact byte length of verified immutable `Bytes` storage.
+    ///
+    /// This typed storage operation neither pins nor creates a borrow token.
+    ///
+    /// # Errors
+    ///
+    /// Rejects forged or non-`Bytes` managed references.
+    fn immutable_bytes_length(&self, bytes: ManagedReference) -> Result<u64, RuntimeFailure> {
+        let _ = bytes;
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
+    /// Copies one already bounds-checked immutable byte range.
+    ///
+    /// This typed storage operation never exposes an address and creates no
+    /// runtime borrow state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects forged storage or a range inconsistent with the target length.
+    fn immutable_bytes_read(
+        &self,
+        bytes: ManagedReference,
+        offset: u64,
+        target: &mut [u8],
+    ) -> Result<(), RuntimeFailure> {
+        let _ = (bytes, offset, target);
+        Err(RuntimeFailure::runtime_invariant())
+    }
+
     /// Pins one exact immutable byte payload and returns its packed address.
     ///
     /// # Errors

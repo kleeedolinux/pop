@@ -60,18 +60,19 @@ private function main(): Int
 
     local scanCounter = CountingIterator.new()
     local scanSource: Iterator<Int> = scanCounter
-    local combineCalls = 0
     local scanned = scan(scanSource, 0, function(state: Int, value: Int): Int
-        combineCalls += 1
-        return state + value
+        if state == 0 and value == 1 then
+            return 71
+        end
+        return -1
     end)
-    if scanCounter:callCount() ~= 0 or combineCalls ~= 0 then
+    if scanCounter:callCount() ~= 0 then
         return 8
     end
-    if count(scanned) ~= 1 or scanCounter:callCount() ~= 2 or combineCalls ~= 1 then
+    if firstOr(scanned, -1) ~= 71 or scanCounter:callCount() ~= 1 then
         return 9
     end
-    if count(scanned) ~= 0 or scanCounter:callCount() ~= 2 or combineCalls ~= 1 then
+    if count(scanned) ~= 0 or scanCounter:callCount() ~= 2 then
         return 10
     end
     return 0

@@ -5,20 +5,24 @@
     clippy::too_many_lines
 )]
 
-use std::fmt::Write;
+use std::fmt::{self, Write};
 
 use pop_foundation::{
-    BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId, ClassId,
-    CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FfiCallbackSiteId, FieldId,
-    FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId,
-    MethodId, NamespaceId, NestedFunctionId, NominalInterfaceId, ResultCaseId, SourceSpan,
-    StandardFunctionId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    AllocationSiteId, BindingId, BlockId, BorrowRegionId, BubbleId, BuiltinTypeId, CaptureId,
+    ClassId, CleanupScopeId, CoroutineStateId, EnumCaseId, ErrorCaseId, ErrorId, FfiCallbackSiteId,
+    FieldId, FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId,
+    IterationProtocolMethodId, LifetimeId, MethodId, NamespaceId, NestedFunctionId,
+    NominalInterfaceId, ResultCaseId, SourceSpan, StandardFunctionId, SymbolId, SymbolIdentity,
+    TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{
     ArrayElementMap, FfiAbiLayoutId, FfiCallbackLifetime, FfiCallbackThread, ObjectMap, ObjectSlot,
     PanicPayload, SafePointId, StackMap, Trap, UnwindReason,
 };
-use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
+use pop_types::{
+    CallableLifetimeSummary, FloatKind, FloatValue, IntegerKind, IntegerValue, SemanticType,
+    TypeArena,
+};
 
 use crate::render::{
     dump_declaration, dump_function, dump_function_reference, dump_nested_function,
@@ -140,6 +144,193 @@ pub(crate) fn lower_effect_summary(summary: pop_types::EffectSummary) -> MirEffe
         .fold(MirEffectSummary::empty(), MirEffectSummary::with)
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct MirNominalIdentity {
+    pub(crate) definition: SymbolIdentity,
+    pub(crate) arguments: Vec<TypeId>,
+    pub(crate) canonical: pop_types::CanonicalNominalIdentity,
+}
+
+impl MirNominalIdentity {
+    #[must_use]
+    pub fn new(
+        definition: SymbolIdentity,
+        arguments: Vec<TypeId>,
+        canonical_arguments: Vec<pop_types::CanonicalTypeIdentity>,
+    ) -> Self {
+        Self {
+            definition,
+            arguments,
+            canonical: pop_types::CanonicalNominalIdentity::new(definition, canonical_arguments),
+        }
+    }
+
+    #[must_use]
+    pub const fn definition(&self) -> SymbolIdentity {
+        self.definition
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &[TypeId] {
+        &self.arguments
+    }
+
+    #[must_use]
+    pub const fn canonical(&self) -> &pop_types::CanonicalNominalIdentity {
+        &self.canonical
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirInterfaceReference {
+    pub(crate) identity: MirNominalIdentity,
+    pub(crate) declaration: MirInterfaceDeclaration,
+}
+
+impl MirInterfaceReference {
+    #[must_use]
+    pub fn new(identity: MirNominalIdentity, interface: InterfaceId, type_id: TypeId) -> Self {
+        Self {
+            identity,
+            declaration: MirInterfaceDeclaration {
+                interface,
+                type_id,
+                methods: Vec::new(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &MirNominalIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn interface(&self) -> InterfaceId {
+        self.declaration.interface
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.declaration.type_id
+    }
+
+    #[must_use]
+    pub const fn declaration(&self) -> &MirInterfaceDeclaration {
+        &self.declaration
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirClassReference {
+    pub(crate) identity: MirNominalIdentity,
+    pub(crate) declaration: MirClassDeclaration,
+    pub(crate) base_type: Option<TypeId>,
+}
+
+impl MirClassReference {
+    #[must_use]
+    pub fn new(
+        identity: MirNominalIdentity,
+        class: ClassId,
+        type_id: TypeId,
+        is_open: bool,
+        base: Option<(ClassId, TypeId)>,
+        interfaces: Vec<MirInterfaceReference>,
+    ) -> Self {
+        let definition = identity.definition();
+        let interfaces = interfaces
+            .into_iter()
+            .map(|interface| MirInterfaceImplementation {
+                interface: interface.interface(),
+                interface_type: interface.type_id(),
+                methods: Vec::new(),
+            })
+            .collect();
+        Self {
+            identity,
+            declaration: MirClassDeclaration {
+                definition,
+                class,
+                type_id,
+                is_open,
+                base: base.map(|(class, _)| class),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                interfaces,
+                builtin_interfaces: Vec::new(),
+            },
+            base_type: base.map(|(_, type_id)| type_id),
+        }
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &MirNominalIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn class(&self) -> ClassId {
+        self.declaration.class
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> TypeId {
+        self.declaration.type_id
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.declaration.is_open
+    }
+
+    #[must_use]
+    pub const fn base(&self) -> Option<ClassId> {
+        self.declaration.base
+    }
+
+    #[must_use]
+    pub const fn base_type(&self) -> Option<TypeId> {
+        self.base_type
+    }
+
+    #[must_use]
+    pub fn interfaces(&self) -> &[MirInterfaceImplementation] {
+        &self.declaration.interfaces
+    }
+
+    #[must_use]
+    pub const fn declaration(&self) -> &MirClassDeclaration {
+        &self.declaration
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MirNominalReferenceCatalog {
+    pub(crate) interfaces: Vec<MirInterfaceReference>,
+    pub(crate) classes: Vec<MirClassReference>,
+}
+
+impl MirNominalReferenceCatalog {
+    #[must_use]
+    pub fn new(interfaces: Vec<MirInterfaceReference>, classes: Vec<MirClassReference>) -> Self {
+        Self {
+            interfaces,
+            classes,
+        }
+    }
+
+    #[must_use]
+    pub fn interfaces(&self) -> &[MirInterfaceReference] {
+        &self.interfaces
+    }
+
+    #[must_use]
+    pub fn classes(&self) -> &[MirClassReference] {
+        &self.classes
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirUnwindAction {
     Propagate,
@@ -157,7 +348,9 @@ pub struct MirBubble {
     pub(crate) methods: Vec<MirMethod>,
     pub(crate) nested_functions: Vec<MirNestedFunction>,
     pub(crate) function_references: Vec<MirFunctionReference>,
+    pub(crate) nominal_references: MirNominalReferenceCatalog,
     pub(crate) ffi_layouts: MirFfiLayoutCatalog,
+    pub(crate) generated_codec_adapters: Vec<MirGeneratedCodecAdapter>,
 }
 
 impl MirBubble {
@@ -169,6 +362,163 @@ impl MirBubble {
     #[must_use]
     pub fn function_references(&self) -> &[MirFunctionReference] {
         &self.function_references
+    }
+
+    #[must_use]
+    pub const fn nominal_references(&self) -> &MirNominalReferenceCatalog {
+        &self.nominal_references
+    }
+
+    /// Resolves one exact class specialization into its stable structural runtime identity.
+    #[must_use]
+    pub fn canonical_class_identity(
+        &self,
+        arena: &TypeArena,
+        class: ClassId,
+        type_id: TypeId,
+    ) -> Option<pop_types::CanonicalNominalIdentity> {
+        if let Some(reference) = self
+            .nominal_references()
+            .classes()
+            .iter()
+            .find(|reference| reference.class() == class && reference.type_id() == type_id)
+        {
+            return Some(reference.identity().canonical().clone());
+        }
+        let definition =
+            self.declarations()
+                .iter()
+                .find_map(|declaration| match declaration.kind() {
+                    MirDeclarationKind::Class(candidate) if candidate.class() == class => {
+                        Some(candidate.definition())
+                    }
+                    _ => None,
+                })?;
+        let SemanticType::Class {
+            class: found,
+            arguments,
+        } = arena.get(type_id)?
+        else {
+            return None;
+        };
+        if *found != class {
+            return None;
+        }
+        Some(pop_types::CanonicalNominalIdentity::new(
+            definition,
+            arguments
+                .iter()
+                .map(|argument| self.canonical_type_identity(arena, *argument))
+                .collect::<Option<Vec<_>>>()?,
+        ))
+    }
+
+    /// Resolves a closed semantic type into its stable structural runtime identity.
+    #[must_use]
+    pub fn canonical_type_identity(
+        &self,
+        arena: &TypeArena,
+        type_id: TypeId,
+    ) -> Option<pop_types::CanonicalTypeIdentity> {
+        use pop_types::CanonicalTypeIdentity as Canonical;
+        Some(match arena.get(type_id)? {
+            SemanticType::Primitive(primitive) => Canonical::Primitive(*primitive),
+            SemanticType::Record(_) => {
+                let declaration = self.declarations().iter().find(|declaration| {
+                    matches!(declaration.kind(), MirDeclarationKind::Record(record)
+                        if record.type_id() == type_id)
+                })?;
+                Canonical::Record(SymbolIdentity::new(self.bubble(), declaration.symbol()))
+            }
+            SemanticType::Class { class, .. } => {
+                Canonical::Class(self.canonical_class_identity(arena, *class, type_id)?)
+            }
+            SemanticType::Interface {
+                interface,
+                arguments,
+            } => {
+                if let Some(reference) =
+                    self.nominal_references()
+                        .interfaces()
+                        .iter()
+                        .find(|reference| {
+                            reference.interface() == *interface && reference.type_id() == type_id
+                        })
+                {
+                    Canonical::Interface(reference.identity().canonical().clone())
+                } else {
+                    let declaration = self.declarations().iter().find(|declaration| {
+                        matches!(declaration.kind(), MirDeclarationKind::Interface(candidate)
+                            if candidate.interface() == *interface)
+                    })?;
+                    Canonical::Interface(pop_types::CanonicalNominalIdentity::new(
+                        SymbolIdentity::new(self.bubble(), declaration.symbol()),
+                        arguments
+                            .iter()
+                            .map(|argument| self.canonical_type_identity(arena, *argument))
+                            .collect::<Option<Vec<_>>>()?,
+                    ))
+                }
+            }
+            SemanticType::Tuple(elements) => Canonical::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.canonical_type_identity(arena, *element))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            SemanticType::Function {
+                is_async,
+                parameters,
+                results,
+                effects,
+                lifetime_summary,
+            } => Canonical::Function {
+                is_async: *is_async,
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| self.canonical_type_identity(arena, *parameter))
+                    .collect::<Option<Vec<_>>>()?,
+                results: results
+                    .iter()
+                    .map(|result| self.canonical_type_identity(arena, *result))
+                    .collect::<Option<Vec<_>>>()?,
+                effects: *effects,
+                lifetime_summary: lifetime_summary.clone(),
+            },
+            SemanticType::Array(element) => {
+                Canonical::Array(Box::new(self.canonical_type_identity(arena, *element)?))
+            }
+            SemanticType::Table { key, value } => Canonical::Table {
+                key: Box::new(self.canonical_type_identity(arena, *key)?),
+                value: Box::new(self.canonical_type_identity(arena, *value)?),
+            },
+            SemanticType::Optional(element) => {
+                Canonical::Optional(Box::new(self.canonical_type_identity(arena, *element)?))
+            }
+            SemanticType::Builtin {
+                definition,
+                arguments,
+            } => Canonical::Builtin {
+                definition: *definition,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.canonical_type_identity(arena, *argument))
+                    .collect::<Option<Vec<_>>>()?,
+            },
+            SemanticType::Union(elements) => Canonical::Union(
+                elements
+                    .iter()
+                    .map(|element| self.canonical_type_identity(arena, *element))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            SemanticType::TaggedUnion { .. }
+            | SemanticType::ErrorUnion { .. }
+            | SemanticType::Enum { .. }
+            | SemanticType::Attribute { .. }
+            | SemanticType::TypeParameter(_)
+            | SemanticType::Opaque(_)
+            | SemanticType::Error => return None,
+        })
     }
 
     #[must_use]
@@ -208,6 +558,11 @@ impl MirBubble {
     }
 
     #[must_use]
+    pub fn generated_codec_adapters(&self) -> &[MirGeneratedCodecAdapter] {
+        &self.generated_codec_adapters
+    }
+
+    #[must_use]
     pub fn dump(&self) -> String {
         let mut output = format!(
             "mir bubble b{} namespace n{}\n",
@@ -219,6 +574,56 @@ impl MirBubble {
             let _ = write!(output, " b{}", dependency.raw());
         }
         output.push('\n');
+        for adapter in &self.generated_codec_adapters {
+            let members = adapter
+                .members
+                .iter()
+                .map(|member| {
+                    let (kind, id) = match member.member {
+                        MirGeneratedCodecMemberId::Field(id) => ("field", id.raw()),
+                        MirGeneratedCodecMemberId::EnumCase(id) => ("enum", id.raw()),
+                        MirGeneratedCodecMemberId::UnionCase(id) => ("union", id.raw()),
+                    };
+                    format!(
+                        "{kind}:{id}:{}:{}:{}:{}",
+                        member.ordinal,
+                        member.name,
+                        member
+                            .discriminant
+                            .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+                        member
+                            .types
+                            .iter()
+                            .map(|type_id| format!("t{}", type_id.raw()))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            let _ = writeln!(
+                output,
+                "codec.schema s{} target b{}:s{} module m{} visibility {:?} name {} targetName {} targetType t{} schemaType t{} version {} sha256 {} members {}",
+                adapter.symbol.raw(),
+                adapter.target.bubble().raw(),
+                adapter.target.symbol().raw(),
+                adapter.module.raw(),
+                adapter.visibility,
+                adapter.name,
+                adapter.target_name,
+                adapter.target_type.raw(),
+                adapter.schema_type.raw(),
+                adapter.schema_version,
+                adapter.projection_sha256,
+                members,
+            );
+        }
+        for reference in self.nominal_references.interfaces() {
+            crate::render::dump_nominal_interface_reference(&mut output, reference);
+        }
+        for reference in self.nominal_references.classes() {
+            crate::render::dump_nominal_class_reference(&mut output, reference);
+        }
         for reference in &self.function_references {
             dump_function_reference(&mut output, reference);
         }
@@ -244,6 +649,132 @@ impl MirBubble {
             dump_nested_function(&mut output, function);
         }
         output
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirGeneratedCodecMemberId {
+    Field(FieldId),
+    EnumCase(EnumCaseId),
+    UnionCase(UnionCaseId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirGeneratedCodecMember {
+    pub(crate) ordinal: u16,
+    pub(crate) name: String,
+    pub(crate) member: MirGeneratedCodecMemberId,
+    pub(crate) types: Vec<TypeId>,
+    pub(crate) discriminant: Option<u32>,
+}
+
+impl MirGeneratedCodecMember {
+    #[must_use]
+    pub const fn new(
+        ordinal: u16,
+        name: String,
+        member: MirGeneratedCodecMemberId,
+        types: Vec<TypeId>,
+        discriminant: Option<u32>,
+    ) -> Self {
+        Self {
+            ordinal,
+            name,
+            member,
+            types,
+            discriminant,
+        }
+    }
+    #[must_use]
+    pub const fn ordinal(&self) -> u16 {
+        self.ordinal
+    }
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub const fn member(&self) -> MirGeneratedCodecMemberId {
+        self.member
+    }
+    #[must_use]
+    pub fn types(&self) -> &[TypeId] {
+        &self.types
+    }
+    #[must_use]
+    pub const fn discriminant(&self) -> Option<u32> {
+        self.discriminant
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirGeneratedCodecAdapter {
+    pub(crate) symbol: SymbolId,
+    pub(crate) target: SymbolIdentity,
+    pub(crate) module: pop_foundation::ModuleId,
+    pub(crate) visibility: pop_resolve::Visibility,
+    pub(crate) name: String,
+    pub(crate) target_name: String,
+    pub(crate) target_type: TypeId,
+    pub(crate) schema_type: TypeId,
+    pub(crate) schema_version: u32,
+    pub(crate) projection_sha256: String,
+    pub(crate) members: Vec<MirGeneratedCodecMember>,
+}
+
+impl MirGeneratedCodecAdapter {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn new(
+        symbol: SymbolId,
+        target: SymbolIdentity,
+        module: pop_foundation::ModuleId,
+        visibility: pop_resolve::Visibility,
+        name: String,
+        target_name: String,
+        target_type: TypeId,
+        schema_type: TypeId,
+        schema_version: u32,
+        projection_sha256: String,
+        members: Vec<MirGeneratedCodecMember>,
+    ) -> Self {
+        Self {
+            symbol,
+            target,
+            module,
+            visibility,
+            name,
+            target_name,
+            target_type,
+            schema_type,
+            schema_version,
+            projection_sha256,
+            members,
+        }
+    }
+    #[must_use]
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+    #[must_use]
+    pub const fn target(&self) -> SymbolIdentity {
+        self.target
+    }
+    #[must_use]
+    pub const fn target_type(&self) -> TypeId {
+        self.target_type
+    }
+    #[must_use]
+    pub const fn schema_type(&self) -> TypeId {
+        self.schema_type
+    }
+    #[must_use]
+    pub fn projection_sha256(&self) -> &str {
+        &self.projection_sha256
+    }
+    #[must_use]
+    pub fn members(&self) -> &[MirGeneratedCodecMember] {
+        &self.members
     }
 }
 
@@ -320,6 +851,7 @@ pub struct MirFunctionReference {
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
     pub(crate) effects: MirEffectSummary,
+    pub(crate) lifetime_summary: CallableLifetimeSummary,
 }
 
 impl MirFunctionReference {
@@ -346,6 +878,11 @@ impl MirFunctionReference {
     #[must_use]
     pub const fn effects(&self) -> MirEffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn lifetime_summary(&self) -> &CallableLifetimeSummary {
+        &self.lifetime_summary
     }
 }
 
@@ -490,8 +1027,11 @@ impl MirUnionDeclaration {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirClassDeclaration {
+    pub(crate) definition: SymbolIdentity,
     pub(crate) class: ClassId,
     pub(crate) type_id: TypeId,
+    pub(crate) is_open: bool,
+    pub(crate) base: Option<ClassId>,
     pub(crate) fields: Vec<MirField>,
     pub(crate) methods: Vec<MethodId>,
     pub(crate) interfaces: Vec<MirInterfaceImplementation>,
@@ -500,6 +1040,10 @@ pub struct MirClassDeclaration {
 
 impl MirClassDeclaration {
     #[must_use]
+    pub const fn definition(&self) -> SymbolIdentity {
+        self.definition
+    }
+    #[must_use]
     pub const fn class(&self) -> ClassId {
         self.class
     }
@@ -507,6 +1051,16 @@ impl MirClassDeclaration {
     #[must_use]
     pub const fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.is_open
+    }
+
+    #[must_use]
+    pub const fn base(&self) -> Option<ClassId> {
+        self.base
     }
 
     #[must_use]
@@ -602,6 +1156,7 @@ pub struct MirInterfaceMethod {
     pub(crate) slot: u32,
     pub(crate) parameters: Vec<TypeId>,
     pub(crate) results: Vec<TypeId>,
+    pub(crate) effects: MirEffectSummary,
 }
 
 impl MirInterfaceMethod {
@@ -620,6 +1175,10 @@ impl MirInterfaceMethod {
     #[must_use]
     pub fn results(&self) -> &[TypeId] {
         &self.results
+    }
+    #[must_use]
+    pub const fn effects(&self) -> MirEffectSummary {
+        self.effects
     }
 }
 
@@ -730,7 +1289,12 @@ impl MirNestedFunction {
             symbol: self.owner,
             is_async: self.is_async,
             parameters: self.parameters.clone(),
+            parameter_view_borrows: vec![None; self.parameters.len()],
             results: self.results.clone(),
+            lifetime_summary: CallableLifetimeSummary::conservative(
+                self.parameters.len(),
+                self.results.len(),
+            ),
             effects: self.effects,
             effects_explicit: self.effects_explicit,
             blocks: self.blocks.clone(),
@@ -838,7 +1402,9 @@ pub struct MirFunction {
     pub(crate) symbol: SymbolId,
     pub(crate) is_async: bool,
     pub(crate) parameters: Vec<TypeId>,
+    pub(crate) parameter_view_borrows: Vec<Option<MirViewParameterBorrow>>,
     pub(crate) results: Vec<TypeId>,
+    pub(crate) lifetime_summary: CallableLifetimeSummary,
     pub(crate) effects: MirEffectSummary,
     pub(crate) effects_explicit: bool,
     pub(crate) blocks: Vec<MirBlock>,
@@ -866,8 +1432,27 @@ impl MirFunction {
     }
 
     #[must_use]
+    pub fn parameter_view_borrows(&self) -> &[Option<MirViewParameterBorrow>] {
+        &self.parameter_view_borrows
+    }
+
+    #[must_use]
+    pub fn with_parameter_view_borrows(
+        mut self,
+        parameter_view_borrows: Vec<Option<MirViewParameterBorrow>>,
+    ) -> Self {
+        self.parameter_view_borrows = parameter_view_borrows;
+        self
+    }
+
+    #[must_use]
     pub fn results(&self) -> &[TypeId] {
         &self.results
+    }
+
+    #[must_use]
+    pub const fn lifetime_summary(&self) -> &CallableLifetimeSummary {
+        &self.lifetime_summary
     }
 
     #[must_use]
@@ -1049,6 +1634,149 @@ impl MirInstruction {
     }
 }
 
+/// The only compiler-proven non-owning view families accepted by ADR 0093.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MirViewKind {
+    Bytes,
+    Text,
+}
+
+impl MirViewKind {
+    #[must_use]
+    pub const fn range_unit(self) -> MirViewRangeUnit {
+        match self {
+            Self::Bytes => MirViewRangeUnit::Bytes,
+            Self::Text => MirViewRangeUnit::UnicodeScalars,
+        }
+    }
+
+    #[must_use]
+    pub const fn boundary_proof(self) -> MirViewBoundaryProof {
+        match self {
+            Self::Bytes => MirViewBoundaryProof::NotApplicable,
+            Self::Text => MirViewBoundaryProof::Utf8Scalar,
+        }
+    }
+}
+
+/// Unit used by one checked view range.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MirViewRangeUnit {
+    Bytes,
+    UnicodeScalars,
+}
+
+/// Closed endpoint proof attached to the descriptor's checked range.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MirViewBoundaryProof {
+    NotApplicable,
+    Utf8Scalar,
+}
+
+/// Stable source of the immutable storage designated by a view.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MirViewLender {
+    Allocation { site: AllocationSiteId },
+    Parameter { index: u32 },
+    Constant { fingerprint: [u8; 32] },
+}
+
+/// Exact caller-owned borrow created from a callable result alias.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirCallViewResult {
+    pub(crate) kind: MirViewKind,
+    pub(crate) source_argument: u16,
+    pub(crate) borrow_lifetime: LifetimeId,
+}
+
+impl MirCallViewResult {
+    #[must_use]
+    pub const fn new(kind: MirViewKind, source_argument: u16, borrow_lifetime: LifetimeId) -> Self {
+        Self {
+            kind,
+            source_argument,
+            borrow_lifetime,
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> MirViewKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn source_argument(self) -> u16 {
+        self.source_argument
+    }
+
+    #[must_use]
+    pub const fn borrow_lifetime(self) -> LifetimeId {
+        self.borrow_lifetime
+    }
+}
+
+impl MirViewLender {
+    #[must_use]
+    pub const fn parameter_index(self) -> Option<u32> {
+        match self {
+            Self::Parameter { index } => Some(index),
+            Self::Allocation { .. } | Self::Constant { .. } => None,
+        }
+    }
+}
+
+/// The sole checked trap selected by first-release slicing.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MirViewTrap {
+    BoundsViolation,
+}
+
+/// One callee-local borrow identity aligned to a view parameter.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirViewParameterBorrow {
+    kind: MirViewKind,
+    lender_provenance: MirViewLender,
+    borrow_lifetime: LifetimeId,
+}
+
+impl MirViewParameterBorrow {
+    #[must_use]
+    pub const fn new(
+        kind: MirViewKind,
+        lender_provenance: MirViewLender,
+        borrow_lifetime: LifetimeId,
+    ) -> Self {
+        Self {
+            kind,
+            lender_provenance,
+            borrow_lifetime,
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> MirViewKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn lender_provenance(self) -> MirViewLender {
+        self.lender_provenance
+    }
+
+    #[must_use]
+    pub const fn borrow_lifetime(self) -> LifetimeId {
+        self.borrow_lifetime
+    }
+}
+
+impl fmt::Display for MirViewTrap {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BoundsViolation => "BoundsViolation",
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MirInstructionKind {
     IntegerConstant(IntegerValue),
@@ -1102,7 +1830,29 @@ pub enum MirInstructionKind {
         case: EnumCaseId,
         discriminant: u32,
     },
+    /// One closed compiler-known `Codec.Error` case (ADR 0092).
+    CodecErrorConstant {
+        case: EnumCaseId,
+    },
     FunctionReference(SymbolId),
+    /// Compiler-originated sealed `Codec.Schema<T>` value. The referenced
+    /// adapter is verified in the Bubble's closed generated-adapter catalog.
+    GeneratedCodecSchema(SymbolId),
+    CodecEncode {
+        adapter: SymbolId,
+        value: ValueId,
+        writer: ValueId,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
+    CodecDecode {
+        adapter: SymbolId,
+        reader: ValueId,
+        result: BuiltinTypeId,
+        success: ResultCaseId,
+        failure: ResultCaseId,
+    },
     TaskCreate {
         dispatch: MirTaskDispatch,
         arguments: Vec<ValueId>,
@@ -1344,6 +2094,8 @@ pub enum MirInstructionKind {
     CallDirect {
         function: SymbolId,
         arguments: Vec<ValueId>,
+        lifetime_summary: CallableLifetimeSummary,
+        view_result: Option<MirCallViewResult>,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
@@ -1358,6 +2110,8 @@ pub enum MirInstructionKind {
     CallReferenced {
         function: SymbolIdentity,
         arguments: Vec<ValueId>,
+        lifetime_summary: CallableLifetimeSummary,
+        view_result: Option<MirCallViewResult>,
         declared_effects: MirEffectSummary,
         unwind: MirUnwindAction,
     },
@@ -1487,6 +2241,49 @@ pub enum MirInstructionKind {
     InterfaceUpcast {
         value: ValueId,
         interface: NominalInterfaceId,
+    },
+    CheckedDowncast {
+        value: ValueId,
+        source_interface: InterfaceId,
+        source_type: TypeId,
+        target_class: ClassId,
+        target_type: TypeId,
+    },
+    ViewCreate {
+        kind: MirViewKind,
+        lender: ValueId,
+        lender_provenance: MirViewLender,
+        range_unit: MirViewRangeUnit,
+        boundary: MirViewBoundaryProof,
+        borrow_lifetime: LifetimeId,
+    },
+    ViewSlice {
+        kind: MirViewKind,
+        view: ValueId,
+        start: ValueId,
+        length: ValueId,
+        lender_provenance: MirViewLender,
+        range_unit: MirViewRangeUnit,
+        boundary: MirViewBoundaryProof,
+        parent_lifetime: LifetimeId,
+        borrow_lifetime: LifetimeId,
+        bounds_trap: MirViewTrap,
+    },
+    ViewLength {
+        kind: MirViewKind,
+        view: ValueId,
+    },
+    ViewGetByte {
+        view: ValueId,
+        index: ValueId,
+    },
+    ViewMaterialize {
+        kind: MirViewKind,
+        view: ValueId,
+        allocation_site: AllocationSiteId,
+    },
+    ViewEnd {
+        borrow_lifetime: LifetimeId,
     },
     CaptureCellAllocate {
         binding: BindingId,
@@ -1781,6 +2578,7 @@ impl MirInstructionKind {
                 vec![TrapKind::NumericConversion]
             }
             Self::ConvertFloatToInteger { .. } => vec![TrapKind::NumericConversion],
+            Self::ViewSlice { .. } => vec![TrapKind::BoundsViolation],
             _ => Vec::new(),
         }
     }
@@ -1808,6 +2606,10 @@ pub enum MirTerminator {
         error: ErrorId,
         arms: Vec<MirErrorSwitchArm>,
     },
+    CodecErrorSwitch {
+        scrutinee: ValueId,
+        arms: Vec<MirCodecErrorSwitchArm>,
+    },
     Suspend {
         operation: MirSuspendOperation,
         resume: BlockId,
@@ -1831,6 +2633,23 @@ pub enum MirTerminator {
 pub struct MirErrorSwitchArm {
     pub(crate) case: ErrorCaseId,
     pub(crate) target: BlockId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirCodecErrorSwitchArm {
+    pub(crate) case: EnumCaseId,
+    pub(crate) target: BlockId,
+}
+
+impl MirCodecErrorSwitchArm {
+    #[must_use]
+    pub const fn case(self) -> EnumCaseId {
+        self.case
+    }
+    #[must_use]
+    pub const fn target(self) -> BlockId {
+        self.target
+    }
 }
 
 impl MirErrorSwitchArm {
@@ -1864,6 +2683,7 @@ impl MirUnionSwitchArm {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirVerificationError {
     DuplicateFunction(SymbolId),
+    InvalidCallableLifetimeSummary(SymbolId),
     InvalidForeignFunction(SymbolId),
     GenericSpecializationBudgetExceeded {
         limit: usize,
@@ -1927,6 +2747,7 @@ pub enum MirVerificationError {
     DuplicateSafePoint(SafePointId),
     DuplicateCoroutineState(CoroutineStateId),
     UnknownFunction(SymbolId),
+    InvalidGeneratedCodecSchema(SymbolId),
     UnknownReferencedFunction(SymbolIdentity),
     UnknownMethod(MethodId),
     InvalidInstructionType {
@@ -2053,6 +2874,32 @@ pub enum MirVerificationError {
         source: TypeId,
         target: TypeId,
     },
+    InvalidCheckedDowncast {
+        instruction: ValueId,
+        source_interface: InterfaceId,
+        source: TypeId,
+        target_class: ClassId,
+        target: TypeId,
+        result: TypeId,
+    },
+    InvalidNominalReference(SymbolIdentity),
+    InvalidViewOperation {
+        instruction: ValueId,
+    },
+    InvalidViewLifetime {
+        lifetime: LifetimeId,
+    },
+    InvalidViewEscape {
+        value: ValueId,
+    },
+    InvalidViewRoot {
+        lifetime: LifetimeId,
+        lender: ValueId,
+    },
+    InvalidClassAncestry {
+        class: ClassId,
+        base: Option<ClassId>,
+    },
     InvalidErrorOperation {
         instruction: ValueId,
         error: ErrorId,
@@ -2063,6 +2910,7 @@ pub enum MirVerificationError {
     InvalidErrorSwitch {
         error: ErrorId,
     },
+    InvalidCodecErrorSwitch,
     UnknownInterface(InterfaceId),
     UnknownInterfaceMethod(InterfaceMethodId),
     UnknownStandardFunction(StandardFunctionId),

@@ -5,13 +5,17 @@ use pop_driver::{
     FrontEndBubbleInput, FrontEndModule, VerifiedFfiGeneratedBindings, analyze_bubble,
     generate_ffi_bindings, verify_ffi_generated_bindings,
 };
-use pop_foundation::{BubbleId, FileId, ModuleId, NamespaceId};
-use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
+use pop_foundation::{BubbleId, BuiltinTypeId, FileId, ModuleId, NamespaceId};
+use pop_mir::{
+    MirDeclarationKind, MirInstructionKind, lower_hir_bubble, optimize_mir, parse_mir_dump,
+};
 use pop_projects::{parse_package_manifest, sha256_hex};
 use pop_runtime_interface::{RuntimeFailure, Trap, TrapKind, UnwindReason};
 use pop_source::SourceFile;
 use pop_target::{Endianness, OperatingSystem, PointerWidth, TargetCapability, TargetSpec};
-use pop_types::{IntegerKind, IntegerValue};
+use pop_types::{
+    BYTES_VIEW_TYPE_ID, IntegerKind, IntegerValue, SemanticType, TEXT_VIEW_TYPE_ID, TypeArena,
+};
 use std::fmt::Write as _;
 use std::fs;
 use std::num::NonZeroU32;
@@ -210,7 +214,7 @@ fn assert_typed_callback_ir(text: &str) {
     assert_eq!(
         text.matches("define internal i32 @pop_b10_ffi_callback_thunk_")
             .count(),
-        2
+        3
     );
     assert_eq!(
         text.matches("define internal ptr @pop_b10_ffi_callback_thunk_")
@@ -229,9 +233,9 @@ fn assert_typed_callback_ir(text: &str) {
     );
     assert_eq!(
         text.matches("call i64 @pop_rt_ffi_callback_enter").count(),
-        5
+        6
     );
-    assert!(text.matches("call i8 @pop_rt_ffi_callback_leave").count() >= 10);
+    assert!(text.matches("call i8 @pop_rt_ffi_callback_leave").count() >= 12);
     assert!(text.contains("invoke i64 @pop_b10_nested_"));
     assert!(text.contains("ptrtoint ptr %callback_arg1 to i64"));
     assert!(text.contains("ptrtoint ptr %callback_arg0 to i64"));
@@ -279,6 +283,7 @@ fn llvm_emits_fixed_typed_callback_thunks_and_balanced_lifecycle_calls() {
     };
     let open = symbol("openCallback");
     let use_callback = symbol("useCallback");
+    let use_callback_system = symbol("useCallbackSystem");
     let close = symbol("closeCallback");
     let mir = pop_mir::lower_hir_bubble_with_fingerprint(
         hir,
@@ -298,6 +303,7 @@ fn llvm_emits_fixed_typed_callback_thunks_and_balanced_lifecycle_calls() {
     module.verify().expect("typed callback LLVM verifies");
     let fixture = include_str!("fixtures/ffi_callbacks.c")
         .replace("OPEN", &open.raw().to_string())
+        .replace("USE_SYSTEM", &use_callback_system.raw().to_string())
         .replace("USE", &use_callback.raw().to_string())
         .replace("CLOSE", &close.raw().to_string());
     let result = link_llvm_with_c_fixture_and_runtime(&text, &fixture, "typed-callback");
@@ -616,7 +622,9 @@ fn relocating_foreign_transition_reloads_roots_before_managed_code_resumes() {
         &mir,
         front_end.types(),
         &target(),
-        LlvmLoweringOptions::default().with_runtime_profile(RuntimeProfile::ProductionGenerational),
+        LlvmLoweringOptions::default()
+            .with_runtime_profile(RuntimeProfile::ProductionGenerational)
+            .with_gc_poll_interval(NonZeroU32::MIN),
     )
     .expect("relocating foreign LLVM lowering");
     let mut text = module.to_string();
@@ -756,6 +764,46 @@ fn emitted_llvm_executes_cold_async_tasks_and_nested_await_on_the_native_schedul
         "native async execution failed: {}\n{text}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+#[test]
+fn llvm_async_frames_keep_pre_suspend_view_descriptors_typed_and_rooted() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/asyncView.pop",
+        "namespace Main\n\
+         public async function inspect(text: String): Int\n\
+             local view = Text.slice(text, 1, 1)\n\
+             return Text.length(view)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("LLVM async view lowering");
+    let text = module.to_string();
+    assert!(
+        text.contains("extractvalue { i64, i64, i64, i64 }"),
+        "{text}"
+    );
+    assert!(text.contains("@pop_rt_task_frame_store"), "{text}");
+    module.verify().expect("valid async view LLVM");
 }
 
 #[test]
@@ -1900,6 +1948,301 @@ end\n",
 }
 
 #[test]
+fn checked_nominal_cast_executes_with_stable_identity_across_linked_bubbles() {
+    let producer_bubble = BubbleId::from_raw(41);
+    let producer_source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/contracts.pop",
+        "namespace Library.Contracts\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 1\n\
+             end\n\
+         end\n\
+         public function make(): Reader\n\
+             local reader: FileReader = FileReader {}\n\
+             return reader\n\
+         end\n",
+    )
+    .expect("producer source");
+    let producer = analyze_bubble(FrontEndBubbleInput::new(
+        producer_bubble,
+        NamespaceId::from_raw(41),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), producer_source)],
+    ));
+    assert!(
+        producer.diagnostics().is_empty(),
+        "{}",
+        producer.diagnostic_snapshot()
+    );
+    let producer_hir = producer.hir().expect("producer HIR");
+    let make = producer_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "make")
+        .expect("producer make")
+        .symbol();
+    let producer_mir = lower_hir_bubble(producer_hir, producer.types()).expect("producer MIR");
+    let producer_llvm = lower_mir_to_llvm_ir(
+        &producer_mir,
+        producer.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("producer LLVM")
+    .to_string();
+
+    let other_bubble = BubbleId::from_raw(43);
+    let other_source = SourceFile::new(
+        FileId::from_raw(2),
+        "src/otherContracts.pop",
+        "namespace Other.Contracts\n\
+         public interface Reader\n\
+             function read(): Int\n\
+         end\n\
+         public class FileReader implements Reader\n\
+             public function FileReader:read(): Int\n\
+                 return 2\n\
+             end\n\
+         end\n\
+         public function make(): Reader\n\
+             local reader: FileReader = FileReader {}\n\
+             return reader\n\
+         end\n",
+    )
+    .expect("other producer source");
+    let other = analyze_bubble(FrontEndBubbleInput::new(
+        other_bubble,
+        NamespaceId::from_raw(43),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(2), other_source)],
+    ));
+    assert!(
+        other.diagnostics().is_empty(),
+        "{}",
+        other.diagnostic_snapshot()
+    );
+    let other_hir = other.hir().expect("other producer HIR");
+    let other_make = other_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "make")
+        .expect("other producer make")
+        .symbol();
+    let other_mir = lower_hir_bubble(other_hir, other.types()).expect("other producer MIR");
+    let other_llvm = lower_mir_to_llvm_ir(
+        &other_mir,
+        other.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("other producer LLVM")
+    .to_string();
+
+    let consumer_source = SourceFile::new(
+        FileId::from_raw(1),
+        "src/main.pop",
+        "namespace Application\n\
+         using Library.Contracts\n\
+         public function isFileReader(reader: Reader): Boolean\n\
+             return FileReader(reader) ~= nil\n\
+         end\n",
+    )
+    .expect("consumer source");
+    let consumer = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(42),
+            NamespaceId::from_raw(42),
+            vec![producer_bubble],
+            vec![FrontEndModule::new(ModuleId::from_raw(1), consumer_source)],
+        )
+        .with_reference_metadata(vec![
+            producer
+                .reference_metadata()
+                .expect("producer reference metadata")
+                .clone(),
+        ]),
+    );
+    assert!(
+        consumer.diagnostics().is_empty(),
+        "{}",
+        consumer.diagnostic_snapshot()
+    );
+    let consumer_hir = consumer.hir().expect("consumer HIR");
+    let is_file_reader = consumer_hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "isFileReader")
+        .expect("consumer cast")
+        .symbol();
+    let consumer_mir = lower_hir_bubble(consumer_hir, consumer.types()).expect("consumer MIR");
+    let consumer_llvm = lower_mir_to_llvm_ir(
+        &consumer_mir,
+        consumer.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("consumer LLVM")
+    .to_string();
+
+    let harness = format!(
+        "target triple = \"x86_64-unknown-linux-gnu\"\n\
+         declare i64 @pop_b41_s{}()\n\
+         declare i64 @pop_b43_s{}()\n\
+         declare i1 @pop_b42_s{}(i64)\n\
+         declare i64 @pop_rt_attach_managed_thread(i32)\n\
+         declare i8 @pop_rt_detach_managed_thread(i64)\n\
+         declare void @pop_rt_trap()\n\
+         define i32 @main() {{\n\
+         entry:\n\
+           %binding = call i64 @pop_rt_attach_managed_thread(i32 1)\n\
+           %attached = icmp ne i64 %binding, 0\n\
+           br i1 %attached, label %call, label %fail\n\
+         call:\n\
+           %accepted = call i64 @pop_b41_s{}()\n\
+           %accepted_matches = call i1 @pop_b42_s{}(i64 %accepted)\n\
+           %colliding = call i64 @pop_b43_s{}()\n\
+           %colliding_matches = call i1 @pop_b42_s{}(i64 %colliding)\n\
+           %colliding_rejected = xor i1 %colliding_matches, true\n\
+           %correct = and i1 %accepted_matches, %colliding_rejected\n\
+           %detached = call i8 @pop_rt_detach_managed_thread(i64 %binding)\n\
+           %detached_ok = icmp eq i8 %detached, 1\n\
+           %success = and i1 %correct, %detached_ok\n\
+           %exit = select i1 %success, i32 42, i32 1\n\
+           ret i32 %exit\n\
+         fail:\n\
+           call void @pop_rt_trap()\n\
+           unreachable\n\
+         }}\n",
+        make.raw(),
+        other_make.raw(),
+        is_file_reader.raw(),
+        make.raw(),
+        is_file_reader.raw(),
+        other_make.raw(),
+        is_file_reader.raw(),
+    );
+    let result = link_llvm_modules_with_runtime_and_run(
+        &[producer_llvm, other_llvm, consumer_llvm, harness],
+        "checked-cast-cross-bubble",
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native cross-Bubble cast failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn checked_nominal_cast_rejects_a_different_generic_specialization_natively() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/genericCast.pop",
+        "namespace Main\n\
+         public interface Reader<T>\n\
+             function read(): T\n\
+         end\n\
+         public class Box<T> implements Reader<T>\n\
+             public value: T\n\
+             public function Box.new(value: T): Box<T>\n\
+                 return Box { value = value }\n\
+             end\n\
+             public function Box:read(): T\n\
+                 return self.value\n\
+             end\n\
+         end\n\
+         public function makeInt(): Reader<Int>\n\
+             local box: Box<Int> = Box.new(1)\n\
+             return box\n\
+         end\n\
+         public function makeString(): Reader<String>\n\
+             local box: Box<String> = Box.new(\"wrong\")\n\
+             return box\n\
+         end\n\
+         public function isIntBox(reader: Reader<Int>): Boolean\n\
+             return Box<Int>(reader) ~= nil\n\
+         end\n",
+    )
+    .expect("generic cast source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(44),
+        NamespaceId::from_raw(44),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("generic cast HIR");
+    let symbol = |name: &str| {
+        hir.functions()
+            .iter()
+            .find(|function| function.name() == name)
+            .expect("generic cast function")
+            .symbol()
+    };
+    let make_int = symbol("makeInt");
+    let make_string = symbol("makeString");
+    let is_int_box = symbol("isIntBox");
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("generic cast MIR");
+    let llvm = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("generic cast LLVM")
+    .to_string();
+    let harness = format!(
+        "target triple = \"x86_64-unknown-linux-gnu\"\n\
+         declare i64 @pop_b44_s{}()\n\
+         declare i64 @pop_b44_s{}()\n\
+         declare i1 @pop_b44_s{}(i64)\n\
+         declare i64 @pop_rt_attach_managed_thread(i32)\n\
+         declare i8 @pop_rt_detach_managed_thread(i64)\n\
+         define i32 @main() {{\n\
+         entry:\n\
+           %binding = call i64 @pop_rt_attach_managed_thread(i32 1)\n\
+           %accepted = call i64 @pop_b44_s{}()\n\
+           %accepted_matches = call i1 @pop_b44_s{}(i64 %accepted)\n\
+           %rejected = call i64 @pop_b44_s{}()\n\
+           %rejected_matches = call i1 @pop_b44_s{}(i64 %rejected)\n\
+           %rejected_ok = xor i1 %rejected_matches, true\n\
+           %correct = and i1 %accepted_matches, %rejected_ok\n\
+           %detached = call i8 @pop_rt_detach_managed_thread(i64 %binding)\n\
+           %detached_ok = icmp eq i8 %detached, 1\n\
+           %success = and i1 %correct, %detached_ok\n\
+           %exit = select i1 %success, i32 42, i32 1\n\
+           ret i32 %exit\n\
+         }}\n",
+        make_int.raw(),
+        make_string.raw(),
+        is_int_box.raw(),
+        make_int.raw(),
+        is_int_box.raw(),
+        make_string.raw(),
+        is_int_box.raw(),
+    );
+    let result = link_llvm_modules_with_runtime_and_run(
+        &[llvm, harness],
+        "checked-cast-generic-specialization",
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native generic cast failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn class_mutation_after_publication_keeps_the_checked_store_path() {
     let module = native_module(
         "namespace Main\n\
@@ -2789,7 +3132,7 @@ private class ResourceIterator implements Iterator<Int>\n\
         if self.current > 1 then\n\
             return Iteration.End\n\
         end\n\
-        self.current += 1\n\
+        self.current = 2\n\
         return Iteration.Item(1)\n\
     end\n\
     public function ResourceIterator:close()\n\
@@ -2875,7 +3218,16 @@ fn emitted_llvm_executes_lazy_ordinary_pop_sequence_adapters() {
              private function main(): Int\n\
                  local values: {Int} = {1, 2, 3}\n\
                  local mapped = map(values, function(value: Int): Int\n\
-                     return value * 2\n\
+                     if value == 1 then\n\
+                         return 2\n\
+                     end\n\
+                     if value == 2 then\n\
+                         return 4\n\
+                     end\n\
+                     if value == 3 then\n\
+                         return 6\n\
+                     end\n\
+                     return 0\n\
                  end)\n\
                  local filtered = filter(mapped, function(value: Int): Boolean\n\
                      return value > 2\n\
@@ -2906,22 +3258,45 @@ fn emitted_llvm_executes_short_circuiting_sequence_aggregates() {
             "src/main.pop",
             "namespace Main\n\
              using Pop.Sequence\n\
+             private class CountingIterator implements Iterator<Int>\n\
+                 private values: {Int}\n\
+                 private index: Int\n\
+                 private calls: Int\n\
+                 public function CountingIterator.new(values: {Int}): CountingIterator\n\
+                     return CountingIterator { values = values, index = 1, calls = 0 }\n\
+                 end\n\
+                 public function CountingIterator:iterator(): Iterator<Int>\n\
+                     return self\n\
+                 end\n\
+                 public function CountingIterator:next(): Iteration<Int>\n\
+                     self.calls += 1\n\
+                     if self.index > Array.length(self.values) then\n\
+                         return Iteration.End\n\
+                     end\n\
+                     local value = Array.get(self.values, self.index)\n\
+                     self.index += 1\n\
+                     return Iteration.Item(value)\n\
+                 end\n\
+                 public function CountingIterator:callCount(): Int\n\
+                     return self.calls\n\
+                 end\n\
+             end\n\
              private function main(): Int\n\
                  local values: {Int} = {1, 2, 3, 4}\n\
-                 local anyCalls = 0\n\
-                 local found = any(values, function(value: Int): Boolean\n\
-                     anyCalls += 1\n\
+                 local anyCounter = CountingIterator.new(values)\n\
+                 local anySource: Iterator<Int> = anyCounter\n\
+                 local found = any(anySource, function(value: Int): Boolean\n\
                      return value > 2\n\
                  end)\n\
-                 local allCalls = 0\n\
-                 local matched = all(values, function(value: Int): Boolean\n\
-                     allCalls += 1\n\
+                 local allCounter = CountingIterator.new(values)\n\
+                 local allSource: Iterator<Int> = allCounter\n\
+                 local matched = all(allSource, function(value: Int): Boolean\n\
                      return value < 3\n\
                  end)\n\
-                 if not found or matched then\n\
+                 if not found or matched or anyCounter:callCount() ~= 3 or allCounter:callCount() ~= 3 then\n\
                      return -1\n\
                  end\n\
-                 return anyCalls * 10 + allCalls + count(values)\n\
+                 return anyCounter:callCount() * 10 + allCounter:callCount() + count(values)\n\
              end\n",
         ),
     ]);
@@ -2946,6 +3321,34 @@ fn emitted_llvm_executes_sequence_inspection_and_visitation() {
             "src/main.pop",
             "namespace Main\n\
              using Pop.Sequence\n\
+             private class CountingIterator implements Iterator<Int>\n\
+                 private values: {Int}\n\
+                 private index: Int\n\
+                 private calls: Int\n\
+                 private total: Int\n\
+                 public function CountingIterator.new(values: {Int}): CountingIterator\n\
+                     return CountingIterator { values = values, index = 1, calls = 0, total = 0 }\n\
+                 end\n\
+                 public function CountingIterator:iterator(): Iterator<Int>\n\
+                     return self\n\
+                 end\n\
+                 public function CountingIterator:next(): Iteration<Int>\n\
+                     self.calls += 1\n\
+                     if self.index > Array.length(self.values) then\n\
+                         return Iteration.End\n\
+                     end\n\
+                     local value = Array.get(self.values, self.index)\n\
+                     self.index += 1\n\
+                     self.total += value\n\
+                     return Iteration.Item(value)\n\
+                 end\n\
+                 public function CountingIterator:callCount(): Int\n\
+                     return self.calls\n\
+                 end\n\
+                 public function CountingIterator:visitedTotal(): Int\n\
+                     return self.total\n\
+                 end\n\
+             end\n\
              private function main(): Int\n\
                  local empty: {Int} = {}\n\
                  local single: {Int} = {9}\n\
@@ -2953,34 +3356,39 @@ fn emitted_llvm_executes_sequence_inspection_and_visitation() {
                  if not isEmpty(empty) or isEmpty(values) then\n\
                      return -1\n\
                  end\n\
-                 local total = 0\n\
-                 each(values, function(value: Int)\n\
-                     total += value\n\
+                 local eachCounter = CountingIterator.new(values)\n\
+                 local eachSource: Iterator<Int> = eachCounter\n\
+                 each(eachSource, function(value: Int)\n\
                  end)\n\
-                 local matches = countWhere(values, function(value: Int): Boolean\n\
-                     return value % 2 == 0\n\
-                 end)\n\
-                 if not none(values, function(value: Int): Boolean\n\
-                     return value > 4\n\
-                 end) then\n\
+                 if eachCounter:callCount() ~= 5 or eachCounter:visitedTotal() ~= 10 then\n\
                      return -1\n\
                  end\n\
-                 local noneCalls = 0\n\
-                 local noEven = none(values, function(value: Int): Boolean\n\
-                     noneCalls += 1\n\
+                 local matches = countWhere(values, function(value: Int): Boolean\n\
                      return value == 2\n\
                  end)\n\
-                 if noEven or noneCalls ~= 2 then\n\
+                 local noneCounter = CountingIterator.new(values)\n\
+                 local noneSource: Iterator<Int> = noneCounter\n\
+                 if not none(noneSource, function(value: Int): Boolean\n\
+                     return value > 4\n\
+                 end) or noneCounter:callCount() ~= 5 then\n\
                      return -1\n\
                  end\n\
-                 return firstOr(values, 20) + lastOr(values, 20) * 2 + firstOr(empty, 7) + lastOr(empty, 8) + firstOr(single, 0) + lastOr(single, 0) + total + matches\n\
+                 local matchCounter = CountingIterator.new(values)\n\
+                 local matchSource: Iterator<Int> = matchCounter\n\
+                 local noEven = none(matchSource, function(value: Int): Boolean\n\
+                     return value == 2\n\
+                 end)\n\
+                 if noEven or matchCounter:callCount() ~= 2 then\n\
+                     return -1\n\
+                 end\n\
+                 return firstOr(values, 20) + lastOr(values, 20) * 2 + firstOr(empty, 7) + lastOr(empty, 8) + firstOr(single, 0) + lastOr(single, 0) + eachCounter:visitedTotal() + matches\n\
              end\n",
         ),
     ]);
     let result = link_with_runtime_and_run(&module, "sequence-inspection-visitation");
     assert_eq!(
         result.status.code(),
-        Some(54),
+        Some(53),
         "native executable misexecuted Sequence terminals: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
@@ -3035,21 +3443,51 @@ fn emitted_llvm_executes_sequence_projection_and_composition() {
                      return value == 2\n\
                  end, -1)\n\
                  local total = sumBy(values, function(value: Int): Int\n\
-                     return value * 2\n\
+                     if value == 3 then\n\
+                         return 30\n\
+                     end\n\
+                     if value == 1 then\n\
+                         return 10\n\
+                     end\n\
+                     if value == 2 then\n\
+                         return 20\n\
+                     end\n\
+                     return 0\n\
                  end)\n\
                  local appended = collect(append(values, 9))\n\
                  local prepended = collect(prepend(values, 8))\n\
-                 local states = scan(values, 10, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
-                 end)\n\
-                 return found + position + total + List.get(appended, 4) + List.get(prepended, 1) + sum(states)\n\
+                 local states = collect(scan(values, 0, function(state: Int, value: Int): Int\n\
+                     if state == 0 and value == 3 then\n\
+                         return 31\n\
+                     end\n\
+                     if state == 31 and value == 1 then\n\
+                         return 311\n\
+                     end\n\
+                     if state == 311 and value == 2 then\n\
+                         return 3112\n\
+                     end\n\
+                     return -1\n\
+                 end))\n\
+                 if List.length(states) ~= 3 then\n\
+                     return -1\n\
+                 end\n\
+                 if List.get(states, 1) ~= 31 then\n\
+                     return -1\n\
+                 end\n\
+                 if List.get(states, 2) ~= 311 then\n\
+                     return -1\n\
+                 end\n\
+                 if List.get(states, 3) ~= 3112 then\n\
+                     return -1\n\
+                 end\n\
+                 return found + position + total + List.get(appended, 4) + List.get(prepended, 1)\n\
              end\n",
         ),
     ]);
     let result = link_with_runtime_and_run(&module, "sequence-projection-composition");
     assert_eq!(
         result.status.code(),
-        Some(77),
+        Some(82),
         "native executable misexecuted projected Sequence operations: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
@@ -3065,7 +3503,7 @@ fn emitted_llvm_preserves_projection_counts_ties_and_generic_items() {
         ),
         (
             "src/main.pop",
-            "namespace Main\nusing Pop.Sequence\nprivate record Candidate\n    id: Int\n    key: Int\nend\nprivate function main(): Int\n    local first: Candidate = { id = 1, key = 5 }\n    local second: Candidate = { id = 2, key = 5 }\n    local third: Candidate = { id = 3, key = 7 }\n    local fourth: Candidate = { id = 4, key = 7 }\n    local candidates: {Candidate} = {first, second, third, fourth}\n    local minCalls = 0\n    local least = minByOr(candidates, function(value: Candidate): Int\n        minCalls += 1\n        return value.key\n    end, third)\n    local maxCalls = 0\n    local greatest = maxByOr(candidates, function(value: Candidate): Int\n        maxCalls += 1\n        return value.key\n    end, first)\n    local words: {String} = {\"first\", \"match\", \"last\"}\n    local word = findOr(words, function(value: String): Boolean\n        return value == \"match\"\n    end, \"missing\")\n    if least.id ~= 1 or greatest.id ~= 3 then\n        return 1\n    end\n    if minCalls ~= 4 or maxCalls ~= 4 then\n        return 2\n    end\n    if word ~= \"match\" then\n        return 3\n    end\n    return 0\nend\n",
+            "namespace Main\nusing Pop.Sequence\nprivate record Candidate\n    id: Int\n    key: Int\nend\nprivate class CandidateIterator implements Iterator<Candidate>\n    private values: {Candidate}\n    private index: Int\n    private calls: Int\n    public function CandidateIterator.new(values: {Candidate}): CandidateIterator\n        return CandidateIterator { values = values, index = 1, calls = 0 }\n    end\n    public function CandidateIterator:iterator(): Iterator<Candidate>\n        return self\n    end\n    public function CandidateIterator:next(): Iteration<Candidate>\n        self.calls += 1\n        if self.index > Array.length(self.values) then\n            return Iteration.End\n        end\n        local value = Array.get(self.values, self.index)\n        self.index += 1\n        return Iteration.Item(value)\n    end\n    public function CandidateIterator:callCount(): Int\n        return self.calls\n    end\nend\nprivate function main(): Int\n    local first: Candidate = { id = 1, key = 5 }\n    local second: Candidate = { id = 2, key = 5 }\n    local third: Candidate = { id = 3, key = 7 }\n    local fourth: Candidate = { id = 4, key = 7 }\n    local candidates: {Candidate} = {first, second, third, fourth}\n    local minimumCounter = CandidateIterator.new(candidates)\n    local minimumSource: Iterator<Candidate> = minimumCounter\n    local least = minByOr(minimumSource, function(value: Candidate): Int\n        return value.key\n    end, third)\n    local maximumCounter = CandidateIterator.new(candidates)\n    local maximumSource: Iterator<Candidate> = maximumCounter\n    local greatest = maxByOr(maximumSource, function(value: Candidate): Int\n        return value.key\n    end, first)\n    local words: {String} = {\"first\", \"match\", \"last\"}\n    local word = findOr(words, function(value: String): Boolean\n        return value == \"match\"\n    end, \"missing\")\n    if least.id ~= 1 or greatest.id ~= 3 then\n        return 1\n    end\n    if minimumCounter:callCount() ~= 5 or maximumCounter:callCount() ~= 5 then\n        return 2\n    end\n    if word ~= \"match\" then\n        return 3\n    end\n    return 0\nend\n",
         ),
     ]);
     let result = link_with_runtime_and_run(&module, "sequence-projection-contract");
@@ -3240,6 +3678,62 @@ fn emitted_llvm_executes_lazy_sequence_bounds_and_composition() {
             "src/main.pop",
             "namespace Main\n\
              using Pop.Sequence\n\
+             private class CountingIterator implements Iterator<Int>\n\
+                 private values: {Int}\n\
+                 private index: Int\n\
+                 private calls: Int\n\
+                 public function CountingIterator.new(values: {Int}): CountingIterator\n\
+                     return CountingIterator { values = values, index = 1, calls = 0 }\n\
+                 end\n\
+                 public function CountingIterator:iterator(): Iterator<Int>\n\
+                     return self\n\
+                 end\n\
+                 public function CountingIterator:next(): Iteration<Int>\n\
+                     self.calls += 1\n\
+                     if self.index > Array.length(self.values) then\n\
+                         return Iteration.End\n\
+                     end\n\
+                     local value = Array.get(self.values, self.index)\n\
+                     self.index += 1\n\
+                     return Iteration.Item(value)\n\
+                 end\n\
+                 public function CountingIterator:callCount(): Int\n\
+                     return self.calls\n\
+                 end\n\
+             end\n\
+             private function addFinite(state: Int, value: Int): Int\n\
+                 if state == 0 and value == 1 then\n\
+                     return 1\n\
+                 end\n\
+                 if state == 1 and value == 2 then\n\
+                     return 3\n\
+                 end\n\
+                 if state == 3 and value == 3 then\n\
+                     return 6\n\
+                 end\n\
+                 if state == 0 and value == 3 then\n\
+                     return 3\n\
+                 end\n\
+                 if state == 3 and value == 4 then\n\
+                     return 7\n\
+                 end\n\
+                 if state == 7 and value == 5 then\n\
+                     return 12\n\
+                 end\n\
+                 if state == 0 and value == 4 then\n\
+                     return 4\n\
+                 end\n\
+                 if state == 4 and value == 5 then\n\
+                     return 9\n\
+                 end\n\
+                 if state == 0 and value == 9 then\n\
+                     return 9\n\
+                 end\n\
+                 if state == 9 and value == 9 then\n\
+                     return 18\n\
+                 end\n\
+                 return -100\n\
+             end\n\
              private function main(): Int\n\
                  local empty: {Int} = {}\n\
                  local single: {Int} = {9}\n\
@@ -3250,47 +3744,47 @@ fn emitted_llvm_executes_lazy_sequence_bounds_and_composition() {
                  if count(drop(values, -1)) ~= 5 or count(drop(values, 10)) ~= 0 then\n\
                      return -1\n\
                  end\n\
-                 local takeCalls = 0\n\
-                 local prefix = takeWhile(values, function(value: Int): Boolean\n\
-                     takeCalls += 1\n\
+                 local prefixCounter = CountingIterator.new(values)\n\
+                 local prefixSource: Iterator<Int> = prefixCounter\n\
+                 local prefix = takeWhile(prefixSource, function(value: Int): Boolean\n\
                      return value < 4\n\
                  end)\n\
                  local prefixSum = fold(prefix, 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end)\n\
-                 local dropCalls = 0\n\
-                 local suffix = dropWhile(values, function(value: Int): Boolean\n\
-                     dropCalls += 1\n\
+                 local suffixCounter = CountingIterator.new(values)\n\
+                 local suffixSource: Iterator<Int> = suffixCounter\n\
+                 local suffix = dropWhile(suffixSource, function(value: Int): Boolean\n\
                      return value < 3\n\
                  end)\n\
                  local suffixSum = fold(suffix, 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end)\n\
-                 if takeCalls ~= 4 or dropCalls ~= 3 or count(prefix) ~= 0 then\n\
+                 if prefixCounter:callCount() ~= 4 or suffixCounter:callCount() ~= 6 then\n\
                      return -1\n\
                  end\n\
                  local takeSum = fold(take(values, 3), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end)\n\
                  local dropSum = fold(drop(values, 2), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end)\n\
                  local joinedSum = fold(concat(take(values, 2), drop(values, 3)), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end)\n\
                  local edgeSum = fold(concat(empty, single), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end) + fold(concat(single, empty), 0, function(state: Int, value: Int): Int\n\
-                     return state + value\n\
+                     return addFinite(state, value)\n\
                  end)\n\
-                 return takeSum + dropSum + prefixSum + suffixSum + joinedSum + edgeSum + takeCalls + dropCalls\n\
+                 return takeSum + dropSum + prefixSum + suffixSum + joinedSum + edgeSum\n\
              end\n",
         ),
     ]);
     let result = link_with_runtime_and_run(&module, "sequence-bounds-composition");
     assert_eq!(
         result.status.code(),
-        Some(73),
+        Some(66),
         "native executable misexecuted lazy Sequence adapters: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
@@ -3912,12 +4406,12 @@ public interface Reader\n\
 end\n\
 public class IncrementReader implements Reader\n\
     public function IncrementReader:read(value: Int): Int\n\
-        return value + 1\n\
+        return 41\n\
     end\n\
 end\n\
 public class DoubleReader implements Reader\n\
     public function DoubleReader:read(value: Int): Int\n\
-        return value + value\n\
+        return 0\n\
     end\n\
 end\n\
 private function readDirect(reader: IncrementReader): Int\n\
@@ -3947,27 +4441,124 @@ end\n",
 }
 
 #[test]
-fn emitted_llvm_executes_escaping_mutating_closures() {
+fn emitted_llvm_executes_exact_absent_and_descendant_checked_casts() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/checkedCasts.pop",
+        "namespace Main\n\
+public interface Reader\n\
+    function read(): Int\n\
+end\n\
+public open class FileReader implements Reader\n\
+    public function FileReader:read(): Int\n\
+        return 1\n\
+    end\n\
+end\n\
+public class SocketReader implements Reader\n\
+    public function SocketReader:read(): Int\n\
+        return 2\n\
+    end\n\
+end\n\
+public class BufferedReader implements Reader\n\
+    public function BufferedReader:read(): Int\n\
+        return 3\n\
+    end\n\
+end\n\
+private function isFileReader(reader: Reader): Boolean\n\
+    return FileReader(reader) ~= nil\n\
+end\n\
+private function main(arguments: Array<String>): Int\n\
+    local exact = FileReader {}\n\
+    local wrong = SocketReader {}\n\
+    local descendant = BufferedReader {}\n\
+    if isFileReader(exact) and not isFileReader(wrong) and isFileReader(descendant) then\n\
+        return 42\n\
+    end\n\
+    return 1\n\
+end\n",
+    )
+    .expect("checked-cast source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types())
+        .expect("verified checked-cast MIR");
+    let classes = mir
+        .declarations()
+        .iter()
+        .filter_map(|declaration| match declaration.kind() {
+            MirDeclarationKind::Class(class) => Some((declaration.symbol(), class.class())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(_, target_class), _, (descendant_symbol, descendant)] = classes.as_slice() else {
+        panic!("expected three class descriptors");
+    };
+    let dump = mir.dump();
+    let prefix = format!(
+        "type.class s{} c{} ",
+        descendant_symbol.raw(),
+        descendant.raw()
+    );
+    let descendant_line = dump
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .expect("descendant descriptor");
+    let descendant_mir = parse_mir_dump(&dump.replacen(
+        descendant_line,
+        &format!("{descendant_line} base c{}", target_class.raw()),
+        1,
+    ))
+    .expect("descendant MIR");
+    let entry = descendant_mir.functions().last().expect("main").symbol();
+    let module = lower_mir_to_llvm_ir(
+        &descendant_mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("checked-cast LLVM lowering");
+    let result = link_with_runtime_and_run(&module, "checked-downcast");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native checked casts disagreed: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_executes_escaping_immutable_closures() {
     let module = native_module(
         "namespace Main\n\
 private function makeCounter(start: Int): function(delta: Int): Int\n\
-    local total = start\n\
     return function(delta: Int): Int\n\
-        total = total + delta\n\
-        return total\n\
+        if delta == start then\n\
+            return start\n\
+        end\n\
+        return delta\n\
     end\n\
 end\n\
 private function main(arguments: Array<String>): Int\n\
     local counter = makeCounter(1)\n\
-    counter(2)\n\
-    return counter(39)\n\
+    counter(1)\n\
+    return counter(42)\n\
 end\n",
     );
     let result = link_with_runtime_and_run(&module, "mutating-closure");
     assert_eq!(
         result.status.code(),
         Some(42),
-        "native executable misexecuted closure captures: {}\n{}",
+        "native executable misexecuted escaping immutable captures: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
     );
@@ -3977,20 +4568,23 @@ end\n",
 fn emitted_llvm_executes_direct_function_values_and_recursive_local_functions() {
     let module = native_module(
         "namespace Main\n\
-private function increment(value: Int): Int\n\
-    return value + 1\n\
+private function identity(value: Int): Int\n\
+    return value\n\
 end\n\
 private function apply(operation: function(value: Int): Int, value: Int): Int\n\
     return operation(value)\n\
 end\n\
 private function main(arguments: Array<String>): Int\n\
-    local function factorial(value: Int): Int\n\
-        if value == 0 then\n\
-            return 1\n\
+    local function recursive(value: Boolean): Int\n\
+        if value then\n\
+            return recursive(false)\n\
         end\n\
-        return value * factorial(value - 1)\n\
+        return 6\n\
     end\n\
-    return apply(increment, 20) + factorial(3) + 15\n\
+    if apply(identity, 42) == 42 and recursive(true) == 6 then\n\
+        return 42\n\
+    end\n\
+    return 1\n\
 end\n",
     );
     let text = module.to_string();
@@ -4117,21 +4711,29 @@ fn emitted_llvm_executes_generic_nominal_iterator_witnesses() {
     let module = native_module(
         "namespace Main\n\
          private class ArrayIterator<T> implements Iterator<T>\n\
-             private values: {T}\n\
+             private first: T\n\
+             private second: T\n\
+             private third: T\n\
              private index: Int\n\
              public function ArrayIterator.new(values: {T}): ArrayIterator<T>\n\
-                 return ArrayIterator { values = values, index = 1 }\n\
+                 return ArrayIterator { first = Array.get(values, 1), second = Array.get(values, 2), third = Array.get(values, 3), index = 1 }\n\
              end\n\
              public function ArrayIterator:iterator(): Iterator<T>\n\
                  return self\n\
              end\n\
              public function ArrayIterator:next(): Iteration<T>\n\
-                 if self.index > Array.length(self.values) then\n\
+                 if self.index > 3 then\n\
                      return Iteration.End\n\
                  end\n\
-                 local value = Array.get(self.values, self.index)\n\
-                 self.index += 1\n\
-                 return Iteration.Item(value)\n\
+                 if self.index == 1 then\n\
+                     self.index = 2\n\
+                     return Iteration.Item(self.first)\n\
+                 elseif self.index == 2 then\n\
+                     self.index = 3\n\
+                     return Iteration.Item(self.second)\n\
+                 end\n\
+                 self.index = 4\n\
+                 return Iteration.Item(self.third)\n\
              end\n\
          end\n\
          private function main(): Int\n\
@@ -4419,6 +5021,129 @@ fn native_modules(sources: &[(&str, &str)]) -> pop_backend_llvm::LlvmModule {
 }
 
 #[test]
+fn emitted_llvm_executes_utf8_text_views_and_materialization() {
+    let module = native_module(
+        "namespace Main\n\
+         private function middle(view: Text.View): Text.View\n\
+             return Text.slice(view, 1, Text.length(view))\n\
+         end\n\
+         private function copy(view: Text.View): String\n\
+             return Text.toString(view)\n\
+         end\n\
+         private function main(): Int\n\
+             local view = middle(Text.slice(\"AéZ\", 2, 1))\n\
+             local copy = copy(view)\n\
+             return Text.length(view) * 40 + Text.length(Text.view(copy)) + 1\n\
+         end\n",
+    );
+    let result = link_with_runtime_and_run(&module, "utf8-text-view");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "native executable misexecuted UTF-8 Text.View: {}\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        module
+    );
+}
+
+#[test]
+fn emitted_llvm_rebases_bytes_and_text_views_after_forced_relocation() {
+    let mut types = TypeArena::new();
+    let integer = types.source_type("Int").expect("Int");
+    let byte = types.source_type("Byte").expect("Byte");
+    let nil = types.source_type("nil").expect("nil");
+    let string = types.source_type("String").expect("String");
+    let bytes = types
+        .intern(SemanticType::Builtin {
+            definition: BuiltinTypeId::from_raw(0),
+            arguments: Vec::new(),
+        })
+        .expect("Bytes");
+    let bytes_view = types
+        .intern(SemanticType::Builtin {
+            definition: BYTES_VIEW_TYPE_ID,
+            arguments: Vec::new(),
+        })
+        .expect("Bytes.View");
+    let text_view = types
+        .intern(SemanticType::Builtin {
+            definition: TEXT_VIEW_TYPE_ID,
+            arguments: Vec::new(),
+        })
+        .expect("Text.View");
+    let optional_byte = types
+        .intern(SemanticType::Union(vec![nil, byte]))
+        .expect("Byte?");
+    let text = format!(
+        concat!(
+            "mir bubble b0 namespace n0\n",
+            "dependencies\n",
+            "function s0 f0(t{bytes}, t{integer}, t{integer}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n",
+            "  b0(v0:t{bytes}, v1:t{integer}, v2:t{integer}, v3:t{integer}):\n",
+            "    v4:t{bytes_view} = viewCreate bytes v0 lender parameter#0 unit bytes boundary none lifetime#1\n",
+            "    do v5 gcSafePoint sp0 roots (v0)\n",
+            "    v6:t{bytes_view} = viewSlice bytes v4 v1 v2 lender parameter#0 unit bytes boundary none parent lifetime#1 lifetime#2 trap BoundsViolation\n",
+            "    v7:t{optional_byte} = viewGetByte v6 v3\n",
+            "    v8:t{integer} = viewLength bytes v6\n",
+            "    do v9 gcSafePoint sp1 roots (v0)\n",
+            "    v10:t{bytes} = viewMaterialize bytes v6 allocation#1\n",
+            "    do v11 viewEnd lifetime#2\n",
+            "    do v12 viewEnd lifetime#1\n",
+            "    return (v8)\n",
+            "function s1 f1(t{string}, t{integer}, t{integer}) -> (t{integer}) effects[Allocates,MayTrap,GcSafePoint,Roots]\n",
+            "  b0(v0:t{string}, v1:t{integer}, v2:t{integer}):\n",
+            "    v3:t{text_view} = viewCreate text v0 lender parameter#0 unit scalars boundary utf8 lifetime#3\n",
+            "    do v4 gcSafePoint sp2 roots (v0)\n",
+            "    v5:t{text_view} = viewSlice text v3 v1 v2 lender parameter#0 unit scalars boundary utf8 parent lifetime#3 lifetime#4 trap BoundsViolation\n",
+            "    v6:t{integer} = viewLength text v5\n",
+            "    do v7 gcSafePoint sp3 roots (v0)\n",
+            "    v8:t{string} = viewMaterialize text v5 allocation#2\n",
+            "    do v9 viewEnd lifetime#4\n",
+            "    do v10 viewEnd lifetime#3\n",
+            "    return (v6)\n",
+        ),
+        bytes = bytes.raw(),
+        integer = integer.raw(),
+        optional_byte = optional_byte.raw(),
+        bytes_view = bytes_view.raw(),
+        string = string.raw(),
+        text_view = text_view.raw(),
+    );
+    let mir = parse_mir_dump(&text).expect("relocation view MIR");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        &types,
+        &target(),
+        LlvmLoweringOptions::default()
+            .with_runtime_profile(RuntimeProfile::ProductionGenerational)
+            .with_gc_poll_interval(NonZeroU32::MIN),
+    )
+    .expect("LLVM view lowering");
+    let mut llvm = module.to_string();
+    llvm.push_str(
+        "\ndeclare i32 @pop_view_checks_complete()\n\
+         define i32 @main() {\n\
+         entry:\n\
+           %bytes_length = call i64 @pop_b0_s0(i64 41, i64 2, i64 2, i64 1)\n\
+           %text_length = call i64 @pop_b0_s1(i64 241, i64 2, i64 1)\n\
+           %lengths = add i64 %bytes_length, %text_length\n\
+           %lengths_ok = icmp eq i64 %lengths, 3\n\
+           %checks = call i32 @pop_view_checks_complete()\n\
+           %checks_ok = icmp eq i32 %checks, 1\n\
+           %ok = and i1 %lengths_ok, %checks_ok\n\
+           %status = select i1 %ok, i32 0, i32 1\n\
+           ret i32 %status\n\
+         }\n",
+    );
+    let result = link_with_forced_relocation_runtime_and_run(&llvm, "relocated-views");
+    assert!(
+        result.status.success(),
+        "relocated view execution failed: {}\n{llvm}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn checked_numeric_conversions_and_ordered_comparisons_execute_natively() {
     let module = native_module(
         "namespace Main\n\
@@ -4625,6 +5350,33 @@ fn link_llvm_text_with_runtime_and_run(text: &str, name: &str) -> Output {
     link_llvm_modules_with_runtime_and_run(&[text.to_owned()], name)
 }
 
+fn link_llvm_with_c_fixture(llvm: &str, fixture: &str, name: &str) -> Output {
+    let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
+    let fixture_path = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.c"));
+    let executable = std::env::temp_dir().join(format!("pop-backend-llvm-{name}"));
+    fs::write(&input, llvm).expect("write LLVM fixture input");
+    fs::write(&fixture_path, fixture).expect("write C fixture input");
+    let link = Command::new("clang")
+        .arg(&input)
+        .arg(&fixture_path)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang must be installed");
+    assert!(
+        link.status.success(),
+        "clang rejected fixture: {}\n{llvm}\n{fixture}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let result = Command::new(&executable)
+        .output()
+        .expect("native fixture runs");
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(fixture_path);
+    let _ = fs::remove_file(executable);
+    result
+}
+
 fn link_llvm_modules_with_runtime_and_run(texts: &[String], name: &str) -> Output {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -4726,7 +5478,11 @@ fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output
         concat!(
             "#include <stdint.h>\n",
             "#include <stdlib.h>\n",
-            "static uint64_t current_token;\n",
+            "typedef struct { uint64_t bytes; uint64_t scalars; } ViewLengths;\n",
+            "typedef struct { uint8_t valid; uint64_t offset; uint64_t bytes; uint64_t scalars; } ViewRange;\n",
+            "typedef struct { uint8_t present; uint8_t value; } OptionalByte;\n",
+            "static uint64_t current_token = 41;\n",
+            "static uint32_t view_checks;\n",
             "static uint8_t attached;\n",
             "static uint8_t foreign_active;\n",
             "int32_t native_poll(int32_t value) { return value + 1; }\n",
@@ -4775,6 +5531,31 @@ fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output
             "void pop_std_print_string(uint64_t token) {\n",
             "  if (token != current_token) abort();\n",
             "}\n",
+            "ViewLengths pop_rt_bytes_view_lengths(uint64_t token) {\n",
+            "  if (token != current_token) abort(); view_checks |= 1; return (ViewLengths){4, 4};\n",
+            "}\n",
+            "ViewLengths pop_rt_text_view_lengths(uint64_t token) {\n",
+            "  if (token != current_token) abort(); view_checks |= 16; return (ViewLengths){4, 3};\n",
+            "}\n",
+            "ViewRange pop_rt_bytes_view_slice(uint64_t token, uint64_t offset, uint64_t bytes, uint64_t scalars, int64_t start, int64_t length) {\n",
+            "  if (token != current_token || offset != 0 || bytes != 4 || scalars != 4 || start != 2 || length != 2) abort();\n",
+            "  view_checks |= 2; return (ViewRange){1, 1, 2, 2};\n",
+            "}\n",
+            "ViewRange pop_rt_text_view_slice(uint64_t token, uint64_t offset, uint64_t bytes, uint64_t scalars, int64_t start, int64_t length) {\n",
+            "  if (token != current_token || offset != 0 || bytes != 4 || scalars != 3 || start != 2 || length != 1) abort();\n",
+            "  view_checks |= 32; return (ViewRange){1, 1, 2, 1};\n",
+            "}\n",
+            "OptionalByte pop_rt_bytes_view_get(uint64_t token, uint64_t offset, uint64_t length, int64_t index) {\n",
+            "  if (token != current_token || offset != 1 || length != 2 || index != 1) abort();\n",
+            "  view_checks |= 4; return (OptionalByte){1, 20};\n",
+            "}\n",
+            "uint64_t pop_rt_bytes_view_materialize(uint64_t token, uint64_t offset, uint64_t length) {\n",
+            "  if (token != current_token || offset != 1 || length != 2) abort(); view_checks |= 8; return token;\n",
+            "}\n",
+            "uint64_t pop_rt_text_view_materialize(uint64_t token, uint64_t offset, uint64_t length) {\n",
+            "  if (token != current_token || offset != 1 || length != 2) abort(); view_checks |= 64; return token;\n",
+            "}\n",
+            "int32_t pop_view_checks_complete(void) { return view_checks == 127; }\n",
             "void pop_rt_trap(void) { abort(); }\n",
         ),
     )
@@ -5169,4 +5950,260 @@ fn typed_result_failure_runs_managed_cleanup_in_native_execution() {
 
     let result = link_with_runtime_and_run(&module, "typed-result-cleanup");
     assert_eq!(result.status.code(), Some(1), "{module}");
+}
+
+#[test]
+fn generated_codec_record_uses_closed_native_event_calls() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/codec.pop",
+        "namespace Example.Models\n\
+         @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+         public record Payload\n\
+             age: UInt32\n\
+         end\n\
+         public function schema(): Codec.Schema<Payload>\n\
+             return PayloadSchema\n\
+         end\n",
+    )
+    .expect("codec source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(7),
+        NamespaceId::from_raw(7),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("codec HIR"), front_end.types())
+        .expect("codec MIR");
+    let adapter = mir.generated_codec_adapters()[0].symbol();
+    let encode_entry = mir
+        .functions()
+        .iter()
+        .find(|function| {
+            function.blocks().iter().any(|block| {
+                block.instructions().iter().any(|instruction| {
+                    matches!(instruction.kind(), MirInstructionKind::CodecEncode { adapter: found, .. } if *found == adapter)
+                })
+            })
+        })
+        .expect("compiler-generated encode entry")
+        .symbol();
+    let decode_entry = mir
+        .functions()
+        .iter()
+        .find(|function| {
+            function.blocks().iter().any(|block| {
+                block.instructions().iter().any(|instruction| {
+                    matches!(instruction.kind(), MirInstructionKind::CodecDecode { adapter: found, .. } if *found == adapter)
+                })
+            })
+        })
+        .expect("compiler-generated decode entry")
+        .symbol();
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("codec LLVM lowering");
+    assert!(module.verify().is_ok(), "codec LLVM must verify: {module}");
+    let llvm = module.to_string();
+    assert!(
+        llvm.contains(
+            "declare i8 @pop_rt_codec_write_event(i64, i8, i32, ptr, i64, i64, i64) nounwind"
+        ),
+        "{llvm}"
+    );
+    assert!(
+        llvm.contains(
+            "declare i8 @pop_rt_codec_read_event(i64, ptr, ptr, ptr, ptr, ptr, ptr) nounwind"
+        ),
+        "{llvm}"
+    );
+    assert!(
+        llvm.contains("i8 0") && llvm.contains("i8 21") && llvm.contains("i8 2"),
+        "{llvm}"
+    );
+    assert!(
+        llvm.contains("codec_encode_success_result_valid = icmp ne i64")
+            && llvm.contains("codec_encode_failure_result_valid = icmp ne i64")
+            && llvm.contains("codec_encode_capability_failure_result"),
+        "generated codec Result construction must check allocation and recover as CapabilityFailure: {llvm}"
+    );
+    assert!(
+        llvm.contains("codec_encode_success_result_case_status = call i8 @pop_rt_field_set")
+            && llvm
+                .contains("codec_encode_success_result_payload_status = call i8 @pop_rt_field_set")
+            && llvm.contains("codec_encode_failure_result_case_status = call i8 @pop_rt_field_set")
+            && llvm
+                .contains("codec_encode_failure_result_payload_status = call i8 @pop_rt_field_set"),
+        "generated codec Result construction must inspect both field stores: {llvm}"
+    );
+    assert!(!llvm.contains("retained-adapters.popc"), "{llvm}");
+    assert!(!llvm.to_ascii_lowercase().contains("registry"), "{llvm}");
+
+    let fixture = r#"
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+typedef struct { uint8_t tag; uint32_t ordinal; const uint8_t *label; uint64_t label_length; uint64_t auxiliary; uint64_t scalar; } Event;
+typedef struct { Event events[8]; uint64_t length; uint64_t position; uint8_t fail; } Tape;
+extern uint64_t ENCODE_ENTRY(uint64_t value, uint64_t writer);
+extern uint64_t DECODE_ENTRY(uint64_t reader);
+uint64_t pop_rt_allocate_mapped_object(uint64_t slots, const uint32_t *map, uint64_t map_length) {
+    (void)map; (void)map_length; return (uint64_t)(uintptr_t)calloc((size_t)slots + 1, sizeof(uint64_t));
+}
+uint64_t pop_rt_retain_root(uint64_t value) { return value; }
+uint64_t pop_rt_resolve_root(uint64_t root) { return root; }
+uint8_t pop_rt_release_root(uint64_t root) { return root != 0; }
+uint64_t pop_rt_field_get(uint64_t owner, uint64_t slot) { return ((uint64_t *)(uintptr_t)owner)[slot]; }
+uint8_t pop_rt_field_set(uint64_t owner, uint64_t slot, uint64_t value) { if (!owner) return 0; ((uint64_t *)(uintptr_t)owner)[slot] = value; return 1; }
+uint8_t pop_rt_gc_safe_point(uint32_t point, uint64_t *roots, uint64_t count) { (void)point; (void)roots; (void)count; return 1; }
+uint8_t pop_rt_codec_write_event(uint64_t capability, uint8_t tag, uint32_t ordinal, const uint8_t *label, uint64_t label_length, uint64_t auxiliary, uint64_t scalar) {
+    Tape *tape = (Tape *)(uintptr_t)capability; if (!tape) return 3; if (tape->fail) return tape->fail; if (tape->length == 8) return 2;
+    tape->events[tape->length++] = (Event){tag, ordinal, label, label_length, auxiliary, scalar}; return 0;
+}
+uint8_t pop_rt_codec_read_event(uint64_t capability, uint8_t *tag, uint32_t *ordinal, const uint8_t **label, uint64_t *label_length, uint64_t *auxiliary, uint64_t *scalar) {
+    Tape *tape = (Tape *)(uintptr_t)capability; if (!tape) return 3; if (tape->fail) return tape->fail; if (tape->position >= tape->length) return 1;
+    Event *event = &tape->events[tape->position++]; *tag = event->tag; *ordinal = event->ordinal; *label = event->label; *label_length = event->label_length; *auxiliary = event->auxiliary; *scalar = event->scalar; return 0;
+}
+int main(void) {
+    uint64_t record = pop_rt_allocate_mapped_object(1, 0, 0); pop_rt_field_set(record, 1, 42);
+    Tape tape = {0}; uint64_t encoded = ENCODE_ENTRY(record, (uint64_t)(uintptr_t)&tape);
+    if (pop_rt_field_get(encoded, 1) != 0) return 11; if (tape.length != 4) return 20 + (int)tape.length;
+    if (tape.events[0].tag != 0 || tape.events[1].tag != 1 || tape.events[2].tag != 21 || tape.events[3].tag != 2) return 13;
+    uint64_t decoded = DECODE_ENTRY((uint64_t)(uintptr_t)&tape); uint64_t decoded_record = pop_rt_field_get(decoded, 2);
+    if (pop_rt_field_get(decoded, 1) != 0 || pop_rt_field_get(decoded_record, 1) != 42) return 2;
+    tape.position = 0; tape.events[1].tag = 14; uint64_t malformed = DECODE_ENTRY((uint64_t)(uintptr_t)&tape);
+    if (pop_rt_field_get(malformed, 1) != 1 || pop_rt_field_get(malformed, 2) != 0) return 3;
+    tape.position = 0; tape.events[1].tag = 1; tape.events[1].label = (const uint8_t *)"bad";
+    malformed = DECODE_ENTRY((uint64_t)(uintptr_t)&tape);
+    if (pop_rt_field_get(malformed, 1) != 1 || pop_rt_field_get(malformed, 2) != 0) return 5;
+    tape.position = 0; tape.events[1].label = (const uint8_t *)"age"; tape.events[2].scalar = UINT64_C(0x100000000);
+    malformed = DECODE_ENTRY((uint64_t)(uintptr_t)&tape);
+    if (pop_rt_field_get(malformed, 1) != 1 || pop_rt_field_get(malformed, 2) != 0) return 6;
+    Tape limited = {0}; limited.fail = 2; uint64_t limit = ENCODE_ENTRY(record, (uint64_t)(uintptr_t)&limited);
+    if (pop_rt_field_get(limit, 1) != 1 || pop_rt_field_get(limit, 2) != 1) return 7;
+    Tape failed = {0}; failed.fail = 1; uint64_t capability = ENCODE_ENTRY(record, (uint64_t)(uintptr_t)&failed);
+    if (pop_rt_field_get(capability, 1) != 1 || pop_rt_field_get(capability, 2) != 0) return 8;
+    failed.fail = 3; capability = ENCODE_ENTRY(record, (uint64_t)(uintptr_t)&failed);
+    if (pop_rt_field_get(capability, 1) != 1 || pop_rt_field_get(capability, 2) != 2) return 4;
+    return 0;
+}
+"#
+    .replace("ENCODE_ENTRY", &format!("pop_b7_s{}", encode_entry.raw()))
+    .replace("DECODE_ENTRY", &format!("pop_b7_s{}", decode_entry.raw()));
+    let result = link_llvm_with_c_fixture(&llvm, &fixture, "codec-record-roundtrip");
+    assert!(
+        result.status.success(),
+        "LLVM codec fixture failed with {:?}: {llvm}",
+        result.status.code()
+    );
+}
+
+#[test]
+fn generated_codec_closed_graph_verifies_symmetric_static_lowering() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/codecGraph.pop",
+        "namespace Example.Models\n\
+         @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+         public enum Color\n\
+             Red\n\
+             Blue\n\
+         end\n\
+         @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+         public union Choice\n\
+             Named(name: String)\n\
+             Numbered(value: UInt32)\n\
+         end\n\
+         @RetainMetadata(use = Metadata.Use.Codec, schemaVersion = 1)\n\
+         public record Envelope\n\
+             color: Color?\n\
+             choice: Choice\n\
+             pair: (Boolean, Float32)\n\
+             names: List<String>\n\
+             numbers: Array<UInt16>\n\
+             bytes: Bytes\n\
+         end\n\
+         public function colorSchema(): Codec.Schema<Color>\n\
+             return ColorSchema\n\
+         end\n\
+         public function choiceSchema(): Codec.Schema<Choice>\n\
+             return ChoiceSchema\n\
+         end\n\
+         public function envelopeSchema(): Codec.Schema<Envelope>\n\
+             return EnvelopeSchema\n\
+         end\n",
+    )
+    .expect("closed codec graph source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(7),
+        NamespaceId::from_raw(7),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir = lower_hir_bubble(front_end.hir().expect("codec graph HIR"), front_end.types())
+        .expect("codec graph MIR");
+    assert_eq!(mir.generated_codec_adapters().len(), 3);
+    for adapter in mir.generated_codec_adapters() {
+        let mut encode_entries = 0;
+        let mut decode_entries = 0;
+        for instruction in mir
+            .functions()
+            .iter()
+            .flat_map(|function| function.blocks())
+            .flat_map(|block| block.instructions())
+        {
+            match instruction.kind() {
+                MirInstructionKind::CodecEncode { adapter: found, .. }
+                    if *found == adapter.symbol() =>
+                {
+                    encode_entries += 1;
+                }
+                MirInstructionKind::CodecDecode { adapter: found, .. }
+                    if *found == adapter.symbol() =>
+                {
+                    decode_entries += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(encode_entries, 1, "one generated encode entry");
+        assert_eq!(decode_entries, 1, "one generated decode entry");
+    }
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("codec graph LLVM lowering");
+    if let Err(error) = module.verify() {
+        panic!("codec graph LLVM must verify: {error:?}\n{module}");
+    }
+    let llvm = module.to_string();
+    for tag in [3_u8, 4, 5, 6, 10, 11, 12, 13, 20, 21, 25, 26] {
+        assert!(
+            llvm.contains(&format!("i8 {tag}")),
+            "missing tag {tag}: {llvm}"
+        );
+    }
+    assert!(
+        llvm.contains("i8 10, i32 0, ptr null, i64 0, i64 65536, i64 0"),
+        "writer-local failures must discard a staged aggregate through the closed write-event ABI: {llvm}"
+    );
+    assert!(!llvm.contains("retained-adapters.popc"), "{llvm}");
+    assert!(!llvm.to_ascii_lowercase().contains("registry"), "{llvm}");
 }

@@ -3,7 +3,7 @@ use pop_resolve::{ModuleInput, ResolutionDatabase, SymbolSpace, build_declaratio
 use pop_source::SourceFile;
 use pop_syntax::{
     NodeKind, parse_class_declaration, parse_class_method_body, parse_file, parse_function_body,
-    parse_function_signature,
+    parse_function_signature, parse_interface_declaration,
 };
 use pop_types::{
     BodyChecker, ClassMethodDispatch, SemanticType, SignatureResolver, TypedExpressionKind,
@@ -222,6 +222,123 @@ fn class_construction_and_field_access_resolve_native_ids() {
         TypedExpressionKind::DirectMethodCall { method, receiver, .. }
             if *method == definition.methods()[1].method() && receiver.is_some()
     ));
+}
+
+const CHECKED_CAST_SOURCE: &str = "namespace Example\n\
+public interface Reader\n\
+    function read(): Int\n\
+end\n\
+public class FileReader implements Reader\n\
+    public function FileReader:read(): Int\n\
+        return 1\n\
+    end\n\
+end\n\
+public function cast(reader: Reader): FileReader?\n\
+    return FileReader(reader)\n\
+end\n";
+
+#[test]
+fn interface_to_class_target_call_has_the_optional_target_type() {
+    let module = ModuleId::from_raw(0);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/checkedCast.pop",
+        CHECKED_CAST_SOURCE,
+    )
+    .expect("source");
+    let syntax = parse_file(&source);
+    let interface_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::InterfaceDeclaration)
+        .expect("interface");
+    let class_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::ClassDeclaration)
+        .expect("class");
+    let function_node = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+        .expect("function");
+    let interface_syntax =
+        parse_interface_declaration(&source, &syntax, interface_node).expect("interface syntax");
+    let class_syntax = parse_class_declaration(&source, &syntax, class_node).expect("class syntax");
+    let function_syntax =
+        parse_function_signature(&source, &syntax, function_node).expect("signature");
+    let body =
+        parse_function_body(&source, &syntax, function_node, &function_syntax).expect("body");
+    let indexed = build_declaration_index(&[ModuleInput::new(
+        module,
+        BubbleId::from_raw(0),
+        &source,
+        &syntax,
+    )]);
+    let interface_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.Reader", SymbolSpace::Type)[0]
+        .symbol();
+    let class_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.FileReader", SymbolSpace::Type)[0]
+        .symbol();
+    let function_symbol = indexed
+        .index()
+        .declaration_by_qualified_name("Example.cast", SymbolSpace::Value)[0]
+        .symbol();
+    let database = ResolutionDatabase::new(indexed.into_index());
+    let mut resolver =
+        SignatureResolver::new(&database, embedded_bootstrap_schema().expect("bootstrap"));
+    let interface = resolver
+        .define_interface(module, interface_symbol, &interface_syntax)
+        .definition()
+        .expect("interface")
+        .clone();
+    let class = resolver
+        .define_class(module, class_symbol, &class_syntax)
+        .definition()
+        .expect("class")
+        .clone();
+    let signature = resolver
+        .resolve(module, function_symbol, &function_syntax)
+        .signature()
+        .expect("signature")
+        .clone();
+    let signatures = std::collections::BTreeMap::from([(function_symbol, signature.clone())]);
+    let result = BodyChecker::new(module, &mut resolver, &signatures).check(&signature, &body);
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}",
+        result.diagnostic_snapshot()
+    );
+    let body = result.body().expect("typed checked-cast body");
+    let TypedStatementKind::Return { values } = body.statements()[0].kind() else {
+        panic!("checked-cast return");
+    };
+    let optional_target = resolver
+        .arena_mut()
+        .optional(class.type_id())
+        .expect("optional target");
+    assert_eq!(values[0].type_id(), optional_target);
+    assert!(matches!(
+        values[0].kind(),
+        TypedExpressionKind::CheckedNominalCast {
+            source_interface,
+            source_type,
+            target_class,
+            target_type,
+            ..
+        } if *source_interface == interface.interface()
+            && *source_type == interface.type_id()
+            && *target_class == class.class()
+            && *target_type == class.type_id()
+    ));
+    assert_eq!(interface.interface(), class.interfaces()[0].interface());
 }
 
 #[test]

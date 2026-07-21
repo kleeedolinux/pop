@@ -36,7 +36,7 @@ impl GenerationalRuntime {
         Ok(reference)
     }
 
-    fn immutable_bytes(&self, reference: ManagedReference) -> Option<&[u8]> {
+    pub(super) fn immutable_bytes(&self, reference: ManagedReference) -> Option<&[u8]> {
         let allocation = &self.nursery.objects.get(&reference)?.allocation;
         (allocation.type_id == IMMUTABLE_BYTES_RUNTIME_TYPE_ID
             && allocation.object_map.slot_count() == 0)

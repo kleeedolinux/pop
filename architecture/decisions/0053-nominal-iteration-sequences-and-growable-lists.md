@@ -55,6 +55,23 @@ metamethod, no truthy sentinel, and no dynamic fallback. User types participate
 only through an explicit, statically verified implementation of the exact
 generic interface instance.
 
+The reserved member-effect contract is closed and exact under ADR 0022:
+
+- `Iterable<T>.iterator()` has the upper summary `effects[]`;
+- `Iterator<T>.iterator()` has the upper summary `effects[]`; and
+- `Iterator<T>.next()` has the upper summary
+  `effects[WritesManagedReference,MayTrap,GcSafePoint]`.
+
+An implementation may use a strict subset of its member's upper summary but
+may never widen it. The `next()` bound is the smallest fixed summary required
+by the accepted adapters: checked iterator-state arithmetic may trap, generic
+state replacement may require a managed-reference barrier, and a transitive
+iterator loop may poll at a GC safe point. It does not authorize allocation,
+unwinding, roots, suspension, blocking, FFI, unsafe memory, ambient I/O, or
+compiler queries. Interface calls use these reserved summaries directly; they
+never infer a public contract by unioning whichever implementations happen to
+be present in the current Bubble.
+
 ### Generalized `for`
 
 The generalized source form is:
@@ -239,6 +256,7 @@ optimization remains permitted after semantic correctness is established.
 ## Required conformance tests
 
 - stable protocol/step identities, exact generic arity, case/method slots, and
+  exact reserved upper effect summaries with implementation subset checks, and
   no dynamic lookup;
 - parser/type tests for one expression, one/tuple bindings, immutable scope,
   exact protocol implementation, optional items, and malformed/dynamic forms;

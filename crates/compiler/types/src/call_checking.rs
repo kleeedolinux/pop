@@ -40,6 +40,12 @@ enum FfiPointerOperationKind {
     Require,
 }
 
+pub(crate) enum CheckedNominalCastInvocation {
+    NotCast,
+    Rejected,
+    Accepted(TypedExpression),
+}
+
 impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
     pub(crate) fn check_call(
         &mut self,
@@ -251,6 +257,29 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     .check_ffi_unsafe_invocation(path, arguments, None, span)
                     .map(CheckedInvocation::Value);
             }
+            if matches!(path.as_slice(), [namespace, operation]
+                if matches!(namespace.as_str(), "Bytes" | "Text")
+                    && matches!(operation.as_str(), "view" | "slice" | "length" | "get" | "toBytes" | "toString"))
+                && path
+                    .first()
+                    .is_some_and(|namespace| self.binding_by_name(namespace).is_none())
+                && self
+                    .resolver
+                    .database()
+                    .resolve(
+                        self.module,
+                        &path.join("."),
+                        SymbolSpace::Value,
+                        callee.span(),
+                    )
+                    .symbols()
+                    .iter()
+                    .all(|symbol| !self.signatures.contains_key(symbol))
+            {
+                return self
+                    .check_view_invocation(path, arguments, span)
+                    .map(CheckedInvocation::Value);
+            }
             if path.as_slice() == ["String"] {
                 return self
                     .check_string_conversion(arguments, span)
@@ -264,6 +293,13 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 return self
                     .check_numeric_conversion(path, arguments, span)
                     .map(CheckedInvocation::Value);
+            }
+            match self.check_checked_nominal_cast_invocation(path, callee.span(), arguments, span) {
+                CheckedNominalCastInvocation::NotCast => {}
+                CheckedNominalCastInvocation::Rejected => return None,
+                CheckedNominalCastInvocation::Accepted(value) => {
+                    return Some(CheckedInvocation::Value(value));
+                }
             }
             if matches!(
                 path.as_slice(),
@@ -363,6 +399,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             is_async,
             parameters,
             results,
+            lifetime_summary,
             ..
         }) = self.resolver.arena().get(callee.type_id()).cloned()
         else {
@@ -407,6 +444,17 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 .unwrap_or_else(|| ExpectedExpressionType::plain(parameter_type));
             let typed = self.check_expression_expected(argument, Some(expected))?;
             self.require_same_type(parameter_type, typed.type_id(), typed.span(), callee.span());
+            if self.resolver.arena().view_kind(typed.type_id()).is_some()
+                && lifetime_summary.parameter_retention().get(index)
+                    != Some(&crate::ParameterRetention::DoesNotRetain)
+            {
+                self.diagnostics
+                    .push(type_diagnostics::borrowed_view_retained(
+                        typed.span(),
+                        "View",
+                        "CallableMayRetain",
+                    ));
+            }
             typed_arguments.push(typed);
         }
         let dispatch = self.call_dispatch(callee);
@@ -421,6 +469,374 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             },
             results,
         }))
+    }
+
+    fn check_view_invocation(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> Option<TypedExpression> {
+        let [namespace, operation] = path else {
+            return None;
+        };
+        let kind = match namespace.as_str() {
+            "Bytes" => crate::ViewKind::Bytes,
+            "Text" => crate::ViewKind::Text,
+            _ => return None,
+        };
+        let view_type = self
+            .resolver
+            .arena_mut()
+            .intern(SemanticType::Builtin {
+                definition: kind.type_definition(),
+                arguments: Vec::new(),
+            })
+            .ok()?;
+        let owner_type = match kind {
+            crate::ViewKind::Bytes => self.ffi_builtin_type("Bytes", Vec::new())?,
+            crate::ViewKind::Text => self.resolver.arena().source_type("String")?,
+        };
+        let integer = self.resolver.arena().source_type("Int")?;
+
+        match operation.as_str() {
+            "view" => {
+                self.require_view_arity(span, path, arguments, 1)?;
+                let lender = self.check_expression_expected(
+                    &arguments[0],
+                    Some(ExpectedExpressionType::plain(owner_type)),
+                )?;
+                self.require_same_type(owner_type, lender.type_id(), lender.span(), span);
+                let provenance = self.lender_for_expression(&lender);
+                let borrow = self.fresh_view_borrow(provenance);
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ViewCreate {
+                        kind,
+                        lender: Box::new(lender),
+                        borrow,
+                    },
+                    type_id: view_type,
+                    span,
+                })
+            }
+            "slice" => {
+                self.require_view_arity(span, path, arguments, 3)?;
+                let supplied = self.check_expression(&arguments[0])?;
+                let parent_view = if supplied.type_id() == owner_type {
+                    let provenance = self.lender_for_expression(&supplied);
+                    let borrow = self.fresh_view_borrow(provenance);
+                    TypedExpression {
+                        kind: TypedExpressionKind::ViewCreate {
+                            kind,
+                            lender: Box::new(supplied),
+                            borrow,
+                        },
+                        type_id: view_type,
+                        span: arguments[0].span(),
+                    }
+                } else {
+                    self.require_same_type(view_type, supplied.type_id(), supplied.span(), span);
+                    supplied
+                };
+                let parent = self.view_borrow_for_expression(&parent_view).or_else(|| {
+                    self.diagnostics
+                        .push(type_diagnostics::borrowed_view_escape(
+                            parent_view.span(),
+                            namespace,
+                            "MissingLenderProvenance",
+                        ));
+                    None
+                })?;
+                let start = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(integer)),
+                )?;
+                let length = self.check_expression_expected(
+                    &arguments[2],
+                    Some(ExpectedExpressionType::plain(integer)),
+                )?;
+                self.require_same_type(integer, start.type_id(), start.span(), span);
+                self.require_same_type(integer, length.type_id(), length.span(), span);
+                let borrow = self.fresh_view_borrow(parent.lender());
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ViewSlice {
+                        kind,
+                        view: Box::new(parent_view),
+                        start: Box::new(start),
+                        length: Box::new(length),
+                        parent,
+                        borrow,
+                    },
+                    type_id: view_type,
+                    span,
+                })
+            }
+            "length" => {
+                self.require_view_arity(span, path, arguments, 1)?;
+                let view = self.check_expression_expected(
+                    &arguments[0],
+                    Some(ExpectedExpressionType::plain(view_type)),
+                )?;
+                self.require_same_type(view_type, view.type_id(), view.span(), span);
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ViewLength {
+                        kind,
+                        view: Box::new(view),
+                    },
+                    type_id: integer,
+                    span,
+                })
+            }
+            "get" if kind == crate::ViewKind::Bytes => {
+                self.require_view_arity(span, path, arguments, 2)?;
+                let view = self.check_expression_expected(
+                    &arguments[0],
+                    Some(ExpectedExpressionType::plain(view_type)),
+                )?;
+                let index = self.check_expression_expected(
+                    &arguments[1],
+                    Some(ExpectedExpressionType::plain(integer)),
+                )?;
+                self.require_same_type(view_type, view.type_id(), view.span(), span);
+                self.require_same_type(integer, index.type_id(), index.span(), span);
+                let byte = self.resolver.arena().source_type("Byte")?;
+                let result = self.resolver.arena_mut().optional(byte).ok()?;
+                Some(TypedExpression {
+                    kind: TypedExpressionKind::ViewGetByte {
+                        view: Box::new(view),
+                        index: Box::new(index),
+                    },
+                    type_id: result,
+                    span,
+                })
+            }
+            "toBytes" if kind == crate::ViewKind::Bytes => {
+                self.check_view_materialize(path, arguments, span, kind, view_type, owner_type)
+            }
+            "toString" if kind == crate::ViewKind::Text => {
+                self.check_view_materialize(path, arguments, span, kind, view_type, owner_type)
+            }
+            _ => {
+                self.diagnostics.push(type_diagnostics::invalid_operator(
+                    span,
+                    "view operation",
+                    path.join("."),
+                ));
+                None
+            }
+        }
+    }
+
+    fn check_view_materialize(
+        &mut self,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+        kind: crate::ViewKind,
+        view_type: TypeId,
+        result_type: TypeId,
+    ) -> Option<TypedExpression> {
+        self.require_view_arity(span, path, arguments, 1)?;
+        let view = self.check_expression_expected(
+            &arguments[0],
+            Some(ExpectedExpressionType::plain(view_type)),
+        )?;
+        self.require_same_type(view_type, view.type_id(), view.span(), span);
+        let allocation_site = self.fresh_allocation_site();
+        Some(TypedExpression {
+            kind: TypedExpressionKind::ViewMaterialize {
+                kind,
+                view: Box::new(view),
+                allocation_site,
+            },
+            type_id: result_type,
+            span,
+        })
+    }
+
+    fn require_view_arity(
+        &mut self,
+        span: SourceSpan,
+        path: &[String],
+        arguments: &[ExpressionSyntax],
+        expected: usize,
+    ) -> Option<()> {
+        if arguments.len() == expected {
+            return Some(());
+        }
+        self.diagnostics.push(type_diagnostics::wrong_value_arity(
+            span,
+            path.join("."),
+            expected,
+            arguments.len(),
+        ));
+        None
+    }
+
+    fn check_checked_nominal_cast_invocation(
+        &mut self,
+        path: &[String],
+        target_span: SourceSpan,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> CheckedNominalCastInvocation {
+        let name = path.join(".");
+        let resolution =
+            self.resolver
+                .database()
+                .resolve(self.module, &name, SymbolSpace::Type, target_span);
+        if !resolution.diagnostics().is_empty() {
+            return CheckedNominalCastInvocation::NotCast;
+        }
+        let Some(symbol) = resolution.symbol() else {
+            return CheckedNominalCastInvocation::NotCast;
+        };
+        let Some(target_type) = self.resolver.declaration_type(symbol) else {
+            return CheckedNominalCastInvocation::NotCast;
+        };
+        let Some(target) = self.resolver.class_definition(symbol).cloned() else {
+            self.diagnostics
+                .push(type_diagnostics::invalid_checked_cast_target(
+                    target_span,
+                    target_type,
+                    self.type_name(target_type),
+                    "NotNamedClass",
+                ));
+            return CheckedNominalCastInvocation::Rejected;
+        };
+        self.check_checked_nominal_cast_target(&target, target_type, target_span, arguments, span)
+    }
+
+    pub(crate) fn check_generic_checked_nominal_cast_invocation(
+        &mut self,
+        path: &[String],
+        type_arguments: &[pop_syntax::TypeSyntax],
+        target_span: SourceSpan,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> CheckedNominalCastInvocation {
+        let name = path.join(".");
+        let resolution =
+            self.resolver
+                .database()
+                .resolve(self.module, &name, SymbolSpace::Type, target_span);
+        if !resolution.diagnostics().is_empty() {
+            return CheckedNominalCastInvocation::NotCast;
+        }
+        let Some(symbol) = resolution.symbol() else {
+            return CheckedNominalCastInvocation::NotCast;
+        };
+        let Some(template) = self.resolver.class_definition(symbol).cloned() else {
+            return CheckedNominalCastInvocation::NotCast;
+        };
+        if template.type_parameters().len() != type_arguments.len() {
+            self.diagnostics.push(type_diagnostics::wrong_type_arity(
+                span,
+                &name,
+                u16::try_from(template.type_parameters().len()).unwrap_or(u16::MAX),
+                type_arguments.len(),
+            ));
+            return CheckedNominalCastInvocation::Rejected;
+        }
+        let Some(enclosing) = self.signature_stack.last().cloned() else {
+            return CheckedNominalCastInvocation::Rejected;
+        };
+        let mut resolved_arguments = Vec::with_capacity(type_arguments.len());
+        for argument in type_arguments {
+            let (resolved, diagnostics) =
+                self.resolver
+                    .resolve_annotation(self.module, argument, &enclosing);
+            self.diagnostics.extend(diagnostics);
+            let Some(type_id) = resolved.and_then(|resolved| resolved.type_id()) else {
+                return CheckedNominalCastInvocation::Rejected;
+            };
+            resolved_arguments.push(type_id);
+        }
+        let Some(target) = self.resolver.instantiate_class(symbol, &resolved_arguments) else {
+            return CheckedNominalCastInvocation::Rejected;
+        };
+        let target_type = target.type_id();
+        self.check_checked_nominal_cast_target(&target, target_type, target_span, arguments, span)
+    }
+
+    fn check_checked_nominal_cast_target(
+        &mut self,
+        target: &crate::ClassDefinition,
+        target_type: TypeId,
+        target_span: SourceSpan,
+        arguments: &[ExpressionSyntax],
+        span: SourceSpan,
+    ) -> CheckedNominalCastInvocation {
+        if self.resolver.arena().contains_type_parameter(target_type) {
+            self.diagnostics
+                .push(type_diagnostics::invalid_checked_cast_target(
+                    target_span,
+                    target_type,
+                    self.type_name(target_type),
+                    "NotFullyApplied",
+                ));
+            return CheckedNominalCastInvocation::Rejected;
+        }
+        if arguments.len() != 1 {
+            self.diagnostics.push(type_diagnostics::wrong_value_arity(
+                span,
+                "checked nominal cast",
+                1,
+                arguments.len(),
+            ));
+            return CheckedNominalCastInvocation::Rejected;
+        }
+        let Some(value) = self.check_expression(&arguments[0]) else {
+            return CheckedNominalCastInvocation::Rejected;
+        };
+        let source_type = value.type_id();
+        let Some(SemanticType::Interface {
+            interface: source_interface,
+            ..
+        }) = self.resolver.arena().get(source_type)
+        else {
+            self.diagnostics
+                .push(type_diagnostics::invalid_checked_cast_operand(
+                    value.span(),
+                    source_type,
+                    self.type_name(source_type),
+                    target_type,
+                    self.type_name(target_type),
+                    target_span,
+                ));
+            return CheckedNominalCastInvocation::Rejected;
+        };
+        let source_interface = *source_interface;
+        if !target
+            .interfaces()
+            .iter()
+            .any(|implementation| implementation.interface_type() == source_type)
+        {
+            self.diagnostics
+                .push(type_diagnostics::incompatible_checked_cast(
+                    span,
+                    source_type,
+                    self.type_name(source_type),
+                    target_type,
+                    self.type_name(target_type),
+                    target_span,
+                ));
+            return CheckedNominalCastInvocation::Rejected;
+        }
+        let Some(result_type) = self.resolver.arena_mut().optional(target_type).ok() else {
+            return CheckedNominalCastInvocation::Rejected;
+        };
+        CheckedNominalCastInvocation::Accepted(TypedExpression {
+            kind: TypedExpressionKind::CheckedNominalCast {
+                value: Box::new(value),
+                source_interface,
+                source_type,
+                target_class: target.class(),
+                target_type,
+            },
+            type_id: result_type,
+            span,
+        })
     }
 
     pub(crate) fn check_ffi_handle_invocation(
@@ -987,6 +1403,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 parameters,
                 results,
                 effects,
+                ..
             }) => {
                 !is_async
                     && !effects.contains(crate::Effect::Suspends)
@@ -1766,16 +2183,19 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                     parameters: left_parameters,
                     results: left_results,
                     effects: left_effects,
+                    lifetime_summary: left_lifetime,
                 },
                 SemanticType::Function {
                     is_async: right_async,
                     parameters: right_parameters,
                     results: right_results,
                     effects: right_effects,
+                    lifetime_summary: right_lifetime,
                 },
             ) => {
                 left_async == right_async
                     && left_effects == right_effects
+                    && left_lifetime == right_lifetime
                     && self.infer_type_lists(&left_parameters, &right_parameters, substitutions)
                     && self.infer_type_lists(&left_results, &right_results, substitutions)
             }

@@ -21,6 +21,7 @@ use crate::lowering::{
     async_nested_poll_name, initialize_array_outputs, native_runtime_symbol,
     replace_llvm_value_token,
 };
+use crate::module_lowering::ClassRuntimeKeys;
 
 #[derive(Clone, Copy)]
 struct FrameValue {
@@ -91,6 +92,9 @@ impl FrameLayout {
 }
 
 fn frame_width(type_id: TypeId, types: &TypeArena) -> Result<u32, LlvmLoweringError> {
+    if crate::views::is_view_type(type_id, types) {
+        return Ok(4);
+    }
     if let Some(inner) = optional_inner_type(types, type_id) {
         return 1_u32
             .checked_add(frame_width(inner, types)?)
@@ -106,6 +110,10 @@ fn append_type_roots(
     types: &TypeArena,
     roots: &mut BTreeSet<u32>,
 ) -> Result<(), LlvmLoweringError> {
+    if crate::views::is_view_type(type_id, types) {
+        roots.insert(offset);
+        return Ok(());
+    }
     if let Some(inner) = optional_inner_type(types, type_id) {
         return append_type_roots(inner, offset + 1, types, roots);
     }
@@ -124,9 +132,12 @@ pub(crate) fn lower_async_function(
     foreign_functions: &BTreeMap<SymbolId, &pop_mir::MirForeignFunction>,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
+    class_runtime_keys: &ClassRuntimeKeys,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
+    callback_plan: &crate::ffi_callback::CallbackPlan,
+    codec_adapters: &[pop_mir::MirGeneratedCodecAdapter],
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     lower_async_parts(
         bubble,
@@ -142,9 +153,12 @@ pub(crate) fn lower_async_function(
         foreign_functions,
         options,
         field_layout,
+        class_runtime_keys,
         record_fields,
         record_field_types,
         string_literals,
+        callback_plan,
+        codec_adapters,
     )
 }
 
@@ -157,10 +171,13 @@ pub(crate) fn lower_async_nested(
     foreign_functions: &BTreeMap<SymbolId, &pop_mir::MirForeignFunction>,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
+    class_runtime_keys: &ClassRuntimeKeys,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
     self_capture_slots: &BTreeSet<u32>,
+    callback_plan: &crate::ffi_callback::CallbackPlan,
+    codec_adapters: &[pop_mir::MirGeneratedCodecAdapter],
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     lower_async_parts(
         bubble,
@@ -176,9 +193,12 @@ pub(crate) fn lower_async_nested(
         foreign_functions,
         options,
         field_layout,
+        class_runtime_keys,
         record_fields,
         record_field_types,
         string_literals,
+        callback_plan,
+        codec_adapters,
     )
 }
 
@@ -197,9 +217,12 @@ fn lower_async_parts(
     foreign_functions: &BTreeMap<SymbolId, &pop_mir::MirForeignFunction>,
     options: LlvmLoweringOptions,
     field_layout: &BTreeMap<FieldId, u32>,
+    class_runtime_keys: &ClassRuntimeKeys,
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
     record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     string_literals: &BTreeMap<String, String>,
+    callback_plan: &crate::ffi_callback::CallbackPlan,
+    codec_adapters: &[pop_mir::MirGeneratedCodecAdapter],
 ) -> Result<Vec<PrivateFunction>, LlvmLoweringError> {
     let layout = FrameLayout::new(blocks, types)?;
     let value_types = layout
@@ -239,6 +262,7 @@ fn lower_async_parts(
         })
         .collect::<BTreeMap<_, _>>();
     poll_blocks[0].terminator = poll_dispatch(&suspend_states);
+    let view_lenders = crate::views::collect_lenders(blocks, &value_types, types);
     for block in blocks {
         let mut instructions = Vec::new();
         if let Some(scrutinee) = switch_payload_sources.get(&block.block()) {
@@ -275,6 +299,7 @@ fn lower_async_parts(
                 ffi_layouts,
                 foreign_functions,
                 field_layout,
+                class_runtime_keys,
                 record_fields,
                 record_field_types,
                 string_literals,
@@ -283,6 +308,9 @@ fn lower_async_parts(
                 }),
                 &BTreeSet::new(),
                 &direct_scalar_arrays,
+                callback_plan,
+                codec_adapters,
+                &view_lenders,
                 options,
             )?;
             for (value, alias) in aliases {
@@ -618,6 +646,33 @@ fn lower_async_terminator(
             types,
             instructions,
         ),
+        MirTerminator::CodecErrorSwitch { scrutinee, arms } => {
+            let value = format!("%codec_error_switch_b{}", block.block().raw());
+            load_frame_value(
+                instructions,
+                "%pop_frame",
+                &value,
+                layout.value(*scrutinee)?,
+                types,
+            )?;
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "    i64 {}, label %b{}",
+                        arm.case().raw(),
+                        arm.target().raw()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(format!(
+                "switch i64 {value}, label %pop_invalid_switch_b{} [\n{cases}\n  ]\n  pop_invalid_switch_b{}:\n  call void @{}()\n  unreachable",
+                block.block().raw(),
+                block.block().raw(),
+                native_runtime_symbol(RuntimeOperation::Trap)
+            ))
+        }
     }
 }
 
@@ -945,6 +1000,20 @@ fn store_frame_value(
     types: &TypeArena,
     label: &str,
 ) -> Result<(), LlvmLoweringError> {
+    if crate::views::is_view_type(layout.type_id, types) {
+        for field in 0_u32..4 {
+            let part = format!("%{label}_view_{field}");
+            instructions.push(format!(
+                "{part} = extractvalue {{ i64, i64, i64, i64 }} {value}, {field}"
+            ));
+            instructions.push(format!(
+                "call i8 @{}(i64 {frame}, i32 {}, i64 {part})",
+                native_runtime_symbol(RuntimeOperation::TaskFrameStore),
+                layout.offset + field
+            ));
+        }
+        return Ok(());
+    }
     if let Some(inner) = optional_inner_type(types, layout.type_id) {
         let ty = llvm_type(inner, types)?;
         let present = format!("%{label}_present");
@@ -998,6 +1067,30 @@ fn load_frame_value(
     layout: FrameValue,
     types: &TypeArena,
 ) -> Result<(), LlvmLoweringError> {
+    if crate::views::is_view_type(layout.type_id, types) {
+        let mut aggregate = "zeroinitializer".to_owned();
+        for field in 0_u32..4 {
+            let output = format!("{result}_view_{field}_out");
+            let raw = format!("{result}_view_{field}_raw");
+            instructions.push(format!("{output} = alloca i64"));
+            instructions.push(format!(
+                "{result}_view_{field}_ok = call i8 @{}(i64 {frame}, i32 {}, ptr {output})",
+                native_runtime_symbol(RuntimeOperation::TaskFrameLoad),
+                layout.offset + field
+            ));
+            instructions.push(format!("{raw} = load i64, ptr {output}"));
+            let next = if field == 3 {
+                result.to_owned()
+            } else {
+                format!("{result}_view_{field}_aggregate")
+            };
+            instructions.push(format!(
+                "{next} = insertvalue {{ i64, i64, i64, i64 }} {aggregate}, i64 {raw}, {field}"
+            ));
+            aggregate = next;
+        }
+        return Ok(());
+    }
     if let Some(inner) = optional_inner_type(types, layout.type_id) {
         let present_raw = format!("{result}_present_raw");
         let present_out = format!("{result}_present_out");

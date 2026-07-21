@@ -7,12 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BlockId, BorrowRegionId, BuiltinTypeId, ClassId, ErrorId, FieldId, InterfaceId, MethodId,
-    NestedFunctionId, NominalInterfaceId, SymbolId, SymbolIdentity, TypeId, UnionCaseId, ValueId,
+    BlockId, BorrowRegionId, BuiltinTypeId, ClassId, EnumCaseId, ErrorId, FieldId, InterfaceId,
+    LifetimeId, MethodId, NestedFunctionId, NominalInterfaceId, SymbolId, SymbolIdentity, TypeId,
+    UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot};
 use pop_types::{
-    FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena, embedded_bootstrap_schema,
+    CODEC_ERROR_TYPE_ID, FloatKind, IntegerKind, PrimitiveType, SemanticType, TypeArena,
+    embedded_bootstrap_schema,
 };
 
 use crate::ir::*;
@@ -25,6 +27,99 @@ use crate::render::{float_kind_text, integer_kind_text};
 use crate::{
     MirFfiCallbackAbi, MirFfiCallbackFingerprint, MirFfiCallbackSignature, MirFfiLayoutCatalog,
 };
+
+fn canonical_arguments_match(
+    arena: &TypeArena,
+    types: &[TypeId],
+    canonical: &[pop_types::CanonicalTypeIdentity],
+    catalog: &MirNominalReferenceCatalog,
+) -> bool {
+    types.len() == canonical.len()
+        && types
+            .iter()
+            .zip(canonical)
+            .all(|(type_id, canonical)| canonical_type_matches(arena, *type_id, canonical, catalog))
+}
+
+fn canonical_type_matches(
+    arena: &TypeArena,
+    type_id: TypeId,
+    canonical: &pop_types::CanonicalTypeIdentity,
+    catalog: &MirNominalReferenceCatalog,
+) -> bool {
+    use pop_types::CanonicalTypeIdentity as Canonical;
+    match (arena.get(type_id), canonical) {
+        (Some(SemanticType::Primitive(found)), Canonical::Primitive(expected)) => found == expected,
+        (Some(SemanticType::Record(_)), Canonical::Record(_)) => true,
+        (Some(SemanticType::Class { .. }), Canonical::Class(expected)) => catalog
+            .classes()
+            .iter()
+            .find(|reference| reference.type_id() == type_id)
+            .is_some_and(|reference| reference.identity().canonical() == expected),
+        (Some(SemanticType::Interface { .. }), Canonical::Interface(expected)) => catalog
+            .interfaces()
+            .iter()
+            .find(|reference| reference.type_id() == type_id)
+            .is_some_and(|reference| reference.identity().canonical() == expected),
+        (Some(SemanticType::Tuple(found)), Canonical::Tuple(expected))
+        | (Some(SemanticType::Union(found)), Canonical::Union(expected)) => {
+            canonical_arguments_match(arena, found, expected, catalog)
+        }
+        (
+            Some(SemanticType::Function {
+                is_async,
+                parameters,
+                results,
+                effects,
+                lifetime_summary,
+            }),
+            Canonical::Function {
+                is_async: expected_async,
+                parameters: expected_parameters,
+                results: expected_results,
+                effects: expected_effects,
+                lifetime_summary: expected_lifetime,
+            },
+        ) => {
+            is_async == expected_async
+                && effects == expected_effects
+                && lifetime_summary == expected_lifetime
+                && canonical_arguments_match(arena, parameters, expected_parameters, catalog)
+                && canonical_arguments_match(arena, results, expected_results, catalog)
+        }
+        (Some(SemanticType::Array(found)), Canonical::Array(expected))
+        | (Some(SemanticType::Optional(found)), Canonical::Optional(expected)) => {
+            canonical_type_matches(arena, *found, expected, catalog)
+        }
+        (
+            Some(SemanticType::Table {
+                key: found_key,
+                value: found_value,
+            }),
+            Canonical::Table {
+                key: expected_key,
+                value: expected_value,
+            },
+        ) => {
+            canonical_type_matches(arena, *found_key, expected_key, catalog)
+                && canonical_type_matches(arena, *found_value, expected_value, catalog)
+        }
+        (
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }),
+            Canonical::Builtin {
+                definition: expected_definition,
+                arguments: expected_arguments,
+            },
+        ) => {
+            definition == expected_definition
+                && canonical_arguments_match(arena, arguments, expected_arguments, catalog)
+        }
+        _ => false,
+    }
+}
 
 /// Verifies canonical MIR block, value, type, call, and return invariants.
 ///
@@ -48,6 +143,11 @@ pub fn verify_mir_bubble(
                 ),
             )
         })
+        .collect();
+    let lifetime_summaries: BTreeMap<_, _> = bubble
+        .functions()
+        .iter()
+        .map(|function| (function.symbol(), function.lifetime_summary()))
         .collect();
     let mut errors = Vec::new();
     let mut referenced_identities = BTreeSet::new();
@@ -138,6 +238,7 @@ pub fn verify_mir_bubble(
         .collect();
     let callback_signatures = verified_callback_signatures(bubble, arena);
     let mut reference_signatures = BTreeMap::new();
+    let mut reference_lifetime_summaries = BTreeMap::new();
     for reference in &bubble.function_references {
         let signature = (
             reference.parameters.clone(),
@@ -147,6 +248,7 @@ pub fn verify_mir_bubble(
         let duplicate_signature = reference_signatures
             .insert(reference.identity, signature)
             .is_some();
+        reference_lifetime_summaries.insert(reference.identity, reference.lifetime_summary());
         if duplicate_signature || !referenced_identities.insert(reference.identity) {
             errors.push(MirVerificationError::DuplicateReferencedFunction(
                 reference.identity,
@@ -155,6 +257,16 @@ pub fn verify_mir_bubble(
         if !bubble.dependencies.contains(&reference.identity.bubble()) {
             errors.push(MirVerificationError::UnknownReferencedFunction(
                 reference.identity,
+            ));
+        }
+        if !callable_lifetime_summary_is_valid(
+            arena,
+            reference.parameters(),
+            reference.results(),
+            reference.lifetime_summary(),
+        ) {
+            errors.push(MirVerificationError::InvalidCallableLifetimeSummary(
+                reference.identity().symbol(),
             ));
         }
     }
@@ -171,6 +283,8 @@ pub fn verify_mir_bubble(
             arena,
             &schema,
             &signatures,
+            &lifetime_summaries,
+            &reference_lifetime_summaries,
             &reference_signatures,
             &method_signatures,
             &nested_signatures,
@@ -188,6 +302,8 @@ pub fn verify_mir_bubble(
             arena,
             &schema,
             &signatures,
+            &lifetime_summaries,
+            &reference_lifetime_summaries,
             &reference_signatures,
             &method_signatures,
             &nested_signatures,
@@ -323,6 +439,7 @@ struct DeclaredField {
 }
 
 struct MirSchema<'mir> {
+    generated_codec_adapters: BTreeMap<SymbolId, &'mir MirGeneratedCodecAdapter>,
     records: BTreeMap<SymbolId, &'mir MirRecordDeclaration>,
     unions: BTreeMap<SymbolId, &'mir MirUnionDeclaration>,
     errors: BTreeMap<ErrorId, &'mir MirErrorDeclaration>,
@@ -340,6 +457,7 @@ impl<'mir> MirSchema<'mir> {
         errors: &mut Vec<MirVerificationError>,
     ) -> Self {
         let mut schema = Self {
+            generated_codec_adapters: BTreeMap::new(),
             records: BTreeMap::new(),
             unions: BTreeMap::new(),
             errors: BTreeMap::new(),
@@ -349,6 +467,90 @@ impl<'mir> MirSchema<'mir> {
             fields: BTreeMap::new(),
         };
         let mut symbols = BTreeSet::new();
+        for reference in bubble.nominal_references().interfaces() {
+            let valid_owner = bubble
+                .dependencies
+                .contains(&reference.identity().definition().bubble());
+            let valid_type = matches!(
+                arena.get(reference.type_id()),
+                Some(SemanticType::Interface { interface, arguments })
+                    if *interface == reference.interface()
+                        && arguments == reference.identity().arguments()
+                        && reference.identity().canonical().definition()
+                            == reference.identity().definition()
+                        && canonical_arguments_match(
+                            arena,
+                            arguments,
+                            reference.identity().canonical().arguments(),
+                            bubble.nominal_references(),
+                        )
+                        && arguments
+                            .iter()
+                            .all(|argument| !arena.contains_type_parameter(*argument))
+            );
+            if !valid_owner || !valid_type {
+                errors.push(MirVerificationError::InvalidNominalReference(
+                    reference.identity().definition(),
+                ));
+                continue;
+            }
+            if schema
+                .interfaces
+                .insert(reference.interface(), reference.declaration())
+                .is_some()
+            {
+                errors.push(MirVerificationError::InvalidNominalReference(
+                    reference.identity().definition(),
+                ));
+            }
+        }
+        for reference in bubble.nominal_references().classes() {
+            let valid_owner = bubble
+                .dependencies
+                .contains(&reference.identity().definition().bubble());
+            let valid_type = matches!(
+                arena.get(reference.type_id()),
+                Some(SemanticType::Class { class, arguments })
+                    if *class == reference.class()
+                        && arguments == reference.identity().arguments()
+                        && reference.identity().canonical().definition()
+                            == reference.identity().definition()
+                        && canonical_arguments_match(
+                            arena,
+                            arguments,
+                            reference.identity().canonical().arguments(),
+                            bubble.nominal_references(),
+                        )
+                        && arguments
+                            .iter()
+                            .all(|argument| !arena.contains_type_parameter(*argument))
+            );
+            let valid_base = match (reference.base(), reference.base_type()) {
+                (None, None) => true,
+                (Some(base), Some(base_type)) => bubble
+                    .nominal_references()
+                    .classes()
+                    .iter()
+                    .find(|candidate| candidate.class() == base && candidate.type_id() == base_type)
+                    .is_some_and(MirClassReference::is_open),
+                _ => false,
+            };
+            if !valid_owner || !valid_type || !valid_base {
+                errors.push(MirVerificationError::InvalidNominalReference(
+                    reference.identity().definition(),
+                ));
+                continue;
+            }
+            if schema
+                .classes
+                .insert(reference.class(), reference.declaration())
+                .is_some()
+            {
+                errors.push(MirVerificationError::InvalidNominalReference(
+                    reference.identity().definition(),
+                ));
+            }
+        }
         for declaration in &bubble.declarations {
             if !symbols.insert(declaration.symbol) {
                 errors.push(MirVerificationError::DuplicateDeclaration(
@@ -464,8 +666,132 @@ impl<'mir> MirSchema<'mir> {
                 }
             }
         }
+        for adapter in bubble.generated_codec_adapters() {
+            let local_target = adapter.target().bubble() == bubble.bubble();
+            let target_type_matches = if local_target {
+                bubble.declarations().iter().any(|declaration| {
+                    declaration.symbol() == adapter.target().symbol()
+                        && match declaration.kind() {
+                            MirDeclarationKind::Record(value) => {
+                                value.type_id() == adapter.target_type
+                            }
+                            MirDeclarationKind::Enum(value) => {
+                                value.type_id() == adapter.target_type
+                            }
+                            MirDeclarationKind::Union(value) => {
+                                value.type_id() == adapter.target_type
+                            }
+                            _ => false,
+                        }
+                })
+            } else {
+                bubble.dependencies.contains(&adapter.target().bubble())
+                    && match arena.get(adapter.target_type()) {
+                        Some(SemanticType::Record(fields)) => {
+                            fields.len() == adapter.members().len()
+                                && fields.iter().zip(adapter.members()).enumerate().all(
+                                    |(ordinal, ((name, type_id), member))| {
+                                        member.ordinal() as usize == ordinal
+                                            && member.name() == name
+                                            && matches!(
+                                                member.member(),
+                                                MirGeneratedCodecMemberId::Field(_)
+                                            )
+                                            && member.types() == [*type_id]
+                                            && member.discriminant().is_none()
+                                    },
+                                )
+                        }
+                        Some(SemanticType::Enum { .. }) => adapter
+                            .members()
+                            .iter()
+                            .enumerate()
+                            .all(|(ordinal, member)| {
+                                member.ordinal() as usize == ordinal
+                                    && matches!(
+                                        member.member(),
+                                        MirGeneratedCodecMemberId::EnumCase(_)
+                                    )
+                                    && member.types().is_empty()
+                                    && member.discriminant().is_some()
+                            }),
+                        Some(SemanticType::TaggedUnion { arguments, .. })
+                            if arguments.is_empty() =>
+                        {
+                            adapter
+                                .members()
+                                .iter()
+                                .enumerate()
+                                .all(|(ordinal, member)| {
+                                    member.ordinal() as usize == ordinal
+                                        && matches!(
+                                            member.member(),
+                                            MirGeneratedCodecMemberId::UnionCase(_)
+                                        )
+                                        && member
+                                            .types()
+                                            .iter()
+                                            .all(|type_id| arena.get(*type_id).is_some())
+                                        && member.discriminant().is_none()
+                                })
+                        }
+                        _ => false,
+                    }
+            };
+            let schema_type_matches = matches!(
+                arena.get(adapter.schema_type()),
+                Some(SemanticType::Builtin { definition, arguments })
+                    if definition.raw() == 118 && arguments.as_slice() == [adapter.target_type]
+            );
+            if (!local_target && !bubble.dependencies.contains(&adapter.target().bubble()))
+                || !target_type_matches
+                || !schema_type_matches
+                || adapter.schema_version == 0
+                || adapter.projection_sha256.len() != 64
+                || schema
+                    .generated_codec_adapters
+                    .insert(adapter.symbol(), adapter)
+                    .is_some()
+            {
+                errors.push(MirVerificationError::InvalidGeneratedCodecSchema(
+                    adapter.symbol(),
+                ));
+            }
+        }
+        schema.verify_class_ancestry(errors);
         schema.verify_interface_implementations(method_signatures, errors);
         schema
+    }
+
+    fn verify_class_ancestry(&self, errors: &mut Vec<MirVerificationError>) {
+        for class in self.classes.values() {
+            let Some(base) = class.base() else {
+                continue;
+            };
+            if !self
+                .classes
+                .get(&base)
+                .is_some_and(|declaration| declaration.is_open())
+            {
+                errors.push(MirVerificationError::InvalidClassAncestry {
+                    class: class.class(),
+                    base: Some(base),
+                });
+                continue;
+            }
+            let mut current = Some(class.class());
+            let mut visited = BTreeSet::new();
+            while let Some(identity) = current {
+                if !visited.insert(identity) {
+                    errors.push(MirVerificationError::InvalidClassAncestry {
+                        class: class.class(),
+                        base: Some(base),
+                    });
+                    break;
+                }
+                current = self.classes.get(&identity).and_then(|entry| entry.base());
+            }
+        }
     }
 
     fn verify_interface_implementations(
@@ -499,10 +825,11 @@ impl<'mir> MirSchema<'mir> {
                             && mapping.slot() == required.slot()
                             && class.methods().contains(&mapping.class_method())
                             && method_signatures.get(&mapping.class_method()).is_some_and(
-                                |(parameters, results, _)| {
+                                |(parameters, results, effects)| {
                                     parameters.first() == Some(&class.type_id())
                                         && parameters[1..] == required.parameters()[..]
                                         && results == required.results()
+                                        && effects.is_subset_of(required.effects())
                                 },
                             )
                     })
@@ -606,17 +933,23 @@ fn verify_builtin_interface_implementations(
                 } else {
                     None
                 };
+                let expected_effects = protocol
+                    .method_effects(implementation.interface(), mapping.protocol_method())
+                    .map(lower_effect_summary);
                 protocol_methods.insert(mapping.protocol_method())
                     && expected_protocol_methods.contains(&mapping.protocol_method())
                     && class.methods().contains(&mapping.class_method())
-                    && expected_result.is_some_and(|expected_result| {
-                        method_signatures.get(&mapping.class_method()).is_some_and(
-                            |(parameters, results, _)| {
-                                parameters.as_slice() == [class.type_id()]
-                                    && results.as_slice() == [expected_result]
-                            },
-                        )
-                    })
+                    && expected_result.zip(expected_effects).is_some_and(
+                        |(expected_result, expected_effects)| {
+                            method_signatures.get(&mapping.class_method()).is_some_and(
+                                |(parameters, results, effects)| {
+                                    parameters.as_slice() == [class.type_id()]
+                                        && results.as_slice() == [expected_result]
+                                        && effects.is_subset_of(expected_effects)
+                                },
+                            )
+                        },
+                    )
             })
             && expected_protocol_methods
                 .iter()
@@ -637,6 +970,8 @@ fn verify_function(
     arena: &TypeArena,
     schema: &MirSchema<'_>,
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
+    lifetime_summaries: &BTreeMap<SymbolId, &pop_types::CallableLifetimeSummary>,
+    reference_lifetime_summaries: &BTreeMap<SymbolIdentity, &pop_types::CallableLifetimeSummary>,
     reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     nested_signatures: &BTreeMap<(SymbolId, NestedFunctionId), &MirNestedFunction>,
@@ -647,6 +982,16 @@ fn verify_function(
     ffi_layouts: &MirFfiLayoutCatalog,
     errors: &mut Vec<MirVerificationError>,
 ) {
+    if !callable_lifetime_summary_is_valid(
+        arena,
+        function.parameters(),
+        function.results(),
+        function.lifetime_summary(),
+    ) {
+        errors.push(MirVerificationError::InvalidCallableLifetimeSummary(
+            function.symbol(),
+        ));
+    }
     verify_entry_parameters(function, errors);
     let blocks = collect_blocks(function, errors);
     let cleanup_targets: BTreeSet<_> = function
@@ -738,6 +1083,15 @@ fn verify_function(
         blocks: &blocks,
     };
     verify_ffi_borrows(function, &blocks, errors);
+    verify_view_lifetimes(
+        function,
+        arena,
+        &blocks,
+        &definitions.values,
+        lifetime_summaries,
+        reference_lifetime_summaries,
+        errors,
+    );
     let expected_suspend_frames = expected_suspend_frame_slots(function);
     let mut safe_points = BTreeSet::new();
     let mut coroutine_states = BTreeSet::new();
@@ -864,6 +1218,7 @@ fn verify_function(
             );
             let expected_effects = expected_instruction_effects(
                 instruction,
+                schema,
                 signatures,
                 reference_signatures,
                 method_signatures,
@@ -935,6 +1290,7 @@ fn verify_entry_parameters(function: &MirFunction, errors: &mut Vec<MirVerificat
 
 fn expected_instruction_effects(
     instruction: &MirInstruction,
+    schema: &MirSchema<'_>,
     signatures: &BTreeMap<SymbolId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     reference_signatures: &BTreeMap<SymbolIdentity, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
     method_signatures: &BTreeMap<MethodId, (Vec<TypeId>, Vec<TypeId>, MirEffectSummary)>,
@@ -955,6 +1311,30 @@ fn expected_instruction_effects(
         MirInstructionKind::CallDirectMethod { method, .. } => method_signatures
             .get(method)
             .map(|(_, _, effects)| *effects)
+            .unwrap_or_default(),
+        MirInstructionKind::CallInterface {
+            interface,
+            method,
+            slot,
+            ..
+        } => schema
+            .interfaces
+            .get(interface)
+            .and_then(|declaration| {
+                declaration
+                    .methods()
+                    .iter()
+                    .find(|candidate| candidate.method() == *method && candidate.slot() == *slot)
+            })
+            .map(MirInterfaceMethod::effects)
+            .unwrap_or_default(),
+        MirInstructionKind::CallBuiltinInterface {
+            interface, method, ..
+        } => embedded_bootstrap_schema()
+            .ok()
+            .and_then(|schema| schema.iteration_protocol())
+            .and_then(|protocol| protocol.method_effects(*interface, *method))
+            .map(lower_effect_summary)
             .unwrap_or_default(),
         MirInstructionKind::CallIndirect {
             declared_effects, ..
@@ -1147,6 +1527,7 @@ fn verify_gc_contracts(
                         if !expected.contains(root)
                             || !facts.values.get(root).is_some_and(|type_id| {
                                 is_managed_reference_type_id(*type_id, Some(arena))
+                                    || is_view_type(arena, *type_id)
                             })
                         {
                             errors.push(MirVerificationError::InvalidStackMapRoot {
@@ -1887,6 +2268,7 @@ pub(crate) fn terminator_targets(terminator: &MirTerminator) -> Vec<BlockId> {
         } => vec![*when_true, *when_false],
         MirTerminator::UnionSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
         MirTerminator::ErrorSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
+        MirTerminator::CodecErrorSwitch { arms, .. } => arms.iter().map(|arm| arm.target).collect(),
         MirTerminator::Suspend {
             resume,
             cancellation,
@@ -1915,6 +2297,7 @@ pub(crate) fn terminator_operands(terminator: &MirTerminator) -> Vec<ValueId> {
         MirTerminator::ConditionalBranch { condition, .. } => vec![*condition],
         MirTerminator::UnionSwitch { scrutinee, .. } => vec![*scrutinee],
         MirTerminator::ErrorSwitch { scrutinee, .. } => vec![*scrutinee],
+        MirTerminator::CodecErrorSwitch { scrutinee, .. } => vec![*scrutinee],
         MirTerminator::Suspend { operation, .. } => match operation {
             MirSuspendOperation::Task { task, .. } => vec![*task],
         },
@@ -2200,6 +2583,645 @@ fn verify_ffi_borrows(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ViewLifetimeFacts {
+    kind: MirViewKind,
+    provenance: MirViewLender,
+    parent: Option<LifetimeId>,
+    root: ValueId,
+    view: ValueId,
+}
+
+fn verify_view_lifetimes(
+    function: &MirFunction,
+    arena: &TypeArena,
+    blocks: &BTreeMap<BlockId, &MirBlock>,
+    values: &BTreeMap<ValueId, TypeId>,
+    lifetime_summaries: &BTreeMap<SymbolId, &pop_types::CallableLifetimeSummary>,
+    reference_lifetime_summaries: &BTreeMap<SymbolIdentity, &pop_types::CallableLifetimeSummary>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let Some(entry) = function.blocks().first() else {
+        return;
+    };
+    if function.parameter_view_borrows().len() != function.parameters().len() {
+        errors.push(MirVerificationError::InvalidViewLifetime {
+            lifetime: LifetimeId::from_raw(u32::MAX),
+        });
+        return;
+    }
+
+    let mut lifetimes = BTreeMap::<LifetimeId, ViewLifetimeFacts>::new();
+    let mut view_lifetimes = BTreeMap::<ValueId, LifetimeId>::new();
+    let mut initial = BTreeSet::new();
+    for (index, ((parameter_type, argument), borrow)) in function
+        .parameters()
+        .iter()
+        .zip(entry.arguments())
+        .zip(function.parameter_view_borrows())
+        .enumerate()
+    {
+        let expected_kind = view_kind_for_type(arena, *parameter_type);
+        match (expected_kind, borrow) {
+            (None, None) => {}
+            (Some(kind), Some(borrow))
+                if borrow.kind() == kind
+                    && borrow.lender_provenance()
+                        == MirViewLender::Parameter {
+                            index: u32::try_from(index).unwrap_or(u32::MAX),
+                        } =>
+            {
+                let lifetime = borrow.borrow_lifetime();
+                let facts = ViewLifetimeFacts {
+                    kind,
+                    provenance: borrow.lender_provenance(),
+                    parent: None,
+                    root: argument.value(),
+                    view: argument.value(),
+                };
+                if lifetimes.insert(lifetime, facts).is_some() {
+                    push_view_lifetime_error(lifetime, errors);
+                }
+                view_lifetimes.insert(argument.value(), lifetime);
+                initial.insert(lifetime);
+            }
+            (_, Some(borrow)) => push_view_lifetime_error(borrow.borrow_lifetime(), errors),
+            (Some(_), None) => errors.push(MirVerificationError::InvalidViewEscape {
+                value: argument.value(),
+            }),
+        }
+    }
+
+    let mut materializations = BTreeSet::new();
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            match instruction.kind() {
+                MirInstructionKind::ViewCreate {
+                    kind,
+                    lender,
+                    lender_provenance,
+                    borrow_lifetime,
+                    ..
+                } => {
+                    let facts = ViewLifetimeFacts {
+                        kind: *kind,
+                        provenance: *lender_provenance,
+                        parent: None,
+                        root: *lender,
+                        view: instruction.result(),
+                    };
+                    if lifetimes.insert(*borrow_lifetime, facts).is_some() {
+                        push_view_lifetime_error(*borrow_lifetime, errors);
+                    }
+                    if view_lifetimes
+                        .insert(instruction.result(), *borrow_lifetime)
+                        .is_some()
+                    {
+                        errors.push(MirVerificationError::InvalidViewEscape {
+                            value: instruction.result(),
+                        });
+                    }
+                    verify_created_view_provenance(
+                        function,
+                        entry,
+                        instruction,
+                        *lender,
+                        *lender_provenance,
+                        errors,
+                    );
+                }
+                MirInstructionKind::ViewSlice {
+                    kind,
+                    view,
+                    lender_provenance,
+                    parent_lifetime,
+                    borrow_lifetime,
+                    ..
+                } => {
+                    let parent = lifetimes.get(parent_lifetime).copied();
+                    let valid_parent = parent.is_some_and(|parent| {
+                        parent.kind == *kind
+                            && parent.provenance == *lender_provenance
+                            && view_lifetimes.get(view) == Some(parent_lifetime)
+                    });
+                    let (root, provenance) = parent
+                        .map(|parent| (parent.root, parent.provenance))
+                        .unwrap_or((*view, *lender_provenance));
+                    let facts = ViewLifetimeFacts {
+                        kind: *kind,
+                        provenance,
+                        parent: Some(*parent_lifetime),
+                        root,
+                        view: instruction.result(),
+                    };
+                    if !valid_parent || lifetimes.insert(*borrow_lifetime, facts).is_some() {
+                        push_view_lifetime_error(*borrow_lifetime, errors);
+                    }
+                    view_lifetimes.insert(instruction.result(), *borrow_lifetime);
+                }
+                MirInstructionKind::ViewMaterialize {
+                    allocation_site, ..
+                } => {
+                    if !materializations.insert(*allocation_site) {
+                        errors.push(MirVerificationError::InvalidViewOperation {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::CallDirect {
+                    function: callee,
+                    arguments,
+                    lifetime_summary,
+                    view_result: Some(result),
+                    ..
+                } => {
+                    let expected = lifetime_summaries.get(callee).copied();
+                    let source = arguments
+                        .get(usize::from(result.source_argument()))
+                        .copied();
+                    let parent = source.and_then(|source| {
+                        view_lifetimes
+                            .get(&source)
+                            .and_then(|lifetime| lifetimes.get(lifetime))
+                            .copied()
+                    });
+                    let valid = expected == Some(lifetime_summary)
+                        && lifetime_summary.result_provenance().first()
+                            == Some(&pop_types::ResultProvenance::ReturnsAlias(
+                                result.source_argument(),
+                            ))
+                        && view_kind_for_type(arena, instruction.result_type())
+                            == Some(result.kind())
+                        && parent.is_some_and(|parent| parent.kind == result.kind());
+                    let Some(parent) = parent else {
+                        push_view_lifetime_error(result.borrow_lifetime(), errors);
+                        continue;
+                    };
+                    let facts = ViewLifetimeFacts {
+                        kind: result.kind(),
+                        provenance: parent.provenance,
+                        parent: view_lifetimes
+                            .get(&source.expect("validated source"))
+                            .copied(),
+                        root: parent.root,
+                        view: instruction.result(),
+                    };
+                    if !valid || lifetimes.insert(result.borrow_lifetime(), facts).is_some() {
+                        push_view_lifetime_error(result.borrow_lifetime(), errors);
+                    }
+                    view_lifetimes.insert(instruction.result(), result.borrow_lifetime());
+                }
+                MirInstructionKind::CallReferenced {
+                    function: callee,
+                    arguments,
+                    lifetime_summary,
+                    view_result: Some(result),
+                    ..
+                } => {
+                    let expected = reference_lifetime_summaries.get(callee).copied();
+                    let source = arguments
+                        .get(usize::from(result.source_argument()))
+                        .copied();
+                    let parent = source.and_then(|source| {
+                        view_lifetimes
+                            .get(&source)
+                            .and_then(|lifetime| lifetimes.get(lifetime))
+                            .copied()
+                    });
+                    let valid = expected == Some(lifetime_summary)
+                        && lifetime_summary.result_provenance().first()
+                            == Some(&pop_types::ResultProvenance::ReturnsAlias(
+                                result.source_argument(),
+                            ))
+                        && view_kind_for_type(arena, instruction.result_type())
+                            == Some(result.kind())
+                        && parent.is_some_and(|parent| parent.kind == result.kind());
+                    let Some(parent) = parent else {
+                        push_view_lifetime_error(result.borrow_lifetime(), errors);
+                        continue;
+                    };
+                    let facts = ViewLifetimeFacts {
+                        kind: result.kind(),
+                        provenance: parent.provenance,
+                        parent: view_lifetimes
+                            .get(&source.expect("validated source"))
+                            .copied(),
+                        root: parent.root,
+                        view: instruction.result(),
+                    };
+                    if !valid || lifetimes.insert(result.borrow_lifetime(), facts).is_some() {
+                        push_view_lifetime_error(result.borrow_lifetime(), errors);
+                    }
+                    view_lifetimes.insert(instruction.result(), result.borrow_lifetime());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    propagate_view_block_arguments(function, blocks, values, arena, &mut view_lifetimes, errors);
+    verify_view_escapes(
+        function,
+        &lifetimes,
+        &view_lifetimes,
+        lifetime_summaries,
+        reference_lifetime_summaries,
+        errors,
+    );
+    verify_view_lifetime_dataflow(
+        function,
+        blocks,
+        &lifetimes,
+        &view_lifetimes,
+        initial,
+        errors,
+    );
+}
+
+fn verify_created_view_provenance(
+    function: &MirFunction,
+    entry: &MirBlock,
+    instruction: &MirInstruction,
+    lender: ValueId,
+    provenance: MirViewLender,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if let MirViewLender::Parameter { index } = provenance {
+        let index = usize::try_from(index).unwrap_or(usize::MAX);
+        if function.parameters().get(index).is_none()
+            || entry
+                .arguments()
+                .get(index)
+                .map(|argument| argument.value())
+                != Some(lender)
+        {
+            errors.push(MirVerificationError::InvalidViewOperation {
+                instruction: instruction.result(),
+            });
+        }
+    }
+}
+
+fn propagate_view_block_arguments(
+    function: &MirFunction,
+    blocks: &BTreeMap<BlockId, &MirBlock>,
+    values: &BTreeMap<ValueId, TypeId>,
+    arena: &TypeArena,
+    view_lifetimes: &mut BTreeMap<ValueId, LifetimeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.blocks() {
+            let MirTerminator::Branch { target, arguments } = block.terminator() else {
+                continue;
+            };
+            let Some(target) = blocks.get(target) else {
+                continue;
+            };
+            for (source, target) in arguments.iter().zip(target.arguments()) {
+                let Some(lifetime) = view_lifetimes.get(source).copied() else {
+                    continue;
+                };
+                match view_lifetimes.get(&target.value()).copied() {
+                    None => {
+                        view_lifetimes.insert(target.value(), lifetime);
+                        changed = true;
+                    }
+                    Some(found) if found != lifetime => {
+                        push_view_lifetime_error(lifetime, errors);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    for (value, type_id) in values {
+        if view_kind_for_type(arena, *type_id).is_some() && !view_lifetimes.contains_key(value) {
+            errors.push(MirVerificationError::InvalidViewEscape { value: *value });
+        }
+    }
+}
+
+fn verify_view_escapes(
+    function: &MirFunction,
+    lifetimes: &BTreeMap<LifetimeId, ViewLifetimeFacts>,
+    view_lifetimes: &BTreeMap<ValueId, LifetimeId>,
+    lifetime_summaries: &BTreeMap<SymbolId, &pop_types::CallableLifetimeSummary>,
+    reference_lifetime_summaries: &BTreeMap<SymbolIdentity, &pop_types::CallableLifetimeSummary>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    for block in function.blocks() {
+        for instruction in block.instructions() {
+            for operand in instruction.operands() {
+                if !view_lifetimes.contains_key(&operand) {
+                    continue;
+                }
+                let permitted = matches!(
+                    instruction.kind(),
+                    MirInstructionKind::ViewSlice { view, .. }
+                        | MirInstructionKind::ViewLength { view, .. }
+                        | MirInstructionKind::ViewMaterialize { view, .. }
+                        if *view == operand
+                ) || matches!(
+                    instruction.kind(),
+                    MirInstructionKind::ViewGetByte { view, .. } if *view == operand
+                ) || view_call_argument_does_not_retain(
+                    instruction.kind(),
+                    operand,
+                    lifetime_summaries,
+                    reference_lifetime_summaries,
+                );
+                if !permitted {
+                    errors.push(MirVerificationError::InvalidViewEscape { value: operand });
+                }
+            }
+        }
+        match block.terminator() {
+            MirTerminator::Branch { arguments, .. } => {
+                for argument in arguments {
+                    if !view_lifetimes.contains_key(argument) {
+                        continue;
+                    }
+                }
+            }
+            MirTerminator::Return { values } => {
+                for (index, value) in values.iter().copied().enumerate() {
+                    if view_lifetimes.contains_key(&value)
+                        && !view_return_is_exact_parameter_alias(
+                            function,
+                            index,
+                            value,
+                            lifetimes,
+                            view_lifetimes,
+                        )
+                    {
+                        errors.push(MirVerificationError::InvalidViewEscape { value });
+                    }
+                }
+            }
+            terminator => {
+                for value in terminator_operands(terminator) {
+                    if view_lifetimes.contains_key(&value) {
+                        errors.push(MirVerificationError::InvalidViewEscape { value });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn view_call_argument_does_not_retain(
+    kind: &MirInstructionKind,
+    operand: ValueId,
+    lifetime_summaries: &BTreeMap<SymbolId, &pop_types::CallableLifetimeSummary>,
+    reference_lifetime_summaries: &BTreeMap<SymbolIdentity, &pop_types::CallableLifetimeSummary>,
+) -> bool {
+    let (arguments, summary) = match kind {
+        MirInstructionKind::CallDirect {
+            function,
+            arguments,
+            lifetime_summary,
+            ..
+        } => (
+            arguments,
+            lifetime_summaries
+                .get(function)
+                .copied()
+                .filter(|expected| *expected == lifetime_summary),
+        ),
+        MirInstructionKind::CallReferenced {
+            function,
+            arguments,
+            lifetime_summary,
+            ..
+        } => (
+            arguments,
+            reference_lifetime_summaries
+                .get(function)
+                .copied()
+                .filter(|expected| *expected == lifetime_summary),
+        ),
+        _ => return false,
+    };
+    arguments
+        .iter()
+        .position(|argument| *argument == operand)
+        .and_then(|index| summary.and_then(|summary| summary.parameter_retention().get(index)))
+        == Some(&pop_types::ParameterRetention::DoesNotRetain)
+}
+
+fn view_return_is_exact_parameter_alias(
+    function: &MirFunction,
+    result_index: usize,
+    value: ValueId,
+    lifetimes: &BTreeMap<LifetimeId, ViewLifetimeFacts>,
+    view_lifetimes: &BTreeMap<ValueId, LifetimeId>,
+) -> bool {
+    let Some(pop_types::ResultProvenance::ReturnsAlias(source)) = function
+        .lifetime_summary()
+        .result_provenance()
+        .get(result_index)
+    else {
+        return false;
+    };
+    let Some(source_value) = function
+        .blocks()
+        .first()
+        .and_then(|entry| entry.arguments().get(usize::from(*source)))
+        .map(|argument| argument.value())
+    else {
+        return false;
+    };
+    view_lifetimes
+        .get(&value)
+        .and_then(|lifetime| lifetimes.get(lifetime))
+        .is_some_and(|facts| {
+            facts.root == source_value
+                && facts.provenance
+                    == MirViewLender::Parameter {
+                        index: u32::from(*source),
+                    }
+        })
+}
+
+fn verify_view_lifetime_dataflow(
+    function: &MirFunction,
+    blocks: &BTreeMap<BlockId, &MirBlock>,
+    lifetimes: &BTreeMap<LifetimeId, ViewLifetimeFacts>,
+    view_lifetimes: &BTreeMap<ValueId, LifetimeId>,
+    initial: BTreeSet<LifetimeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let entry = function
+        .blocks()
+        .first()
+        .map(MirBlock::block)
+        .unwrap_or(BlockId::from_raw(0));
+    let mut incoming = BTreeMap::from([(entry, initial)]);
+    let mut pending = vec![entry];
+    while let Some(block_id) = pending.pop() {
+        let Some(block) = blocks.get(&block_id) else {
+            continue;
+        };
+        let mut state = incoming.get(&block_id).cloned().unwrap_or_default();
+        transfer_view_lifetimes(block, &mut state);
+        for target in block_targets(block) {
+            let target_state = incoming.entry(target).or_default();
+            let old_len = target_state.len();
+            target_state.extend(state.iter().copied());
+            if target_state.len() != old_len {
+                pending.push(target);
+            }
+        }
+    }
+
+    for block in function.blocks() {
+        let mut state = incoming.get(&block.block()).cloned().unwrap_or_default();
+        for instruction in block.instructions() {
+            for operand in instruction.operands() {
+                if let Some(lifetime) = view_lifetimes.get(&operand)
+                    && !state.contains(lifetime)
+                {
+                    push_view_lifetime_error(*lifetime, errors);
+                }
+            }
+            if let Some(borrow_lifetime) = instruction_view_lifetime(instruction.kind()) {
+                if !state.insert(borrow_lifetime) {
+                    push_view_lifetime_error(borrow_lifetime, errors);
+                }
+                if let Some(parent) = lifetimes
+                    .get(&borrow_lifetime)
+                    .and_then(|facts| facts.parent)
+                    && !state.contains(&parent)
+                {
+                    push_view_lifetime_error(borrow_lifetime, errors);
+                }
+            } else {
+                match instruction.kind() {
+                    MirInstructionKind::ViewEnd { borrow_lifetime } => {
+                        let child_is_live = lifetimes.iter().any(|(lifetime, facts)| {
+                            facts.parent == Some(*borrow_lifetime) && state.contains(lifetime)
+                        });
+                        if child_is_live || !state.remove(borrow_lifetime) {
+                            push_view_lifetime_error(*borrow_lifetime, errors);
+                        }
+                    }
+                    MirInstructionKind::GcSafePoint { roots, .. } => {
+                        verify_view_roots(&state, lifetimes, roots, errors);
+                    }
+                    MirInstructionKind::CallForeign { roots, .. } => {
+                        verify_view_roots(&state, lifetimes, roots, errors);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let exits = block_targets(block).is_empty();
+        if (exits || matches!(block.terminator(), MirTerminator::Suspend { .. }))
+            && !state.is_empty()
+        {
+            for lifetime in state {
+                push_view_lifetime_error(lifetime, errors);
+            }
+        }
+    }
+}
+
+fn transfer_view_lifetimes(block: &MirBlock, state: &mut BTreeSet<LifetimeId>) {
+    for instruction in block.instructions() {
+        if let Some(lifetime) = instruction_view_lifetime(instruction.kind()) {
+            state.insert(lifetime);
+        } else if let MirInstructionKind::ViewEnd { borrow_lifetime } = instruction.kind() {
+            state.remove(borrow_lifetime);
+        }
+    }
+}
+
+fn instruction_view_lifetime(kind: &MirInstructionKind) -> Option<LifetimeId> {
+    match kind {
+        MirInstructionKind::ViewCreate {
+            borrow_lifetime, ..
+        }
+        | MirInstructionKind::ViewSlice {
+            borrow_lifetime, ..
+        } => Some(*borrow_lifetime),
+        MirInstructionKind::CallDirect {
+            view_result: Some(result),
+            ..
+        }
+        | MirInstructionKind::CallReferenced {
+            view_result: Some(result),
+            ..
+        } => Some(result.borrow_lifetime()),
+        _ => None,
+    }
+}
+
+fn verify_view_roots(
+    active: &BTreeSet<LifetimeId>,
+    lifetimes: &BTreeMap<LifetimeId, ViewLifetimeFacts>,
+    roots: &[ValueId],
+    errors: &mut Vec<MirVerificationError>,
+) {
+    for lifetime in active {
+        let Some(facts) = lifetimes.get(lifetime) else {
+            push_view_lifetime_error(*lifetime, errors);
+            continue;
+        };
+        if !matches!(facts.provenance, MirViewLender::Constant { .. })
+            && !roots.contains(&facts.root)
+        {
+            errors.push(MirVerificationError::InvalidViewRoot {
+                lifetime: *lifetime,
+                lender: facts.root,
+            });
+        }
+    }
+}
+
+fn view_kind_for_type(arena: &TypeArena, type_id: TypeId) -> Option<MirViewKind> {
+    [MirViewKind::Bytes, MirViewKind::Text]
+        .into_iter()
+        .find(|kind| view_type_matches(arena, type_id, *kind))
+}
+
+fn callable_lifetime_summary_is_valid(
+    arena: &TypeArena,
+    parameters: &[TypeId],
+    results: &[TypeId],
+    summary: &pop_types::CallableLifetimeSummary,
+) -> bool {
+    summary.is_canonical_for(parameters.len(), results.len())
+        && parameters
+            .iter()
+            .zip(summary.parameter_retention())
+            .all(|(parameter, retention)| {
+                view_kind_for_type(arena, *parameter).is_none()
+                    || *retention == pop_types::ParameterRetention::DoesNotRetain
+            })
+        && results
+            .iter()
+            .zip(summary.result_provenance())
+            .all(|(result, provenance)| {
+                let Some(kind) = view_kind_for_type(arena, *result) else {
+                    return true;
+                };
+                let pop_types::ResultProvenance::ReturnsAlias(source) = provenance else {
+                    return false;
+                };
+                parameters.get(usize::from(*source)).is_some_and(|source| {
+                    view_type_matches(arena, *source, kind)
+                        || view_lender_type_matches(arena, *source, kind)
+                })
+            })
+}
+
+fn push_view_lifetime_error(lifetime: LifetimeId, errors: &mut Vec<MirVerificationError>) {
+    errors.push(MirVerificationError::InvalidViewLifetime { lifetime });
+}
+
 fn merge_borrow_state(
     target: BlockId,
     state: &BTreeMap<BorrowRegionId, (ValueId, FfiBorrowKind)>,
@@ -2261,11 +3283,13 @@ fn callback_signature_is_valid(arena: &TypeArena, type_id: TypeId) -> bool {
         parameters,
         results,
         effects,
+        lifetime_summary,
     }) = arena.get(type_id)
     else {
         return false;
     };
     !is_async
+        && callable_lifetime_summary_is_valid(arena, parameters, results, lifetime_summary)
         && !effects.contains(pop_types::Effect::Suspends)
         && results.len() <= 1
         && parameters
@@ -2383,6 +3407,7 @@ fn verify_instruction_types(
             | MirInstructionKind::Pin { .. }
             | MirInstructionKind::Unpin { .. }
             | MirInstructionKind::WriteBarrier { .. }
+            | MirInstructionKind::ViewEnd { .. }
     );
     if requires_effect_form && instruction.has_result() {
         errors.push(MirVerificationError::InvalidInstructionType {
@@ -2403,9 +3428,25 @@ fn verify_instruction_types(
             | MirInstructionKind::FfiCallbackOpenOwned { .. }
             | MirInstructionKind::CallCallbackPair { .. }
             | MirInstructionKind::FfiCallbackCloseOwned { .. }
+            | MirInstructionKind::ViewCreate { .. }
+            | MirInstructionKind::ViewSlice { .. }
+            | MirInstructionKind::ViewLength { .. }
+            | MirInstructionKind::ViewGetByte { .. }
+            | MirInstructionKind::ViewMaterialize { .. }
     );
     if requires_value_form && !instruction.has_result() {
         let error = if matches!(
+            instruction.kind(),
+            MirInstructionKind::ViewCreate { .. }
+                | MirInstructionKind::ViewSlice { .. }
+                | MirInstructionKind::ViewLength { .. }
+                | MirInstructionKind::ViewGetByte { .. }
+                | MirInstructionKind::ViewMaterialize { .. }
+        ) {
+            MirVerificationError::InvalidViewOperation {
+                instruction: instruction.result(),
+            }
+        } else if matches!(
             instruction.kind(),
             MirInstructionKind::FfiBytesBorrow { .. }
                 | MirInstructionKind::FfiBytesBorrowLength { .. }
@@ -2461,6 +3502,65 @@ fn verify_instruction_types(
         return;
     }
     match instruction.kind() {
+        MirInstructionKind::ViewCreate {
+            kind,
+            lender,
+            range_unit,
+            boundary,
+            ..
+        } => {
+            let valid = view_kind_contract_matches(*kind, *range_unit, *boundary)
+                && view_type_matches(arena, instruction.result_type(), *kind)
+                && values
+                    .get(lender)
+                    .is_some_and(|type_id| view_lender_type_matches(arena, *type_id, *kind));
+            verify_view_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::ViewSlice {
+            kind,
+            view,
+            start,
+            length,
+            range_unit,
+            boundary,
+            bounds_trap: MirViewTrap::BoundsViolation,
+            ..
+        } => {
+            let integer = arena.source_type("Int");
+            let valid = view_kind_contract_matches(*kind, *range_unit, *boundary)
+                && view_type_matches(arena, instruction.result_type(), *kind)
+                && values
+                    .get(view)
+                    .is_some_and(|type_id| view_type_matches(arena, *type_id, *kind))
+                && value_has_type(values, *start, integer)
+                && value_has_type(values, *length, integer);
+            verify_view_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::ViewLength { kind, view } => {
+            let valid = values
+                .get(view)
+                .is_some_and(|type_id| view_type_matches(arena, *type_id, *kind))
+                && arena.source_type("Int") == Some(instruction.result_type());
+            verify_view_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::ViewGetByte { view, index } => {
+            let valid = values
+                .get(view)
+                .is_some_and(|type_id| view_type_matches(arena, *type_id, MirViewKind::Bytes))
+                && value_has_type(values, *index, arena.source_type("Int"))
+                && arena
+                    .source_type("Byte")
+                    .is_some_and(|byte| is_optional_of(arena, instruction.result_type(), byte));
+            verify_view_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::ViewMaterialize { kind, view, .. } => {
+            let valid = values
+                .get(view)
+                .is_some_and(|type_id| view_type_matches(arena, *type_id, *kind))
+                && view_lender_type_matches(arena, instruction.result_type(), *kind);
+            verify_view_operation(instruction, valid, errors);
+        }
+        MirInstructionKind::ViewEnd { .. } => {}
         MirInstructionKind::FfiHandleOpen { value } => {
             let valid = values.get(value).copied().is_some_and(|payload| {
                 is_managed_reference_type_id(payload, Some(arena))
@@ -3524,6 +4624,54 @@ fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
     }
 }
 
+fn view_kind_contract_matches(
+    kind: MirViewKind,
+    unit: MirViewRangeUnit,
+    boundary: MirViewBoundaryProof,
+) -> bool {
+    kind.range_unit() == unit && kind.boundary_proof() == boundary
+}
+
+fn view_type_matches(arena: &TypeArena, type_id: TypeId, kind: MirViewKind) -> bool {
+    let expected = match kind {
+        MirViewKind::Bytes => pop_types::BYTES_VIEW_TYPE_ID,
+        MirViewKind::Text => pop_types::TEXT_VIEW_TYPE_ID,
+    };
+    matches!(
+        arena.get(type_id),
+        Some(SemanticType::Builtin {
+            definition,
+            arguments,
+        }) if *definition == expected && arguments.is_empty()
+    )
+}
+
+fn is_view_type(arena: &TypeArena, type_id: TypeId) -> bool {
+    view_type_matches(arena, type_id, MirViewKind::Bytes)
+        || view_type_matches(arena, type_id, MirViewKind::Text)
+}
+
+fn view_lender_type_matches(arena: &TypeArena, type_id: TypeId, kind: MirViewKind) -> bool {
+    match kind {
+        MirViewKind::Bytes => is_exact_bootstrap_type(arena, type_id, "Bytes", &[]),
+        MirViewKind::Text => {
+            arena.get(type_id) == Some(&SemanticType::Primitive(PrimitiveType::String))
+        }
+    }
+}
+
+fn verify_view_operation(
+    instruction: &MirInstruction,
+    valid: bool,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    if !valid {
+        errors.push(MirVerificationError::InvalidViewOperation {
+            instruction: instruction.result(),
+        });
+    }
+}
+
 fn ffi_buffer_element(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
     match arena.get(type_id)? {
         SemanticType::Builtin {
@@ -4163,6 +5311,19 @@ fn verify_schema_instruction(
                 });
             }
         }
+        MirInstructionKind::CodecErrorConstant { case } => {
+            let valid_type = matches!(
+                arena.get(instruction.result_type()),
+                Some(SemanticType::Builtin { definition, arguments })
+                    if *definition == pop_types::CODEC_ERROR_TYPE_ID && arguments.is_empty()
+            );
+            if !valid_type || case.raw() > 2 {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::RecordMake { record, fields } => {
             let Some(declaration) = schema.records.get(record) else {
                 errors.push(MirVerificationError::UnknownRecord {
@@ -4300,9 +5461,91 @@ fn verify_schema_instruction(
                 errors,
             );
         }
+        MirInstructionKind::CheckedDowncast {
+            value,
+            source_interface,
+            source_type,
+            target_class,
+            target_type,
+        } => verify_checked_downcast(
+            instruction,
+            *value,
+            *source_interface,
+            *source_type,
+            *target_class,
+            *target_type,
+            arena,
+            schema,
+            values,
+            errors,
+        ),
         _ => return false,
     }
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_checked_downcast(
+    instruction: &MirInstruction,
+    value: ValueId,
+    source_interface: InterfaceId,
+    source_type: TypeId,
+    target_class: ClassId,
+    target_type: TypeId,
+    arena: &TypeArena,
+    schema: &MirSchema<'_>,
+    values: &BTreeMap<ValueId, TypeId>,
+    errors: &mut Vec<MirVerificationError>,
+) {
+    let valid_source = values.get(&value) == Some(&source_type)
+        && matches!(
+            arena.get(source_type),
+            Some(SemanticType::Interface { interface, .. }) if *interface == source_interface
+        );
+    let valid_target = matches!(
+        arena.get(target_type),
+        Some(SemanticType::Class { class, .. }) if *class == target_class
+    ) && schema
+        .classes
+        .get(&target_class)
+        .is_some_and(|class| class.type_id() == target_type)
+        && class_has_interface(schema, target_class, source_interface, source_type);
+    let valid_result = is_optional_of(arena, instruction.result_type(), target_type);
+    if !(valid_source && valid_target && valid_result) {
+        errors.push(MirVerificationError::InvalidCheckedDowncast {
+            instruction: instruction.result(),
+            source_interface,
+            source: source_type,
+            target_class,
+            target: target_type,
+            result: instruction.result_type(),
+        });
+    }
+}
+
+fn class_has_interface(
+    schema: &MirSchema<'_>,
+    mut class: ClassId,
+    interface: InterfaceId,
+    interface_type: TypeId,
+) -> bool {
+    let mut visited = BTreeSet::new();
+    while visited.insert(class) {
+        let Some(declaration) = schema.classes.get(&class) else {
+            return false;
+        };
+        if declaration.interfaces().iter().any(|implementation| {
+            implementation.interface() == interface
+                && implementation.interface_type() == interface_type
+        }) {
+            return true;
+        }
+        let Some(base) = declaration.base() else {
+            return false;
+        };
+        class = base;
+    }
+    false
 }
 
 fn verify_interface_upcast(
@@ -4541,15 +5784,81 @@ fn verify_callable_instruction(
     errors: &mut Vec<MirVerificationError>,
 ) -> bool {
     match instruction.kind() {
-        MirInstructionKind::FunctionReference(function) => {
-            if let Some((parameters, results, _)) = signatures.functions.get(function)
-                && arena.get(instruction.result_type())
-                    != Some(&SemanticType::Function {
-                        is_async: signatures.async_functions.contains(function),
-                        parameters: parameters.clone(),
-                        results: results.clone(),
-                        effects: pop_types::EffectSummary::empty(),
+        MirInstructionKind::CodecEncode {
+            adapter,
+            value,
+            writer,
+            result,
+            success,
+            failure,
+        } => {
+            let valid = schema.generated_codec_adapters.get(adapter).is_some_and(|adapter| {
+                values.get(value) == Some(&adapter.target_type)
+                    && values.get(writer).is_some_and(|type_id| {
+                        matches!(arena.get(*type_id), Some(SemanticType::Builtin { definition, arguments }) if definition.raw() == 119 && arguments.is_empty())
                     })
+                    && matches!(arena.get(instruction.result_type()), Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == *result && definition.raw() == 100 && arguments.len() == 2
+                            && arena.get(arguments[0]) == Some(&SemanticType::Primitive(PrimitiveType::Nil))
+                            && matches!(arena.get(arguments[1]), Some(SemanticType::Builtin { definition, arguments }) if *definition == CODEC_ERROR_TYPE_ID && arguments.is_empty()))
+                    && success.raw() == 0
+                    && failure.raw() == 1
+            });
+            if !valid {
+                errors.push(MirVerificationError::InvalidGeneratedCodecSchema(*adapter));
+            }
+        }
+        MirInstructionKind::CodecDecode {
+            adapter,
+            reader,
+            result,
+            success,
+            failure,
+        } => {
+            let valid = schema.generated_codec_adapters.get(adapter).is_some_and(|adapter| {
+                values.get(reader).is_some_and(|type_id| {
+                    matches!(arena.get(*type_id), Some(SemanticType::Builtin { definition, arguments }) if definition.raw() == 120 && arguments.is_empty())
+                })
+                    && matches!(arena.get(instruction.result_type()), Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == *result && definition.raw() == 100 && arguments.as_slice().first() == Some(&adapter.target_type)
+                            && arguments.get(1).is_some_and(|error| matches!(arena.get(*error), Some(SemanticType::Builtin { definition, arguments }) if *definition == CODEC_ERROR_TYPE_ID && arguments.is_empty())))
+                    && success.raw() == 0
+                    && failure.raw() == 1
+            });
+            if !valid {
+                errors.push(MirVerificationError::InvalidGeneratedCodecSchema(*adapter));
+            }
+        }
+        MirInstructionKind::GeneratedCodecSchema(adapter) => {
+            if !schema
+                .generated_codec_adapters
+                .get(adapter)
+                .is_some_and(|schema| schema.schema_type() == instruction.result_type())
+            {
+                errors.push(MirVerificationError::InvalidGeneratedCodecSchema(*adapter));
+            }
+        }
+        MirInstructionKind::FunctionReference(function) => {
+            if let Some((parameters, results, effects)) = signatures.functions.get(function)
+                && !matches!(
+                    arena.get(instruction.result_type()),
+                    Some(SemanticType::Function {
+                        is_async,
+                        parameters: found_parameters,
+                        results: found_results,
+                        effects: found_effects,
+                        lifetime_summary,
+                    }) if *is_async == signatures.async_functions.contains(function)
+                        && found_parameters == parameters
+                        && found_results == results
+                        && lower_effect_summary(*found_effects) == *effects
+                        && callable_lifetime_summary_is_valid(
+                            arena,
+                            found_parameters,
+                            found_results,
+                            lifetime_summary,
+                        )
+                )
             {
                 errors.push(MirVerificationError::InvalidInstructionType {
                     instruction: instruction.result(),
@@ -4805,9 +6114,20 @@ fn verify_callable_instruction(
             );
         }
         MirInstructionKind::CallIndirect {
-            callee, arguments, ..
+            callee,
+            arguments,
+            declared_effects,
+            ..
         } => {
-            verify_indirect_call(instruction, *callee, arguments, arena, values, errors);
+            verify_indirect_call(
+                instruction,
+                *callee,
+                arguments,
+                *declared_effects,
+                arena,
+                values,
+                errors,
+            );
         }
         MirInstructionKind::CallScopedBorrow {
             owner,
@@ -5043,6 +6363,7 @@ fn verify_indirect_call(
     instruction: &MirInstruction,
     callee: ValueId,
     arguments: &[ValueId],
+    declared_effects: MirEffectSummary,
     arena: &TypeArena,
     values: &BTreeMap<ValueId, TypeId>,
     errors: &mut Vec<MirVerificationError>,
@@ -5053,6 +6374,7 @@ fn verify_indirect_call(
     let Some(SemanticType::Function {
         parameters,
         results,
+        effects,
         ..
     }) = arena.get(callee_type).cloned()
     else {
@@ -5063,6 +6385,14 @@ fn verify_indirect_call(
         });
         return;
     };
+    let expected_effects = lower_effect_summary(effects);
+    if expected_effects != declared_effects {
+        errors.push(MirVerificationError::InstructionEffectMismatch {
+            instruction: instruction.result(),
+            expected: expected_effects,
+            found: declared_effects,
+        });
+    }
     verify_call_signature(
         instruction,
         arguments,
@@ -5323,6 +6653,30 @@ fn verify_terminator(
                 }
             }
         }
+        MirTerminator::CodecErrorSwitch { scrutinee, arms } => {
+            verify_value_use(*scrutinee, block.block, use_instruction, facts, errors);
+            let valid_type = facts.values.get(scrutinee).is_some_and(|type_id| {
+                matches!(
+                    arena.get(*type_id),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == pop_types::CODEC_ERROR_TYPE_ID && arguments.is_empty()
+                )
+            });
+            let expected: BTreeSet<_> = (0..=2).map(EnumCaseId::from_raw).collect();
+            let found: BTreeSet<_> = arms.iter().map(|arm| arm.case).collect();
+            if !valid_type || found != expected || found.len() != arms.len() {
+                errors.push(MirVerificationError::InvalidCodecErrorSwitch);
+            }
+            for arm in arms {
+                verify_target(arm.target, facts.blocks, errors);
+                let Some(target) = facts.blocks.get(&arm.target) else {
+                    continue;
+                };
+                if !target.arguments.is_empty() {
+                    errors.push(MirVerificationError::InvalidCodecErrorSwitch);
+                }
+            }
+        }
         MirTerminator::Return { values: returned } => {
             if returned.len() != function.results.len() {
                 errors.push(MirVerificationError::WrongReturnArity {
@@ -5508,9 +6862,14 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::NilConstant
         | MirInstructionKind::FfiPointerNone
         | MirInstructionKind::EnumConstant { .. }
+        | MirInstructionKind::CodecErrorConstant { .. }
         | MirInstructionKind::FunctionReference(_)
+        | MirInstructionKind::GeneratedCodecSchema(_)
         | MirInstructionKind::CancelSourceCreate
+        | MirInstructionKind::ViewEnd { .. }
         | MirInstructionKind::GcSafePoint { .. } => Vec::new(),
+        MirInstructionKind::CodecEncode { value, writer, .. } => vec![*value, *writer],
+        MirInstructionKind::CodecDecode { reader, .. } => vec![*reader],
         MirInstructionKind::TupleMake(values)
         | MirInstructionKind::ArrayMake {
             elements: values, ..
@@ -5562,6 +6921,16 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::CancelRequest { source } => vec![*source],
         MirInstructionKind::TaskGroupCreate { cancel, body, .. } => vec![*cancel, *body],
         MirInstructionKind::TaskStart { group, task } => vec![*group, *task],
+        MirInstructionKind::ViewCreate { lender, .. } => vec![*lender],
+        MirInstructionKind::ViewSlice {
+            view,
+            start,
+            length,
+            ..
+        } => vec![*view, *start, *length],
+        MirInstructionKind::ViewLength { view, .. }
+        | MirInstructionKind::ViewMaterialize { view, .. } => vec![*view],
+        MirInstructionKind::ViewGetByte { view, index } => vec![*view, *index],
         MirInstructionKind::TupleGet { tuple, .. } => vec![*tuple],
         MirInstructionKind::IterationIsItem { iteration, .. }
         | MirInstructionKind::IterationGetItem { iteration, .. } => vec![*iteration],
@@ -5703,6 +7072,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             .collect(),
         MirInstructionKind::FieldGet { base, .. } => vec![*base],
         MirInstructionKind::InterfaceUpcast { value: base, .. }
+        | MirInstructionKind::CheckedDowncast { value: base, .. }
         | MirInstructionKind::CaptureCellLoad { cell: base } => vec![*base],
         MirInstructionKind::CaptureCellAllocate { initial, .. } => vec![*initial],
         MirInstructionKind::CaptureCellStore { cell, value } => vec![*cell, *value],

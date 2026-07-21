@@ -1440,6 +1440,7 @@ fn source_interfaces_are_nominal_and_dispatch_by_resolved_slot() {
                 interface,
                 method,
                 slot: 0,
+                ..
             },
             ..
         } if *interface == reader.interface() && *method == reader.methods()[0].method()

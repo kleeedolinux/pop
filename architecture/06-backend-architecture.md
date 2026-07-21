@@ -171,6 +171,11 @@ ADR 0097 view operations and callable signatures containing `Text.View` or
 runtime-free literal-string path proves neither lender rooting nor Unicode
 slicing and cannot substitute `char *`, `void *`, or an implicit owned copy.
 
+ADR 0092 `CodecEncode` and `CodecDecode` operations are rejected before C
+emission as well. The experimental backend has no managed aggregate, typed
+codec-event, or PLRI implementation and cannot reconstruct a generated adapter,
+parse `retained-adapters.popc`, or substitute a JSON/name-based runtime codec.
+
 The bootstrap driver exposes this experiment as `pop transpile <source.pop>
 --to c`. Successful output is C source on standard output; failure publishes no
 partial artifact. C text is disposable output and is not a stable ABI, cache,

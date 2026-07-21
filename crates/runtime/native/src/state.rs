@@ -15,6 +15,15 @@ use pop_runtime_interface::{
 static ABI_RUNTIME: OnceLock<Mutex<StableGenerationalRuntime>> = OnceLock::new();
 static ABI_TABLES: OnceLock<Mutex<BTreeMap<u64, TableMetadata>>> = OnceLock::new();
 static ABI_LISTS: OnceLock<Mutex<BTreeMap<u64, ListMetadata>>> = OnceLock::new();
+#[cfg(test)]
+static NATIVE_RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_native_runtime_test() -> MutexGuard<'static, ()> {
+    NATIVE_RUNTIME_TEST_LOCK
+        .lock()
+        .expect("native runtime test lock")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeExecutionBinding {

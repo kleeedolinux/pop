@@ -22,6 +22,7 @@ pop-compile-time.workspace = true
 pop-driver.workspace = true
 pop-projects.workspace = true
 pop-query.workspace = true
+pop-resolve.workspace = true
 pop-runtime-collector.workspace = true
 pop-source.workspace = true
 

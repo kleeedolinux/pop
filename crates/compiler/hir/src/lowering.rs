@@ -250,6 +250,11 @@ pub fn build_hir_function_with_known_callables_and_attributes(
     let Some((parameters, results)) = parameters.zip(results) else {
         return Err(vec![HirVerificationError::MissingCanonicalType]);
     };
+    let parameter_types = parameters
+        .iter()
+        .map(HirParameter::type_id)
+        .collect::<Vec<_>>();
+    let lifetime_summary = infer_callable_lifetime_summary(body, &parameter_types, &results, arena);
     let function = HirFunction {
         function: FunctionId::from_raw(signature.symbol().raw()),
         symbol: signature.symbol(),
@@ -282,9 +287,209 @@ pub fn build_hir_function_with_known_callables_and_attributes(
             .collect(),
         attributes: attributes.iter().map(lower_attribute).collect(),
         effects: pop_types::EffectSummary::empty(),
+        lifetime_summary,
     };
     verify_hir_callable(&function, arena, known.functions, known.methods)?;
     Ok(function)
+}
+
+fn infer_callable_lifetime_summary(
+    body: &TypedBody,
+    parameters: &[pop_foundation::TypeId],
+    results: &[pop_foundation::TypeId],
+    arena: &TypeArena,
+) -> pop_types::CallableLifetimeSummary {
+    let mut locals = BTreeMap::new();
+    collect_view_locals(body.statements(), &mut locals);
+    let mut returned = vec![Vec::new(); results.len()];
+    collect_view_returns(body.statements(), &locals, &mut returned);
+    let mut summary =
+        pop_types::CallableLifetimeSummary::conservative(parameters.len(), results.len());
+    for (index, parameter) in parameters.iter().enumerate() {
+        if arena.view_kind(*parameter).is_some() {
+            summary = summary
+                .with_parameter_retention(index, pop_types::ParameterRetention::DoesNotRetain);
+        }
+    }
+    for (index, result) in results.iter().enumerate() {
+        if arena.view_kind(*result).is_none() {
+            summary =
+                summary.with_result_provenance(index, pop_types::ResultProvenance::Independent);
+            continue;
+        }
+        let mut sources = returned[index].iter().copied();
+        let Some(Some(source)) = sources.next() else {
+            continue;
+        };
+        if sources.all(|candidate| candidate == Some(source)) {
+            summary = summary.with_result_alias(index, source);
+            summary = summary.with_parameter_retention(
+                usize::from(source),
+                pop_types::ParameterRetention::DoesNotRetain,
+            );
+        }
+    }
+    summary
+}
+
+fn collect_view_locals(
+    statements: &[TypedStatement],
+    locals: &mut BTreeMap<pop_foundation::LocalId, pop_types::ViewLenderProvenance>,
+) {
+    for statement in statements {
+        match statement.kind() {
+            TypedStatementKind::Local {
+                local, initializer, ..
+            }
+            | TypedStatementKind::LocalSet {
+                local,
+                value: initializer,
+            } => {
+                if let Some(lender) = typed_view_lender(initializer, locals) {
+                    locals.insert(*local, lender);
+                } else {
+                    locals.remove(local);
+                }
+            }
+            TypedStatementKind::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_view_locals(then_body, locals);
+                collect_view_locals(else_body, locals);
+            }
+            TypedStatementKind::OptionalIf {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_view_locals(then_body, locals);
+                collect_view_locals(else_body, locals);
+            }
+            TypedStatementKind::While { body, .. }
+            | TypedStatementKind::OptionalWhile { body, .. }
+            | TypedStatementKind::RepeatUntil { body, .. }
+            | TypedStatementKind::NumericFor { body, .. }
+            | TypedStatementKind::GeneralizedFor { body, .. }
+            | TypedStatementKind::Defer { body }
+            | TypedStatementKind::AsyncDefer { body } => collect_view_locals(body, locals),
+            TypedStatementKind::Match { arms, .. } => {
+                for arm in arms {
+                    collect_view_locals(arm.body(), locals);
+                }
+            }
+            TypedStatementKind::ErrorMatch { arms, .. } => {
+                for arm in arms {
+                    collect_view_locals(arm.body(), locals);
+                }
+            }
+            TypedStatementKind::ResultMatch { arms, .. } => {
+                for arm in arms {
+                    collect_view_locals(arm.body(), locals);
+                }
+            }
+            TypedStatementKind::CodecErrorMatch { arms, .. } => {
+                for arm in arms {
+                    collect_view_locals(arm.body(), locals);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_view_returns(
+    statements: &[TypedStatement],
+    locals: &BTreeMap<pop_foundation::LocalId, pop_types::ViewLenderProvenance>,
+    returned: &mut [Vec<Option<u16>>],
+) {
+    for statement in statements {
+        match statement.kind() {
+            TypedStatementKind::Return { values } => {
+                for (index, value) in values.iter().enumerate() {
+                    if let Some(slot) = returned.get_mut(index) {
+                        slot.push(typed_view_lender(value, locals).and_then(
+                            |lender| match lender {
+                                pop_types::ViewLenderProvenance::Parameter { index } => {
+                                    u16::try_from(index).ok()
+                                }
+                                _ => None,
+                            },
+                        ));
+                    }
+                }
+            }
+            TypedStatementKind::If {
+                then_body,
+                else_body,
+                ..
+            }
+            | TypedStatementKind::OptionalIf {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_view_returns(then_body, locals, returned);
+                collect_view_returns(else_body, locals, returned);
+            }
+            TypedStatementKind::While { body, .. }
+            | TypedStatementKind::OptionalWhile { body, .. }
+            | TypedStatementKind::RepeatUntil { body, .. }
+            | TypedStatementKind::NumericFor { body, .. }
+            | TypedStatementKind::GeneralizedFor { body, .. }
+            | TypedStatementKind::Defer { body }
+            | TypedStatementKind::AsyncDefer { body } => {
+                collect_view_returns(body, locals, returned);
+            }
+            TypedStatementKind::Match { arms, .. } => {
+                for arm in arms {
+                    collect_view_returns(arm.body(), locals, returned);
+                }
+            }
+            TypedStatementKind::ErrorMatch { arms, .. } => {
+                for arm in arms {
+                    collect_view_returns(arm.body(), locals, returned);
+                }
+            }
+            TypedStatementKind::ResultMatch { arms, .. } => {
+                for arm in arms {
+                    collect_view_returns(arm.body(), locals, returned);
+                }
+            }
+            TypedStatementKind::CodecErrorMatch { arms, .. } => {
+                for arm in arms {
+                    collect_view_returns(arm.body(), locals, returned);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn typed_view_lender(
+    expression: &TypedExpression,
+    locals: &BTreeMap<pop_foundation::LocalId, pop_types::ViewLenderProvenance>,
+) -> Option<pop_types::ViewLenderProvenance> {
+    match expression.kind() {
+        TypedExpressionKind::ViewCreate { borrow, .. }
+        | TypedExpressionKind::ViewSlice { borrow, .. } => Some(borrow.lender()),
+        TypedExpressionKind::Local(local) => locals.get(local).copied(),
+        TypedExpressionKind::Parameter(parameter) => {
+            Some(pop_types::ViewLenderProvenance::Parameter {
+                index: parameter.raw(),
+            })
+        }
+        TypedExpressionKind::Conditional {
+            when_true,
+            when_false,
+            ..
+        } => {
+            let when_true = typed_view_lender(when_true, locals)?;
+            (typed_view_lender(when_false, locals) == Some(when_true)).then_some(when_true)
+        }
+        _ => None,
+    }
 }
 
 /// Constructs one verified native method body while retaining its `MethodId`.
@@ -599,6 +804,23 @@ fn lower_statement(
                 })
                 .collect(),
         },
+        TypedStatementKind::CodecErrorMatch { scrutinee, arms } => {
+            HirStatementKind::CodecErrorMatch {
+                scrutinee: lower_expression(scrutinee, interface_slots),
+                arms: arms
+                    .iter()
+                    .map(|arm| HirCodecErrorMatchArm {
+                        case: arm.reason().case(),
+                        body: arm
+                            .body()
+                            .iter()
+                            .map(|statement| lower_statement(statement, interface_slots))
+                            .collect(),
+                        span: arm.span(),
+                    })
+                    .collect(),
+            }
+        }
         TypedStatementKind::Defer { body } => HirStatementKind::Defer {
             body: body
                 .iter()
@@ -781,6 +1003,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                     interface: *interface,
                     method: *method,
                     slot: interface_slots[&(*interface, *method)],
+                    effects: pop_types::EffectSummary::empty(),
                 },
                 is_async: call.is_async(),
                 type_arguments: call.type_arguments().to_vec(),
@@ -803,6 +1026,7 @@ fn lower_call(call: &TypedCall, interface_slots: &HirInterfaceSlotMap) -> HirCal
                 dispatch: HirCallDispatch::BuiltinInterfaceMethod {
                     interface: *interface,
                     method: *method,
+                    effects: pop_types::EffectSummary::empty(),
                 },
                 is_async: call.is_async(),
                 type_arguments: call.type_arguments().to_vec(),
@@ -855,6 +1079,9 @@ fn lower_expression(
         TypedExpressionKind::Parameter(parameter) => HirExpressionKind::Parameter(*parameter),
         TypedExpressionKind::Capture(capture) => HirExpressionKind::Capture(*capture),
         TypedExpressionKind::Function(function) => HirExpressionKind::Function(*function),
+        TypedExpressionKind::GeneratedCodecSchema(adapter) => {
+            HirExpressionKind::GeneratedCodecSchema(*adapter)
+        }
         TypedExpressionKind::Field { base, field } => HirExpressionKind::Field {
             base: Box::new(lower_expression(base, interface_slots)),
             field: *field,
@@ -1016,6 +1243,9 @@ fn lower_expression(
             case: *case,
             discriminant: *discriminant,
         },
+        TypedExpressionKind::CodecErrorCase(reason) => {
+            HirExpressionKind::CodecErrorCase(reason.case())
+        }
         TypedExpressionKind::Tuple(elements) => HirExpressionKind::Tuple(
             elements
                 .iter()
@@ -1326,6 +1556,60 @@ fn lower_expression(
                 interface: *interface,
             }
         }
+        TypedExpressionKind::CheckedNominalCast {
+            value,
+            source_interface,
+            source_type,
+            target_class,
+            target_type,
+        } => HirExpressionKind::CheckedNominalCast {
+            value: Box::new(lower_expression(value, interface_slots)),
+            source_interface: *source_interface,
+            source_type: *source_type,
+            target_class: *target_class,
+            target_type: *target_type,
+        },
+        TypedExpressionKind::ViewCreate {
+            kind,
+            lender,
+            borrow,
+        } => HirExpressionKind::ViewCreate {
+            kind: *kind,
+            lender: Box::new(lower_expression(lender, interface_slots)),
+            borrow: *borrow,
+        },
+        TypedExpressionKind::ViewSlice {
+            kind,
+            view,
+            start,
+            length,
+            parent,
+            borrow,
+        } => HirExpressionKind::ViewSlice {
+            kind: *kind,
+            view: Box::new(lower_expression(view, interface_slots)),
+            start: Box::new(lower_expression(start, interface_slots)),
+            length: Box::new(lower_expression(length, interface_slots)),
+            parent: *parent,
+            borrow: *borrow,
+        },
+        TypedExpressionKind::ViewLength { kind, view } => HirExpressionKind::ViewLength {
+            kind: *kind,
+            view: Box::new(lower_expression(view, interface_slots)),
+        },
+        TypedExpressionKind::ViewGetByte { view, index } => HirExpressionKind::ViewGetByte {
+            view: Box::new(lower_expression(view, interface_slots)),
+            index: Box::new(lower_expression(index, interface_slots)),
+        },
+        TypedExpressionKind::ViewMaterialize {
+            kind,
+            view,
+            allocation_site,
+        } => HirExpressionKind::ViewMaterialize {
+            kind: *kind,
+            view: Box::new(lower_expression(view, interface_slots)),
+            allocation_site: *allocation_site,
+        },
         TypedExpressionKind::NumericConvert { value, conversion } => {
             HirExpressionKind::NumericConvert {
                 value: Box::new(lower_expression(value, interface_slots)),
@@ -1434,6 +1718,7 @@ fn lower_call_expression(
                 interface: *interface,
                 method: *method,
                 slot: interface_slots[&(*interface, *method)],
+                effects: pop_types::EffectSummary::empty(),
             },
             is_async: false,
             type_arguments: Vec::new(),
@@ -1454,6 +1739,7 @@ fn lower_call_expression(
             dispatch: HirCallDispatch::BuiltinInterfaceMethod {
                 interface: *interface,
                 method: *method,
+                effects: pop_types::EffectSummary::empty(),
             },
             is_async: false,
             type_arguments: Vec::new(),
@@ -1649,6 +1935,12 @@ fn first_unknown_interface_call(
                 arms.iter()
                     .find_map(|arm| first_unknown_interface_call(arm.body(), slots))
             }),
+            TypedStatementKind::CodecErrorMatch { scrutinee, arms } => {
+                first_unknown_interface_expression(scrutinee, slots).or_else(|| {
+                    arms.iter()
+                        .find_map(|arm| first_unknown_interface_call(arm.body(), slots))
+                })
+            }
             TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
                 first_unknown_interface_call(body, slots)
             }
@@ -1988,11 +2280,29 @@ fn first_unknown_interface_expression(
                     .iter()
                     .find_map(|argument| first_unknown_interface_expression(argument, slots))
             }),
-        TypedExpressionKind::InterfaceUpcast { value, .. } => {
+        TypedExpressionKind::InterfaceUpcast { value, .. }
+        | TypedExpressionKind::CheckedNominalCast { value, .. } => {
             first_unknown_interface_expression(value, slots)
         }
         TypedExpressionKind::NumericConvert { value, .. } => {
             first_unknown_interface_expression(value, slots)
+        }
+        TypedExpressionKind::ViewCreate { lender, .. }
+        | TypedExpressionKind::ViewLength { view: lender, .. }
+        | TypedExpressionKind::ViewMaterialize { view: lender, .. } => {
+            first_unknown_interface_expression(lender, slots)
+        }
+        TypedExpressionKind::ViewSlice {
+            view,
+            start,
+            length,
+            ..
+        } => first_unknown_interface_expression(view, slots)
+            .or_else(|| first_unknown_interface_expression(start, slots))
+            .or_else(|| first_unknown_interface_expression(length, slots)),
+        TypedExpressionKind::ViewGetByte { view, index } => {
+            first_unknown_interface_expression(view, slots)
+                .or_else(|| first_unknown_interface_expression(index, slots))
         }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::Float(_)
@@ -2005,9 +2315,11 @@ fn first_unknown_interface_expression(
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::GeneratedCodecSchema(_)
         | TypedExpressionKind::TaskCancellationSource
         | TypedExpressionKind::FfiPointerNone { .. }
-        | TypedExpressionKind::EnumCase { .. } => None,
+        | TypedExpressionKind::EnumCase { .. }
+        | TypedExpressionKind::CodecErrorCase(_) => None,
     }
 }
 
@@ -2087,6 +2399,12 @@ fn first_compile_time_only_statement(statements: &[TypedStatement]) -> Option<So
                 arms.iter()
                     .find_map(|arm| first_compile_time_only_statement(arm.body()))
             }),
+            TypedStatementKind::CodecErrorMatch { scrutinee, arms } => {
+                first_compile_time_only_expression(scrutinee).or_else(|| {
+                    arms.iter()
+                        .find_map(|arm| first_compile_time_only_statement(arm.body()))
+                })
+            }
             TypedStatementKind::Defer { body } | TypedStatementKind::AsyncDefer { body } => {
                 first_compile_time_only_statement(body)
             }
@@ -2388,11 +2706,29 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
                 .iter()
                 .find_map(first_compile_time_only_expression)
         }),
-        TypedExpressionKind::InterfaceUpcast { value, .. } => {
+        TypedExpressionKind::InterfaceUpcast { value, .. }
+        | TypedExpressionKind::CheckedNominalCast { value, .. } => {
             first_compile_time_only_expression(value)
         }
         TypedExpressionKind::NumericConvert { value, .. } => {
             first_compile_time_only_expression(value)
+        }
+        TypedExpressionKind::ViewCreate { lender, .. }
+        | TypedExpressionKind::ViewLength { view: lender, .. }
+        | TypedExpressionKind::ViewMaterialize { view: lender, .. } => {
+            first_compile_time_only_expression(lender)
+        }
+        TypedExpressionKind::ViewSlice {
+            view,
+            start,
+            length,
+            ..
+        } => first_compile_time_only_expression(view)
+            .or_else(|| first_compile_time_only_expression(start))
+            .or_else(|| first_compile_time_only_expression(length)),
+        TypedExpressionKind::ViewGetByte { view, index } => {
+            first_compile_time_only_expression(view)
+                .or_else(|| first_compile_time_only_expression(index))
         }
         TypedExpressionKind::Integer(_)
         | TypedExpressionKind::Float(_)
@@ -2403,9 +2739,11 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
         | TypedExpressionKind::Parameter(_)
         | TypedExpressionKind::Capture(_)
         | TypedExpressionKind::Function(_)
+        | TypedExpressionKind::GeneratedCodecSchema(_)
         | TypedExpressionKind::TaskCancellationSource
         | TypedExpressionKind::FfiPointerNone { .. }
-        | TypedExpressionKind::EnumCase { .. } => None,
+        | TypedExpressionKind::EnumCase { .. }
+        | TypedExpressionKind::CodecErrorCase(_) => None,
     }
 }
 

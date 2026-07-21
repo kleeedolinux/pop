@@ -143,6 +143,166 @@ pub fn invalid_overload_set(
 }
 
 #[must_use]
+pub fn invalid_checked_cast_target(
+    span: SourceSpan,
+    target_type: pop_foundation::TypeId,
+    target: impl Into<String>,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2032"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.invalidCheckedCastTarget"),
+        vec![
+            DiagnosticArgument::Type {
+                type_id: target_type,
+                display: target.into(),
+            },
+            DiagnosticArgument::Identifier(reason.into()),
+        ],
+        span,
+    )
+}
+
+#[must_use]
+pub fn invalid_checked_cast_operand(
+    span: SourceSpan,
+    source_type: pop_foundation::TypeId,
+    source: impl Into<String>,
+    target_type: pop_foundation::TypeId,
+    target: impl Into<String>,
+    target_span: SourceSpan,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2033"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.invalidCheckedCastOperand"),
+        vec![
+            DiagnosticArgument::Type {
+                type_id: source_type,
+                display: source.into(),
+            },
+            DiagnosticArgument::Type {
+                type_id: target_type,
+                display: target.into(),
+            },
+            DiagnosticArgument::Identifier("NonNominalInterface".to_owned()),
+        ],
+        span,
+    )
+    .with_label(DiagnosticLabel::new(
+        target_span,
+        MessageKey::new("types.checkedCastTarget"),
+        Vec::new(),
+    ))
+}
+
+#[must_use]
+pub fn incompatible_checked_cast(
+    span: SourceSpan,
+    source_type: pop_foundation::TypeId,
+    source: impl Into<String>,
+    target_type: pop_foundation::TypeId,
+    target: impl Into<String>,
+    target_span: SourceSpan,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2034"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.incompatibleCheckedCast"),
+        vec![
+            DiagnosticArgument::Type {
+                type_id: source_type,
+                display: source.into(),
+            },
+            DiagnosticArgument::Type {
+                type_id: target_type,
+                display: target.into(),
+            },
+            DiagnosticArgument::Identifier("MissingExactInterfaceWitness".to_owned()),
+        ],
+        span,
+    )
+    .with_label(DiagnosticLabel::new(
+        target_span,
+        MessageKey::new("types.checkedCastTarget"),
+        Vec::new(),
+    ))
+}
+
+#[must_use]
+pub fn borrowed_view_escape(
+    span: SourceSpan,
+    view: impl Into<String>,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2035"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.borrowedViewEscape"),
+        vec![
+            DiagnosticArgument::Identifier(view.into()),
+            DiagnosticArgument::Identifier(reason.into()),
+        ],
+        span,
+    )
+}
+
+#[must_use]
+pub fn borrowed_view_retained(
+    span: SourceSpan,
+    view: impl Into<String>,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2036"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.borrowedViewRetained"),
+        vec![
+            DiagnosticArgument::Identifier(view.into()),
+            DiagnosticArgument::Identifier(reason.into()),
+        ],
+        span,
+    )
+}
+
+#[must_use]
+pub fn borrowed_view_across_suspension(span: SourceSpan, view: impl Into<String>) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2037"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.borrowedViewAcrossSuspension"),
+        vec![DiagnosticArgument::Identifier(view.into())],
+        span,
+    )
+}
+
+#[must_use]
+pub fn invalid_view_callable_provenance(
+    span: SourceSpan,
+    callable: impl Into<String>,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(
+        DiagnosticCode::new("POP2038"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Type,
+        MessageKey::new("types.invalidViewCallableProvenance"),
+        vec![
+            DiagnosticArgument::Identifier(callable.into()),
+            DiagnosticArgument::Identifier(reason.into()),
+        ],
+        span,
+    )
+}
+
+#[must_use]
 pub fn invalid_operator(
     span: SourceSpan,
     operator: impl Into<String>,

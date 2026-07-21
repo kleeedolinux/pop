@@ -197,3 +197,43 @@ kinds = []
 text = "original binding"
 arguments = []
 kinds = []
+
+[messages."types.invalidCheckedCastTarget"]
+text = "invalid checked-cast target `{target}`: {reason}"
+arguments = ["target", "reason"]
+kinds = ["Type", "Identifier"]
+
+[messages."types.invalidCheckedCastOperand"]
+text = "cannot checked-cast `{source}` to `{target}`: {reason}"
+arguments = ["source", "target", "reason"]
+kinds = ["Type", "Type", "Identifier"]
+
+[messages."types.incompatibleCheckedCast"]
+text = "checked cast from `{source}` to `{target}` is incompatible: {reason}"
+arguments = ["source", "target", "reason"]
+kinds = ["Type", "Type", "Identifier"]
+
+[messages."types.checkedCastTarget"]
+text = "checked-cast target is declared here"
+arguments = []
+kinds = []
+
+[messages."types.borrowedViewEscape"]
+text = "borrowed view `{view}` escapes its lender: {reason}"
+arguments = ["view", "reason"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.borrowedViewRetained"]
+text = "borrowed view `{view}` is retained: {reason}"
+arguments = ["view", "reason"]
+kinds = ["Identifier", "Identifier"]
+
+[messages."types.borrowedViewAcrossSuspension"]
+text = "borrowed view `{view}` cannot cross suspension"
+arguments = ["view"]
+kinds = ["Identifier"]
+
+[messages."types.invalidViewCallableProvenance"]
+text = "callable `{callable}` has invalid view provenance: {reason}"
+arguments = ["callable", "reason"]
+kinds = ["Identifier", "Identifier"]

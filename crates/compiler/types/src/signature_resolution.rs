@@ -150,6 +150,7 @@ pub struct ResolvedFunctionSignature {
     parameters: Vec<ResolvedFunctionParameter>,
     results: Vec<ResolvedType>,
     effects: crate::EffectSummary,
+    lifetime_summary: crate::CallableLifetimeSummary,
 }
 
 impl ResolvedFunctionSignature {
@@ -169,6 +170,8 @@ impl ResolvedFunctionSignature {
         parameters: Vec<(String, TypeId, SourceSpan)>,
         results: Vec<(TypeId, SourceSpan)>,
     ) -> Self {
+        let parameter_count = parameters.len();
+        let result_count = results.len();
         Self {
             symbol,
             name,
@@ -187,6 +190,10 @@ impl ResolvedFunctionSignature {
                 .map(|(type_id, span)| ResolvedType::canonical(type_id, span))
                 .collect(),
             effects: crate::EffectSummary::empty(),
+            lifetime_summary: crate::CallableLifetimeSummary::conservative(
+                parameter_count,
+                result_count,
+            ),
         }
     }
 
@@ -198,6 +205,12 @@ impl ResolvedFunctionSignature {
     #[must_use]
     pub const fn with_effects(mut self, effects: crate::EffectSummary) -> Self {
         self.effects = effects;
+        self
+    }
+
+    #[must_use]
+    pub fn with_lifetime_summary(mut self, summary: crate::CallableLifetimeSummary) -> Self {
+        self.lifetime_summary = summary;
         self
     }
 
@@ -267,6 +280,11 @@ impl ResolvedFunctionSignature {
     #[must_use]
     pub const fn effects(&self) -> crate::EffectSummary {
         self.effects
+    }
+
+    #[must_use]
+    pub const fn lifetime_summary(&self) -> &crate::CallableLifetimeSummary {
+        &self.lifetime_summary
     }
 }
 
@@ -989,6 +1007,7 @@ impl<'index> SignatureResolver<'index> {
                 parameters,
                 results,
                 effects,
+                lifetime_summary,
             } => SemanticType::Function {
                 is_async,
                 parameters: parameters
@@ -1000,6 +1019,7 @@ impl<'index> SignatureResolver<'index> {
                     .map(|result| self.substitute_type_parameters(result, substitutions))
                     .collect::<Option<_>>()?,
                 effects,
+                lifetime_summary,
             },
             SemanticType::Class { class, arguments } => {
                 let arguments = arguments
@@ -1497,6 +1517,93 @@ impl<'index> SignatureResolver<'index> {
         Some(definition)
     }
 
+    #[must_use]
+    pub fn define_referenced_enum(
+        &mut self,
+        symbol: SymbolId,
+        cases: Vec<(String, u32)>,
+        span: SourceSpan,
+    ) -> Option<EnumDefinition> {
+        if self.enum_definitions.contains_key(&symbol) {
+            return None;
+        }
+        let type_id = self
+            .arena
+            .intern(SemanticType::Enum { definition: symbol })
+            .ok()?;
+        let cases = cases
+            .into_iter()
+            .map(|(name, discriminant)| {
+                let case = EnumCaseId::from_raw(self.next_enum_case);
+                self.next_enum_case = self.next_enum_case.saturating_add(1);
+                EnumCaseDefinition {
+                    case,
+                    name,
+                    discriminant,
+                    span,
+                }
+            })
+            .collect();
+        let definition = EnumDefinition {
+            symbol,
+            type_id,
+            cases,
+            span,
+        };
+        self.enum_definitions.insert(symbol, definition.clone());
+        Some(definition)
+    }
+
+    #[must_use]
+    pub fn define_referenced_union(
+        &mut self,
+        symbol: SymbolId,
+        cases: Vec<(String, Vec<(String, TypeId)>)>,
+        span: SourceSpan,
+    ) -> Option<UnionDefinition> {
+        if self.union_definitions.contains_key(&symbol)
+            || cases
+                .iter()
+                .flat_map(|(_, values)| values)
+                .any(|(_, type_id)| self.arena.get(*type_id).is_none())
+        {
+            return None;
+        }
+        let type_id = self
+            .arena
+            .intern(SemanticType::TaggedUnion {
+                definition: symbol,
+                source: symbol,
+                arguments: Vec::new(),
+            })
+            .ok()?;
+        let cases = cases
+            .into_iter()
+            .map(|(name, parameters)| {
+                let case = UnionCaseId::from_raw(self.next_union_case);
+                self.next_union_case = self.next_union_case.saturating_add(1);
+                UnionCaseDefinition {
+                    case,
+                    name,
+                    parameters: parameters
+                        .into_iter()
+                        .map(|(name, type_id)| (name, type_id, span))
+                        .collect(),
+                    span,
+                }
+            })
+            .collect();
+        let definition = UnionDefinition {
+            symbol,
+            type_id,
+            cases,
+            span,
+        };
+        self.unions_by_type.insert(type_id, symbol);
+        self.union_definitions.insert(symbol, definition.clone());
+        Some(definition)
+    }
+
     fn define_record_impl(
         &mut self,
         module: ModuleId,
@@ -1528,6 +1635,14 @@ impl<'index> SignatureResolver<'index> {
             let Some(field_type) = resolved.type_id() else {
                 continue;
             };
+            if self.arena.contains_view(field_type) {
+                diagnostics.push(type_diagnostics::borrowed_view_escape(
+                    field.span(),
+                    "View",
+                    "RecordField",
+                ));
+                continue;
+            }
             let (default, pending_default) = match field.default_value() {
                 Some(value) if defer_defaults => (
                     None,
@@ -1991,7 +2106,7 @@ impl<'index> SignatureResolver<'index> {
         let mut diagnostics = Vec::new();
         let (type_parameters, generic_types) =
             self.resolve_type_parameters(module, syntax, &mut diagnostics);
-        let parameters = syntax
+        let parameters: Vec<ResolvedFunctionParameter> = syntax
             .parameters()
             .iter()
             .filter_map(|parameter| {
@@ -2008,7 +2123,7 @@ impl<'index> SignatureResolver<'index> {
                 })
             })
             .collect();
-        let results = syntax
+        let results: Vec<ResolvedType> = syntax
             .results()
             .iter()
             .filter_map(|result| {
@@ -2023,6 +2138,8 @@ impl<'index> SignatureResolver<'index> {
                 diagnostic.code().as_str(),
             )
         });
+        let parameter_count = parameters.len();
+        let result_count = results.len();
         let signature = diagnostics.is_empty().then(|| ResolvedFunctionSignature {
             symbol,
             name: syntax.name().to_owned(),
@@ -2031,6 +2148,10 @@ impl<'index> SignatureResolver<'index> {
             parameters,
             results,
             effects: crate::EffectSummary::empty(),
+            lifetime_summary: crate::CallableLifetimeSummary::conservative(
+                parameter_count,
+                result_count,
+            ),
         });
         ResolvedSignatureResult {
             signature,
@@ -2532,12 +2653,12 @@ impl<'index> SignatureResolver<'index> {
                     key: canonical[0],
                     value: canonical[1],
                 },
-                BootstrapTypeRole::Nominal | BootstrapTypeRole::Interface => {
-                    SemanticType::Builtin {
-                        definition: entry.id(),
-                        arguments: canonical,
-                    }
-                }
+                BootstrapTypeRole::Nominal
+                | BootstrapTypeRole::Interface
+                | BootstrapTypeRole::View => SemanticType::Builtin {
+                    definition: entry.id(),
+                    arguments: canonical,
+                },
             };
             self.arena.intern(semantic).ok()
         });
@@ -2602,15 +2723,32 @@ impl<'index> SignatureResolver<'index> {
         let results = self.resolve_types(module, results, generics, diagnostics)?;
         let parameter_ids: Option<Vec<_>> = parameters.iter().map(ResolvedType::type_id).collect();
         let result_ids: Option<Vec<_>> = results.iter().map(ResolvedType::type_id).collect();
+        let contains_view = parameter_ids
+            .as_ref()
+            .into_iter()
+            .chain(result_ids.as_ref())
+            .flatten()
+            .any(|type_id| self.arena.contains_view(*type_id));
+        if contains_view {
+            diagnostics.push(pop_diagnostics::types::invalid_view_callable_provenance(
+                syntax.span(),
+                "function type",
+                "SourceLifetimeSummaryIsNotExpressible",
+            ));
+        }
         let type_id = parameter_ids
             .zip(result_ids)
+            .filter(|_| !contains_view)
             .and_then(|(parameters, results)| {
+                let lifetime_summary =
+                    crate::CallableLifetimeSummary::conservative(parameters.len(), results.len());
                 self.arena
                     .intern(SemanticType::Function {
                         is_async,
                         parameters,
                         results,
                         effects: crate::EffectSummary::empty(),
+                        lifetime_summary,
                     })
                     .ok()
             });

@@ -6,10 +6,35 @@ use pop_standard::{
 use pop_types::embedded_bootstrap_schema;
 
 #[test]
+fn sequence_callbacks_are_invoked_once_per_loop_item() {
+    let source = include_str!("../pop/src/sequence.pop");
+    for (name, invocation) in [
+        ("each", "action(value)"),
+        ("findLastOr", "predicate(value)"),
+        ("indexLastOr", "predicate(value)"),
+        ("minByOr", "select(value)"),
+        ("maxByOr", "select(value)"),
+    ] {
+        let marker = format!("public function {name}<");
+        let function = source
+            .split_once(&marker)
+            .map(|(_, remainder)| remainder)
+            .unwrap_or_else(|| panic!("missing Sequence.{name}"))
+            .split_once("\npublic function ")
+            .map_or_else(|| source, |(body, _)| body);
+        assert_eq!(
+            function.matches(invocation).count(),
+            1,
+            "Sequence.{name} must call its closed pure predicate exactly once per loop item"
+        );
+    }
+}
+
+#[test]
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 90);
+    assert_eq!(baseline.entries().len(), 111);
 
     let prelude_names = baseline
         .entries()
@@ -18,6 +43,9 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .map(|entry| (entry.kind(), entry.name()))
         .collect::<Vec<_>>();
     assert!(prelude_names.contains(&(ApiKind::Namespace, "Sequence")));
+    assert!(prelude_names.contains(&(ApiKind::Attribute, "RetainMetadata")));
+    assert!(prelude_names.contains(&(ApiKind::Namespace, "Metadata")));
+    assert!(prelude_names.contains(&(ApiKind::Namespace, "Codec")));
     assert!(!prelude_names.contains(&(ApiKind::Namespace, "Math")));
     assert!(!prelude_names.iter().any(|(_, name)| *name == "Option"));
     assert!(!prelude_names.iter().any(|(_, name)| *name == "Actor"));
@@ -92,6 +120,17 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
             ("Pop.Task", "cancel"),
             ("Pop.Task", "group"),
             ("Pop.Task", "start"),
+            ("Pop.Bytes", "view"),
+            ("Pop.Bytes", "slice"),
+            ("Pop.Bytes", "slice"),
+            ("Pop.Bytes", "length"),
+            ("Pop.Bytes", "get"),
+            ("Pop.Bytes", "toBytes"),
+            ("Pop.Text", "view"),
+            ("Pop.Text", "slice"),
+            ("Pop.Text", "slice"),
+            ("Pop.Text", "length"),
+            ("Pop.Text", "toString"),
         ]
     );
 }

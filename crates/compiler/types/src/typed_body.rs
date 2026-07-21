@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AttributeQuerySubject, FfiCallbackBindingContract, FfiCallbackThreadPolicy, FloatKind,
-    FloatValue, IntegerKind, IntegerValue, NumericConversionKind,
+    FloatValue, IntegerKind, IntegerValue, NumericConversionKind, ViewBorrow, ViewKind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +143,10 @@ pub enum TypedStatementKind {
         result: BuiltinTypeId,
         result_type: TypeId,
         arms: Vec<TypedResultMatchArm>,
+    },
+    CodecErrorMatch {
+        scrutinee: TypedExpression,
+        arms: Vec<TypedCodecErrorMatchArm>,
     },
     Defer {
         body: Vec<TypedStatement>,
@@ -406,6 +410,9 @@ pub enum TypedExpressionKind {
     Parameter(ValueParameterId),
     Capture(CaptureId),
     Function(SymbolId),
+    /// Compiler-originated sealed `Codec.Schema<T>` Item selected by static
+    /// source resolution. The symbol never becomes a runtime registry key.
+    GeneratedCodecSchema(SymbolId),
     Field {
         base: Box<TypedExpression>,
         field: FieldId,
@@ -491,6 +498,7 @@ pub enum TypedExpressionKind {
         case: pop_foundation::IterationCaseId,
         arguments: Vec<TypedExpression>,
     },
+    CodecErrorCase(crate::CodecErrorReason),
     ErrorCase {
         error: ErrorId,
         case: ErrorCaseId,
@@ -727,6 +735,39 @@ pub enum TypedExpressionKind {
         value: Box<TypedExpression>,
         interface: NominalInterfaceId,
     },
+    CheckedNominalCast {
+        value: Box<TypedExpression>,
+        source_interface: InterfaceId,
+        source_type: TypeId,
+        target_class: ClassId,
+        target_type: TypeId,
+    },
+    ViewCreate {
+        kind: ViewKind,
+        lender: Box<TypedExpression>,
+        borrow: ViewBorrow,
+    },
+    ViewSlice {
+        kind: ViewKind,
+        view: Box<TypedExpression>,
+        start: Box<TypedExpression>,
+        length: Box<TypedExpression>,
+        parent: ViewBorrow,
+        borrow: ViewBorrow,
+    },
+    ViewLength {
+        kind: ViewKind,
+        view: Box<TypedExpression>,
+    },
+    ViewGetByte {
+        view: Box<TypedExpression>,
+        index: Box<TypedExpression>,
+    },
+    ViewMaterialize {
+        kind: ViewKind,
+        view: Box<TypedExpression>,
+        allocation_site: pop_foundation::AllocationSiteId,
+    },
     NumericConvert {
         value: Box<TypedExpression>,
         conversion: NumericConversionKind,
@@ -953,6 +994,30 @@ pub struct TypedResultMatchArm {
     pub(crate) bindings: Vec<TypedMatchBinding>,
     pub(crate) body: Vec<TypedStatement>,
     pub(crate) span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypedCodecErrorMatchArm {
+    pub(crate) reason: crate::CodecErrorReason,
+    pub(crate) body: Vec<TypedStatement>,
+    pub(crate) span: SourceSpan,
+}
+
+impl TypedCodecErrorMatchArm {
+    #[must_use]
+    pub const fn reason(&self) -> crate::CodecErrorReason {
+        self.reason
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &[TypedStatement] {
+        &self.body
+    }
+
+    #[must_use]
+    pub const fn span(&self) -> SourceSpan {
+        self.span
+    }
 }
 
 impl TypedResultMatchArm {

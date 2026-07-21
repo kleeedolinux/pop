@@ -14,11 +14,104 @@ use pop_foundation::{
 };
 use pop_resolve::Visibility;
 use pop_types::{
-    ClassMethodDispatch, FloatKind, NumericConversionKind, PrimitiveType, SemanticType, TypeArena,
-    TypedBinaryOperator, TypedUnaryOperator, embedded_bootstrap_schema,
+    ClassMethodDispatch, Effect, EffectSummary, FloatKind, NumericConversionKind, PrimitiveType,
+    SemanticType, TypeArena, TypedBinaryOperator, TypedUnaryOperator, embedded_bootstrap_schema,
 };
 
 use crate::ir::*;
+
+fn canonical_arguments_match(
+    arena: &TypeArena,
+    types: &[TypeId],
+    canonical: &[pop_types::CanonicalTypeIdentity],
+    catalog: &HirNominalReferenceCatalog,
+) -> bool {
+    types.len() == canonical.len()
+        && types
+            .iter()
+            .zip(canonical)
+            .all(|(type_id, canonical)| canonical_type_matches(arena, *type_id, canonical, catalog))
+}
+
+fn canonical_type_matches(
+    arena: &TypeArena,
+    type_id: TypeId,
+    canonical: &pop_types::CanonicalTypeIdentity,
+    catalog: &HirNominalReferenceCatalog,
+) -> bool {
+    use pop_types::CanonicalTypeIdentity as Canonical;
+    match (arena.get(type_id), canonical) {
+        (Some(SemanticType::Primitive(found)), Canonical::Primitive(expected)) => found == expected,
+        (Some(SemanticType::Record(_)), Canonical::Record(_)) => true,
+        (Some(SemanticType::Class { .. }), Canonical::Class(expected)) => catalog
+            .classes()
+            .iter()
+            .find(|reference| reference.type_id() == type_id)
+            .is_some_and(|reference| reference.identity().canonical() == expected),
+        (Some(SemanticType::Interface { .. }), Canonical::Interface(expected)) => catalog
+            .interfaces()
+            .iter()
+            .find(|reference| reference.type_id() == type_id)
+            .is_some_and(|reference| reference.identity().canonical() == expected),
+        (Some(SemanticType::Tuple(found)), Canonical::Tuple(expected))
+        | (Some(SemanticType::Union(found)), Canonical::Union(expected)) => {
+            canonical_arguments_match(arena, found, expected, catalog)
+        }
+        (
+            Some(SemanticType::Function {
+                is_async,
+                parameters,
+                results,
+                effects,
+                lifetime_summary,
+            }),
+            Canonical::Function {
+                is_async: expected_async,
+                parameters: expected_parameters,
+                results: expected_results,
+                effects: expected_effects,
+                lifetime_summary: expected_lifetime,
+            },
+        ) => {
+            is_async == expected_async
+                && effects == expected_effects
+                && lifetime_summary == expected_lifetime
+                && canonical_arguments_match(arena, parameters, expected_parameters, catalog)
+                && canonical_arguments_match(arena, results, expected_results, catalog)
+        }
+        (Some(SemanticType::Array(found)), Canonical::Array(expected))
+        | (Some(SemanticType::Optional(found)), Canonical::Optional(expected)) => {
+            canonical_type_matches(arena, *found, expected, catalog)
+        }
+        (
+            Some(SemanticType::Table {
+                key: found_key,
+                value: found_value,
+            }),
+            Canonical::Table {
+                key: expected_key,
+                value: expected_value,
+            },
+        ) => {
+            canonical_type_matches(arena, *found_key, expected_key, catalog)
+                && canonical_type_matches(arena, *found_value, expected_value, catalog)
+        }
+        (
+            Some(SemanticType::Builtin {
+                definition,
+                arguments,
+            }),
+            Canonical::Builtin {
+                definition: expected_definition,
+                arguments: expected_arguments,
+            },
+        ) => {
+            definition == expected_definition
+                && canonical_arguments_match(arena, arguments, expected_arguments, catalog)
+        }
+        _ => false,
+    }
+}
 
 fn ffi_handle_payload(arena: &TypeArena, type_id: TypeId) -> Option<TypeId> {
     match arena.get(type_id)? {
@@ -295,6 +388,10 @@ pub enum HirVerificationError {
         case: ResultCaseId,
         span: SourceSpan,
     },
+    InvalidCodecErrorCase {
+        case: EnumCaseId,
+        span: SourceSpan,
+    },
     InvalidIterationCase {
         case: IterationCaseId,
         span: SourceSpan,
@@ -368,6 +465,15 @@ pub enum HirVerificationError {
         target: TypeId,
         span: SourceSpan,
     },
+    InvalidCheckedNominalCast {
+        source_interface: InterfaceId,
+        source: TypeId,
+        target_class: ClassId,
+        target: TypeId,
+        result: TypeId,
+        span: SourceSpan,
+    },
+    InvalidNominalReference(SymbolIdentity),
     WrongClassDefinition {
         class: ClassId,
         expected: SymbolId,
@@ -466,9 +572,18 @@ pub enum HirVerificationError {
         found: TypeId,
         span: SourceSpan,
     },
+    CallEffectMismatch {
+        expected: pop_types::EffectSummary,
+        found: pop_types::EffectSummary,
+        span: SourceSpan,
+    },
     InvalidFunctionReferenceType {
         function: SymbolId,
         found: TypeId,
+        span: SourceSpan,
+    },
+    InvalidGeneratedCodecSchema {
+        adapter: SymbolId,
         span: SourceSpan,
     },
     InvalidMethodSignature {
@@ -563,6 +678,7 @@ struct HirInterfaceSchema {
 struct HirInterfaceMethodSchema {
     slot: u32,
     signature: HirCallableSignature,
+    effects: pop_types::EffectSummary,
     span: SourceSpan,
 }
 
@@ -583,6 +699,7 @@ struct HirDeclaredMethod {
 }
 
 struct HirSchema {
+    generated_codec_adapters: BTreeMap<SymbolId, TypeId>,
     functions: BTreeMap<SymbolId, HirCallableSignature>,
     function_references: BTreeMap<SymbolIdentity, HirCallableSignature>,
     methods: BTreeMap<MethodId, HirCallableSignature>,
@@ -604,6 +721,7 @@ impl HirSchema {
         errors: &mut Vec<HirVerificationError>,
     ) -> Self {
         let mut schema = Self {
+            generated_codec_adapters: BTreeMap::new(),
             functions: BTreeMap::new(),
             function_references: BTreeMap::new(),
             methods: BTreeMap::new(),
@@ -618,6 +736,168 @@ impl HirSchema {
             fields: BTreeMap::new(),
         };
         let mut symbols = BTreeSet::new();
+        for adapter in bubble.generated_codec_adapters() {
+            if schema
+                .generated_codec_adapters
+                .insert(adapter.symbol(), adapter.schema_type())
+                .is_some()
+            {
+                errors.push(HirVerificationError::InvalidGeneratedCodecSchema {
+                    adapter: adapter.symbol(),
+                    span: empty_span(),
+                });
+            }
+            let encode = adapter.encode_entry();
+            let decode = adapter.decode_entry();
+            let expected_effects = EffectSummary::empty()
+                .with(Effect::Allocates)
+                .with(Effect::GcSafePoint);
+            let builtin_is = |type_id: TypeId, raw: u32| matches!(arena.get(type_id), Some(SemanticType::Builtin { definition, arguments }) if definition.raw() == raw && arguments.is_empty());
+            let result_is = |type_id: TypeId, ok: TypeId| {
+                matches!(arena.get(type_id), Some(SemanticType::Builtin { definition, arguments })
+                    if definition.raw() == 100 && arguments.len() == 2
+                        && arguments[0] == ok && builtin_is(arguments[1], 121))
+            };
+            let encode_result_ok = encode.results().first().is_some_and(|result| {
+                arena
+                    .source_type("nil")
+                    .is_some_and(|nil| result_is(*result, nil))
+            });
+            let decode_result_ok = decode
+                .results()
+                .first()
+                .is_some_and(|result| result_is(*result, adapter.target_type()));
+            let unique_symbols = symbols.insert(adapter.symbol())
+                && symbols.insert(encode.symbol())
+                && symbols.insert(decode.symbol());
+            let valid_entries = unique_symbols
+                && encode.identity().adapter() == decode.identity().adapter()
+                && encode.identity().role() == HirGeneratedCodecEntryRole::Encode
+                && decode.identity().role() == HirGeneratedCodecEntryRole::Decode
+                && encode.symbol() != decode.symbol()
+                && encode.parameters().len() == 2
+                && encode.parameters()[0] == adapter.target_type()
+                && builtin_is(encode.parameters()[1], 119)
+                && encode.results().len() == 1
+                && encode_result_ok
+                && decode.parameters().len() == 1
+                && builtin_is(decode.parameters()[0], 120)
+                && decode.results().len() == 1
+                && decode_result_ok
+                && encode.effects() == expected_effects
+                && decode.effects() == expected_effects
+                && encode.provenance() == adapter.provenance()
+                && decode.provenance() == adapter.provenance()
+                && matches!(encode.body(), HirGeneratedCodecEntryBody::CodecEncode { adapter: symbol } if symbol == adapter.symbol())
+                && matches!(decode.body(), HirGeneratedCodecEntryBody::CodecDecode { adapter: symbol } if symbol == adapter.symbol());
+            if !valid_entries {
+                errors.push(HirVerificationError::InvalidGeneratedCodecSchema {
+                    adapter: adapter.symbol(),
+                    span: adapter.provenance().attachment(),
+                });
+            }
+        }
+        for reference in bubble.nominal_references().interfaces() {
+            let valid_owner = bubble
+                .dependencies()
+                .contains(&reference.identity().definition().bubble());
+            let valid_type = matches!(
+                arena.get(reference.type_id()),
+                Some(SemanticType::Interface { interface, arguments })
+                    if *interface == reference.interface()
+                        && arguments == reference.identity().arguments()
+                        && reference.identity().canonical().definition()
+                            == reference.identity().definition()
+                        && canonical_arguments_match(
+                            arena,
+                            arguments,
+                            reference.identity().canonical().arguments(),
+                            bubble.nominal_references(),
+                        )
+            );
+            if !valid_owner || !valid_type {
+                errors.push(HirVerificationError::InvalidNominalReference(
+                    reference.identity().definition(),
+                ));
+                continue;
+            }
+            if schema
+                .interfaces
+                .insert(
+                    reference.interface(),
+                    HirInterfaceSchema {
+                        type_id: reference.type_id(),
+                        methods: BTreeMap::new(),
+                    },
+                )
+                .is_some()
+            {
+                errors.push(HirVerificationError::DuplicateInterface(
+                    reference.interface(),
+                ));
+            }
+        }
+        for reference in bubble.nominal_references().classes() {
+            let valid_owner = bubble
+                .dependencies()
+                .contains(&reference.identity().definition().bubble());
+            let valid_type = matches!(
+                arena.get(reference.type_id()),
+                Some(SemanticType::Class { class, arguments })
+                    if *class == reference.class()
+                        && arguments == reference.identity().arguments()
+                        && reference.identity().canonical().definition()
+                            == reference.identity().definition()
+                        && canonical_arguments_match(
+                            arena,
+                            arguments,
+                            reference.identity().canonical().arguments(),
+                            bubble.nominal_references(),
+                        )
+            );
+            let interfaces = reference
+                .interfaces()
+                .iter()
+                .map(|interface| {
+                    (
+                        interface.interface(),
+                        HirInterfaceImplementation {
+                            interface: interface.interface(),
+                            interface_type: interface.type_id(),
+                            methods: Vec::new(),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let valid_interfaces = reference.interfaces().iter().all(|interface| {
+                schema
+                    .interfaces
+                    .get(&interface.interface())
+                    .is_some_and(|schema| schema.type_id == interface.type_id())
+            });
+            if !valid_owner || !valid_type || !valid_interfaces {
+                errors.push(HirVerificationError::InvalidNominalReference(
+                    reference.identity().definition(),
+                ));
+                continue;
+            }
+            if schema
+                .classes
+                .insert(
+                    reference.class(),
+                    HirClassSchema {
+                        definition: reference.identity().definition().symbol(),
+                        type_id: reference.type_id(),
+                        fields: BTreeMap::new(),
+                        interfaces,
+                        builtin_interfaces: BTreeMap::new(),
+                    },
+                )
+                .is_some()
+            {
+                errors.push(HirVerificationError::DuplicateClass(reference.class()));
+            }
+        }
         for declaration in bubble.declarations() {
             if !symbols.insert(declaration.symbol()) {
                 errors.push(HirVerificationError::DuplicateSymbol(declaration.symbol()));
@@ -945,6 +1225,7 @@ impl HirSchema {
                                             .collect(),
                                         results: method.results.clone(),
                                     },
+                                    effects: method.effects,
                                     span: method.span,
                                 },
                             )
@@ -2042,6 +2323,9 @@ impl Verifier<'_> {
                     statement.span(),
                     &visible,
                 ),
+                HirStatementKind::CodecErrorMatch { scrutinee, arms } => {
+                    self.verify_codec_error_match(scrutinee, arms, statement.span(), &visible);
+                }
                 HirStatementKind::Defer { body } => {
                     if self.cleanup_depth != 0 {
                         self.errors
@@ -2346,6 +2630,30 @@ impl Verifier<'_> {
                 self.verify_function(*function, expression.span());
                 self.verify_function_reference(*function, expression);
             }
+            HirExpressionKind::GeneratedCodecSchema(adapter) => {
+                if let Some(schema) = self.schema {
+                    let Some(schema_type) = schema.generated_codec_adapters.get(adapter).copied()
+                    else {
+                        self.errors
+                            .push(HirVerificationError::InvalidGeneratedCodecSchema {
+                                adapter: *adapter,
+                                span: expression.span(),
+                            });
+                        return;
+                    };
+                    self.verify_expression_type(schema_type, expression);
+                } else if !matches!(
+                    self.arena.get(expression.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if definition.raw() == 118 && arguments.len() == 1
+                ) {
+                    self.errors
+                        .push(HirVerificationError::InvalidGeneratedCodecSchema {
+                            adapter: *adapter,
+                            span: expression.span(),
+                        });
+                }
+            }
             HirExpressionKind::Field { .. }
             | HirExpressionKind::Record { .. }
             | HirExpressionKind::ClassConstruct { .. }
@@ -2402,6 +2710,21 @@ impl Verifier<'_> {
                         case: *case,
                         span: expression.span(),
                     });
+                }
+            }
+            HirExpressionKind::CodecErrorCase(case) => {
+                if case.raw() > 2
+                    || !matches!(
+                        self.arena.get(expression.type_id()),
+                        Some(SemanticType::Builtin { definition, arguments })
+                            if *definition == pop_types::CODEC_ERROR_TYPE_ID && arguments.is_empty()
+                    )
+                {
+                    self.errors
+                        .push(HirVerificationError::InvalidCodecErrorCase {
+                            case: *case,
+                            span: expression.span(),
+                        });
                 }
             }
             HirExpressionKind::ArrayGet { array, index } => {
@@ -3434,6 +3757,23 @@ impl Verifier<'_> {
                 self.verify_expression(value, visible);
                 self.verify_interface_upcast(*interface, value, expression);
             }
+            HirExpressionKind::CheckedNominalCast {
+                value,
+                source_interface,
+                source_type,
+                target_class,
+                target_type,
+            } => {
+                self.verify_expression(value, visible);
+                self.verify_checked_nominal_cast(
+                    *source_interface,
+                    *source_type,
+                    *target_class,
+                    *target_type,
+                    value,
+                    expression,
+                );
+            }
             HirExpressionKind::NumericConvert { value, conversion } => {
                 self.verify_expression(value, visible);
                 if !valid_numeric_conversion(
@@ -3487,6 +3827,142 @@ impl Verifier<'_> {
                     _ => false,
                 };
                 if !source_valid || self.arena.source_type("String") != Some(expression.type_id()) {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::ViewCreate {
+                kind,
+                lender,
+                borrow,
+            } => {
+                self.verify_expression(lender, visible);
+                let lender_valid = match kind {
+                    pop_types::ViewKind::Bytes => matches!(
+                        self.arena.get(lender.type_id()),
+                        Some(SemanticType::Builtin { definition, arguments })
+                            if *definition == pop_types::BYTES_TYPE_ID && arguments.is_empty()
+                    ),
+                    pop_types::ViewKind::Text => {
+                        self.arena.source_type("String") == Some(lender.type_id())
+                    }
+                };
+                let valid_result = matches!(
+                    self.arena.get(expression.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == kind.type_definition() && arguments.is_empty()
+                );
+                let parameter_matches = match (lender.kind(), borrow.lender()) {
+                    (
+                        HirExpressionKind::Parameter(parameter),
+                        pop_types::ViewLenderProvenance::Parameter { index },
+                    ) => parameter.raw() == index,
+                    _ => true,
+                };
+                if !lender_valid || !valid_result || !parameter_matches {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::ViewSlice {
+                kind,
+                view,
+                start,
+                length,
+                parent,
+                borrow,
+            } => {
+                self.verify_expression(view, visible);
+                self.verify_expression(start, visible);
+                self.verify_expression(length, visible);
+                let valid_view = |type_id| {
+                    matches!(
+                        self.arena.get(type_id),
+                        Some(SemanticType::Builtin { definition, arguments })
+                            if *definition == kind.type_definition() && arguments.is_empty()
+                    )
+                };
+                let integer = self.arena.source_type("Int");
+                if !valid_view(view.type_id())
+                    || !valid_view(expression.type_id())
+                    || integer != Some(start.type_id())
+                    || integer != Some(length.type_id())
+                    || parent.lifetime() == borrow.lifetime()
+                    || parent.lender() != borrow.lender()
+                {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::ViewLength { kind, view } => {
+                self.verify_expression(view, visible);
+                let valid_view = matches!(
+                    self.arena.get(view.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == kind.type_definition() && arguments.is_empty()
+                );
+                if !valid_view || self.arena.source_type("Int") != Some(expression.type_id()) {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::ViewGetByte { view, index } => {
+                self.verify_expression(view, visible);
+                self.verify_expression(index, visible);
+                let valid_view = matches!(
+                    self.arena.get(view.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == pop_types::BYTES_VIEW_TYPE_ID && arguments.is_empty()
+                );
+                let byte = self.arena.source_type("Byte");
+                let nil = self.arena.source_type("nil");
+                let valid_result = matches!(
+                    self.arena.get(expression.type_id()),
+                    Some(SemanticType::Union(members))
+                        if members.len() == 2
+                            && byte.is_some_and(|byte| members.contains(&byte))
+                            && nil.is_some_and(|nil| members.contains(&nil))
+                );
+                if !valid_view
+                    || self.arena.source_type("Int") != Some(index.type_id())
+                    || !valid_result
+                {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
+            HirExpressionKind::ViewMaterialize {
+                kind,
+                view,
+                allocation_site: _,
+            } => {
+                self.verify_expression(view, visible);
+                let valid_view = matches!(
+                    self.arena.get(view.type_id()),
+                    Some(SemanticType::Builtin { definition, arguments })
+                        if *definition == kind.type_definition() && arguments.is_empty()
+                );
+                let expected = match kind {
+                    pop_types::ViewKind::Bytes => matches!(
+                        self.arena.get(expression.type_id()),
+                        Some(SemanticType::Builtin { definition, arguments })
+                            if *definition == pop_types::BYTES_TYPE_ID && arguments.is_empty()
+                    ),
+                    pop_types::ViewKind::Text => {
+                        self.arena.source_type("String") == Some(expression.type_id())
+                    }
+                };
+                if !valid_view || !expected {
                     self.errors.push(HirVerificationError::InvalidType {
                         type_id: expression.type_id(),
                         span: expression.span(),
@@ -3593,6 +4069,10 @@ impl Verifier<'_> {
                 .collect(),
             results: closure.results.clone(),
             effects: pop_types::EffectSummary::empty(),
+            lifetime_summary: pop_types::CallableLifetimeSummary::conservative(
+                closure.parameters.len(),
+                closure.results.len(),
+            ),
         };
         if self.arena.get(expression.type_id()) != Some(&expected_function) {
             self.errors.push(HirVerificationError::InvalidCallableType {
@@ -3925,6 +4405,45 @@ impl Verifier<'_> {
         }
     }
 
+    fn verify_codec_error_match(
+        &mut self,
+        scrutinee: &HirExpression,
+        arms: &[HirCodecErrorMatchArm],
+        span: SourceSpan,
+        visible: &BTreeSet<LocalId>,
+    ) {
+        self.verify_expression(scrutinee, visible);
+        if !matches!(
+            self.arena.get(scrutinee.type_id()),
+            Some(SemanticType::Builtin { definition, arguments })
+                if *definition == pop_types::CODEC_ERROR_TYPE_ID && arguments.is_empty()
+        ) {
+            self.errors
+                .push(HirVerificationError::InvalidCodecErrorCase {
+                    case: EnumCaseId::from_raw(u32::MAX),
+                    span,
+                });
+        }
+        let mut seen = BTreeSet::new();
+        for arm in arms {
+            if arm.case.raw() > 2 || !seen.insert(arm.case) {
+                self.errors
+                    .push(HirVerificationError::InvalidCodecErrorCase {
+                        case: arm.case,
+                        span: arm.span,
+                    });
+            }
+            self.verify_statements(&arm.body, visible);
+        }
+        for raw in 0..=2 {
+            let case = EnumCaseId::from_raw(raw);
+            if !seen.contains(&case) {
+                self.errors
+                    .push(HirVerificationError::InvalidCodecErrorCase { case, span });
+            }
+        }
+    }
+
     fn verify_result_match(
         &mut self,
         scrutinee: &HirExpression,
@@ -4159,6 +4678,44 @@ impl Verifier<'_> {
                     interface: interface_id,
                     source: value.type_id(),
                     target: expression.type_id(),
+                    span: expression.span(),
+                });
+        }
+    }
+
+    fn verify_checked_nominal_cast(
+        &mut self,
+        source_interface: InterfaceId,
+        source_type: TypeId,
+        target_class: ClassId,
+        target_type: TypeId,
+        value: &HirExpression,
+        expression: &HirExpression,
+    ) {
+        let Some(schema) = self.schema else {
+            return;
+        };
+        let valid_source = schema
+            .interfaces
+            .get(&source_interface)
+            .is_some_and(|interface| interface.type_id == source_type)
+            && value.type_id() == source_type;
+        let valid_target = schema.classes.get(&target_class).is_some_and(|class| {
+            class.type_id == target_type
+                && class
+                    .interfaces
+                    .get(&source_interface)
+                    .is_some_and(|implementation| implementation.interface_type == source_type)
+        });
+        let valid_result = self.optional_inner_type(expression.type_id()) == Some(target_type);
+        if !(valid_source && valid_target && valid_result) {
+            self.errors
+                .push(HirVerificationError::InvalidCheckedNominalCast {
+                    source_interface,
+                    source: source_type,
+                    target_class,
+                    target: target_type,
+                    result: expression.type_id(),
                     span: expression.span(),
                 });
         }
@@ -4442,6 +4999,7 @@ impl Verifier<'_> {
                 interface,
                 method,
                 slot,
+                effects,
             } => {
                 let signature =
                     self.schema
@@ -4461,6 +5019,13 @@ impl Verifier<'_> {
                                 found: *slot,
                                 span,
                             });
+                    }
+                    if method_schema.effects != *effects {
+                        self.errors.push(HirVerificationError::CallEffectMismatch {
+                            expected: method_schema.effects,
+                            found: *effects,
+                            span,
+                        });
                     }
                     let mut parameters = vec![receiver_type];
                     if let Some(receiver) = arguments.first()
@@ -4488,7 +5053,9 @@ impl Verifier<'_> {
                     None
                 }
             }
-            HirCallDispatch::BuiltinInterfaceMethod { interface, method } => {
+            HirCallDispatch::BuiltinInterfaceMethod {
+                interface, method, ..
+            } => {
                 let signature = arguments.first().and_then(|receiver| {
                     let receiver_contract = self
                         .parameter_bounds
@@ -4687,11 +5254,16 @@ impl Verifier<'_> {
         else {
             return;
         };
+        let lifetime_summary = pop_types::CallableLifetimeSummary::conservative(
+            signature.parameters.len(),
+            signature.results.len(),
+        );
         let expected = SemanticType::Function {
             is_async: signature.is_async,
             parameters: signature.parameters,
             results: signature.results,
             effects: pop_types::EffectSummary::empty(),
+            lifetime_summary,
         };
         if self.arena.get(expression.type_id()) != Some(&expected) {
             self.errors
@@ -5379,6 +5951,11 @@ fn collect_local_binding_map(
                     collect_local_binding_map(&arm.body, local_bindings);
                 }
             }
+            HirStatementKind::CodecErrorMatch { arms, .. } => {
+                for arm in arms {
+                    collect_local_binding_map(&arm.body, local_bindings);
+                }
+            }
             HirStatementKind::Defer { body } | HirStatementKind::AsyncDefer { body } => {
                 collect_local_binding_map(body, local_bindings);
             }
@@ -5577,6 +6154,18 @@ fn collect_written_bindings(
             HirStatementKind::ResultMatch {
                 scrutinee, arms, ..
             } => {
+                collect_cell_captures(scrutinee, written);
+                for arm in arms {
+                    collect_written_bindings(
+                        &arm.body,
+                        parameter_bindings,
+                        capture_bindings,
+                        local_bindings,
+                        written,
+                    );
+                }
+            }
+            HirStatementKind::CodecErrorMatch { scrutinee, arms } => {
                 collect_cell_captures(scrutinee, written);
                 for arm in arms {
                     collect_written_bindings(
@@ -5904,11 +6493,31 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         HirExpressionKind::StringFormat { value, .. } => {
             collect_cell_captures(value, written);
         }
-        HirExpressionKind::InterfaceUpcast { value, .. } => {
+        HirExpressionKind::InterfaceUpcast { value, .. }
+        | HirExpressionKind::CheckedNominalCast { value, .. } => {
             collect_cell_captures(value, written);
         }
         HirExpressionKind::NumericConvert { value, .. } => {
             collect_cell_captures(value, written);
+        }
+        HirExpressionKind::ViewCreate { lender: value, .. }
+        | HirExpressionKind::ViewLength { view: value, .. }
+        | HirExpressionKind::ViewMaterialize { view: value, .. } => {
+            collect_cell_captures(value, written);
+        }
+        HirExpressionKind::ViewSlice {
+            view,
+            start,
+            length,
+            ..
+        } => {
+            collect_cell_captures(view, written);
+            collect_cell_captures(start, written);
+            collect_cell_captures(length, written);
+        }
+        HirExpressionKind::ViewGetByte { view, index } => {
+            collect_cell_captures(view, written);
+            collect_cell_captures(index, written);
         }
         HirExpressionKind::Integer(_)
         | HirExpressionKind::Float(_)
@@ -5919,6 +6528,8 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
         | HirExpressionKind::Parameter(_)
         | HirExpressionKind::Capture(_)
         | HirExpressionKind::Function(_)
+        | HirExpressionKind::CodecErrorCase(_)
+        | HirExpressionKind::GeneratedCodecSchema(_)
         | HirExpressionKind::TaskCancellationSource
         | HirExpressionKind::FfiPointerNone { .. }
         | HirExpressionKind::EnumCase { .. } => {}

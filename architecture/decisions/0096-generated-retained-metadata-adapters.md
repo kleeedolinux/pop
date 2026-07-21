@@ -128,6 +128,16 @@ version 1 payload is exactly:
 - a statically typed decode entry with logical signature
   `function(Codec.Reader): Result<T, Codec.Error>`.
 
+Each entry has one sealed compiler-originated identity consisting of the stable
+generated adapter `SymbolIdentity` plus the closed `Encode` or `Decode` role.
+The entries are verified typed functions in generated HIR and ordinary MIR,
+but they are not additional namespace Items and cannot be named from source.
+Local lowering slots and consumer-local IDs are private remappings of that
+identity; numeric arithmetic on the schema Item's local `SymbolId` is never an
+artifact or language identity. A source-free consumer reconstructs both typed
+entries from the verified adapter identity, role, and canonical `.popc`
+projection without duplicating structural schema in JSON metadata.
+
 `Codec.Writer` and `Codec.Reader` are sealed format capabilities exposing only a
 closed typed scalar/container event vocabulary. They do not accept compiler
 handles, arbitrary program values, or member names as symbol lookup requests.
@@ -141,6 +151,96 @@ call. `UserSchema` is not a runtime registry entry, and a runtime string cannot
 select it. A codec may infer an already visible exact schema from a statically
 known `T` only when normal resolution finds that generated adapter identity;
 failure is a compile error, not a runtime search.
+
+### Exact codec event vocabulary and sequencing
+
+Adapter protocol 1 uses one closed backend-neutral event tape between generated
+adapters and sealed `Codec.Writer`/`Codec.Reader` capabilities. Canonical MIR
+has exactly two schema-selected operations, `CodecEncode(adapter, value,
+writer)` and `CodecDecode(adapter, reader)`. Their `adapter` operand is the exact
+reachable generated Item identity and their value/result types must match that
+adapter's verified `Codec.Schema<T>` catalog entry. They cannot accept a type,
+field, case, or function name.
+
+The tape vocabulary is closed to:
+
+- `RecordStart(memberCount)`, `Member(ordinal, label)`, and `RecordEnd`;
+- `EnumCase(ordinal, label, discriminant)`;
+- `UnionStart(ordinal, label, payloadCount)`, `Payload(ordinal)`, and
+  `UnionEnd`;
+- `TupleStart(elementCount)`, `Element(ordinal)`, and `TupleEnd`;
+- `SequenceStart(elementCount)`, `Element(ordinal)`, and `SequenceEnd`;
+- `OptionalAbsent` and `OptionalPresent`; and
+- separate typed `Boolean`, fixed-width integer, fixed-width float, `String`,
+  and `Bytes` scalar events.
+
+Generated encoding emits declaration-order record members, the exact selected
+enum/union case, declaration-order union payloads and tuple elements, and
+increasing sequence ordinals. Generated decoding accepts exactly that nesting
+and ordinal sequence. `Member` and case labels are data labels: decoding
+compares one label only with the exact adapter catalog's bounded label at the
+same ordinal. It never resolves a program Item or consults a registry. A format
+adapter may reorder keyed input only while constructing the tape; it must
+canonicalize it to declaration order before `CodecDecode` executes.
+
+Each `CodecDecode` consumes exactly one complete top-level value. A reader may
+hold later top-level values for subsequent typed decode calls; those later
+values are not trailing payload. Extra events inside the selected top-level
+record, union, tuple, sequence, optional, or retained nominal remain malformed
+unconsumed nested events.
+
+Both operations return ordinary `Result` values and stop at the first error.
+Protocol 1 has the closed `Codec.Error` reasons `MalformedInput`,
+`LimitExceeded`, and `CapabilityFailure`. Unexpected end or event kind,
+unknown/duplicate/missing member, wrong label/ordinal/discriminant/arity,
+trailing payload, invalid scalar representation, and unconsumed nested events
+produce `MalformedInput`; accepted depth/input limits produce `LimitExceeded`;
+and a sealed reader/writer failure produces `CapabilityFailure`. No malformed
+input traps, unwinds, or falls back to dynamic decoding.
+
+Protocol 1 fixes the runtime tape limits at 32 nested container/retained-nominal
+levels, 65,536 total events, and 65,535 elements in one sequence or `Bytes`
+payload. Readers reject an over-limit count before allocation or recursive
+descent. Writers stop before emitting an over-limit tape. Both return
+`LimitExceeded` through the declared `Result` failure case; they do not trap or
+partially publish an output tape.
+
+`Codec.Error` keeps compiler-known type identity 121. Its exhaustive case
+identities are fixed as `MalformedInput` = 0, `LimitExceeded` = 1, and
+`CapabilityFailure` = 2. At the PLRI boundary those cases map exactly to status
+1, 2, and 3 respectively; status 0 is success and cannot construct an error.
+HIR, MIR, reference consumers, and every primary backend use these identities
+directly rather than private strings or backend-local reason numbers.
+
+Native ABI 1.19 carries this tape through exactly two PLRI operations:
+`CodecWriteEvent` and `CodecReadEvent`. `CodecWriteEvent` receives an opaque
+capability handle, one closed `UInt8` event tag, `UInt32` ordinal, bounded static
+label pointer plus `UInt64` byte length, `UInt64` auxiliary value, and one
+`UInt64` scalar payload. `CodecReadEvent` receives an opaque capability handle,
+then writes the actual closed `UInt8` event tag, `UInt32` ordinal, label pointer
+and `UInt64` length, `UInt64` auxiliary value, and `UInt64` scalar through
+separate fixed-width output slots. Generated code validates one exact expected
+tag except at an optional, where it accepts exactly `OptionalAbsent` or
+`OptionalPresent` before taking the corresponding static branch. The returned
+label is a read-only capability-owned byte borrow valid only until the next
+reader event call; it is never a managed object pointer. Generated code compares
+that bounded label only with the exact static catalog label selected by the
+returned ordinal and checks the exact discriminant, arity, count, and scalar
+kind before construction.
+Integer and floating events fix the payload's signed kind or IEEE bit
+interpretation through the event tag; `Boolean` accepts only zero or one;
+`String` and `Bytes` carry managed handles published as precise roots across the
+call. The `UInt8` status is exactly `Ok`, `MalformedInput`, `LimitExceeded`, or
+`CapabilityFailure`. No variadic payload, untyped union, descriptor pointer,
+registry key, or runtime Item name crosses this boundary.
+
+The two MIR operations have exact local effects `Allocates` and `GcSafePoint`:
+the writer tape and decoded owned values may allocate. Typed failures remain
+`Result` values, so the operations do not intrinsically add `MayTrap` or
+`MayUnwind`. Generated entry effects are the union of those local effects and
+ordinary effects of direct typed value construction. The interpreter, LLVM,
+and future VM must implement this same event contract; the experimental C
+backend fails closed.
 
 ### Canonical typed `.popc` descriptor
 

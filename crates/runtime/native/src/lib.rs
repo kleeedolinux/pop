@@ -2,6 +2,7 @@
 
 mod allocation;
 mod binding;
+mod codec;
 mod failure;
 mod ffi_buffer;
 mod ffi_bytes;
@@ -17,9 +18,11 @@ mod state;
 mod storage;
 mod task;
 mod text;
+mod view;
 
 pub use allocation::*;
 pub use binding::*;
+pub use codec::*;
 pub use failure::*;
 pub use ffi_buffer::*;
 pub use ffi_bytes::*;
@@ -34,3 +37,4 @@ pub use scheduler::*;
 pub use storage::*;
 pub use task::*;
 pub use text::*;
+pub use view::*;

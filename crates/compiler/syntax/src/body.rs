@@ -184,6 +184,11 @@ pub enum ExpressionSyntaxKind {
         type_arguments: Vec<TypeSyntax>,
         arguments: Vec<ExpressionSyntax>,
     },
+    TargetTypeCall {
+        callee: Box<ExpressionSyntax>,
+        type_arguments: Vec<TypeSyntax>,
+        arguments: Vec<ExpressionSyntax>,
+    },
     MethodCall {
         receiver: Box<ExpressionSyntax>,
         method: String,
