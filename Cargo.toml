@@ -47,7 +47,7 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [workspace.dependencies]
 inkwell = { version = "0.9.0", default-features = false, features = ["llvm22-1-prefer-dynamic", "target-x86", "target-bpf"] }

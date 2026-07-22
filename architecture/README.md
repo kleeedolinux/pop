@@ -57,6 +57,7 @@ compile-time evaluator, or portable optimizer.
 30. [Concurrency, actors, and distribution](./23-concurrency-actors-and-distribution.md)
 31. [Scheduler runtime implementation](./23.1-scheduler-runtime-implementation.md)
 32. [Static memory management](./24-static-memory-management.md)
+33. [Project and output licensing](./25-project-and-output-licensing.md)
 
 The examples define the canonical syntax direction. The full grammar will grow
 with implementation, but `.pop`, the `pop` command, naming rules, namespace/
@@ -195,6 +196,10 @@ transplanted into a Luau-shaped file.
   `.popc` projection.
 - The initial compiler/runtime/tool implementation uses a Rust 2024 virtual
   Cargo workspace with architecture-tested crate dependency boundaries.
+- Compiler, backend, and developer-tool sources default to `GPL-3.0-only`;
+  runtime, foundational-library, official-extension, example, and project-owned
+  application-injected material use `Apache-2.0` under ADR 0098. Running a tool
+  does not place user-authored source or ordinary output under the GPL.
 
 ## Decision process
 

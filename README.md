@@ -443,7 +443,16 @@ change genuinely needs compiler or runtime knowledge.
 
 ## License
 
-Pop Lang is released under the [MIT License](LICENSE).
+Copyright (C) 2026 Julia Klee.
+
+The compiler, backends, tools, and default repository material are licensed
+under GPL version 3 only. Runtime components, foundational libraries, official
+extensions, examples, and project-owned code copied or linked into user
+applications are licensed under Apache License 2.0. Using Pop Lang does not
+make a user's own source or ordinary compiler output GPL-covered.
+
+See [LICENSE.txt](LICENSE.txt) for the complete path map and references to the
+GNU and Apache license texts stored in each crate family.
 
 ## Star History
 

@@ -252,6 +252,7 @@ Minimum traceability matrix:
 | Compiler-proven Text/Bytes views | type/lifetime/effect checking, HIR/MIR, reference metadata, standard library, interpreter, LLVM, C validation | exact API/bounds/UTF-8/cost behavior, structured retention/result provenance, lender/root/frontier proofs, store/capture/suspend/ownership/FFI negatives, artifact/verifier corruption, C fail-closed behavior, and interpreter/LLVM relocation differentials under ADR 0097 |
 | Diagnostic fixes | compiler/tooling | applicability, atomicity, postcondition tests |
 | XML documentation | parser, resolver, docs, libraries | tag/signature/cref/artifact tests |
+| Project/output licensing | manifests, runtime, libraries, extensions, generators, packaging | exact GPL/Apache path boundary, output non-claim, notices, and artifact license-inventory tests |
 | No Lua regression | all semantic layers | permanent forbidden-feature regression suite |
 
 ## Review checklist
@@ -327,6 +328,8 @@ Architecture CI should eventually verify:
 - permanent Lua-regression test corpus;
 - no unresolved architecture gaps in release features;
 - checked public documentation/API signature consistency for base libraries.
+- GPL-3.0-only compiler/tool and Apache-2.0 application-facing path, manifest,
+  generated-material, artifact-inventory, and notice boundaries under ADR 0098.
 
 A failing gate is not waived by updating expected output to match buggy behavior.
 The expectation changes only with an accepted architecture change.

@@ -1,4 +1,4 @@
-//! Conformance tests for ADR 0018 and architecture section 11.
+//! Conformance tests for repository architecture and accepted ADRs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -494,7 +494,6 @@ fn every_member_inherits_workspace_metadata_and_has_a_target() {
         for inherited in [
             "edition.workspace = true",
             "rust-version.workspace = true",
-            "license.workspace = true",
             "[lints]",
             "workspace = true",
         ] {
@@ -505,10 +504,86 @@ fn every_member_inherits_workspace_metadata_and_has_a_target() {
             );
         }
 
+        let is_application_facing = member.starts_with("crates/runtime/")
+            || member.starts_with("crates/libraries/")
+            || member.starts_with("crates/extensions/");
+        let license_contract = if is_application_facing {
+            "license = \"Apache-2.0\""
+        } else {
+            "license.workspace = true"
+        };
+        assert!(
+            manifest.contains(license_contract),
+            "{} must contain `{license_contract}` under ADR 0098",
+            manifest_path.display()
+        );
+        if is_application_facing {
+            assert!(
+                !manifest.contains("license.workspace = true")
+                    && !manifest.contains("GPL-3.0-only"),
+                "{} must not inherit or declare the GPL toolchain license",
+                manifest_path.display()
+            );
+        }
+
         let has_target =
             directory.join("src/lib.rs").is_file() || directory.join("src/main.rs").is_file();
         assert!(has_target, "{} has no Rust target", directory.display());
     }
+}
+
+#[test]
+fn repository_licenses_follow_adr_0098() {
+    let root = repository_root();
+    let workspace = read_required(root.join("Cargo.toml"));
+    assert!(
+        workspace.contains("license = \"GPL-3.0-only\""),
+        "the workspace default must be GPL-3.0-only"
+    );
+
+    let licensing = read_required(root.join("LICENSE.txt"));
+    for contract in [
+        "Copyright (C) 2026 Julia Klee",
+        "`GPL-3.0-only`",
+        "`Apache-2.0`",
+        "`crates/compiler/LICENSE.txt`",
+        "`crates/tools/LICENSE.txt`",
+        "`crates/extensions/LICENSE.txt`",
+        "`crates/libraries/LICENSE.txt`",
+        "`crates/runtime/LICENSE.txt`",
+        "`crates/runtime/`",
+        "`crates/libraries/`",
+        "`libraries/`",
+        "`crates/extensions/`",
+        "`examples/`",
+        "does not make",
+    ] {
+        assert!(
+            licensing.contains(contract),
+            "LICENSE.txt must contain `{contract}`"
+        );
+    }
+
+    let compiler_gpl = read_required(root.join("crates/compiler/LICENSE.txt"));
+    let tools_gpl = read_required(root.join("crates/tools/LICENSE.txt"));
+    assert!(compiler_gpl.starts_with("GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007"));
+    assert_eq!(compiler_gpl, tools_gpl);
+
+    let extensions_apache = read_required(root.join("crates/extensions/LICENSE.txt"));
+    let libraries_apache = read_required(root.join("crates/libraries/LICENSE.txt"));
+    let runtime_apache = read_required(root.join("crates/runtime/LICENSE.txt"));
+    assert!(extensions_apache.contains("Apache License\n                        Version 2.0"));
+    assert_eq!(extensions_apache, libraries_apache);
+    assert_eq!(extensions_apache, runtime_apache);
+
+    let mut root_license_files = fs::read_dir(&root)
+        .expect("read repository root")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("LICENSE"))
+        .collect::<Vec<_>>();
+    root_license_files.sort();
+    assert_eq!(root_license_files, ["LICENSE.txt"]);
 }
 
 #[test]

@@ -1,0 +1,55 @@
+# Pop Lang Licensing
+
+Copyright (C) 2026 Julia Klee
+
+This file is the license index for the Pop Lang repository. The repository uses
+two exact SPDX licenses with complete texts stored at the crate-family boundary
+that they govern.
+
+## GPL-3.0-only
+
+The compiler, all backends, and compiler tests under `crates/compiler/` are
+licensed under GNU General Public License version 3 only (`GPL-3.0-only`). The
+complete text is in [`crates/compiler/LICENSE.txt`](crates/compiler/LICENSE.txt).
+
+Developer tools and their tests under `crates/tools/` use the same license. The
+complete text is also present in
+[`crates/tools/LICENSE.txt`](crates/tools/LICENSE.txt).
+
+The GNU license is the default for root files, `architecture/`, localization
+assets, project documentation, and repository material not assigned more
+narrowly below.
+
+## Apache-2.0
+
+Official extensions and their tests under `crates/extensions/` are licensed
+under Apache License 2.0 (`Apache-2.0`). The complete text is in
+[`crates/extensions/LICENSE.txt`](crates/extensions/LICENSE.txt).
+
+Foundational libraries and their tests under `crates/libraries/` are licensed
+under Apache License 2.0. The complete text is in
+[`crates/libraries/LICENSE.txt`](crates/libraries/LICENSE.txt). Repository Pop
+source under `libraries/` follows this same license.
+
+Runtime components and their tests under `crates/runtime/` are licensed under
+Apache License 2.0. The complete text is in
+[`crates/runtime/LICENSE.txt`](crates/runtime/LICENSE.txt).
+
+Repository examples under `examples/` and copyrightable Pop Lang project
+material copied, injected, embedded, or linked into user applications also use
+`Apache-2.0`.
+
+## User programs and generated output
+
+Using a GPL-covered Pop Lang compiler or tool does not make user-authored source
+or ordinary output GPL-covered. The Pop Lang project does not claim copyright
+in a user's program merely because a tool processed it.
+
+When a tool copies copyrightable Pop Lang project material into an output, that
+project-owned material uses `Apache-2.0`. User-provided names, declarations,
+descriptors, and other content retain the terms selected by their owner.
+
+Third-party dependencies and vendored material retain their own copyright and
+license notices. See `NOTICE` for the distribution notice and
+[`architecture/25-project-and-output-licensing.md`](architecture/25-project-and-output-licensing.md)
+for the binding architecture contract.

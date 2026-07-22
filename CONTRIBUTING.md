@@ -34,6 +34,19 @@ not permission to invent semantics.
 Keep changes narrow. Do not mix unrelated cleanup, formatting churn, or
 dependency additions into a feature patch.
 
+## Contribution licensing
+
+Contributions are accepted under the license assigned to their target path in
+[`LICENSE.txt`](LICENSE.txt). Compiler, backend, tool, architecture, and
+default repository contributions are `GPL-3.0-only`. Runtime, foundational
+library, official extension, example, and project-owned application-injected
+material are `Apache-2.0`.
+
+Moving code across that boundary requires explicit licensing review. Preserve
+existing copyright and third-party notices, and do not copy GPL implementation
+source into Apache-only runtime, library, extension, example, template, shim,
+or generated-support material.
+
 ## AI-assisted work
 
 AI tools and coding agents are legitimate contribution tools. Use them for

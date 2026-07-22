@@ -274,7 +274,7 @@ resolver = "1"
 
 [workspace.package]
 edition = "2026"
-license = "MIT"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 StudioData = { path = "packages/data", version = "2.1" }
@@ -625,6 +625,15 @@ Absolute checkout paths and timestamps do not affect reproducible artifacts.
 `pop package` creates a deterministic archive containing the Package manifest,
 selected source/resources, license/readme metadata, and a file-hash inventory.
 It excludes `target/`, credentials, editor state, and undeclared files.
+
+License metadata follows
+[ADR 0098](./decisions/0098-project-and-output-licensing-boundary.md). The
+toolchain itself is `GPL-3.0-only`; the Pop Lang runtime, foundation libraries,
+official extensions, and project-owned material copied or linked into user
+artifacts are `Apache-2.0`. A user Package keeps the license selected by its
+author, and scaffolding never selects one silently. Mixed toolchain/application
+bundles include both license texts, applicable notices, and a deterministic
+component license inventory.
 
 `pop publish` requires a clean package verification build, complete public XML
 documentation, API/naming baselines, declared licenses, and registry policy.
