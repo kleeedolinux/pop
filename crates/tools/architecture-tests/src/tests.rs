@@ -371,6 +371,22 @@ fn accepted_adrs_have_unique_numeric_identities() {
 }
 
 #[test]
+fn accepted_toolchain_distribution_adr_is_not_conditionally_proposed() {
+    let adr = read_required(
+        repository_root()
+            .join("architecture/decisions/0028-toolchain-distribution-and-popup-management.md"),
+    );
+
+    assert!(adr.contains("- Status: accepted"));
+    assert!(
+        !adr.contains("Because this ADR remains proposed")
+            && !adr.contains("If this ADR is accepted")
+            && !adr.contains("- Amends on acceptance:"),
+        "accepted ADR 0028 must state its decision as the active architecture"
+    );
+}
+
+#[test]
 fn private_language_server_uses_compiler_queries_without_cli_scraping() {
     let root = repository_root();
     let manifest = read_required(root.join("crates/tools/language-server/Cargo.toml"));

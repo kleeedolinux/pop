@@ -98,6 +98,23 @@ fn temporary_package(name: &str, library: &str, binary: &str) -> PathBuf {
     root
 }
 
+fn copy_directory(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("create copied directory");
+    let mut entries = std::fs::read_dir(source)
+        .expect("read copied directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read copied entries");
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("copied entry type").is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy file");
+        }
+    }
+}
+
 #[test]
 fn check_dumps_deterministic_verified_hir_for_a_pop_module() {
     let first = run_check_dump("inspectable.pop", "hir");
@@ -763,10 +780,534 @@ fn package_check_and_build_use_manifest_selected_bubbles() {
         loaded.target_implementation().map(|(target, _)| target),
         Some("x86_64-unknown-linux-gnu")
     );
+    assert_eq!(
+        loaded.required_capabilities(),
+        [
+            "exceptions",
+            "preciseStackMaps",
+            "relocatingNursery",
+            "threads"
+        ]
+    );
+    assert!(
+        loaded.initialization_order().is_empty(),
+        "the current declaration-only Module model emits no runtime initializers"
+    );
     let status = Command::new(executable)
         .status()
         .expect("manifest-built executable runs");
     assert_eq!(status.code(), Some(42));
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_build_reuses_only_hash_verified_checkout_independent_cache_records() {
+    let package = temporary_package(
+        "cache",
+        "namespace Studio.Entry\n\
+         public function value(): Int\n\
+             return 42\n\
+         end\n",
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+    let manifest = package.join("bubble.toml");
+    let build = |manifest: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_pop"))
+            .args(["--messageFormat", "json", "build", "--manifestPath"])
+            .arg(manifest)
+            .output()
+            .expect("pop build uses the verified cache")
+    };
+
+    let first = build(&manifest);
+    assert!(
+        first.status.success(),
+        "first build failed: {}",
+        output_text(&first.stderr)
+    );
+    let first_events = output_text(&first.stdout);
+    assert!(
+        first_events.contains("\"kind\":\"buildCache\"")
+            && first_events.contains("\"status\":\"miss\""),
+        "{first_events}"
+    );
+    let executable = package.join("target/debug/Studio.Entry");
+    let expected = std::fs::read(&executable).expect("read first executable");
+
+    let second = build(&manifest);
+    assert!(second.status.success(), "{}", output_text(&second.stderr));
+    let second_events = output_text(&second.stdout);
+    assert!(
+        second_events.contains("\"status\":\"hit\""),
+        "{second_events}"
+    );
+    assert_eq!(
+        std::fs::read(&executable).expect("read reused executable"),
+        expected
+    );
+
+    std::fs::write(&executable, b"corrupt").expect("corrupt cached output");
+    let repaired = build(&manifest);
+    assert!(
+        repaired.status.success(),
+        "{}",
+        output_text(&repaired.stderr)
+    );
+    let repaired_events = output_text(&repaired.stdout);
+    assert!(
+        repaired_events.contains("\"status\":\"miss\""),
+        "{repaired_events}"
+    );
+    assert_eq!(
+        std::fs::read(&executable).expect("read repaired executable"),
+        expected
+    );
+    assert_eq!(
+        Command::new(&executable)
+            .status()
+            .expect("repaired executable runs")
+            .code(),
+        Some(42)
+    );
+
+    let relocated = std::env::temp_dir().join(format!(
+        "pop-package-cache-relocated-{}",
+        std::process::id()
+    ));
+    copy_directory(&package, &relocated);
+    let relocated_manifest = relocated.join("bubble.toml");
+    let relocated_build = build(&relocated_manifest);
+    assert!(
+        relocated_build.status.success(),
+        "{}",
+        output_text(&relocated_build.stderr)
+    );
+    let original_record = std::fs::read_to_string(
+        package.join("target/debug/.pop-cache/Studio.Entry-development.json"),
+    )
+    .expect("original cache record");
+    let relocated_record = std::fs::read_to_string(
+        relocated.join("target/debug/.pop-cache/Studio.Entry-development.json"),
+    )
+    .expect("relocated cache record");
+    let original: serde_json::Value =
+        serde_json::from_str(&original_record).expect("original record JSON");
+    let relocated_record_value: serde_json::Value =
+        serde_json::from_str(&relocated_record).expect("relocated record JSON");
+    assert_eq!(original["key"], relocated_record_value["key"]);
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+    std::fs::remove_dir_all(relocated).expect("remove relocated Package");
+}
+
+#[test]
+fn package_lint_uses_manifest_and_workspace_selection() {
+    let package = temporary_package(
+        "lint",
+        "namespace Studio.Entry\n\
+         public function value(): Int\n\
+             return 42\n\
+         end\n",
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+
+    let lint = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["--messageFormat", "json", "lint", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop lint resolves a Package");
+    assert!(
+        lint.status.success(),
+        "Package lint failed: {}",
+        output_text(&lint.stderr)
+    );
+    assert!(lint.stderr.is_empty(), "{}", output_text(&lint.stderr));
+    let events = output_text(&lint.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("lint JSON event"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.first().and_then(|event| event["command"].as_str()),
+        Some("lint")
+    );
+    assert_eq!(
+        events.last().and_then(|event| event["command"].as_str()),
+        Some("lint")
+    );
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_format_checks_applies_and_rechecks_all_selected_sources() {
+    let package = temporary_package(
+        "format",
+        concat!(
+            "namespace Studio.Entry\n",
+            "--- <sum",
+            "mary>Returns the answer.</summary>\n",
+            "public function value(): Int\n",
+            "    return 42\n",
+            "end\n",
+        ),
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+    let manifest = package.join("bubble.toml");
+    let library = package.join("src/lib.pop");
+    let original = std::fs::read(&library).expect("read unformatted source");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["format", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--check")
+        .output()
+        .expect("pop format checks a Package");
+    assert!(
+        !check.status.success(),
+        "unformatted source passed format check"
+    );
+    assert_eq!(
+        std::fs::read(&library).expect("read checked source"),
+        original,
+        "format check must not mutate source"
+    );
+
+    let apply = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["format", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop format applies a Package transaction");
+    assert!(
+        apply.status.success(),
+        "Package format failed: {}",
+        output_text(&apply.stderr)
+    );
+    let formatted = std::fs::read_to_string(&library).expect("read formatted source");
+    assert!(formatted.contains("--- <summary>\n--- Returns the answer.\n--- </summary>"));
+
+    let recheck = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["--messageFormat", "json", "format", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--check")
+        .output()
+        .expect("pop format rechecks a Package");
+    assert!(recheck.status.success(), "{}", output_text(&recheck.stderr));
+    assert!(recheck.stderr.is_empty());
+    let events = output_text(&recheck.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("format JSON event"))
+        .collect::<Vec<_>>();
+    assert_eq!(events[0]["command"], "format");
+    assert_eq!(events.last().expect("finished event")["outcome"], "success");
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_fix_applies_safe_edits_as_one_validated_transaction() {
+    let package = temporary_package(
+        "fix",
+        "namespace Studio.Entry\n\
+         export function value(): Int\n\
+             return 42\n\
+         end\n",
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+    let manifest = package.join("bubble.toml");
+    let library = package.join("src/lib.pop");
+
+    let apply = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["--messageFormat", "json", "fix", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop fix applies a Package transaction");
+    assert!(
+        apply.status.success(),
+        "Package fix failed: stdout={} stderr={}",
+        output_text(&apply.stdout),
+        output_text(&apply.stderr)
+    );
+    assert!(apply.stderr.is_empty());
+    let fixed = std::fs::read_to_string(&library).expect("read fixed Package source");
+    assert!(fixed.contains("public function value"), "{fixed}");
+    assert!(!fixed.contains("export function"), "{fixed}");
+    let events = output_text(&apply.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("fix JSON event"))
+        .collect::<Vec<_>>();
+    let summary = events
+        .iter()
+        .find(|event| event["kind"] == "fixSummary")
+        .expect("Package fix summary");
+    assert_eq!(summary["appliedFixes"], 1);
+    assert_eq!(summary["changedDocuments"], 1);
+
+    let check = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop check validates fixed Package");
+    assert!(
+        check.status.success(),
+        "fixed Package failed: {}",
+        output_text(&check.stderr)
+    );
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_test_executes_every_test_bubble_and_reports_ordered_results() {
+    let package = temporary_package(
+        "test",
+        "namespace Studio.Entry\n\
+         public function value(): Int\n\
+             return 0\n\
+         end\n",
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+    std::fs::create_dir_all(package.join("tests")).expect("create integration tests");
+    std::fs::write(
+        package.join("tests/passing.pop"),
+        "namespace Studio.Entry.Tests\n\
+         function main(): Int\n\
+             return Studio.Entry.value()\n\
+         end\n",
+    )
+    .expect("write passing test Bubble");
+    std::fs::write(
+        package.join("tests/failing.pop"),
+        "namespace Studio.Entry.Tests\n\
+         function main(): Int\n\
+             return 7\n\
+         end\n",
+    )
+    .expect("write failing test Bubble");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["--messageFormat", "json", "test", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop test runs Package tests");
+    assert!(!output.status.success(), "one test Bubble must fail");
+    assert!(output.stderr.is_empty(), "{}", output_text(&output.stderr));
+    let events = output_text(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("test JSON event"))
+        .collect::<Vec<_>>();
+    let results = events
+        .iter()
+        .filter(|event| event["kind"] == "testResult")
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2, "{events:#?}");
+    assert_eq!(results[0]["bubble"], "Failing");
+    assert_eq!(results[0]["exitCode"], 7);
+    assert_eq!(results[0]["outcome"], "failure");
+    assert_eq!(results[1]["bubble"], "Passing");
+    assert_eq!(results[1]["exitCode"], 0);
+    assert_eq!(results[1]["outcome"], "success");
+    assert_eq!(
+        events.last().expect("finished command")["outcome"],
+        "failure"
+    );
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_test_scopes_development_dependencies_and_locks_test_bubbles() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-development-dependency-{}", std::process::id()));
+    let support = workspace.join("support");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(support.join("src")).expect("create support Package");
+    std::fs::create_dir_all(application.join("src")).expect("create application Package");
+    std::fs::create_dir_all(application.join("tests")).expect("create test Bubble");
+    std::fs::write(
+        support.join("bubble.toml"),
+        "[package]\nname = \"Studio.TestSupport\"\nversion = \"1.0.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write support manifest");
+    std::fs::write(
+        support.join("src/lib.pop"),
+        "namespace Studio.TestSupport\n\
+         public function passCode(): Int\n\
+             return 0\n\
+         end\n",
+    )
+    .expect("write support library");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\nname = \"Studio.Application\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+         [developmentDependencies]\n\
+         TestSupport = { path = \"../support\", version = \"1.0.0\" }\n",
+    )
+    .expect("write application manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main(): Int\n\
+             return 0\n\
+         end\n",
+    )
+    .expect("write application binary");
+    std::fs::write(
+        application.join("tests/development.pop"),
+        "namespace Studio.Application.Tests\n\
+         function main(): Int\n\
+             return Studio.TestSupport.passCode()\n\
+         end\n",
+    )
+    .expect("write development-dependent test");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["test", "--manifestPath"])
+        .arg(application.join("bubble.toml"))
+        .output()
+        .expect("pop test resolves development dependencies");
+    assert!(
+        output.status.success(),
+        "development test failed: {}",
+        output_text(&output.stderr)
+    );
+    let lock = std::fs::read_to_string(application.join("bubble.lock"))
+        .expect("test workflow writes one lock");
+    assert!(lock.contains("\"name\":\"Studio.TestSupport\""), "{lock}");
+    assert!(lock.contains("\"kind\":\"test\""), "{lock}");
+
+    std::fs::remove_dir_all(workspace).expect("remove development-dependency fixture");
+}
+
+#[test]
+fn package_check_validates_example_and_benchmark_bubbles() {
+    let package = temporary_package(
+        "auxiliary-check",
+        "namespace Studio.Entry\n\
+         public function value(): Int\n\
+             return 0\n\
+         end\n",
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+    std::fs::create_dir_all(package.join("examples")).expect("create examples");
+    std::fs::create_dir_all(package.join("benchmarks")).expect("create benchmarks");
+    std::fs::write(
+        package.join("examples/invalidExample.pop"),
+        "namespace Studio.Entry.Examples\n\
+         function main(): Int\n\
+             return missingExampleValue()\n\
+         end\n",
+    )
+    .expect("write invalid example");
+    std::fs::write(
+        package.join("benchmarks/validBenchmark.pop"),
+        "namespace Studio.Entry.Benchmarks\n\
+         function main(): Int\n\
+             return Studio.Entry.value()\n\
+         end\n",
+    )
+    .expect("write valid benchmark");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(package.join("bubble.toml"))
+        .output()
+        .expect("pop check validates auxiliary Bubbles");
+    assert!(!output.status.success());
+    assert!(output_text(&output.stderr).contains("POP1002"));
+
+    std::fs::remove_dir_all(package).expect("remove temporary Package");
+}
+
+#[test]
+fn package_builds_examples_and_runs_benchmarks_as_distinct_bubbles() {
+    let package = temporary_package(
+        "auxiliary-build",
+        "namespace Studio.Entry\n\
+         public function value(): Int\n\
+             return 0\n\
+         end\n",
+        "namespace Studio.Entry\n\
+         function main(): Int\n\
+             return value()\n\
+         end\n",
+    );
+    std::fs::create_dir_all(package.join("examples")).expect("create examples");
+    std::fs::create_dir_all(package.join("benchmarks")).expect("create benchmarks");
+    std::fs::write(
+        package.join("examples/basic.pop"),
+        "namespace Studio.Entry.Examples\n\
+         function main(): Int\n\
+             return Studio.Entry.value()\n\
+         end\n",
+    )
+    .expect("write example");
+    std::fs::write(
+        package.join("benchmarks/speed.pop"),
+        "namespace Studio.Entry.Benchmarks\n\
+         function main(): Int\n\
+             return Studio.Entry.value()\n\
+         end\n",
+    )
+    .expect("write benchmark");
+    let manifest = package.join("bubble.toml");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["build", "--manifestPath"])
+        .arg(&manifest)
+        .args(["--example", "Basic"])
+        .output()
+        .expect("pop build selects an example Bubble");
+    assert!(
+        build.status.success(),
+        "example build failed: {}",
+        output_text(&build.stderr)
+    );
+    assert!(package.join("target/debug/Basic").is_file());
+    assert!(
+        !package.join("target/debug/Speed").exists(),
+        "example selection must not build benchmark Bubbles"
+    );
+
+    let benchmark = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["--messageFormat", "json", "benchmark", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop benchmark runs benchmark Bubbles");
+    assert!(
+        benchmark.status.success(),
+        "benchmark failed: {}",
+        output_text(&benchmark.stderr)
+    );
+    let events = output_text(&benchmark.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("benchmark event"))
+        .collect::<Vec<_>>();
+    let result = events
+        .iter()
+        .find(|event| event["kind"] == "benchmarkResult")
+        .expect("benchmark result event");
+    assert_eq!(result["bubble"], "Speed");
+    assert_eq!(result["outcome"], "success");
+    assert!(package.join("target/benchmark/Speed").is_file());
 
     std::fs::remove_dir_all(package).expect("remove temporary Package");
 }
@@ -855,6 +1396,365 @@ fn package_run_resolves_and_links_exact_local_path_dependencies() {
     assert_eq!(dependency.bubble(), "Studio.Data");
 
     std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn package_run_selects_only_exact_platform_dependencies() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-platform-dependencies-{}", std::process::id()));
+    let native = workspace.join("native");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(native.join("src")).expect("create platform dependency Package");
+    std::fs::create_dir_all(application.join("src")).expect("create application Package");
+    std::fs::write(
+        native.join("bubble.toml"),
+        "[package]\nname = \"Studio.Native\"\nversion = \"1.0.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write platform dependency manifest");
+    std::fs::write(
+        native.join("src/lib.pop"),
+        "namespace Studio.Native\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+    )
+    .expect("write platform dependency library");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\n\
+         name = \"Studio.Application\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [platform.\"x86_64-unknown-linux-gnu\".dependencies]\n\
+         StudioNative = { path = \"../native\", version = \"1.0.0\" }\n\
+         [platform.\"aarch64-apple-darwin\".dependencies]\n\
+         MissingApple = { path = \"../missingApple\", version = \"1.0.0\" }\n",
+    )
+    .expect("write application manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main(): Int\n\
+             return Studio.Native.answer()\n\
+         end\n",
+    )
+    .expect("write application binary");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(application.join("bubble.toml"))
+        .args(["--platformTarget", "x86_64-unknown-linux-gnu"])
+        .output()
+        .expect("pop run resolves exact platform dependency");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "platform dependency run failed: {}",
+        output_text(&run.stderr)
+    );
+    let lock = std::fs::read_to_string(application.join("bubble.lock"))
+        .expect("platform selection writes a lock");
+    assert!(
+        lock.contains("\"platformTarget\":\"x86_64-unknown-linux-gnu\""),
+        "{lock}"
+    );
+
+    let unsupported = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(application.join("bubble.toml"))
+        .args(["--platformTarget", "bpfel-unknown-none"])
+        .output()
+        .expect("known non-native target is rejected clearly");
+    assert!(!unsupported.status.success());
+    assert!(
+        output_text(&unsupported.stderr).contains("does not support native Package workflows"),
+        "{}",
+        output_text(&unsupported.stderr)
+    );
+
+    let unknown = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(application.join("bubble.toml"))
+        .args(["--platformTarget", "unknown-unknown-none"])
+        .output()
+        .expect("unknown target is rejected clearly");
+    assert!(!unknown.status.success());
+    assert!(
+        output_text(&unknown.stderr).contains("unknown platform target"),
+        "{}",
+        output_text(&unknown.stderr)
+    );
+
+    std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn package_check_selects_optional_dependencies_through_exact_features() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-feature-selection-{}", std::process::id()));
+    let telemetry = workspace.join("telemetry");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(telemetry.join("src")).expect("create telemetry Package");
+    std::fs::create_dir_all(application.join("src")).expect("create application Package");
+    std::fs::write(
+        telemetry.join("bubble.toml"),
+        "[package]\nname = \"Studio.Telemetry\"\nversion = \"1.0.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write telemetry manifest");
+    std::fs::write(
+        telemetry.join("src/lib.pop"),
+        "namespace Studio.Telemetry\n\
+         public function code(): Int\n\
+             return 0\n\
+         end\n",
+    )
+    .expect("write telemetry library");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\nname = \"Studio.Application\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+         [features]\n\
+         telemetry = [\"dependency:Telemetry\"]\n\
+         [dependencies]\n\
+         Telemetry = { path = \"../telemetry\", version = \"1.0.0\", optional = true }\n",
+    )
+    .expect("write featured manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main(): Int\n\
+             return Studio.Telemetry.code()\n\
+         end\n",
+    )
+    .expect("write featured binary");
+    let manifest = application.join("bubble.toml");
+
+    let disabled = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop check without feature");
+    assert!(!disabled.status.success());
+    assert!(output_text(&disabled.stderr).contains("POP1002"));
+
+    let enabled = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .args(["--feature", "telemetry"])
+        .output()
+        .expect("pop check with feature");
+    assert!(
+        enabled.status.success(),
+        "featured Package failed: {}",
+        output_text(&enabled.stderr)
+    );
+    let lock = std::fs::read_to_string(application.join("bubble.lock"))
+        .expect("featured check writes lock");
+    assert!(lock.contains("\"features\":[\"telemetry\"]"), "{lock}");
+    assert!(lock.contains("\"name\":\"Studio.Telemetry\""), "{lock}");
+
+    std::fs::remove_dir_all(workspace).expect("remove feature fixture");
+}
+
+#[test]
+fn package_run_resolves_a_hash_verified_explicit_registry_mirror() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-registry-mirror-{}", std::process::id()));
+    let registry = workspace.join("registry");
+    let dependency = registry.join("RegistrySupport/1.0.0");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(dependency.join("src")).expect("create registry Package");
+    std::fs::create_dir_all(application.join("src")).expect("create registry consumer");
+    std::fs::write(
+        dependency.join("bubble.toml"),
+        "[package]\nname = \"Studio.RegistrySupport\"\nversion = \"1.0.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write registry manifest");
+    std::fs::write(
+        dependency.join("src/lib.pop"),
+        "namespace Studio.RegistrySupport\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+    )
+    .expect("write registry library");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\nname = \"Studio.Application\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+         [dependencies]\n\
+         RegistrySupport = \"1.0.0\"\n",
+    )
+    .expect("write registry consumer manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main(): Int\n\
+             return Studio.RegistrySupport.answer()\n\
+         end\n",
+    )
+    .expect("write registry consumer");
+    let manifest = application.join("bubble.toml");
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("registry capability is explicit");
+    assert!(!missing.status.success());
+    assert!(
+        output_text(&missing.stderr).contains("requires --registryRoot"),
+        "{}",
+        output_text(&missing.stderr)
+    );
+
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(&manifest)
+        .args(["--registryRoot"])
+        .arg(&registry)
+        .output()
+        .expect("pop resolves the registry mirror");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "registry run failed: {}",
+        output_text(&run.stderr)
+    );
+    let lock =
+        std::fs::read_to_string(application.join("bubble.lock")).expect("registry lock exists");
+    assert!(
+        lock.contains("\"source\":{\"kind\":\"registry\",\"identity\":\"default\"}"),
+        "{lock}"
+    );
+    assert!(
+        !lock.contains(&registry.to_string_lossy().into_owned()),
+        "registry root leaked into lock: {lock}"
+    );
+
+    std::fs::remove_dir_all(workspace).expect("remove registry fixture");
+}
+
+#[test]
+fn package_run_fetches_and_offline_reuses_one_exact_git_revision() {
+    let workspace = std::env::temp_dir().join(format!("pop-exact-git-{}", std::process::id()));
+    let repository = workspace.join("repository");
+    let application = workspace.join("application");
+    std::fs::create_dir_all(repository.join("src")).expect("create Git Package");
+    std::fs::create_dir_all(application.join("src")).expect("create Git consumer");
+    std::fs::write(
+        repository.join("bubble.toml"),
+        "[package]\nname = \"Studio.GitSupport\"\nversion = \"1.0.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write Git manifest");
+    std::fs::write(
+        repository.join("src/lib.pop"),
+        "namespace Studio.GitSupport\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+    )
+    .expect("write Git library");
+    for arguments in [
+        vec!["init"],
+        vec!["config", "user.email", "pop@example.invalid"],
+        vec!["config", "user.name", "Pop Test"],
+        vec!["add", "bubble.toml", "src/lib.pop"],
+        vec!["commit", "-m", "Create exact Package"],
+    ] {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(&repository)
+            .output()
+            .expect("Git fixture command");
+        assert!(
+            output.status.success(),
+            "Git fixture failed: {}",
+            output_text(&output.stderr)
+        );
+    }
+    let revision = output_text(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository)
+            .output()
+            .expect("read exact revision")
+            .stdout,
+    )
+    .trim()
+    .to_owned();
+    std::fs::write(
+        application.join("bubble.toml"),
+        format!(
+            "[package]\nname = \"Studio.Application\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+             [dependencies]\n\
+             GitSupport = {{ git = \"../repository\", revision = \"{revision}\", version = \"1.0.0\" }}\n"
+        ),
+    )
+    .expect("write exact-Git consumer manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main(): Int\n\
+             return Studio.GitSupport.answer()\n\
+         end\n",
+    )
+    .expect("write Git consumer");
+    let manifest = application.join("bubble.toml");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(&manifest)
+        .output()
+        .expect("pop fetches exact Git");
+    assert_eq!(
+        first.status.code(),
+        Some(42),
+        "exact-Git run failed: {}",
+        output_text(&first.stderr)
+    );
+    let lock =
+        std::fs::read_to_string(application.join("bubble.lock")).expect("exact-Git lock exists");
+    assert!(lock.contains("\"kind\":\"exactGit\""), "{lock}");
+    assert!(lock.contains(&revision), "{lock}");
+
+    std::fs::remove_dir_all(&repository).expect("remove original Git repository");
+    let offline = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--offline")
+        .output()
+        .expect("pop reuses exact Git offline");
+    assert_eq!(
+        offline.status.code(),
+        Some(42),
+        "offline exact-Git reuse failed: {}",
+        output_text(&offline.stderr)
+    );
+    let cache_root = application.join("target/resolution/exactGit");
+    let cache_entry = std::fs::read_dir(&cache_root)
+        .expect("read exact-Git cache")
+        .next()
+        .expect("one exact-Git cache entry")
+        .expect("read exact-Git cache entry")
+        .path();
+    std::fs::write(
+        cache_entry.join("checkout/src/lib.pop"),
+        "namespace Studio.GitSupport\npublic function answer(): Int\nreturn 1\nend\n",
+    )
+    .expect("mutate cached Git source");
+    let mutated = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["check", "--manifestPath"])
+        .arg(&manifest)
+        .arg("--offline")
+        .output()
+        .expect("mutated Git cache fails closed");
+    assert!(!mutated.status.success());
+    assert!(
+        output_text(&mutated.stderr).contains("content hash does not match"),
+        "{}",
+        output_text(&mutated.stderr)
+    );
+
+    std::fs::remove_dir_all(workspace).expect("remove exact-Git fixture");
 }
 
 #[test]
@@ -1348,6 +2248,72 @@ fn virtual_workspace_uses_default_members_and_one_shared_target_root() {
     );
 
     std::fs::remove_dir_all(workspace).expect("remove temporary Workspace");
+}
+
+#[test]
+fn workspace_inherited_dependency_resolves_from_the_workspace_root() {
+    let workspace =
+        std::env::temp_dir().join(format!("pop-workspace-inherited-{}", std::process::id()));
+    let application = workspace.join("packages/application");
+    let data = workspace.join("packages/data");
+    std::fs::create_dir_all(application.join("src")).expect("create application Package");
+    std::fs::create_dir_all(data.join("src")).expect("create data Package");
+    std::fs::write(
+        workspace.join("bubble.toml"),
+        "[workspace]\n\
+         members = [\"packages/*\"]\n\
+         defaultMembers = [\"packages/application\"]\n\
+         resolver = \"1\"\n\
+         [workspace.dependencies]\n\
+         StudioData = { path = \"packages/data\", version = \"2.1.0\", bubble = \"Studio.Data\" }\n",
+    )
+    .expect("write Workspace manifest");
+    std::fs::write(
+        data.join("bubble.toml"),
+        "[package]\nname = \"Studio.Data\"\nversion = \"2.1.0\"\nedition = \"2026\"\n",
+    )
+    .expect("write data manifest");
+    std::fs::write(
+        data.join("src/lib.pop"),
+        "namespace Studio.Data\n\
+         public function answer(): Int\n\
+             return 42\n\
+         end\n",
+    )
+    .expect("write data library");
+    std::fs::write(
+        application.join("bubble.toml"),
+        "[package]\nname = \"Studio.Application\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+         [dependencies]\n\
+         StudioData = { workspace = true }\n",
+    )
+    .expect("write application manifest");
+    std::fs::write(
+        application.join("src/main.pop"),
+        "namespace Studio.Application\n\
+         function main(): Int\n\
+             return Studio.Data.answer()\n\
+         end\n",
+    )
+    .expect("write application binary");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_pop"))
+        .args(["run", "--manifestPath"])
+        .arg(workspace.join("bubble.toml"))
+        .output()
+        .expect("pop run resolves Workspace inheritance");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "Workspace dependency failed: {}",
+        output_text(&run.stderr)
+    );
+    let lock =
+        std::fs::read_to_string(workspace.join("bubble.lock")).expect("Workspace lock exists");
+    assert!(lock.contains("\"name\":\"Studio.Data\""), "{lock}");
+    assert!(lock.contains("\"identity\":\"packages/data\""), "{lock}");
+
+    std::fs::remove_dir_all(workspace).expect("remove inherited Workspace");
 }
 
 #[test]

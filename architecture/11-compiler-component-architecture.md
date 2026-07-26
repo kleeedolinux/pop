@@ -76,6 +76,8 @@ runtime/
 tools/
   language-server/  incremental semantic client
   localization/     private typed catalogs and human presentation rendering
+  toolchain/        distribution identity, trust, selection, and transactions
+  popup/            `popup` transport/filesystem adapters and presentation
   formatter/        lossless syntax client
   documentation-generator/ documentation.xml to HTML/searchable output
   test-runner/      conformance and fixture orchestration

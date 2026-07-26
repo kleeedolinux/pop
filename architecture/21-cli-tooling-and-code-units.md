@@ -47,6 +47,20 @@ their versions, manifests, dependency graphs, builds, `internal` visibility, or
 installation state. Only an explicit Package dependency makes one available to
 a project.
 
+## Toolchain distribution
+
+ADR 0028 assigns compiler/runtime toolchain installation, verification,
+selection, update, and removal to the separate `popup` trust boundary.
+Toolchains are immutable, relocatable host-targeted bundles selected by exact
+version or the signed `stable` channel. `popup` consumes signed release metadata
+and never resolves Package dependencies or edits `bubble.toml`/`bubble.lock`.
+
+`pop install` remains the Package workflow for building and installing one
+public binary Bubble. The `pop` command never silently changes or self-updates
+the selected toolchain. Distribution implementation and release publication
+remain gated by ADR 0028's dependency reviews, archive/signature schemas,
+transaction recovery tests, and clean-host installation smoke tests.
+
 ## Items
 
 An item is a namespace-scope declaration or a declared member/case owned by one.
@@ -333,6 +347,13 @@ never becomes semantic identity. Normal dependencies are available to selected
 library/binary Bubbles; development dependencies are limited to tests,
 examples, and benchmarks.
 
+ADR 0109 closes bootstrap source resolution without claiming the future online
+registry protocol. `--registryRoot <directory>` grants read-only access to a
+pre-provisioned `<Alias>/<exact-version>/` mirror. Exact-Git revisions use an
+immutable, content-verified cache below the shared `target/resolution/` root;
+normal mode invokes `git` directly without a shell, while offline/frozen modes
+reuse only a verified checkout.
+
 ### Features
 
 Package features are named additive manifest capabilities. Initially they may
@@ -345,6 +366,12 @@ The selected feature set is stored in `bubble.lock`, included in
 `BubbleIdentity` and cache keys, and exposed by `pop metadata`. Public API
 baselines are feature-set-specific. Resolver unification is deterministic for
 one Package identity within a Workspace.
+
+ADR 0108 fixes the narrower bootstrap grammar: `[features]` maps canonical
+`camelCase` names to bounded `dependency:<Alias>` arrays, and those aliases
+must name optional normal dependencies. Repeatable `--feature <name>` options
+select an exact sorted set. Default/negative/forwarded features, resource or
+Bubble gating, and conditional source remain undesigned and unsupported.
 
 Resolution rules:
 
@@ -403,8 +430,8 @@ Core commands:
 | `pop build` | Build selected Bubbles and dependencies |
 | `pop transpile` | Experimentally emit a selected backend source artifact without compiling it |
 | `pop run` | Build and run exactly one binary/example Bubble |
-| `pop test` | Build and run unit, integration, and XML documentation tests |
-| `pop benchmark` | Build/run benchmark Bubbles under an explicit profile |
+| `pop test` | Bootstrap: build/run explicit integration-test Bubbles; typed generated unit/XML harnesses follow a later accepted contract |
+| `pop benchmark` | Bootstrap: build/run explicit benchmark Bubbles under the Benchmark profile |
 | `pop ffi generate` | Generate deterministic reviewable typed native bindings and ABI metadata for one manifest alias |
 | `pop documentation` | Check XML docs and emit documentation for public library Bubbles |
 | `pop format` | Check or apply the canonical formatter |
@@ -580,6 +607,16 @@ Each `tests/` root is a separate integration-test Bubble and can use only the
 public API of the Package library Bubble plus declared development dependencies.
 Examples and benchmarks are separate Bubbles under the same rule.
 
+During bootstrap, before the typed generated `Pop.Test` and `Pop.Benchmark`
+harness contracts are accepted and implemented, every test, example, and
+benchmark root is an explicit executable Bubble whose root declares the same
+statically checked private `main` entry shape as a binary. `pop check` analyzes
+all discovered Bubble kinds. `pop test` executes every selected test Bubble in
+deterministic Package/Bubble order, reports every result, and fails when any
+process fails. Development dependencies are supplied only to test, example,
+and benchmark Bubbles. See
+[ADR 0107](./decisions/0107-bootstrap-auxiliary-bubble-execution.md).
+
 ## Tooling architecture
 
 The CLI, language server, editor extensions, documentation generator, formatter,
@@ -658,6 +695,11 @@ Cache keys include compiler version, language edition, Bubble graph, normalized
 source and manifests, locked dependency identities, target capabilities, PLRI
 ABI, profile, permitted environment inputs, and compile-time dependencies.
 Absolute checkout paths and timestamps do not affect reproducible artifacts.
+
+ADR 0108 requires each reusable bootstrap native-build record to inventory
+normalized output paths, byte sizes, and SHA-256 digests under the shared
+`target/` root. Output existence and mtimes never prove a hit; malformed,
+symlinked, stale, or hash-mismatched records fail closed to a miss.
 
 ## Publishing and supply-chain rules
 

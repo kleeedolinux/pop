@@ -209,6 +209,29 @@ fn one_root_manifest_can_be_both_package_and_workspace() {
 }
 
 #[test]
+fn workspace_manifest_preserves_concrete_inherited_dependency_requirements() {
+    let workspace = parse_workspace_manifest(
+        "[workspace]\n\
+         members = [\"packages/*\"]\n\
+         resolver = \"1\"\n\
+         [workspace.dependencies]\n\
+         StudioData = { path = \"packages/data\", version = \"2.1.0\", bubble = \"Studio.Data\" }\n",
+    )
+    .expect("Workspace dependency requirement");
+
+    let [dependency] = workspace.dependencies() else {
+        panic!("one Workspace dependency");
+    };
+    assert_eq!(dependency.alias(), "StudioData");
+    assert_eq!(dependency.version_requirement(), Some("2.1.0"));
+    assert_eq!(dependency.bubble(), Some("Studio.Data"));
+    assert_eq!(
+        dependency.source(),
+        &DependencySource::LocalPath("packages/data".to_owned())
+    );
+}
+
+#[test]
 fn development_and_platform_dependencies_remain_separate_scopes() {
     let manifest = parse_package_manifest(
         "[package]\n\
@@ -235,5 +258,173 @@ fn development_and_platform_dependencies_remain_separate_scopes() {
     assert_eq!(
         manifest.platform_dependencies()[0].dependencies()[0].alias(),
         "NativeTls"
+    );
+}
+
+#[test]
+fn dependency_selection_merges_only_the_exact_platform_and_requested_scope() {
+    let manifest = parse_package_manifest(
+        "[package]\n\
+         name = \"Studio.Gameplay\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [dependencies]\n\
+         StudioData = { path = \"../data\", version = \"1.0.0\" }\n\
+         [developmentDependencies]\n\
+         TestSupport = { path = \"../testSupport\", version = \"1.0.0\" }\n\
+         [platform.\"x86_64-unknown-linux-gnu\".dependencies]\n\
+         NativeTls = { path = \"../nativeTls\", version = \"1.0.0\" }\n\
+         [platform.\"aarch64-apple-darwin\".dependencies]\n\
+         AppleSecurity = { path = \"../appleSecurity\", version = \"1.0.0\" }\n",
+    )
+    .expect("scoped manifest");
+
+    assert_eq!(
+        manifest
+            .selected_dependencies("x86_64-unknown-linux-gnu", false)
+            .expect("production dependency selection")
+            .iter()
+            .map(|dependency| dependency.alias())
+            .collect::<Vec<_>>(),
+        ["NativeTls", "StudioData"]
+    );
+    assert_eq!(
+        manifest
+            .selected_dependencies("x86_64-unknown-linux-gnu", true)
+            .expect("development dependency selection")
+            .iter()
+            .map(|dependency| dependency.alias())
+            .collect::<Vec<_>>(),
+        ["NativeTls", "StudioData", "TestSupport"]
+    );
+}
+
+#[test]
+fn dependency_selection_rejects_aliases_duplicated_across_active_scopes() {
+    let manifest = parse_package_manifest(
+        "[package]\n\
+         name = \"Studio.Gameplay\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [dependencies]\n\
+         StudioData = { path = \"../data\", version = \"1.0.0\" }\n\
+         [platform.\"x86_64-unknown-linux-gnu\".dependencies]\n\
+         StudioData = { path = \"../otherData\", version = \"1.0.0\" }\n",
+    )
+    .expect("scope-local parsing remains deterministic");
+
+    assert_eq!(
+        manifest.selected_dependencies("x86_64-unknown-linux-gnu", false),
+        Err(ManifestError::DuplicateDependencyAlias)
+    );
+}
+
+#[test]
+fn feature_selection_enables_only_declared_optional_dependencies() {
+    let manifest = parse_package_manifest(
+        "[package]\n\
+         name = \"Studio.Gameplay\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [features]\n\
+         telemetry = [\"dependency:Telemetry\"]\n\
+         [dependencies]\n\
+         StudioData = { path = \"../data\", version = \"1.0.0\" }\n\
+         Telemetry = { path = \"../telemetry\", version = \"1.0.0\", optional = true }\n",
+    )
+    .expect("feature manifest");
+
+    assert_eq!(manifest.features()[0].name(), "telemetry");
+    assert!(manifest.dependencies()[1].optional());
+    assert_eq!(
+        manifest
+            .selected_dependencies_with_features(
+                "x86_64-unknown-linux-gnu",
+                false,
+                std::iter::empty::<&str>(),
+            )
+            .expect("unfeatured selection")
+            .iter()
+            .map(|dependency| dependency.alias())
+            .collect::<Vec<_>>(),
+        ["StudioData"]
+    );
+    assert_eq!(
+        manifest
+            .selected_dependencies_with_features("x86_64-unknown-linux-gnu", false, ["telemetry"],)
+            .expect("featured selection")
+            .iter()
+            .map(|dependency| dependency.alias())
+            .collect::<Vec<_>>(),
+        ["StudioData", "Telemetry"]
+    );
+}
+
+#[test]
+fn feature_manifest_rejects_unknown_duplicate_and_nonoptional_activations() {
+    let prefix = "[package]\n\
+                  name = \"Studio.Gameplay\"\n\
+                  version = \"0.1.0\"\n\
+                  edition = \"2026\"\n";
+    for (body, expected) in [
+        (
+            "[features]\ntelemetry = [\"dependency:Missing\"]\n",
+            ManifestError::UnknownFeatureDependency,
+        ),
+        (
+            "[features]\ntelemetry = [\"dependency:Telemetry\", \"dependency:Telemetry\"]\n\
+             [dependencies]\nTelemetry = { version = \"1.0.0\", optional = true }\n",
+            ManifestError::DuplicateFeatureMember,
+        ),
+        (
+            "[features]\ntelemetry = [\"dependency:Telemetry\"]\n\
+             [dependencies]\nTelemetry = \"1.0.0\"\n",
+            ManifestError::FeatureDependencyNotOptional,
+        ),
+        (
+            "[features]\nTelemetry = []\n",
+            ManifestError::InvalidFeature,
+        ),
+        (
+            "[features]\ntelemetry = []\n\
+             [dependencies]\nTelemetry = { version = \"1.0.0\", optional = true }\n",
+            ManifestError::UnreferencedOptionalDependency,
+        ),
+    ] {
+        assert_eq!(
+            parse_package_manifest(&format!("{prefix}{body}")),
+            Err(expected),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn feature_selection_rejects_unknown_and_duplicate_requested_names() {
+    let manifest = parse_package_manifest(
+        "[package]\n\
+         name = \"Studio.Gameplay\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2026\"\n\
+         [features]\n\
+         telemetry = []\n",
+    )
+    .expect("feature manifest");
+
+    assert_eq!(
+        manifest.selected_dependencies_with_features(
+            "x86_64-unknown-linux-gnu",
+            false,
+            ["missing"],
+        ),
+        Err(ManifestError::UnknownFeature)
+    );
+    assert_eq!(
+        manifest.selected_dependencies_with_features(
+            "x86_64-unknown-linux-gnu",
+            false,
+            ["telemetry", "telemetry"],
+        ),
+        Err(ManifestError::DuplicateSelectedFeature)
     );
 }

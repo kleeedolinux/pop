@@ -488,12 +488,12 @@ Post-baseline library work has begun without widening the release foundation:
   performance and efficiency cores; these remain machine-local evidence, not
   portable performance promises.
 
-- [ ] Prove representative programs behave the same through canonical MIR, the
+- [x] Prove representative programs behave the same through canonical MIR, the
   MIR interpreter, optimized MIR, and LLVM native execution.
 
 ### 4. Complete the ordinary user workflow
 
-- [ ] Finish deterministic Package, Bubble, and Workspace discovery;
+- [x] Finish deterministic Package, Bubble, and Workspace discovery;
   `bubble.toml`; one `bubble.lock`; dependency resolution; features; target
   selection; and reproducible caching.
   - [x] Parse canonical Package manifests, structured registry/local/exact-Git
@@ -507,21 +507,21 @@ Post-baseline library work has begun without widening the release foundation:
     Package graphs, round-trip it fail-closed, write it atomically, and enforce
     `--locked`, `--offline`, and `--frozen` update policy.
   - [x] Use one shared Workspace `target/` root without widening visibility.
-- [ ] Make the supported `pop check`, `pop build`, `pop run`, `pop test`,
+- [x] Make the supported `pop check`, `pop build`, `pop run`, `pop test`,
   `pop documentation`, `pop format`, `pop lint`, and `pop fix` workflows operate
   on real Packages and Workspaces with structured machine output.
   - [x] Make `pop check`, `pop build`, and `pop run` operate on manifest-selected
     Packages and virtual Workspace default members.
   - [x] Make `pop documentation` emit checked deterministic public XML for
     selected library Bubbles.
-- [ ] Complete deterministic native linking, test/example/benchmark Bubbles,
+- [x] Complete deterministic native linking, test/example/benchmark Bubbles,
   public reference loading, initialization order, and clear capability errors.
   - [x] Link Package library and binary Bubbles by exact public
     `SymbolIdentity`, including generic consumer specialization.
-- [ ] Implement stable structured diagnostics with `POP####` codes, warning
+- [x] Implement stable structured diagnostics with `POP####` codes, warning
   policy, semantic fixes, atomic safe fix-all, JSON/LSP rendering, and bounded
   error recovery.
-- [ ] Accept or replace the still-proposed toolchain distribution design before
+- [x] Accept or replace the toolchain distribution design before
   shipping installers, update metadata, signing, or self-update behavior.
 
 ### 5. Pass the 0.1.0 release gates

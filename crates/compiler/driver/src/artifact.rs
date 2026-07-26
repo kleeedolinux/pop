@@ -334,6 +334,16 @@ impl LoadedPoplib {
     }
 
     #[must_use]
+    pub fn initialization_order(&self) -> &[String] {
+        &self.manifest.initialization_order
+    }
+
+    #[must_use]
+    pub fn required_capabilities(&self) -> &[String] {
+        &self.manifest.required_capabilities
+    }
+
+    #[must_use]
     pub const fn reference_metadata(&self) -> &ReferenceMetadata {
         &self.reference_metadata
     }
@@ -643,6 +653,10 @@ fn validate_emission(emission: &PoplibEmission) -> Result<(), PoplibError> {
         || !valid_sha256(&emission.source_sha256)
         || !is_sorted_unique(&emission.dependencies)
         || !is_sorted_unique(&emission.required_capabilities)
+        || emission
+            .required_capabilities
+            .iter()
+            .any(|capability| !valid_capability(capability))
         || !is_sorted_unique(&emission.native_link_plans)
         || emission
             .native_link_plans
@@ -700,6 +714,10 @@ fn validate_manifest(manifest: &PoplibManifest) -> Result<(), PoplibError> {
         || !is_sorted_unique(&manifest.dependencies)
         || !is_sorted_unique(&manifest.public_namespaces)
         || !is_sorted_unique(&manifest.required_capabilities)
+        || manifest
+            .required_capabilities
+            .iter()
+            .any(|capability| !valid_capability(capability))
         || !is_sorted_unique(&manifest.native_link_plans)
         || manifest
             .native_link_plans
@@ -809,6 +827,22 @@ fn valid_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         && value != "."
         && value != ".."
+}
+
+fn valid_capability(value: &str) -> bool {
+    matches!(
+        value,
+        "atomics"
+            | "coroutines"
+            | "debugInformation"
+            | "exceptions"
+            | "preciseStackMaps"
+            | "relocatingNursery"
+            | "sharedLibraries"
+            | "simd"
+            | "tailCalls"
+            | "threads"
+    )
 }
 
 fn valid_relative_path(value: &str) -> bool {

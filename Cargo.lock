@@ -687,6 +687,7 @@ dependencies = [
  "pop-diagnostics",
  "pop-documentation",
  "pop-documentation-generator",
+ "pop-formatter",
  "pop-foundation",
  "pop-hir",
  "pop-library-bridge",

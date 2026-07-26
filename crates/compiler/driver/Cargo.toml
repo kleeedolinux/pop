@@ -22,6 +22,7 @@ pop-diagnostics.workspace = true
 pop-documentation.workspace = true
 pop-documentation-generator.workspace = true
 pop-foundation.workspace = true
+pop-formatter.workspace = true
 pop-hir.workspace = true
 pop-library-bridge.workspace = true
 pop-localization.workspace = true

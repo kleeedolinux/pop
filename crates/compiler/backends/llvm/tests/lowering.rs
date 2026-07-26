@@ -2994,6 +2994,163 @@ fn emitted_llvm_executes_a_pure_pop_function() {
 }
 
 #[test]
+fn representative_programs_match_canonical_mir_optimized_mir_and_native_execution() {
+    let programs = [
+        (
+            "multi-module-control-flow",
+            vec![
+                (
+                    "src/calculation.pop",
+                    "namespace Representative\n\
+public function sumWithoutThree(limit: Int): Int\n\
+    local total = 0\n\
+    for value = 1, limit do\n\
+        if value == 3 then\n\
+            continue\n\
+        end\n\
+        total += value\n\
+    end\n\
+    return total\n\
+end\n",
+                ),
+                (
+                    "src/main.pop",
+                    "namespace Representative\n\
+private function main(): Int\n\
+    return sumWithoutThree(10)\n\
+end\n",
+                ),
+            ],
+            52,
+        ),
+        (
+            "structural-values",
+            vec![(
+                "src/main.pop",
+                "namespace Representative\n\
+public record Point\n\
+    x: Int\n\
+    label: String\n\
+end\n\
+private function main(): Int\n\
+    local point: Point = { label = \"pop\", x = 40 }\n\
+    local updated = point with { x = point.x + 2 }\n\
+    if updated.label == \"pop\" then\n\
+        return updated.x\n\
+    end\n\
+    return 1\n\
+end\n",
+            )],
+            42,
+        ),
+        (
+            "nominal-dispatch",
+            vec![(
+                "src/main.pop",
+                "namespace Representative\n\
+public interface Reader\n\
+    function read(value: Int): Int\n\
+end\n\
+public class IncrementReader implements Reader\n\
+    public function IncrementReader:read(value: Int): Int\n\
+        return 41\n\
+    end\n\
+end\n\
+public class DoubleReader implements Reader\n\
+    public function DoubleReader:read(value: Int): Int\n\
+        return 0\n\
+    end\n\
+end\n\
+private function readThroughInterface(reader: Reader, value: Int): Int\n\
+    return reader:read(value)\n\
+end\n\
+private function main(): Int\n\
+    local reader = IncrementReader {}\n\
+    local doubleReader = DoubleReader {}\n\
+    return readThroughInterface(reader, 20) + readThroughInterface(doubleReader, 10) + 1\n\
+end\n",
+            )],
+            42,
+        ),
+    ];
+
+    for (name, sources, expected) in programs {
+        assert_representative_program_equivalence(name, &sources, expected);
+    }
+}
+
+fn assert_representative_program_equivalence(name: &str, sources: &[(&str, &str)], expected: i32) {
+    let modules = sources
+        .iter()
+        .enumerate()
+        .map(|(index, (path, text))| {
+            let raw = u32::try_from(index).expect("representative Module count");
+            FrontEndModule::new(
+                ModuleId::from_raw(raw),
+                SourceFile::new(FileId::from_raw(raw), *path, *text)
+                    .expect("representative source"),
+            )
+        })
+        .collect();
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        modules,
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{name}: {}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("representative HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "main")
+        .expect("representative entry")
+        .symbol();
+    let canonical =
+        lower_hir_bubble(hir, front_end.types()).expect("verified canonical representative MIR");
+    let optimized =
+        optimize_mir(canonical.clone(), front_end.types()).expect("verified optimized MIR");
+    let expected_value = vec![MirValue::Integer(
+        IntegerValue::parse_decimal(&expected.to_string(), IntegerKind::Int64)
+            .expect("representative expected Int"),
+    )];
+
+    let canonical_value = MirInterpreter::new(&canonical, front_end.types())
+        .expect("canonical MIR interpreter")
+        .call(entry, &[])
+        .expect("canonical MIR execution");
+    assert_eq!(canonical_value, expected_value, "{name}: canonical MIR");
+
+    let optimized_value = MirInterpreter::new(&optimized, front_end.types())
+        .expect("optimized MIR interpreter")
+        .call(entry, &[])
+        .expect("optimized MIR execution");
+    assert_eq!(
+        optimized_value, canonical_value,
+        "{name}: optimized MIR diverged"
+    );
+
+    let module = lower_mir_to_llvm_ir(
+        &optimized,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default().with_entry_point(entry),
+    )
+    .expect("representative LLVM lowering");
+    let native = link_with_runtime_and_run(&module, name);
+    assert_eq!(
+        native.status.code(),
+        Some(expected),
+        "{name}: LLVM native execution diverged: {}\n{module}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+}
+
+#[test]
 fn no_argument_no_result_entry_returns_zero_without_decoding_arguments() {
     let module = native_module(
         "namespace Main\n\

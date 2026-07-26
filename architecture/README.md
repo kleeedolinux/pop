@@ -132,6 +132,9 @@ transplanted into a Luau-shaped file.
 - Human toolchain presentation uses complete embedded TOML catalogs for `en`,
   `zh-Hans`, `ja`, `pt-BR`, and `es`; one immutable locale context renders the
   same structured diagnostic and event facts for CLI and LSP consumers.
+- Toolchain distributions are immutable, relocatable, signed bundles managed
+  by the separate `popup` trust boundary. `pop install` remains Package-binary
+  installation, and `pop` never silently updates its selected toolchain.
 - Expected failures use the reserved typed `Result` union, nominal error
   declarations, exact prefix propagation, exhaustive recovery, and lexical
   last-in, first-out cleanup.

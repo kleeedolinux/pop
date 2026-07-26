@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-11
-- Amends on acceptance: ADR 0017, ADR 0018
+- Amends: ADR 0017, ADR 0018
 
 ## Context
 
@@ -25,21 +25,20 @@ version-selection precedence, or a one-script bootstrap. Implementing any of
 those choices first would turn an architecture gap into a public security and
 compatibility promise.
 
-This proposal defines a separate toolchain manager named `popup`. It is modeled
+This decision defines a separate toolchain manager named `popup`. It is modeled
 after the useful separation between a language/package command and a toolchain
 installer, without importing Rust source syntax, Package terminology, or
 unrestricted build-script behavior into Pop Lang.
 
-Because this ADR remains proposed, it does not yet authorize implementation,
-new Cargo dependencies, release publication, or changes to the integrated
-architecture. Acceptance requires the synchronized documents and failing
-conformance tests listed below.
+This accepted ADR authorizes implementation only within the trust, ownership,
+dependency-review, and conformance boundaries below. It does not authorize
+release publication before the required implementation, synchronized
+documentation, and release gates are complete.
 
 ## Decision
 
-If this ADR is accepted, Pop Lang will distribute immutable, verified,
-relocatable toolchains through the `popup` toolchain manager and one narrow Bash
-bootstrap script.
+Pop Lang distributes immutable, verified, relocatable toolchains through the
+`popup` toolchain manager and one narrow Bash bootstrap script.
 
 ### Command ownership
 
@@ -327,7 +326,7 @@ no terminal dependency and can be tested with deterministic adapters.
 
 ### Rust crate and dependency boundaries
 
-On acceptance, ADR 0018's member inventory is amended with focused boundaries:
+ADR 0018's member inventory is amended with focused boundaries:
 
 ```text
 tools/
@@ -607,7 +606,7 @@ observed failing for the missing behavior.
 - the installed exact toolchain version/digest appears in build metadata and
   cache identity.
 
-## Documents and components affected on acceptance
+## Documents and components affected
 
 - architecture overview and implementation roadmap;
 - closed toolchain/package design questions;
@@ -625,6 +624,7 @@ observed failing for the missing behavior.
 - bootstrap script, release schemas/fixtures, release workflow, signing service,
   and end-to-end installation tests.
 
-Until this proposal is accepted and those documents/tests are synchronized,
-`popup`, its release formats, and its dependencies remain unauthorized
-architecture-gap work rather than stable Pop Lang behavior.
+Acceptance fixes the architecture but does not claim the distribution system is
+implemented. `popup`, its release formats, and new dependencies cannot ship
+until the affected documents, dependency reviews, conformance tests, release
+pipeline, and end-to-end installation gates above are synchronized and pass.

@@ -354,6 +354,13 @@ pop remove
 
 Diagnostics, symbols, metadata, documentation, and automated fixes are intended to be available through stable structured formats, so editors and build tools do not need to scrape terminal output.
 
+The accepted distribution design keeps compiler/runtime installation separate:
+`popup` verifies, installs, selects, updates, and removes immutable Pop Lang
+toolchains. `pop install` remains reserved for public Package binary Bubbles,
+and `pop` never silently self-updates. The distribution implementation is not
+yet shipped; ADR 0028's trust, transaction, dependency-review, and clean-host
+release gates must pass first.
+
 Human CLI and compiler diagnostics are available in English, Simplified
 Chinese, Japanese, Brazilian Portuguese, and Spanish. Select a language for one
 invocation with `pop --language pt-BR check source.pop`, set `POP_LANGUAGE`, or
@@ -429,7 +436,8 @@ crates/extensions/  Independent Pop.Data/Ai/Cli/Rpc/Syntax/Lsp package builds
 crates/libraries/   Modular Pop.Internal/Pop.Standard Rust bootstrap code
                     plus conventionally discovered pop/ source roots
 crates/runtime/     PLRI and bootstrap/native runtime contracts
-crates/tools/       Architecture tests, formatter, documentation, CLI tooling
+crates/tools/       Architecture tests, formatter, documentation, CLI tooling,
+                    and the accepted `popup` distribution boundary
 libraries/internal/ Pop.Internal verified bootstrap metadata
 libraries/standard/ Pop.Standard verified bootstrap metadata
 ```
