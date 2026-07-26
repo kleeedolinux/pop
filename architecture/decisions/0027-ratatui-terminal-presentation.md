@@ -47,6 +47,9 @@ library APIs, artifact schemas, or machine protocols. Presentation consumes
 immutable structured command state, diagnostics, build events, selections, and
 edit previews through backend-neutral internal interfaces.
 
+The accepted version/feature/checksum/license/advisory review is recorded in
+[Ratatui 0.30.2 dependency review](../dependency-reviews/ratatui-0.30.2.md).
+
 This proposal does not change Pop Lang source syntax, language semantics,
 Item/Module/Bubble/Package/Workspace ownership, backend behavior, or artifact
 identity.

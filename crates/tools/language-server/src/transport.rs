@@ -741,6 +741,7 @@ fn protocol_diagnostic(
             "category": diagnostic_category(diagnostic.category()),
             "documentVersion": version.value(),
             "warningWave": diagnostic.warning_wave(),
+            "warningGroup": diagnostic.warning_group(),
             "suppressionKey": diagnostic.suppression_key(),
             "notes": diagnostic.notes(),
             "fixIds": fix_ids
@@ -784,8 +785,21 @@ fn protocol_code_action(
                 })).collect::<Vec<_>>()
             }]
         },
-        "data": {"fixId": fix.id()}
+        "data": {
+            "fixId": fix.id(),
+            "applicability": fix_applicability(fix.applicability()),
+            "equivalenceKey": fix.equivalence_key(),
+            "workspaceRevision": fix.workspace_revision()
+        }
     })
+}
+
+const fn fix_applicability(applicability: pop_foundation::FixApplicability) -> &'static str {
+    match applicability {
+        pop_foundation::FixApplicability::Safe => "safe",
+        pop_foundation::FixApplicability::RequiresReview => "requiresReview",
+        pop_foundation::FixApplicability::Unsafe => "unsafe",
+    }
 }
 
 fn protocol_inlay_hint(hint: &InlayHint) -> Value {

@@ -64,6 +64,14 @@ approved `serde` and `serde_json` dependencies at its closed machine-protocol
 boundary. JSON protocol values do not cross into source, syntax, resolution,
 typing, HIR, MIR, runtime, base-library, or public-extension contracts.
 
+ADR 0027 approves Ratatui exactly at version `0.30.2`, with default features
+disabled and only its `crossterm_0_29` feature enabled. Only `pop-driver` may
+inherit it, and only its presentation/orchestration code may name Ratatui or
+Crossterm types. Semantic compiler crates, machine schemas, backends, runtimes,
+libraries, and public extensions remain independent of terminal rendering and
+input. The locked dependency graph must contain one compatible Crossterm event
+and raw-mode implementation and no unreviewed optional terminal capability.
+
 Repository architecture tests validate the member inventory, manifest
 inheritance, required source targets, and forbidden dependency directions. New
 feature work follows architecture, then failing tests, then implementation.
@@ -117,8 +125,10 @@ already requires an explicit decision to avoid architecture drift.
 - external dependencies remain the closed reviewed set: Inkwell in the LLVM
   backend; Serde for HIR/MIR projection and at artifact/protocol boundaries;
   JSON and SHA-256 confined to artifact boundaries; and TOML confined to the
-  private localization presentation crate. Architecture tests pin their owning
-  crates and prevent them from spreading into semantic or base-library layers;
+  private localization presentation crate; and exact Ratatui 0.30.2 with only
+  the Crossterm 0.29 backend confined to `pop-driver` presentation. Architecture
+  tests pin their owning crates and prevent them from spreading into semantic or
+  base-library layers;
 - the workspace builds and tests without undeclared external dependencies.
 
 ## Documents/components affected

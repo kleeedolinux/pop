@@ -153,10 +153,17 @@ fn stdio_exposes_compiler_quick_fixes_and_direct_call_parameter_hints() {
     assert_eq!(diagnostic["data"]["category"], "Syntax");
     assert_eq!(diagnostic["data"]["documentVersion"], 7);
     assert_eq!(diagnostic["data"]["fixIds"][0], "replaceExportWithPublic");
+    assert_eq!(diagnostic["data"]["warningGroup"], Value::Null);
 
     let actions = &messages.iter().find(|message| message["id"] == 3).unwrap()["result"];
     assert_eq!(actions[0]["kind"], "quickfix");
     assert_eq!(actions[0]["isPreferred"], true);
+    assert_eq!(actions[0]["data"]["applicability"], "safe");
+    assert_eq!(
+        actions[0]["data"]["equivalenceKey"],
+        "replaceExportWithPublic"
+    );
+    assert_eq!(actions[0]["data"]["workspaceRevision"], 0);
     assert_eq!(
         actions[0]["edit"]["documentChanges"][0]["textDocument"]["version"],
         7

@@ -1,0 +1,6 @@
+namespace Example
+
+--- <!DOCTYPE summary><summary>Unsafe documentation</summary>
+public function answer(): Int
+    return 42
+end

@@ -433,15 +433,17 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                 let raw = u32::try_from(index).unwrap_or(u32::MAX);
                 let binding = BindingId::from_raw(self.next_binding);
                 self.next_binding = self.next_binding.saturating_add(1);
-                self.scopes[0].insert(
-                    parameter.name().to_owned(),
-                    Binding {
-                        id: binding,
-                        kind: BindingKind::Parameter(ValueParameterId::from_raw(raw)),
-                        type_id,
-                        function_depth: 0,
-                    },
-                );
+                if parameter.name() != "_" {
+                    self.scopes[0].insert(
+                        parameter.name().to_owned(),
+                        Binding {
+                            id: binding,
+                            kind: BindingKind::Parameter(ValueParameterId::from_raw(raw)),
+                            type_id,
+                            function_depth: 0,
+                        },
+                    );
+                }
                 let parameter = ValueParameterId::from_raw(raw);
                 let provenance = crate::ViewLenderProvenance::Parameter { index: raw };
                 if self.resolver.arena().view_kind(type_id).is_some() {

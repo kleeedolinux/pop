@@ -25,6 +25,59 @@ fn parse_body(text: &str) -> pop_syntax::FunctionBodySyntax {
 }
 
 #[test]
+fn misspelled_return_reports_the_misspelled_keyword_instead_of_the_next_expression() {
+    let text = "namespace Example\nprivate record Box\n    value: Int\nend\nprivate function make(value: Int): Box\n    retun Box { value = value }\nend\n";
+    let source = SourceFile::new(FileId::from_raw(0), "src/nativeClass.pop", text).expect("source");
+    let syntax = parse_file(&source);
+    let function = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+        .expect("function declaration");
+    let signature = parse_function_signature(&source, &syntax, function).expect("signature");
+    let error =
+        parse_function_body(&source, &syntax, function, &signature).expect_err("misspelled return");
+
+    assert_eq!(error.expectation(), "`return`");
+    let range = error.span().range();
+    assert_eq!(
+        &source.text()[range.start().to_usize()..range.end().to_usize()],
+        "retun"
+    );
+}
+
+#[test]
+fn return_typo_recovery_does_not_reclassify_valid_calls_or_unrelated_syntax() {
+    let body = parse_body(
+        "namespace Example\nprivate function run(value: Int): Int\n    returm(value)\n    return value\nend\n",
+    );
+    assert!(matches!(
+        body.statements()[0].kind(),
+        StatementSyntaxKind::Expression(_)
+    ));
+
+    let text = "namespace Example\nprivate record Box\n    value: Int\nend\nprivate function run(value: Int): Box\n    value Box { value = value }\nend\n";
+    let source = SourceFile::new(FileId::from_raw(0), "src/unrelated.pop", text).expect("source");
+    let syntax = parse_file(&source);
+    let function = syntax
+        .root()
+        .children()
+        .iter()
+        .find(|node| node.kind() == NodeKind::FunctionDeclaration)
+        .expect("function declaration");
+    let signature = parse_function_signature(&source, &syntax, function).expect("signature");
+    let error =
+        parse_function_body(&source, &syntax, function, &signature).expect_err("invalid statement");
+    assert_eq!(error.expectation(), "end of statement");
+    let range = error.span().range();
+    assert_eq!(
+        &source.text()[range.start().to_usize()..range.end().to_usize()],
+        "Box"
+    );
+}
+
+#[test]
 fn parses_typed_and_inferred_locals_and_return() {
     let body = parse_body(
         "namespace Example\n\

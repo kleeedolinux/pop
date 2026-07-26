@@ -9,17 +9,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use pop_diagnostics::catalog as diagnostic_catalog;
 use pop_documentation::{XmlFragment, XmlNode};
-use pop_driver::{FrontEndBubbleInput, FrontEndModule, ToolingDeclarationKind, analyze_bubble};
+use pop_driver::{
+    FfiGenerationError, FfiGenerationErrorKind, FrontEndBubbleInput, FrontEndModule,
+    TOOLING_STANDARD_BUBBLE, ToolingDeclarationKind, VerifiedFfiGeneratedBindings, analyze_bubble,
+    tooling_standard_reference_metadata, verify_ffi_generated_bindings,
+};
 use pop_foundation::{
-    BubbleId, Diagnostic, DiagnosticCategory, DiagnosticSeverity, FileId, FixApplicability,
-    ModuleId, NamespaceId, TextRange, TextSize,
+    BubbleId, Diagnostic, DiagnosticArgument, DiagnosticCategory, DiagnosticCode,
+    DiagnosticSeverity, FileId, FixApplicability, MessageKey, ModuleId, NamespaceId, SourceSpan,
+    TextRange, TextSize,
 };
 use pop_localization::{
     Argument, Language, LocalizationError, RenderContext, select_process_language,
 };
 use pop_projects::{
-    BubbleKind, DiscoveredBubble, discover_conventional_bubbles, parse_package_manifest,
+    BubbleKind, DependencySource, DiscoveredBubble, discover_conventional_bubbles,
+    parse_package_manifest,
 };
 use pop_query::CancellationToken;
 use pop_source::SourceFile;
@@ -29,6 +36,7 @@ mod transport;
 pub use transport::{ExitStatus, TransportError, TransportLimits, serve};
 
 pub const PUBLIC_PROTOCOL_PACKAGE: &str = pop_extension_lsp::PACKAGE;
+const TOOLING_FFI_BUBBLE: BubbleId = BubbleId::from_raw(3);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LanguageServerSession {
@@ -185,6 +193,7 @@ pub struct ProtocolDiagnostic {
     related: Vec<DiagnosticRelatedInformation>,
     notes: Vec<String>,
     warning_wave: Option<u32>,
+    warning_group: Option<String>,
     suppression_key: Option<String>,
     fixes: Vec<ProtocolQuickFix>,
 }
@@ -205,7 +214,9 @@ pub struct ProtocolTextEdit {
 pub struct ProtocolQuickFix {
     id: String,
     title: String,
-    safe: bool,
+    applicability: FixApplicability,
+    equivalence_key: Option<String>,
+    workspace_revision: u64,
     edits: Vec<ProtocolTextEdit>,
 }
 
@@ -257,6 +268,11 @@ impl ProtocolDiagnostic {
     }
 
     #[must_use]
+    pub fn warning_group(&self) -> Option<&str> {
+        self.warning_group.as_deref()
+    }
+
+    #[must_use]
     pub fn suppression_key(&self) -> Option<&str> {
         self.suppression_key.as_deref()
     }
@@ -304,7 +320,22 @@ impl ProtocolQuickFix {
 
     #[must_use]
     pub const fn is_safe(&self) -> bool {
-        self.safe
+        matches!(self.applicability, FixApplicability::Safe)
+    }
+
+    #[must_use]
+    pub const fn applicability(&self) -> FixApplicability {
+        self.applicability
+    }
+
+    #[must_use]
+    pub fn equivalence_key(&self) -> Option<&str> {
+        self.equivalence_key.as_deref()
+    }
+
+    #[must_use]
+    pub const fn workspace_revision(&self) -> u64 {
+        self.workspace_revision
     }
 
     #[must_use]
@@ -926,27 +957,22 @@ fn analyze_document(
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
-    let input = package_analysis_input(open_documents, source).unwrap_or_else(|| {
-        FrontEndBubbleInput::new(
-            BubbleId::from_raw(0),
-            NamespaceId::from_raw(0),
-            Vec::new(),
-            vec![FrontEndModule::new(
-                ModuleId::from_raw(source.id().raw()),
-                source.clone(),
-            )],
-        )
-    });
+    let (input, preflight_diagnostic) = package_analysis_input(open_documents, source)
+        .map_or_else(|| standalone_analysis_input(source), |input| (input, None));
     let result = analyze_bubble(input);
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
-    let diagnostics = result
-        .diagnostics()
-        .iter()
-        .filter(|diagnostic| diagnostic.primary_span().file() == source.id())
-        .map(|diagnostic| protocol_diagnostic(session, source, diagnostic))
-        .collect::<Result<Vec<_>, _>>()?;
+    let diagnostics = if let Some(diagnostic) = preflight_diagnostic.as_ref() {
+        vec![protocol_diagnostic(session, source, diagnostic)?]
+    } else {
+        result
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.primary_span().file() == source.id())
+            .map(|diagnostic| protocol_diagnostic(session, source, diagnostic))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     cancellation
         .check()
         .map_err(|_| LanguageServerError::Cancelled)?;
@@ -1032,7 +1058,7 @@ fn package_analysis_input(
         };
         let text = open_document_text(open_documents, &path)
             .or_else(|| fs::read_to_string(&path).ok().map(Arc::<str>::from))?;
-        let source = SourceFile::new(file, Arc::<str>::from(file_uri(&path)?), text).ok()?;
+        let source = SourceFile::new(file, Arc::<str>::from(relative.as_str()), text).ok()?;
         if selection.bubble.kind() == BubbleKind::Binary && relative == selection.bubble.root() {
             implicit_main = Some(module);
         }
@@ -1041,13 +1067,198 @@ fn package_analysis_input(
     let input = FrontEndBubbleInput::new(
         BubbleId::from_raw(0),
         NamespaceId::from_raw(0),
-        Vec::new(),
+        vec![TOOLING_STANDARD_BUBBLE],
         modules,
-    );
+    )
+    .with_reference_metadata(vec![tooling_standard_reference_metadata().clone()]);
     Some(if let Some(module) = implicit_main {
         input.with_implicit_main_entry(module)
     } else {
         input
+    })
+}
+
+fn standalone_analysis_input(source: &SourceFile) -> (FrontEndBubbleInput, Option<Diagnostic>) {
+    let has_ffi_dependency = has_verified_direct_pop_ffi_dependency(source);
+    let (verified_ffi_bindings, preflight_diagnostic) = if has_ffi_dependency {
+        match verified_ffi_bindings_for_source(source) {
+            Ok(bindings) => (bindings, None),
+            Err(error) => (Vec::new(), Some(ffi_preflight_diagnostic(source, &error))),
+        }
+    } else {
+        (Vec::new(), None)
+    };
+    let relative_source = package_relative_source_path(source);
+    let analysis_source = relative_source.as_ref().map_or_else(
+        || source.clone(),
+        |relative| {
+            SourceFile::new(
+                source.id(),
+                Arc::<str>::from(relative.as_str()),
+                source.text(),
+            )
+            .expect("an existing source snapshot remains valid under a normalized path")
+        },
+    );
+    let mut dependencies = vec![TOOLING_STANDARD_BUBBLE];
+    if has_ffi_dependency {
+        dependencies.push(TOOLING_FFI_BUBBLE);
+    }
+    let input = FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        dependencies,
+        vec![FrontEndModule::new(
+            ModuleId::from_raw(source.id().raw()),
+            analysis_source,
+        )],
+    )
+    .with_reference_metadata(vec![tooling_standard_reference_metadata().clone()]);
+    let input = if has_ffi_dependency {
+        input
+            .with_ffi_dependency(TOOLING_FFI_BUBBLE)
+            .with_verified_ffi_generated_bindings(verified_ffi_bindings)
+    } else {
+        input
+    };
+    (input, preflight_diagnostic)
+}
+
+fn package_relative_source_path(source: &SourceFile) -> Option<String> {
+    let active_path = file_uri_path(source.path())?;
+    let manifest_path = nearest_package_manifest(&active_path)?;
+    relative_pop_path(manifest_path.parent()?, &active_path)
+}
+
+fn verified_ffi_bindings_for_source(
+    source: &SourceFile,
+) -> Result<Vec<VerifiedFfiGeneratedBindings>, FfiGenerationError> {
+    let Some(active_path) = file_uri_path(source.path()) else {
+        return Ok(Vec::new());
+    };
+    let Some(manifest_path) = nearest_package_manifest(&active_path) else {
+        return Ok(Vec::new());
+    };
+    let Some(package_root) = manifest_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let Some(relative) = relative_pop_path(package_root, &active_path) else {
+        return Ok(Vec::new());
+    };
+    let Some(manifest) = fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|text| parse_package_manifest(&text).ok())
+    else {
+        return Ok(Vec::new());
+    };
+    let matching_targets = manifest
+        .platform_ffi_generators()
+        .iter()
+        .flat_map(|platform| {
+            platform
+                .generators()
+                .iter()
+                .filter(|generator| {
+                    format!("{}/bindings.pop", generator.output_directory()) == relative
+                })
+                .map(|_| platform.platform_target())
+        })
+        .collect::<Vec<_>>();
+    let [platform_target] = matching_targets.as_slice() else {
+        return Ok(Vec::new());
+    };
+    verify_ffi_generated_bindings(package_root, &manifest, platform_target).map(|bindings| {
+        bindings
+            .into_iter()
+            .filter(|bindings| bindings.source_path() == relative)
+            .collect()
+    })
+}
+
+fn ffi_preflight_diagnostic(source: &SourceFile, error: &FfiGenerationError) -> Diagnostic {
+    let (code, message_key) = match error.kind() {
+        FfiGenerationErrorKind::InvalidManifest => ("POP5080", "ffi.generator.invalidManifest"),
+        FfiGenerationErrorKind::InvalidInput => ("POP5081", "ffi.generator.invalidInput"),
+        FfiGenerationErrorKind::InvalidDescriptor => ("POP5082", "ffi.generator.invalidDescriptor"),
+        FfiGenerationErrorKind::ResourceLimit => ("POP5083", "ffi.generator.resourceLimit"),
+        FfiGenerationErrorKind::PolicyMismatch => ("POP5084", "ffi.generator.policyMismatch"),
+        FfiGenerationErrorKind::UnsupportedAbi => ("POP5085", "ffi.generator.unsupportedAbi"),
+        FfiGenerationErrorKind::OutputConflict => ("POP5086", "ffi.generator.outputConflict"),
+        FfiGenerationErrorKind::PublicationIo => ("POP5087", "ffi.generator.publicationIo"),
+    };
+    let line_end = source
+        .text()
+        .find('\n')
+        .unwrap_or_else(|| source.text().len());
+    let range = TextRange::new(
+        TextSize::from_u32(0),
+        TextSize::try_from_usize(line_end).expect("validated source length fits TextSize"),
+    )
+    .expect("first source line is an ordered range");
+    Diagnostic::new(
+        DiagnosticCode::new(code),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::RuntimeSafety,
+        MessageKey::new(message_key),
+        vec![DiagnosticArgument::Identifier(error.reason().to_owned())],
+        SourceSpan::new(source.id(), range),
+    )
+}
+
+fn has_verified_direct_pop_ffi_dependency(source: &SourceFile) -> bool {
+    let Some(active_path) = file_uri_path(source.path()) else {
+        return false;
+    };
+    let Some(manifest_path) = nearest_package_manifest(&active_path) else {
+        return false;
+    };
+    let Some(package_root) = manifest_path.parent() else {
+        return false;
+    };
+    let Some(manifest) = fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|text| parse_package_manifest(&text).ok())
+    else {
+        return false;
+    };
+    manifest.dependencies().iter().any(|requirement| {
+        if requirement.bubble() != Some("Pop.Ffi") {
+            return false;
+        }
+        let DependencySource::LocalPath(relative) = requirement.source() else {
+            return false;
+        };
+        let dependency_manifest_path = package_root.join(relative).join("bubble.toml");
+        if fs::symlink_metadata(&dependency_manifest_path)
+            .ok()
+            .is_none_or(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
+        {
+            return false;
+        }
+        let Some(dependency_manifest) = fs::read_to_string(&dependency_manifest_path)
+            .ok()
+            .and_then(|text| parse_package_manifest(&text).ok())
+        else {
+            return false;
+        };
+        if dependency_manifest.name() != "Pop.Ffi"
+            || requirement.version_requirement() != Some(dependency_manifest.version())
+        {
+            return false;
+        }
+        let Some(dependency_root) = dependency_manifest_path.parent() else {
+            return false;
+        };
+        let Some(files) = conventional_pop_files(dependency_root) else {
+            return false;
+        };
+        discover_conventional_bubbles(&dependency_manifest, &files)
+            .ok()
+            .is_some_and(|bubbles| {
+                bubbles.iter().any(|bubble| {
+                    bubble.kind() == BubbleKind::Library && bubble.name() == "Pop.Ffi"
+                })
+            })
     })
 }
 
@@ -1374,7 +1585,9 @@ fn protocol_diagnostic(
             Some(ProtocolQuickFix {
                 id: fix.id().to_owned(),
                 title,
-                safe: fix.is_safe(),
+                applicability: fix.applicability(),
+                equivalence_key: fix.fix_all_equivalence().map(str::to_owned),
+                workspace_revision: fix.edit().revision(),
                 edits,
             })
         })
@@ -1390,6 +1603,15 @@ fn protocol_diagnostic(
         warning_wave: diagnostic
             .warning_wave()
             .map(pop_foundation::WarningWave::value),
+        warning_group: diagnostic_catalog()
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|entry| entry.code() == diagnostic.code())
+            })
+            .and_then(pop_diagnostics::CatalogEntry::warning_group)
+            .map(|group| group.name().to_owned()),
         suppression_key: diagnostic
             .suppression_key()
             .map(|key| key.as_str().to_owned()),

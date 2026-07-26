@@ -607,7 +607,10 @@ fn adr_0093_generates_deterministic_typed_popc_bindings_without_process_input() 
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(first.stdout.is_empty());
-    assert!(first.stderr.is_empty());
+    let stderr = String::from_utf8(first.stderr.clone()).expect("UTF-8 feedback");
+    assert!(stderr.contains("Generating"), "{stderr}");
+    assert!(stderr.contains("[1/1]"), "{stderr}");
+    assert!(stderr.contains("Finished  `ffi generate`"), "{stderr}");
     let output = root.join("src/generated/zlib");
     let source = std::fs::read(output.join("bindings.pop")).expect("generated Pop source");
     let shim = std::fs::read(output.join("bindings.c")).expect("generated shim unit");

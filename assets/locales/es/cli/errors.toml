@@ -70,6 +70,9 @@ text = "no se pudo escribir la ayuda: {detail}"
 [messages."cli.writeDiagnosticsFailed"]
 text = "no se pudieron escribir los diagnósticos: {detail}"
 
+[messages."cli.diagnosticLimitReached"]
+text = "se detuvo después de {maximum} errores; se omitieron {omitted} errores adicionales"
+
 [messages."cli.renderDiagnosticsFailed"]
 text = "no se pudieron renderizar los diagnósticos: {detail}"
 

@@ -550,7 +550,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
 
         let mut names = BTreeMap::new();
         for name in binding_names {
-            if names.insert(name, span).is_some() {
+            if name != "_" && names.insert(name, span).is_some() {
                 self.diagnostics
                     .push(type_diagnostics::duplicate_binding(span, name, span));
                 return None;
@@ -563,18 +563,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             self.next_local = self.next_local.saturating_add(1);
             let binding = BindingId::from_raw(self.next_binding);
             self.next_binding = self.next_binding.saturating_add(1);
-            self.scopes
-                .last_mut()
-                .expect("generalized for scope was just pushed")
-                .insert(
-                    name.clone(),
-                    Binding {
-                        id: binding,
-                        kind: BindingKind::LoopLocal(local),
-                        type_id: local_type,
-                        function_depth: self.function_depth,
-                    },
-                );
+            if name != "_" {
+                self.scopes
+                    .last_mut()
+                    .expect("generalized for scope was just pushed")
+                    .insert(
+                        name.clone(),
+                        Binding {
+                            id: binding,
+                            kind: BindingKind::LoopLocal(local),
+                            type_id: local_type,
+                            function_depth: self.function_depth,
+                        },
+                    );
+            }
             bindings.push(TypedLocalBinding {
                 binding,
                 local,
@@ -687,18 +689,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         self.next_local = self.next_local.saturating_add(1);
         let binding = BindingId::from_raw(self.next_binding);
         self.next_binding = self.next_binding.saturating_add(1);
-        self.scopes
-            .last_mut()
-            .expect("body checker always has a lexical scope")
-            .insert(
-                name.to_owned(),
-                Binding {
-                    id: binding,
-                    kind: BindingKind::Local(local),
-                    type_id: local_type,
-                    function_depth: self.function_depth,
-                },
-            );
+        if name != "_" {
+            self.scopes
+                .last_mut()
+                .expect("body checker always has a lexical scope")
+                .insert(
+                    name.to_owned(),
+                    Binding {
+                        id: binding,
+                        kind: BindingKind::Local(local),
+                        type_id: local_type,
+                        function_depth: self.function_depth,
+                    },
+                );
+        }
         if let Some(view_borrow) = view_borrow {
             self.local_view_borrows.insert(local, view_borrow);
         }
@@ -739,7 +743,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
 
         let mut names = BTreeMap::new();
         for binding in bindings {
-            if let Some(original) = names.insert(binding.name(), binding.span()) {
+            if binding.name() != "_"
+                && let Some(original) = names.insert(binding.name(), binding.span())
+            {
                 self.diagnostics.push(type_diagnostics::duplicate_binding(
                     binding.span(),
                     binding.name(),
@@ -774,18 +780,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             });
         }
         for binding in &typed_bindings {
-            self.scopes
-                .last_mut()
-                .expect("body checker always has a lexical scope")
-                .insert(
-                    binding.name.clone(),
-                    Binding {
-                        id: binding.binding,
-                        kind: BindingKind::Local(binding.local),
-                        type_id: binding.local_type,
-                        function_depth: self.function_depth,
-                    },
-                );
+            if binding.name != "_" {
+                self.scopes
+                    .last_mut()
+                    .expect("body checker always has a lexical scope")
+                    .insert(
+                        binding.name.clone(),
+                        Binding {
+                            id: binding.binding,
+                            kind: BindingKind::Local(binding.local),
+                            type_id: binding.local_type,
+                            function_depth: self.function_depth,
+                        },
+                    );
+            }
         }
         Some(TypedStatementKind::MultipleLocal {
             bindings: typed_bindings,
@@ -909,7 +917,9 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         let mut names = BTreeMap::new();
         let mut parameters = Vec::new();
         for parameter in function.parameters() {
-            if let Some(original) = names.insert(parameter.name().to_owned(), parameter.span()) {
+            if parameter.name() != "_"
+                && let Some(original) = names.insert(parameter.name().to_owned(), parameter.span())
+            {
                 self.diagnostics.push(type_diagnostics::duplicate_binding(
                     parameter.span(),
                     parameter.name(),
@@ -982,18 +992,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             let parameter = ValueParameterId::from_raw(u32::try_from(index).unwrap_or(u32::MAX));
             let binding = BindingId::from_raw(self.next_binding);
             self.next_binding = self.next_binding.saturating_add(1);
-            self.scopes
-                .last_mut()
-                .expect("closure scope was just pushed")
-                .insert(
-                    name.clone(),
-                    Binding {
-                        id: binding,
-                        kind: BindingKind::Parameter(parameter),
-                        type_id: *type_id,
-                        function_depth: depth,
-                    },
-                );
+            if name != "_" {
+                self.scopes
+                    .last_mut()
+                    .expect("closure scope was just pushed")
+                    .insert(
+                        name.clone(),
+                        Binding {
+                            id: binding,
+                            kind: BindingKind::Parameter(parameter),
+                            type_id: *type_id,
+                            function_depth: depth,
+                        },
+                    );
+            }
             typed_parameters.push(TypedClosureParameter {
                 binding,
                 parameter,
@@ -1648,15 +1660,20 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
         self.next_local = self.next_local.saturating_add(1);
         let binding = BindingId::from_raw(self.next_binding);
         self.next_binding = self.next_binding.saturating_add(1);
-        self.scopes.push(BTreeMap::from([(
-            name.to_owned(),
-            Binding {
-                id: binding,
-                kind: BindingKind::ImmutableLocal(local),
-                type_id: inner_type,
-                function_depth: self.function_depth,
-            },
-        )]));
+        let scope = if name == "_" {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([(
+                name.to_owned(),
+                Binding {
+                    id: binding,
+                    kind: BindingKind::ImmutableLocal(local),
+                    type_id: inner_type,
+                    function_depth: self.function_depth,
+                },
+            )])
+        };
+        self.scopes.push(scope);
         if is_loop {
             self.loop_depth = self.loop_depth.saturating_add(1);
         }

@@ -1,6 +1,6 @@
 code	severity	category	warningWave	messageKey	helpKey	argumentSchema	suppressible	documentationUrl	owner	quickFixProviders	editionIntroduced	editionDeprecated
 POP0001	Error	Syntax	-	syntax.invalidCharacter	-	Character	false	diagnostics/POP0001	syntax	-	1	-
-POP0002	Error	Syntax	-	syntax.unexpectedToken	-	SyntaxExpectation,Token	false	diagnostics/POP0002	syntax	-	1	-
+POP0002	Error	Syntax	-	syntax.unexpectedToken	-	SyntaxExpectation,Token	false	diagnostics/POP0002	syntax	replaceMisspelledReturn	1	-
 POP0003	Error	Syntax	-	syntax.missingNamespace	fix.addNamespace	-	false	diagnostics/POP0003	syntax	-	1	-
 POP0004	Error	Syntax	-	syntax.unsupportedExport	fix.replaceExportWithPublic	Identifier	false	diagnostics/POP0004	syntax	replaceExportWithPublic	1	-
 POP0006	Error	Syntax	-	syntax.unterminatedString	-	-	false	diagnostics/POP0006	syntax	-	1	-

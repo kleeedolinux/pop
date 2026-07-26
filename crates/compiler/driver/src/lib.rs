@@ -35,6 +35,7 @@ mod front_end;
 mod native_link;
 mod reference;
 mod retained_metadata;
+mod tooling;
 mod work;
 
 pub use api::*;
@@ -49,3 +50,4 @@ pub use native_link::{
     ResolvedNativeProvider, resolve_native_link_inputs, validate_foreign_link_aliases,
 };
 pub use retained_metadata::*;
+pub use tooling::{TOOLING_STANDARD_BUBBLE, tooling_standard_reference_metadata};

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use pop_foundation::{Diagnostic, DiagnosticArgument, DiagnosticSeverity};
+use pop_foundation::{Diagnostic, DiagnosticArgument, DiagnosticSeverity, FileId, SourceSpan};
 use serde::Deserialize;
 
 struct CatalogSource {
@@ -631,6 +631,20 @@ pub struct RenderContext {
     language: Language,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticSource<'source> {
+    file: FileId,
+    path: &'source str,
+    text: &'source str,
+}
+
+impl<'source> DiagnosticSource<'source> {
+    #[must_use]
+    pub const fn new(file: FileId, path: &'source str, text: &'source str) -> Self {
+        Self { file, path, text }
+    }
+}
+
 impl RenderContext {
     #[must_use]
     pub const fn new(language: Language) -> Self {
@@ -708,6 +722,39 @@ impl RenderContext {
     /// Returns an error when a diagnostic, label, note, or fix references an
     /// unknown message or supplies arguments that violate its schema.
     pub fn diagnostic(self, diagnostic: &Diagnostic) -> Result<String, LocalizationError> {
+        self.diagnostic_with_sources(diagnostic, &[])
+    }
+
+    /// Renders a structured human diagnostic with real paths and source frames
+    /// for every supplied immutable source snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a diagnostic component references an unknown
+    /// message or supplies arguments that violate its schema.
+    pub fn diagnostic_with_sources(
+        self,
+        diagnostic: &Diagnostic,
+        sources: &[DiagnosticSource<'_>],
+    ) -> Result<String, LocalizationError> {
+        self.diagnostic_with_sources_and_width(diagnostic, sources, unicode_scalar_width)
+    }
+
+    /// Renders a source diagnostic using the caller's terminal display-width
+    /// implementation. This keeps localization independent of a terminal
+    /// backend while allowing the driver to align wide and combining Unicode
+    /// exactly as its renderer will display them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a diagnostic component references an unknown
+    /// message or supplies arguments that violate its schema.
+    pub fn diagnostic_with_sources_and_width(
+        self,
+        diagnostic: &Diagnostic,
+        sources: &[DiagnosticSource<'_>],
+        display_width: fn(&str) -> usize,
+    ) -> Result<String, LocalizationError> {
         let message =
             self.diagnostic_message(diagnostic.message_key().as_str(), diagnostic.arguments())?;
         let severity_key = match diagnostic.severity() {
@@ -717,25 +764,26 @@ impl RenderContext {
             DiagnosticSeverity::Hint => "ui.hint",
         };
         let severity = self.message(severity_key, &[])?;
-        let range = diagnostic.primary_span().range();
-        let mut output = format!(
-            "{severity}[{}]: {message}\n  --> file#{}:{}..{}\n",
-            diagnostic.code(),
-            diagnostic.primary_span().file().raw(),
-            range.start().to_u32(),
-            range.end().to_u32()
+        let mut output = format!("{severity}[{}]: {message}\n", diagnostic.code());
+        render_source_span(
+            &mut output,
+            diagnostic.primary_span(),
+            sources,
+            "-->",
+            None,
+            display_width,
         );
         for label in diagnostic.labels() {
             let label_text =
                 self.diagnostic_message(label.message_key().as_str(), label.arguments())?;
             let label_name = self.message("ui.label", &[])?;
-            let range = label.span().range();
-            let _ = writeln!(
-                output,
-                "  {label_name} file#{}:{}..{}: {label_text}",
-                label.span().file().raw(),
-                range.start().to_u32(),
-                range.end().to_u32()
+            render_source_span(
+                &mut output,
+                label.span(),
+                sources,
+                ":::",
+                Some(&format!("{label_name}: {label_text}")),
+                display_width,
             );
         }
         for note in diagnostic.notes() {
@@ -799,4 +847,104 @@ impl RenderContext {
             .collect::<Vec<_>>();
         self.message(key, &bound)
     }
+}
+
+fn render_source_span(
+    output: &mut String,
+    span: SourceSpan,
+    sources: &[DiagnosticSource<'_>],
+    marker: &str,
+    label: Option<&str>,
+    display_width: fn(&str) -> usize,
+) {
+    let range = span.range();
+    let Some(source) = sources.iter().find(|source| source.file == span.file()) else {
+        let _ = writeln!(
+            output,
+            "  {marker} file#{}:{}..{}{}",
+            span.file().raw(),
+            range.start().to_u32(),
+            range.end().to_u32(),
+            label.map_or_else(String::new, |label| format!(": {label}"))
+        );
+        return;
+    };
+    let start = range.start().to_usize();
+    let end = range.end().to_usize();
+    if start > source.text.len()
+        || end > source.text.len()
+        || start > end
+        || !source.text.is_char_boundary(start)
+        || !source.text.is_char_boundary(end)
+    {
+        let _ = writeln!(
+            output,
+            "  {marker} {}:{}..{}",
+            source.path,
+            range.start().to_u32(),
+            range.end().to_u32()
+        );
+        return;
+    }
+    let line_index = source.text[..start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    let line_start = source.text[..start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line_end = source.text[start..]
+        .find('\n')
+        .map_or(source.text.len(), |newline| start + newline);
+    let source_line = &source.text[line_start..line_end];
+    let prefix = &source.text[line_start..start];
+    let underline_end = end.min(line_end);
+    let through_underline = &source.text[line_start..underline_end];
+    let line_text = expand_tabs(source_line, display_width);
+    let display_prefix = expand_tabs(prefix, display_width);
+    let display_through_underline = expand_tabs(through_underline, display_width);
+    let prefix_width = display_width(&display_prefix);
+    let underline_width = display_width(&display_through_underline)
+        .saturating_sub(prefix_width)
+        .max(1);
+    let column = prefix_width + 1;
+    let line_number = line_index + 1;
+    let gutter_width = line_number.to_string().len();
+    let underline_prefix = " ".repeat(prefix_width);
+    let _ = writeln!(output, "  {marker} {}:{line_number}:{column}", source.path);
+    let _ = writeln!(output, " {space:>gutter_width$} |", space = "");
+    let _ = writeln!(output, " {line_number:>gutter_width$} | {line_text}");
+    let _ = write!(
+        output,
+        " {space:>gutter_width$} | {underline_prefix}{}",
+        "^".repeat(underline_width),
+        space = ""
+    );
+    if let Some(label) = label {
+        let _ = write!(output, " {label}");
+    }
+    output.push('\n');
+}
+
+fn unicode_scalar_width(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn expand_tabs(text: &str, display_width: fn(&str) -> usize) -> String {
+    const TAB_WIDTH: usize = 4;
+
+    let mut output = String::with_capacity(text.len());
+    let mut column = 0;
+    for character in text.chars() {
+        if character == '\t' {
+            let spaces = TAB_WIDTH - column % TAB_WIDTH;
+            output.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        } else {
+            output.push(character);
+            let mut buffer = [0; 4];
+            column += display_width(character.encode_utf8(&mut buffer));
+        }
+    }
+    output
 }

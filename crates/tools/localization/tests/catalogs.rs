@@ -5,7 +5,7 @@ use pop_foundation::{
     DiagnosticNote, DiagnosticSeverity, FileId, FixApplicability, MessageKey, QuickFix, SourceSpan,
     TextEdit, TextRange, TextSize, WorkspaceEdit,
 };
-use pop_localization::{Argument, Language, RenderContext, official_catalogs};
+use pop_localization::{Argument, DiagnosticSource, Language, RenderContext, official_catalogs};
 
 fn repository_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -193,5 +193,124 @@ fn diagnostic_message_labels_notes_and_fixes_share_the_locale() {
     assert_ne!(
         outputs[&Language::English],
         outputs[&Language::PortugueseBrazil]
+    );
+}
+
+#[test]
+fn human_diagnostic_uses_real_source_path_line_column_excerpt_and_underline() {
+    let source = "namespace Example\n    malformed value\n";
+    let diagnostic = Diagnostic::new(
+        DiagnosticCode::new("POP0002"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Syntax,
+        MessageKey::new("syntax.unexpectedToken"),
+        vec![
+            DiagnosticArgument::SyntaxExpectation("end of statement"),
+            DiagnosticArgument::Token("malformed declaration".to_owned()),
+        ],
+        SourceSpan::new(
+            FileId::from_raw(7),
+            TextRange::new(TextSize::from_u32(22), TextSize::from_u32(31)).expect("range"),
+        ),
+    );
+
+    let rendered = RenderContext::new(Language::English)
+        .diagnostic_with_sources(
+            &diagnostic,
+            &[DiagnosticSource::new(
+                FileId::from_raw(7),
+                "rust_les/nativeClass.pop",
+                source,
+            )],
+        )
+        .expect("source diagnostic");
+
+    assert!(
+        rendered.contains("--> rust_les/nativeClass.pop:2:5"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("2 |     malformed value"), "{rendered}");
+    assert!(rendered.contains("|     ^^^^^^^^^"), "{rendered}");
+    assert!(!rendered.contains("file#7"), "{rendered}");
+    let source_line = rendered
+        .lines()
+        .find(|line| line.contains("malformed value"))
+        .expect("source line");
+    let caret_line = rendered
+        .lines()
+        .find(|line| line.contains("^^^^^^^^^"))
+        .expect("caret line");
+    assert_eq!(
+        source_line.find("malformed").expect("source column"),
+        caret_line.find('^').expect("caret column"),
+        "caret must begin directly below the diagnosed text:\n{rendered}"
+    );
+    assert_eq!(source_line.find('|'), caret_line.find('|'), "{rendered}");
+}
+
+#[test]
+fn human_diagnostic_aligns_tabs_and_wide_unicode_by_display_column() {
+    fn terminal_width(text: &str) -> usize {
+        text.chars()
+            .map(|character| match character {
+                '\u{0300}'..='\u{036f}' => 0,
+                '界' => 2,
+                _ => 1,
+            })
+            .sum()
+    }
+
+    let source = "\t界 malformed value\n";
+    let diagnostic = Diagnostic::new(
+        DiagnosticCode::new("POP0002"),
+        DiagnosticSeverity::Error,
+        DiagnosticCategory::Syntax,
+        MessageKey::new("syntax.unexpectedToken"),
+        vec![
+            DiagnosticArgument::SyntaxExpectation("end of statement"),
+            DiagnosticArgument::Token("malformed declaration".to_owned()),
+        ],
+        SourceSpan::new(
+            FileId::from_raw(7),
+            TextRange::new(TextSize::from_u32(5), TextSize::from_u32(14)).expect("range"),
+        ),
+    );
+
+    let rendered = RenderContext::new(Language::English)
+        .diagnostic_with_sources_and_width(
+            &diagnostic,
+            &[DiagnosticSource::new(
+                FileId::from_raw(7),
+                "rust_les/nativeClass.pop",
+                source,
+            )],
+            terminal_width,
+        )
+        .expect("source diagnostic");
+
+    assert!(
+        rendered.contains("--> rust_les/nativeClass.pop:1:8"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains('\t'), "{rendered}");
+    let source_line = rendered
+        .lines()
+        .find(|line| line.contains("malformed value"))
+        .expect("source line");
+    let caret_line = rendered
+        .lines()
+        .find(|line| line.contains("^^^^^^^^^"))
+        .expect("caret line");
+    let source_body = source_line.split_once("| ").expect("source gutter").1;
+    let caret_body = caret_line.split_once("| ").expect("caret gutter").1;
+    let source_prefix = source_body
+        .split_once("malformed")
+        .expect("diagnosed source")
+        .0;
+    let caret_prefix = caret_body.split_once('^').expect("caret").0;
+    assert_eq!(
+        terminal_width(source_prefix),
+        terminal_width(caret_prefix),
+        "caret must align by terminal display width:\n{rendered}"
     );
 }

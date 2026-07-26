@@ -8,6 +8,11 @@ text = "replace `export` with `public`"
 arguments = []
 kinds = []
 
+[messages."fix.replaceMisspelledReturn"]
+text = "replace with `return`"
+arguments = []
+kinds = []
+
 [messages."fix.addNamespace"]
 text = "add the required namespace declaration"
 arguments = []

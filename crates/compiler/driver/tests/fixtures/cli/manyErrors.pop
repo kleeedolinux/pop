@@ -1,0 +1,9 @@
+namespace Example
+
+public function first(): Int
+    return missingFirst
+end
+
+public function second(): Int
+    return missingSecond
+end

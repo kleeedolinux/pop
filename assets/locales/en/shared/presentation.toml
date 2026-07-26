@@ -37,3 +37,78 @@ kinds = []
 text = "suggestion"
 arguments = []
 kinds = []
+
+[messages."ui.phase.loading"]
+text = "Loading"
+arguments = []
+kinds = []
+
+[messages."ui.phase.checking"]
+text = "Checking"
+arguments = []
+kinds = []
+
+[messages."ui.phase.building"]
+text = "Building"
+arguments = []
+kinds = []
+
+[messages."ui.phase.documenting"]
+text = "Documenting"
+arguments = []
+kinds = []
+
+[messages."ui.phase.transpiling"]
+text = "Transpiling"
+arguments = []
+kinds = []
+
+[messages."ui.phase.running"]
+text = "Running"
+arguments = []
+kinds = []
+
+[messages."ui.phase.creating"]
+text = "Creating"
+arguments = []
+kinds = []
+
+[messages."ui.phase.generating"]
+text = "Generating"
+arguments = []
+kinds = []
+
+[messages."ui.phase.fixing"]
+text = "Fixing"
+arguments = []
+kinds = []
+
+[messages."ui.fixSummary"]
+text = "Applied {applied} safe fixes in {changed} files; skipped {review} review, {unsafe} unsafe, and {unproven} unproven fixes"
+arguments = ["applied", "changed", "review", "unsafe", "unproven"]
+kinds = ["Unsigned", "Unsigned", "Unsigned", "Unsigned", "Unsigned"]
+
+[messages."ui.command.interactiveFallback"]
+text = "Interactive presentation unavailable; continuing with plain feedback"
+arguments = []
+kinds = []
+
+[messages."ui.command.started"]
+text = "  {phase}  {command}"
+arguments = ["phase", "command"]
+kinds = ["Text", "Text"]
+
+[messages."ui.command.progress"]
+text = "  Progress  {phase} [{completed}/{total}]"
+arguments = ["phase", "completed", "total"]
+kinds = ["Text", "Unsigned", "Unsigned"]
+
+[messages."ui.command.finished"]
+text = "  Finished  `{command}`"
+arguments = ["command"]
+kinds = ["Text"]
+
+[messages."ui.command.failed"]
+text = "  Failed  `{command}`"
+arguments = ["command"]
+kinds = ["Text"]

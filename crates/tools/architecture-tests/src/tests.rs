@@ -258,6 +258,23 @@ fn manifests_below(directory: &Path) -> Vec<PathBuf> {
     manifests
 }
 
+fn rust_sources_below(directory: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read repository entry").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            sources.extend(rust_sources_below(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            sources.push(path);
+        }
+    }
+    sources
+}
+
 fn inline_documentation_element(line: &str) -> Option<&str> {
     let mut remainder = line;
     while let Some(start) = remainder.find("--- <") {
@@ -616,6 +633,8 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
             line.starts_with("pop-") && line.contains(" = { path = \"") && line.ends_with("\" }");
         let approved_inkwell = line
             == "inkwell = { version = \"0.9.0\", default-features = false, features = [\"llvm22-1-prefer-dynamic\", \"target-x86\", \"target-bpf\"] }";
+        let approved_terminal_dependency = line
+            == "ratatui = { version = \"=0.30.2\", default-features = false, features = [\"crossterm_0_29\"] }";
         let approved_artifact_dependency = matches!(
             line,
             "serde = { version = \"1.0.228\", features = [\"derive\"] }"
@@ -624,7 +643,10 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                 | "toml = \"0.9.8\""
         );
         assert!(
-            local || approved_inkwell || approved_artifact_dependency,
+            local
+                || approved_inkwell
+                || approved_terminal_dependency
+                || approved_artifact_dependency,
             "unapproved workspace dependency: {line}"
         );
     }
@@ -666,6 +688,8 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                             | "serde_json.workspace = true"
                             | "sha2.workspace = true"
                     );
+                let driver_terminal_dependency =
+                    *member == "crates/compiler/driver" && line == "ratatui.workspace = true";
                 let localization_dependency = *member == "crates/tools/localization"
                     && matches!(line, "serde.workspace = true" | "toml.workspace = true");
                 let language_server_transport_dependency = *member
@@ -680,6 +704,7 @@ fn dependencies_are_centralized_and_external_dependencies_are_approved() {
                         || serde_projection
                         || project_artifact_dependency
                         || driver_artifact_dependency
+                        || driver_terminal_dependency
                         || localization_dependency
                         || language_server_transport_dependency,
                     "{} {table} entry is not inherited from the workspace: {line}",
@@ -702,6 +727,76 @@ fn inkwell_is_confined_to_the_llvm_backend() {
             *member == "crates/compiler/backends/llvm",
             "Inkwell must remain private to pop-backend-llvm"
         );
+    }
+}
+
+#[test]
+fn ratatui_is_confined_to_driver_presentation() {
+    let root = repository_root();
+    let root_manifest = read_required(root.join("Cargo.toml"));
+    assert!(root_manifest.contains(
+        "ratatui = { version = \"=0.30.2\", default-features = false, features = [\"crossterm_0_29\"] }"
+    ));
+    let lock = read_required(root.join("Cargo.lock"));
+    assert_eq!(
+        lock.matches("name = \"ratatui\"").count(),
+        1,
+        "the lock must contain exactly one Ratatui package"
+    );
+    assert!(lock.contains("name = \"ratatui\"\nversion = \"0.30.2\""));
+    assert_eq!(
+        lock.matches("name = \"crossterm\"").count(),
+        1,
+        "the lock must contain one terminal event/raw-mode implementation"
+    );
+    assert!(lock.contains("name = \"crossterm\"\nversion = \"0.29.0\""));
+    for forbidden in ["termion", "termwiz", "termina", "ratatui-image", "arboard"] {
+        assert!(
+            !lock.contains(&format!("name = \"{forbidden}\"")),
+            "unapproved terminal capability `{forbidden}` entered Cargo.lock"
+        );
+    }
+
+    for member in MEMBERS {
+        let manifest_path = root.join(member).join("Cargo.toml");
+        let manifest = read_required(&manifest_path);
+        assert_eq!(
+            manifest.contains("ratatui.workspace = true"),
+            *member == "crates/compiler/driver",
+            "Ratatui must remain private to pop-driver presentation"
+        );
+    }
+
+    for directory in [
+        "crates/compiler/backend-api",
+        "crates/compiler/backends",
+        "crates/compiler/compile-time",
+        "crates/compiler/diagnostics",
+        "crates/compiler/foundation",
+        "crates/compiler/hir",
+        "crates/compiler/mir",
+        "crates/compiler/projects",
+        "crates/compiler/query",
+        "crates/compiler/resolve",
+        "crates/compiler/source",
+        "crates/compiler/syntax",
+        "crates/compiler/target",
+        "crates/compiler/types",
+        "crates/extensions",
+        "crates/libraries",
+        "crates/runtime",
+        "crates/tools",
+    ] {
+        for source in rust_sources_below(&root.join(directory)) {
+            let text = read_required(&source);
+            let ratatui_path = ["rata", "tui::"].concat();
+            let crossterm_path = ["cross", "term::"].concat();
+            assert!(
+                !text.contains(&ratatui_path) && !text.contains(&crossterm_path),
+                "terminal implementation type escaped into {}",
+                source.display()
+            );
+        }
     }
 }
 
@@ -1569,7 +1664,8 @@ fn toolchain_localization_stays_at_presentation_boundaries() {
         "the CLI must write stderr only through localized presentation adapters"
     );
     assert!(driver.contains("select_process_language"));
-    assert!(driver.contains("rendering().diagnostic(diagnostic)"));
+    assert!(driver.contains("rendering().diagnostic_with_sources_and_width("));
+    assert!(driver.contains("presentation::display_width"));
 
     for directory in [
         "crates/compiler/backend-api",

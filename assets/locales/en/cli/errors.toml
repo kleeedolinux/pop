@@ -118,6 +118,11 @@ text = "could not write diagnostics: {detail}"
 arguments = ["detail"]
 kinds = ["External"]
 
+[messages."cli.diagnosticLimitReached"]
+text = "stopped after {maximum} errors; {omitted} additional errors were omitted"
+arguments = ["maximum", "omitted"]
+kinds = ["Unsigned", "Unsigned"]
+
 [messages."cli.renderDiagnosticsFailed"]
 text = "could not render diagnostics: {detail}"
 arguments = ["detail"]

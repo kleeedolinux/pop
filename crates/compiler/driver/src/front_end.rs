@@ -2054,7 +2054,11 @@ fn define_class(
                     body,
                 }),
                 Err(error) => {
-                    diagnostics.push(syntax_error(error.span(), error.expectation()));
+                    diagnostics.push(syntax_error_from_source(
+                        &module.source,
+                        error.span(),
+                        error.expectation(),
+                    ));
                     None
                 }
             }
@@ -2210,11 +2214,15 @@ fn resolve_function(
         attribute_uses,
     } = pending;
     let syntax_signature = parse_function_signature(&module.source, &module.syntax, node)
-        .map_err(|error| syntax_error(error.span(), error.expectation()))
+        .map_err(|error| {
+            syntax_error_from_source(&module.source, error.span(), error.expectation())
+        })
         .map_err(|diagnostic| diagnostics.push(diagnostic))
         .ok()?;
     let body = parse_function_body(&module.source, &module.syntax, node, &syntax_signature)
-        .map_err(|error| syntax_error(error.span(), error.expectation()))
+        .map_err(|error| {
+            syntax_error_from_source(&module.source, error.span(), error.expectation())
+        })
         .map_err(|diagnostic| diagnostics.push(diagnostic))
         .ok()?;
     let span = SourceSpan::new(module.source.id(), syntax_signature.range());
@@ -2446,6 +2454,25 @@ fn resolve_symbol(
 
 fn syntax_error(span: SourceSpan, expectation: &'static str) -> Diagnostic {
     syntax_diagnostics::unexpected_token(span, expectation, "malformed declaration")
+}
+
+fn syntax_error_from_source(
+    source: &SourceFile,
+    span: SourceSpan,
+    expectation: &'static str,
+) -> Diagnostic {
+    let range = span.range();
+    let found = source
+        .text()
+        .get(range.start().to_usize()..range.end().to_usize())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("end of input");
+    if expectation == "`return`" {
+        syntax_diagnostics::misspelled_return(span, found)
+    } else {
+        syntax_diagnostics::unexpected_token(span, expectation, found)
+    }
 }
 
 fn sort_diagnostics(diagnostics: &mut Vec<Diagnostic>) {

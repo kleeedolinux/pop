@@ -21,3 +21,48 @@ text = "ayuda"
 
 [messages."ui.suggestion"]
 text = "sugerencia"
+
+[messages."ui.phase.loading"]
+text = "Cargando"
+
+[messages."ui.phase.checking"]
+text = "Comprobando"
+
+[messages."ui.phase.building"]
+text = "Compilando"
+
+[messages."ui.phase.documenting"]
+text = "Generando documentación"
+
+[messages."ui.phase.transpiling"]
+text = "Transpilando"
+
+[messages."ui.phase.running"]
+text = "Ejecutando"
+
+[messages."ui.phase.creating"]
+text = "Creando"
+
+[messages."ui.phase.generating"]
+text = "Generando"
+
+[messages."ui.phase.fixing"]
+text = "Corrigiendo"
+
+[messages."ui.fixSummary"]
+text = "Se aplicaron {applied} correcciones seguras en {changed} archivos; se omitieron {review} para revisión, {unsafe} inseguras y {unproven} sin prueba"
+
+[messages."ui.command.interactiveFallback"]
+text = "La presentación interactiva no está disponible; se continúa con información en texto"
+
+[messages."ui.command.started"]
+text = "  {phase}  {command}"
+
+[messages."ui.command.progress"]
+text = "  Progreso  {phase} [{completed}/{total}]"
+
+[messages."ui.command.finished"]
+text = "  Finalizado  `{command}`"
+
+[messages."ui.command.failed"]
+text = "  Falló  `{command}`"

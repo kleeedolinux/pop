@@ -1291,6 +1291,27 @@ fn local_and_anonymous_closures_capture_lexical_values_with_static_function_type
 }
 
 #[test]
+fn repeated_ignored_closure_parameters_do_not_create_duplicate_bindings() {
+    let fixture = check_function(
+        "namespace Example\n\
+         public function calculate(): Int\n\
+             local discard = function(_: Int, _: String): Int\n\
+                 return 42\n\
+             end\n\
+             return discard(1, \"ignored\")\n\
+         end\n",
+        "calculate",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    assert!(fixture.result.body().is_some());
+}
+
+#[test]
 fn captured_mutation_uses_one_typed_cell_and_shadowing_does_not_capture() {
     let fixture = check_function(
         "namespace Example\n\

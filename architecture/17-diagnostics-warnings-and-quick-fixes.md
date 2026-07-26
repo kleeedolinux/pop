@@ -179,6 +179,11 @@ must not create dozens of fictional errors.
   prioritize the active file without changing semantic results.
 - Successful declarations continue to produce navigation/completion data.
 
+ADR 0105 fixes the 2026 bootstrap command-line default at 100 effective errors
+with an accepted range of 1 through 10,000. Promoted warnings count toward that
+presentation bound without changing intrinsic severity. A bounded structured
+summary reports the exact omitted count instead of silently truncating output.
+
 ## Type diagnostic explanations
 
 Constraint failures retain a reason graph. Rendering selects a small causal path:
@@ -265,6 +270,12 @@ diagnostics:
 - Security/correctness warnings may become default errors only in a language
   edition with migration notes and fixes.
 - Standard-library builds use `Latest` and treat all enabled warnings as errors.
+
+ADR 0105 fixes the 2026 bootstrap default at wave 1 and adds global
+`--warningWave`, `--warningsAsErrors`, and `--disabledWarnings` controls.
+Selectors accept one exact `POP####` code, one stable warning group, or `*`.
+They may repeat; errors and compiler incidents ignore disabled-warning
+selectors.
 
 ### Scoped suppression
 
@@ -383,6 +394,13 @@ The engine:
 
 `RequiresReview` fixes show a preview and are excluded from unattended fix-all.
 `Unsafe` fixes never support fix-all.
+
+The first ADR 0105 `pop fix <source.pop>` slice is deliberately source-only. It
+uses the shared snapshot/conflict/postcondition transaction, then publishes one
+verified candidate with same-directory atomic rename. It excludes review,
+unsafe, and safe fixes without an explicit composing equivalence identity.
+Multi-file formatting and interactive review remain follow-up work rather than
+weaker implicit behavior.
 
 ## Compiler and analyzer providers
 

@@ -21,3 +21,48 @@ text = "帮助"
 
 [messages."ui.suggestion"]
 text = "建议"
+
+[messages."ui.phase.loading"]
+text = "正在加载"
+
+[messages."ui.phase.checking"]
+text = "正在检查"
+
+[messages."ui.phase.building"]
+text = "正在构建"
+
+[messages."ui.phase.documenting"]
+text = "正在生成文档"
+
+[messages."ui.phase.transpiling"]
+text = "正在转译"
+
+[messages."ui.phase.running"]
+text = "正在运行"
+
+[messages."ui.phase.creating"]
+text = "正在创建"
+
+[messages."ui.phase.generating"]
+text = "正在生成"
+
+[messages."ui.phase.fixing"]
+text = "正在修复"
+
+[messages."ui.fixSummary"]
+text = "在 {changed} 个文件中应用了 {applied} 个安全修复；跳过了 {review} 个需审查、{unsafe} 个不安全和 {unproven} 个未经证明的修复"
+
+[messages."ui.command.interactiveFallback"]
+text = "交互式界面不可用；继续使用纯文本反馈"
+
+[messages."ui.command.started"]
+text = "  {phase}  {command}"
+
+[messages."ui.command.progress"]
+text = "  进度  {phase} [{completed}/{total}]"
+
+[messages."ui.command.finished"]
+text = "  已完成  `{command}`"
+
+[messages."ui.command.failed"]
+text = "  失败  `{command}`"

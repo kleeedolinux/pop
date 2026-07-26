@@ -23,6 +23,19 @@ pub fn unexpected_token(
 }
 
 #[must_use]
+pub fn misspelled_return(span: SourceSpan, found: impl Into<String>) -> Diagnostic {
+    let edit = TextEdit::new(span.file(), span.range(), "return");
+    let fix = QuickFix::new(
+        "replaceMisspelledReturn",
+        MessageKey::new("fix.replaceMisspelledReturn"),
+        FixApplicability::Safe,
+        WorkspaceEdit::new(0, vec![edit]),
+    )
+    .with_fix_all_equivalence("replaceMisspelledReturn");
+    unexpected_token(span, "`return`", found).with_fix(fix)
+}
+
+#[must_use]
 pub fn missing_namespace(span: SourceSpan) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::new("POP0003"),
@@ -42,7 +55,8 @@ pub fn unsupported_export(span: SourceSpan) -> Diagnostic {
         MessageKey::new("fix.replaceExportWithPublic"),
         FixApplicability::Safe,
         WorkspaceEdit::new(0, vec![edit]),
-    );
+    )
+    .with_fix_all_equivalence("replaceExportWithPublic");
     Diagnostic::new(
         DiagnosticCode::new("POP0004"),
         DiagnosticSeverity::Error,

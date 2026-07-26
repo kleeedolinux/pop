@@ -507,6 +507,7 @@ pub struct QuickFix {
     id: &'static str,
     title_key: MessageKey,
     applicability: FixApplicability,
+    fix_all_equivalence: Option<&'static str>,
     edit: WorkspaceEdit,
 }
 
@@ -522,8 +523,25 @@ impl QuickFix {
             id,
             title_key,
             applicability,
+            fix_all_equivalence: None,
             edit,
         }
+    }
+
+    /// Marks this fix as proven to compose with fixes carrying the same stable
+    /// equivalence identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the equivalence identity is empty.
+    #[must_use]
+    pub const fn with_fix_all_equivalence(mut self, equivalence: &'static str) -> Self {
+        assert!(
+            !equivalence.is_empty(),
+            "fix-all equivalence must not be empty"
+        );
+        self.fix_all_equivalence = Some(equivalence);
+        self
     }
 
     #[must_use]
@@ -544,6 +562,11 @@ impl QuickFix {
     #[must_use]
     pub const fn applicability(&self) -> FixApplicability {
         self.applicability
+    }
+
+    #[must_use]
+    pub const fn fix_all_equivalence(&self) -> Option<&'static str> {
+        self.fix_all_equivalence
     }
 
     #[must_use]

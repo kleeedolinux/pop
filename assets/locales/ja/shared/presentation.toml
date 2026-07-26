@@ -21,3 +21,48 @@ text = "ヘルプ"
 
 [messages."ui.suggestion"]
 text = "提案"
+
+[messages."ui.phase.loading"]
+text = "読み込み中"
+
+[messages."ui.phase.checking"]
+text = "検査中"
+
+[messages."ui.phase.building"]
+text = "ビルド中"
+
+[messages."ui.phase.documenting"]
+text = "ドキュメント生成中"
+
+[messages."ui.phase.transpiling"]
+text = "トランスパイル中"
+
+[messages."ui.phase.running"]
+text = "実行中"
+
+[messages."ui.phase.creating"]
+text = "作成中"
+
+[messages."ui.phase.generating"]
+text = "生成中"
+
+[messages."ui.phase.fixing"]
+text = "修正中"
+
+[messages."ui.fixSummary"]
+text = "{changed} ファイルに {applied} 件の安全な修正を適用しました。レビュー {review} 件、危険 {unsafe} 件、未証明 {unproven} 件を除外しました"
+
+[messages."ui.command.interactiveFallback"]
+text = "対話表示を利用できないため、プレーン表示で続行します"
+
+[messages."ui.command.started"]
+text = "  {phase}  {command}"
+
+[messages."ui.command.progress"]
+text = "  進捗  {phase} [{completed}/{total}]"
+
+[messages."ui.command.finished"]
+text = "  完了  `{command}`"
+
+[messages."ui.command.failed"]
+text = "  失敗  `{command}`"

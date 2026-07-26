@@ -126,6 +126,9 @@ transplanted into a Luau-shaped file.
 - Records/functions/composition are preferred over class hierarchies and fluent
   object APIs.
 - Diagnostics have stable `POP####` identities and structured safe quick fixes.
+- Ratatui terminal presentation is explicitly requested, confined to the driver,
+  and consumes the same structured command, diagnostic, build-event, and edit
+  facts as deterministic plain and machine renderers.
 - Human toolchain presentation uses complete embedded TOML catalogs for `en`,
   `zh-Hans`, `ja`, `pt-BR`, and `es`; one immutable locale context renders the
   same structured diagnostic and event facts for CLI and LSP consumers.
@@ -143,6 +146,11 @@ transplanted into a Luau-shaped file.
   participate.
 - Every normal Bubble receives the verified reserved `Pop.Standard` reference;
   package linking consumes the target implementation reloaded from `.poplib`.
+- Private editor queries use that same verified Standard contract. They may
+  attach generated callback metadata only for a uniquely manifest-owned source
+  with an exact local direct `Pop.Ffi` dependency and successful bounded
+  `.popc` preflight; see
+  [ADR 0106](./decisions/0106-bounded-foundation-and-generated-ffi-editor-analysis.md).
 - Lua-shaped `---` XML documentation comments are parsed, signature-checked,
   emitted with library metadata, and available to editors/doc tools.
 - Non-empty XML documentation elements always use separate opening, body, and
@@ -206,6 +214,9 @@ transplanted into a Luau-shaped file.
   native-iteration construction. Homogeneous and strided `ObjectMap` formulas
   retain constant-size metadata for arrays, tables, and closed runtime layout
   families without creating a dynamic layout escape.
+- ADR 0105 fixes the 2026 bootstrap warning-wave controls, effective-error
+  bound, cross-presentation policy/fix facts, and source-only atomic safe
+  fix-all transaction.
 - Deterministic FFI generation selects one exact target-owned manifest plan,
   verifies one hashed canonical declarative `.popc` ABI-and-policy descriptor,
   and publishes only validated reviewable source, closed shim output, and

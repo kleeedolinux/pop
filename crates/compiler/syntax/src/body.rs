@@ -674,13 +674,17 @@ impl BodyParser<'_> {
             .current_kind()
             .is_some_and(|kind| !terminators.contains(&kind))
         {
-            statements.push(self.parse_statement()?);
+            let statement = self.parse_statement()?;
             if self
                 .current_kind()
                 .is_some_and(|kind| kind != TokenKind::Newline && !terminators.contains(&kind))
             {
+                if is_likely_misspelled_return(&statement) {
+                    return Err(FunctionBodyError::new(statement.span(), "`return`"));
+                }
                 return Err(self.error("end of statement"));
             }
+            statements.push(statement);
             self.skip_newlines();
         }
         Ok(statements)
@@ -1096,6 +1100,69 @@ impl BodyParser<'_> {
             expectation,
         }
     }
+}
+
+fn is_likely_misspelled_return(statement: &StatementSyntax) -> bool {
+    matches!(
+        statement.kind(),
+        StatementSyntaxKind::Expression(expression)
+            if matches!(
+                expression.kind(),
+                ExpressionSyntaxKind::Name(path)
+                    if path.len() == 1 && is_one_typing_edit(&path[0], "return")
+            )
+    )
+}
+
+fn is_one_typing_edit(candidate: &str, expected: &str) -> bool {
+    if !candidate.is_ascii() || candidate == expected {
+        return false;
+    }
+    let candidate = candidate.as_bytes();
+    let expected = expected.as_bytes();
+    match candidate.len().cmp(&expected.len()) {
+        std::cmp::Ordering::Equal => {
+            let differences = candidate
+                .iter()
+                .zip(expected)
+                .enumerate()
+                .filter_map(|(index, (left, right))| (left != right).then_some(index))
+                .collect::<Vec<_>>();
+            differences.len() == 1
+                || matches!(
+                    differences.as_slice(),
+                    [left, right]
+                        if *right == *left + 1
+                            && candidate[*left] == expected[*right]
+                            && candidate[*right] == expected[*left]
+                )
+        }
+        std::cmp::Ordering::Less if candidate.len() + 1 == expected.len() => {
+            is_one_insertion_away(candidate, expected)
+        }
+        std::cmp::Ordering::Greater if candidate.len() == expected.len() + 1 => {
+            is_one_insertion_away(expected, candidate)
+        }
+        _ => false,
+    }
+}
+
+fn is_one_insertion_away(shorter: &[u8], longer: &[u8]) -> bool {
+    let mut short = 0;
+    let mut long = 0;
+    let mut skipped = false;
+    while short < shorter.len() && long < longer.len() {
+        if shorter[short] == longer[long] {
+            short += 1;
+            long += 1;
+        } else if skipped {
+            return false;
+        } else {
+            skipped = true;
+            long += 1;
+        }
+    }
+    true
 }
 
 pub(crate) fn ordered_range(start: TextSize, end: TextSize) -> TextRange {

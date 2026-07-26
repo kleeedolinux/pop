@@ -1,0 +1,5 @@
+namespace Example
+
+export function answer(): Int
+    return 42
+end

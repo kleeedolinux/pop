@@ -581,12 +581,15 @@ pub fn missing_match_cases(
         vec![DiagnosticArgument::Identifier(cases.join(", "))],
         span,
     )
-    .with_fix(QuickFix::new(
-        "addMissingMatchCases",
-        MessageKey::new("fix.addMissingMatchCases"),
-        FixApplicability::Safe,
-        WorkspaceEdit::new(0, vec![edit]),
-    ))
+    .with_fix(
+        QuickFix::new(
+            "addMissingMatchCases",
+            MessageKey::new("fix.addMissingMatchCases"),
+            FixApplicability::Safe,
+            WorkspaceEdit::new(0, vec![edit]),
+        )
+        .with_fix_all_equivalence("addMissingMatchCases"),
+    )
 }
 
 #[must_use]

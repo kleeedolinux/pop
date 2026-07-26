@@ -4,6 +4,9 @@ text = "adicionar os casos de match ausentes"
 [messages."fix.replaceExportWithPublic"]
 text = "substituir `export` por `public`"
 
+[messages."fix.replaceMisspelledReturn"]
+text = "substituir por `return`"
+
 [messages."fix.addNamespace"]
 text = "adicionar a declaração de namespace obrigatória"
 

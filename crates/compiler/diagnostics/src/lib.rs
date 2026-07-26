@@ -5,6 +5,16 @@ use std::fmt;
 
 use pop_foundation::{DiagnosticCategory, DiagnosticCode, DiagnosticSeverity};
 
+mod fix_all;
+mod policy;
+
+pub use fix_all::{
+    DocumentSnapshot, FixAllError, FixAllSummary, WorkspaceSnapshot, apply_safe_fix_all,
+};
+pub use policy::{
+    DiagnosticDisposition, DiagnosticPolicy, DiagnosticReport, DiagnosticSelector, WarningGroup,
+};
+
 pub mod compile_time;
 pub mod documentation;
 pub mod ffi;
@@ -51,6 +61,17 @@ impl CatalogEntry {
     #[must_use]
     pub const fn warning_wave(self) -> Option<u32> {
         self.warning_wave
+    }
+
+    #[must_use]
+    pub fn warning_group(self) -> Option<WarningGroup> {
+        if self.severity != DiagnosticSeverity::Warning {
+            return None;
+        }
+        match self.owner {
+            "documentation" => Some(WarningGroup::Documentation),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -130,6 +151,18 @@ pub fn catalog() -> Result<Vec<CatalogEntry>, CatalogError> {
         .filter(|(_, line)| !line.trim().is_empty())
         .map(|(index, line)| parse_entry(index + 1, line))
         .collect()
+}
+
+/// Returns the highest warning wave in the repository-validated catalog.
+#[must_use]
+pub fn latest_warning_wave() -> u32 {
+    catalog()
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(CatalogEntry::warning_wave)
+        .max()
+        .unwrap_or(0)
 }
 
 fn parse_entry(line_number: usize, line: &'static str) -> Result<CatalogEntry, CatalogError> {

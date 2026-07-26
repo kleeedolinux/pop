@@ -35,6 +35,7 @@ pop-resolve.workspace = true
 pop-source.workspace = true
 pop-syntax.workspace = true
 pop-types.workspace = true
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

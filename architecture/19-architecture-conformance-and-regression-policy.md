@@ -74,6 +74,9 @@ Examples:
 - runtime metadata exposes fields without an accepted retention adapter;
 - `Pop.Standard` depends on private compiler packages;
 - an unsafe quick fix is silently included in fix-all;
+- a review or safe-but-unproven fix enters unattended fix-all;
+- warning policy mutates intrinsic severity or suppresses an error;
+- bounded diagnostic output omits errors without an exact structured count;
 - a class/module is secretly implemented through observable table/metatable
   behavior.
 
@@ -234,7 +237,8 @@ Minimum traceability matrix:
 | Native classes | type checker, HIR/MIR, runtime | resolved field/method IDs; no table lookup |
 | Bubbles/Packages/Workspaces | project resolver, manifest, driver, loader | identity/init/lock/target-selection tests |
 | Lock and `.poplib` encoding | project resolver, artifact emitter/loader, reference metadata, linker | canonical-byte, SHA-256, malformed-input, source-free round-trip tests |
-| Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests |
+| Unified `pop` tooling | CLI, language server, formatter, docs, package manager | command/JSON/selection/reproducibility tests; verified implicit Standard and exact generated-FFI preflight editor tests |
+| Ratatui terminal presentation | driver presentation/orchestration | explicit activation, plain/JSON equivalence, color-policy, accessibility, terminal restoration, and dependency-confinement tests |
 | Default internal visibility | parser, resolver, HIR, metadata | default/access/public-surface tests |
 | Complete public names | formatter, analyzers, libraries | naming baseline and truncation diagnostics |
 | Backend-neutral MIR | MIR, interpreter, LLVM, VM | verifier plus cross-backend conformance |

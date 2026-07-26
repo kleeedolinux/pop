@@ -238,6 +238,10 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   bounded stress, and stale-token rejection;
 - ADR 0104 defines additive ABI 1.22 cyclic-site and native-iteration
   constructors plus closed constant-size layout families;
+- ADR 0106 supplies verified `Pop.Standard` to private editor analysis and
+  permits exact local `Pop.Ffi` generated Modules to consume uniquely
+  target-owned verified callback metadata without claiming complete Workspace
+  dependency analysis;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.
@@ -269,6 +273,9 @@ Every milestone includes:
 - performance baselines, not only peak benchmarks;
 - documentation updates for architectural changes;
 - CLI/manifest/lockfile and monorepo conformance tests;
+- deterministic structured command feedback, plain/JSON equivalence, explicit
+  Ratatui interaction, color-policy, accessibility, cancellation, and terminal
+  restoration tests under ADR 0027;
 - traceability from semantic features to accepted ADR/architecture sections;
 - permanent negative tests for Lua regressions and architecture boundary leaks;
 - architecture-gap review before any new public behavior is declared stable;

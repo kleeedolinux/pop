@@ -1,0 +1,9 @@
+namespace NativeClass
+
+public class Box
+    public value: Int
+
+    public function Box.new(value: Int): Box
+        retun Box { value = value }
+    end
+end

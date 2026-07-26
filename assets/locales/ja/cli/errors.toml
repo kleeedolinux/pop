@@ -70,6 +70,9 @@ text = "ヘルプを書き込めませんでした: {detail}"
 [messages."cli.writeDiagnosticsFailed"]
 text = "診断を書き込めませんでした: {detail}"
 
+[messages."cli.diagnosticLimitReached"]
+text = "{maximum} 件のエラーで停止しました。追加の {omitted} 件のエラーは省略されました"
+
 [messages."cli.renderDiagnosticsFailed"]
 text = "診断を表示できませんでした: {detail}"
 

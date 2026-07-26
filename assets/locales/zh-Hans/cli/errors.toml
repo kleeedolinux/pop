@@ -70,6 +70,9 @@ text = "无法写入帮助：{detail}"
 [messages."cli.writeDiagnosticsFailed"]
 text = "无法写入诊断：{detail}"
 
+[messages."cli.diagnosticLimitReached"]
+text = "在 {maximum} 个错误后停止；另有 {omitted} 个错误被省略"
+
 [messages."cli.renderDiagnosticsFailed"]
 text = "无法呈现诊断：{detail}"
 

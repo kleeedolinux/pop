@@ -4,6 +4,9 @@ text = "添加缺少的 match case"
 [messages."fix.replaceExportWithPublic"]
 text = "将 `export` 替换为 `public`"
 
+[messages."fix.replaceMisspelledReturn"]
+text = "替换为 `return`"
+
 [messages."fix.addNamespace"]
 text = "添加必需的 namespace 声明"
 

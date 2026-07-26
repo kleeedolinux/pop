@@ -449,11 +449,50 @@ Shared selectors and controls include:
 --offline
 --frozen
 --messageFormat human|json
+--interactive
+--color auto|always|never
+--warningWave <number|Latest>
+--warningsAsErrors <*|WarningGroup|POP####>
+--disabledWarnings <*|WarningGroup|POP####>
+--maximumErrors <1..10000>
 ```
 
 Long option spelling follows manifest/source nomenclature and avoids arbitrary
 abbreviations. Short flags are limited to established interactive conveniences
 and never become the only documented interface.
+
+### Terminal presentation and progress
+
+ADR 0027 authorizes Ratatui only at the `pop` presentation/orchestration
+boundary. Ordinary commands retain the deterministic plain renderer and never
+enter raw mode or an alternate screen implicitly. `--interactive` explicitly
+requests a richer terminal workflow for commands whose accepted contract
+supports selection, progress, preview, or confirmation. Standard input and
+standard error must both be terminals; otherwise read-only work continues with
+plain feedback, while an operation requiring a choice refuses the mutation.
+Standard output remains reserved for program, dump, artifact, and machine data.
+
+All command feedback originates as structured command/build events rather than
+strings scraped from compiler output. Human presentation may show a textual
+phase label, elapsed work, spinner, determinate progress bar, completion
+summary, warnings, and next action. Every meaning remains present without color,
+animation, borders, Unicode, or cursor position. Parallel work publishes events
+in deterministic Package/Bubble/Module order for the plain renderer and machine
+protocols.
+
+`--color auto|always|never` controls human presentation. The explicit option
+wins over `NO_COLOR`; a present non-empty `NO_COLOR` selects `never` when no
+option is given; `auto` colors only a capable terminal presentation stream.
+Color never changes wording or exit status. `--messageFormat json` disables
+Ratatui, prompts, terminal control, and ANSI styling and emits the versioned
+newline-delimited event schema.
+
+One terminal-session guard owns setup and idempotent restoration. Normal
+completion, command failure, input/output failure, cancellation, and panic
+restore raw mode, cursor visibility, mouse capture, and the previous screen
+before final plain diagnostics. A layout too small to preserve every label and
+choice falls back to plain presentation. Ratatui's in-memory backend verifies
+rendering and interaction without requiring a real terminal.
 
 The first deterministic binding-generator form is:
 

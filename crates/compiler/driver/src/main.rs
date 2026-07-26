@@ -7,10 +7,13 @@
     clippy::too_many_lines
 )]
 
+mod presentation;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::{Arc, OnceLock};
@@ -21,6 +24,10 @@ use pop_backend_llvm::{
     BpfLoweringOptions, BpfProgramKind, LlvmLoweringOptions, lower_mir_to_bpf_module,
     lower_mir_to_llvm_ir,
 };
+use pop_diagnostics::{
+    DiagnosticPolicy, DiagnosticReport, DiagnosticSelector, DocumentSnapshot, FixAllSummary,
+    WorkspaceSnapshot, apply_safe_fix_all, catalog as diagnostic_catalog, latest_warning_wave,
+};
 use pop_documentation_generator::{DocumentationMember, render_xml};
 use pop_driver::{
     CheckedDocumentation, FrontEndBubbleInput, FrontEndModule, NativeLinkInput,
@@ -29,9 +36,13 @@ use pop_driver::{
     encode_reference_metadata, generate_ffi_bindings, load_poplib, resolve_native_link_inputs,
     validate_foreign_link_aliases, verify_ffi_generated_bindings,
 };
-use pop_foundation::{BubbleId, Diagnostic, FileId, ModuleId, NamespaceId, SymbolId};
+use pop_foundation::{
+    BubbleId, Diagnostic, DiagnosticArgument, DiagnosticCategory, DiagnosticOriginKind,
+    DiagnosticSeverity, FileId, FixApplicability, ModuleId, NamespaceId, SourceSpan, SymbolId,
+};
 use pop_localization::{
-    Argument as LocalizedArgument, Language, RenderContext, select_process_language,
+    Argument as LocalizedArgument, DiagnosticSource, Language, RenderContext,
+    select_process_language,
 };
 use pop_mir::{lower_hir_bubble_with_fingerprint, optimize_mir};
 use pop_projects::{
@@ -44,6 +55,10 @@ use pop_resolve::Visibility;
 use pop_source::SourceFile;
 use pop_target::TargetSpec;
 use pop_types::SemanticType;
+use presentation::{
+    ColorChoice, CommandFeedback, MessageFormat, Request as PresentationRequest, Tone,
+};
+use serde_json::{Value, json};
 
 const INTERNAL_BUBBLE: BubbleId = BubbleId::from_raw(1);
 const STANDARD_BUBBLE: BubbleId = BubbleId::from_raw(2);
@@ -53,6 +68,22 @@ const STANDARD_PACKAGE_NAME: &str = "Pop.Standard";
 const FFI_PACKAGE_NAME: &str = "Pop.Ffi";
 
 static CLI_RENDERING: OnceLock<RenderContext> = OnceLock::new();
+static CLI_DIAGNOSTICS: OnceLock<DiagnosticOptions> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiagnosticOptions {
+    policy: DiagnosticPolicy,
+    maximum_errors: NonZeroUsize,
+}
+
+impl Default for DiagnosticOptions {
+    fn default() -> Self {
+        Self {
+            policy: DiagnosticPolicy::new(1),
+            maximum_errors: NonZeroUsize::new(100).expect("default error limit is non-zero"),
+        }
+    }
+}
 
 macro_rules! tool_failure {
     ($($argument:tt)*) => {{
@@ -79,6 +110,9 @@ enum CommandLine {
     Check {
         source_path: PathBuf,
         dumps: Vec<DumpKind>,
+    },
+    Fix {
+        source_path: PathBuf,
     },
     PackageCheck {
         manifest_path: PathBuf,
@@ -120,6 +154,29 @@ enum CommandLine {
         manifest_path: PathBuf,
         platform_target: String,
     },
+}
+
+impl CommandLine {
+    const fn feedback_identity(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Help => ("help", "ui.phase.loading", "loading"),
+            Self::Scaffold(options) => match options.mode {
+                ScaffoldMode::New => ("new", "ui.phase.creating", "creating"),
+                ScaffoldMode::Initialize => ("initialize", "ui.phase.creating", "creating"),
+            },
+            Self::Check { .. } | Self::PackageCheck { .. } => {
+                ("check", "ui.phase.checking", "checking")
+            }
+            Self::Fix { .. } => ("fix", "ui.phase.fixing", "fixing"),
+            Self::Build { .. } | Self::BuildBpf { .. } | Self::PackageBuild { .. } => {
+                ("build", "ui.phase.building", "building")
+            }
+            Self::Documentation { .. } => ("documentation", "ui.phase.documenting", "documenting"),
+            Self::TranspileToC { .. } => ("transpile", "ui.phase.transpiling", "transpiling"),
+            Self::Run { .. } | Self::PackageRun { .. } => ("run", "ui.phase.running", "running"),
+            Self::FfiGenerate { .. } => ("ffi generate", "ui.phase.generating", "generating"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,65 +244,115 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    let (presentation_request, diagnostic_options, arguments) =
+        match extract_presentation_options(arguments) {
+            Ok(selection) => selection,
+            Err(error) => {
+                presentation::initialize(PresentationRequest::default());
+                let message = format!("pop: {}\n\n{}", error.render(), localized("cli.usage", &[]));
+                let _ = presentation::write_stderr_line(&message, Tone::Error);
+                return ExitCode::from(2);
+            }
+        };
+    presentation::initialize(presentation_request);
+    let _ = CLI_DIAGNOSTICS.set(diagnostic_options);
     match parse_arguments(arguments) {
         Ok(CommandLine::Help) => write_help(),
-        Ok(CommandLine::Scaffold(options)) => scaffold_package(&options),
-        Ok(CommandLine::Check { source_path, dumps }) => check_source(&source_path, &dumps),
-        Ok(CommandLine::PackageCheck {
+        Ok(command) => execute_with_feedback(command),
+        Err(error) => {
+            let message = format!("pop: {}\n\n{}", error.render(), localized("cli.usage", &[]));
+            let _ = presentation::write_stderr_line(&message, Tone::Error);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn execute_command(command: CommandLine) -> ExitCode {
+    match command {
+        CommandLine::Help => write_help(),
+        CommandLine::Scaffold(options) => scaffold_package(&options),
+        CommandLine::Check { source_path, dumps } => check_source(&source_path, &dumps),
+        CommandLine::Fix { source_path } => fix_source(&source_path),
+        CommandLine::PackageCheck {
             manifest_path,
             lock_mode,
-        }) => check_manifest(&manifest_path, lock_mode),
-        Ok(CommandLine::Build {
+        } => check_manifest(&manifest_path, lock_mode),
+        CommandLine::Build {
             source_path,
             output_path,
-        }) => build_source(&source_path, &output_path),
-        Ok(CommandLine::BuildBpf {
+        } => build_source(&source_path, &output_path),
+        CommandLine::BuildBpf {
             source_path,
             target,
             runtime_profile,
             program,
             output_path,
-        }) => build_bpf_source(
+        } => build_bpf_source(
             &source_path,
             &target,
             runtime_profile,
             program,
             &output_path,
         ),
-        Ok(CommandLine::PackageBuild {
+        CommandLine::PackageBuild {
             manifest_path,
             lock_mode,
-        }) => build_manifest(&manifest_path, lock_mode)
+        } => build_manifest(&manifest_path, lock_mode)
             .map_or(ExitCode::FAILURE, |_| ExitCode::SUCCESS),
-        Ok(CommandLine::Documentation {
+        CommandLine::Documentation {
             manifest_path,
             lock_mode,
-        }) => document_manifest(&manifest_path, lock_mode),
-        Ok(CommandLine::TranspileToC { source_path }) => transpile_source_to_c(&source_path),
-        Ok(CommandLine::Run {
+        } => document_manifest(&manifest_path, lock_mode),
+        CommandLine::TranspileToC { source_path } => transpile_source_to_c(&source_path),
+        CommandLine::Run {
             source_path,
             arguments,
-        }) => run_source(&source_path, &arguments),
-        Ok(CommandLine::PackageRun {
+        } => run_source(&source_path, &arguments),
+        CommandLine::PackageRun {
             manifest_path,
             lock_mode,
             arguments,
-        }) => run_manifest(&manifest_path, lock_mode, &arguments),
-        Ok(CommandLine::FfiGenerate {
+        } => run_manifest(&manifest_path, lock_mode, &arguments),
+        CommandLine::FfiGenerate {
             alias,
             manifest_path,
             platform_target,
-        }) => ffi_generate(&alias, &manifest_path, &platform_target),
-        Err(error) => {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "pop: {}\n\n{}",
-                error.render(),
-                localized("cli.usage", &[])
-            );
-            ExitCode::from(2)
-        }
+        } => ffi_generate(&alias, &manifest_path, &platform_target),
     }
+}
+
+fn execute_with_feedback(command: CommandLine) -> ExitCode {
+    let (command_name, phase_key, phase_id) = command.feedback_identity();
+    let phase = localized(phase_key, &[]);
+    let fallback = localized("ui.command.interactiveFallback", &[]);
+    let started = localized(
+        "ui.command.started",
+        &[
+            LocalizedArgument::text("phase", &phase),
+            LocalizedArgument::text("command", command_name),
+        ],
+    );
+    let feedback = CommandFeedback::start(command_name, &phase, phase_id, &fallback, &started);
+    let result = execute_command(command);
+    let success = result == ExitCode::SUCCESS;
+    let progress = localized(
+        "ui.command.progress",
+        &[
+            LocalizedArgument::text("phase", &phase),
+            LocalizedArgument::unsigned("completed", 1),
+            LocalizedArgument::unsigned("total", 1),
+        ],
+    );
+    let finished = localized(
+        if success {
+            "ui.command.finished"
+        } else {
+            "ui.command.failed"
+        },
+        &[LocalizedArgument::text("command", command_name)],
+    );
+    feedback.finish(success, &progress, &finished);
+    result
 }
 
 fn initialize_rendering(explicit: Option<&str>) -> Result<(), pop_localization::LocalizationError> {
@@ -271,7 +378,10 @@ fn localized(key: &str, arguments: &[LocalizedArgument]) -> String {
 }
 
 fn emit_localized(key: &str, arguments: &[LocalizedArgument]) {
-    let _ = writeln!(io::stderr().lock(), "pop: {}", localized(key, arguments));
+    let _ = presentation::write_stderr_line(
+        &format!("pop: {}", localized(key, arguments)),
+        Tone::Error,
+    );
 }
 
 fn extract_language(
@@ -305,6 +415,161 @@ enum LanguageOptionError {
     Unsupported(String),
 }
 
+fn extract_presentation_options(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<(PresentationRequest, DiagnosticOptions, Vec<OsString>), UsageError> {
+    let mut output = Vec::new();
+    let mut request = PresentationRequest::default();
+    let mut diagnostic_options = DiagnosticOptions::default();
+    let mut interactive_seen = false;
+    let mut color_seen = false;
+    let mut message_format_seen = false;
+    let mut warning_wave_seen = false;
+    let mut maximum_errors_seen = false;
+    let mut warnings_as_errors = Vec::new();
+    let mut disabled_warnings = Vec::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            output.push(argument);
+            output.extend(arguments);
+            break;
+        }
+        match argument.to_str() {
+            Some("--interactive") if !interactive_seen => {
+                interactive_seen = true;
+                request.interactive = true;
+            }
+            Some("--color") if !color_seen => {
+                color_seen = true;
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| option_requires("--color", "auto|always|never"))?;
+                request.color = ColorChoice::parse(&value.to_string_lossy()).ok_or_else(|| {
+                    UsageError::new(
+                        "cli.unsupportedChoice",
+                        vec![
+                            LocalizedArgument::text("choice", "color policy"),
+                            LocalizedArgument::text("value", value.to_string_lossy()),
+                            LocalizedArgument::text("expected", "auto, always, or never"),
+                        ],
+                    )
+                })?;
+            }
+            Some("--messageFormat") if !message_format_seen => {
+                message_format_seen = true;
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| option_requires("--messageFormat", "human|json"))?;
+                request.message_format = MessageFormat::parse(&value.to_string_lossy())
+                    .ok_or_else(|| {
+                        UsageError::new(
+                            "cli.unsupportedChoice",
+                            vec![
+                                LocalizedArgument::text("choice", "message format"),
+                                LocalizedArgument::text("value", value.to_string_lossy()),
+                                LocalizedArgument::text("expected", "human or json"),
+                            ],
+                        )
+                    })?;
+            }
+            Some("--warningWave") if !warning_wave_seen => {
+                warning_wave_seen = true;
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| option_requires("--warningWave", "<number|Latest>"))?;
+                let value = value.to_string_lossy();
+                let wave = if value == "Latest" {
+                    latest_warning_wave()
+                } else {
+                    value.parse::<u32>().map_err(|_| {
+                        UsageError::new(
+                            "cli.unsupportedChoice",
+                            vec![
+                                LocalizedArgument::text("choice", "warning wave"),
+                                LocalizedArgument::text("value", &value),
+                                LocalizedArgument::text(
+                                    "expected",
+                                    "a non-negative number or Latest",
+                                ),
+                            ],
+                        )
+                    })?
+                };
+                diagnostic_options.policy = DiagnosticPolicy::new(wave);
+            }
+            Some("--warningsAsErrors") => {
+                warnings_as_errors.push(parse_diagnostic_selector(
+                    "--warningsAsErrors",
+                    arguments.next(),
+                )?);
+            }
+            Some("--disabledWarnings") => {
+                disabled_warnings.push(parse_diagnostic_selector(
+                    "--disabledWarnings",
+                    arguments.next(),
+                )?);
+            }
+            Some("--maximumErrors") if !maximum_errors_seen => {
+                maximum_errors_seen = true;
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| option_requires("--maximumErrors", "<1..10000>"))?;
+                let value = value.to_string_lossy();
+                let maximum = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|maximum| (1..=10_000).contains(maximum))
+                    .and_then(NonZeroUsize::new)
+                    .ok_or_else(|| {
+                        UsageError::new(
+                            "cli.unsupportedChoice",
+                            vec![
+                                LocalizedArgument::text("choice", "maximum errors"),
+                                LocalizedArgument::text("value", &value),
+                                LocalizedArgument::text("expected", "1 through 10000"),
+                            ],
+                        )
+                    })?;
+                diagnostic_options.maximum_errors = maximum;
+            }
+            Some(
+                "--interactive" | "--color" | "--messageFormat" | "--warningWave"
+                | "--maximumErrors",
+            ) => {
+                return Err(unsupported_option(&argument));
+            }
+            _ => output.push(argument),
+        }
+    }
+    diagnostic_options.policy = diagnostic_options
+        .policy
+        .with_warnings_as_errors(warnings_as_errors)
+        .with_disabled_warnings(disabled_warnings);
+    Ok((request, diagnostic_options, output))
+}
+
+fn parse_diagnostic_selector(
+    option: &str,
+    value: Option<OsString>,
+) -> Result<DiagnosticSelector, UsageError> {
+    let value = value.ok_or_else(|| option_requires(option, "<*|WarningGroup|POP####>"))?;
+    let value = value.to_string_lossy();
+    DiagnosticSelector::parse(value.as_ref()).map_err(|_| {
+        UsageError::new(
+            "cli.unsupportedChoice",
+            vec![
+                LocalizedArgument::text("choice", "diagnostic selector"),
+                LocalizedArgument::text("value", &value),
+                LocalizedArgument::text(
+                    "expected",
+                    "*, a WarningGroup, or POP followed by four digits",
+                ),
+            ],
+        )
+    })
+}
+
 fn parse_arguments(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> Result<CommandLine, UsageError> {
@@ -320,6 +585,9 @@ fn parse_arguments(
     }
     if command == "build" {
         return parse_build_arguments(arguments);
+    }
+    if command == "fix" {
+        return parse_fix_arguments(arguments);
     }
     if command == "transpile" {
         return parse_transpile_arguments(arguments);
@@ -344,6 +612,16 @@ fn parse_arguments(
     }
 
     parse_check_arguments(arguments)
+}
+
+fn parse_fix_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<CommandLine, UsageError> {
+    let source_path = required_source_path(arguments.next(), "fix")?;
+    if arguments.next().is_some() {
+        return Err(unexpected_arguments("fix"));
+    }
+    Ok(CommandLine::Fix { source_path })
 }
 
 fn parse_scaffold_arguments(
@@ -858,7 +1136,12 @@ fn bpf_requires(option: &str) -> UsageError {
 }
 
 fn write_help() -> ExitCode {
-    if let Err(error) = writeln!(io::stdout().lock(), "{}", localized("cli.usage", &[])) {
+    if let Err(error) = writeln!(
+        io::stdout().lock(),
+        "{}\n\n{}",
+        localized("cli.usage", &[]),
+        localized("cli.presentationOptions", &[])
+    ) {
         emit_localized(
             "cli.writeHelpFailed",
             &[LocalizedArgument::external("detail", error)],
@@ -1106,6 +1389,7 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let diagnostic_sources = vec![source.clone()];
     let Some((standard, _)) = lower_toolchain_standard() else {
         return ExitCode::FAILURE;
     };
@@ -1118,8 +1402,10 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
         )
         .with_reference_metadata(vec![standard.metadata]),
     );
-    if !result.diagnostics().is_empty() {
-        return write_diagnostics(result.diagnostics());
+    if !result.diagnostics().is_empty()
+        && write_diagnostics(result.diagnostics(), &diagnostic_sources)
+    {
+        return ExitCode::FAILURE;
     }
     let Some(hir) = result.hir() else {
         tool_failure!("pop: internal compiler error: successful analysis did not publish HIR");
@@ -1173,32 +1459,521 @@ fn check_source(source_path: &PathBuf, dumps: &[DumpKind]) -> ExitCode {
     write_output(&output)
 }
 
+fn fix_source(source_path: &Path) -> ExitCode {
+    let metadata = match fs::symlink_metadata(source_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        Ok(_) => {
+            tool_failure!(
+                "pop: fix requires a real writable source file: `{}`",
+                source_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            emit_localized(
+                "cli.readFailed",
+                &[
+                    LocalizedArgument::text("path", source_path.display()),
+                    LocalizedArgument::external("detail", error),
+                ],
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let source_text = match fs::read_to_string(source_path) {
+        Ok(source) => source,
+        Err(error) => {
+            emit_localized(
+                "cli.readFailed",
+                &[
+                    LocalizedArgument::text("path", source_path.display()),
+                    LocalizedArgument::external("detail", error),
+                ],
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let file = FileId::from_raw(0);
+    let source = match SourceFile::new(
+        file,
+        source_path.to_string_lossy().into_owned(),
+        source_text.clone(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            emit_localized(
+                "cli.loadFailed",
+                &[
+                    LocalizedArgument::text("path", source_path.display()),
+                    LocalizedArgument::external("detail", error),
+                ],
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((standard, _)) = lower_toolchain_standard() else {
+        return ExitCode::FAILURE;
+    };
+    let result = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
+            NamespaceId::from_raw(FIRST_PACKAGE_BUBBLE),
+            vec![STANDARD_BUBBLE],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source.clone())],
+        )
+        .with_reference_metadata(vec![standard.metadata.clone()]),
+    );
+    if result.diagnostics().is_empty() {
+        return write_fix_summary(FixAllSummary::default());
+    }
+
+    let document = DocumentSnapshot::new(file, 0, source_text.clone());
+    let document = if metadata.permissions().readonly() {
+        document.read_only()
+    } else {
+        document
+    };
+    let Ok(mut workspace) = WorkspaceSnapshot::new([document]) else {
+        tool_failure!("pop: internal compiler error: duplicate fix source identity");
+        return ExitCode::from(101);
+    };
+    let display_path = source.path().to_owned();
+    let summary = match apply_safe_fix_all(&mut workspace, result.diagnostics(), |candidate| {
+        let Some(document) = candidate.document(file) else {
+            return false;
+        };
+        let Ok(candidate_source) =
+            SourceFile::new(file, display_path.clone(), document.text().to_owned())
+        else {
+            return false;
+        };
+        let candidate_result = analyze_bubble(
+            FrontEndBubbleInput::new(
+                BubbleId::from_raw(FIRST_PACKAGE_BUBBLE),
+                NamespaceId::from_raw(FIRST_PACKAGE_BUBBLE),
+                vec![STANDARD_BUBBLE],
+                vec![FrontEndModule::new(ModuleId::from_raw(0), candidate_source)],
+            )
+            .with_reference_metadata(vec![standard.metadata.clone()]),
+        );
+        candidate_result.hir().is_some()
+            && candidate_result
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.severity() != DiagnosticSeverity::Error)
+    }) {
+        Ok(summary) => summary,
+        Err(error) => {
+            tool_failure!("pop: safe fix-all was not applied: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if summary.applied_fix_count() == 0 {
+        let summary_result = write_fix_summary(summary);
+        if summary_result != ExitCode::SUCCESS {
+            return summary_result;
+        }
+        return if write_diagnostics(result.diagnostics(), &[source]) {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+
+    let candidate = workspace
+        .document(file)
+        .expect("fix transaction preserves the source document")
+        .text();
+    if let Err(error) = publish_fixed_source(
+        source_path,
+        source_text.as_bytes(),
+        candidate.as_bytes(),
+        metadata.permissions(),
+    ) {
+        tool_failure!("pop: could not publish safe fixes atomically: {error}");
+        return ExitCode::FAILURE;
+    }
+    write_fix_summary(summary)
+}
+
+fn publish_fixed_source(
+    source_path: &Path,
+    expected: &[u8],
+    replacement: &[u8],
+    permissions: fs::Permissions,
+) -> Result<(), String> {
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| "source path has no parent directory".to_owned())?;
+    let name = source_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "source filename must be UTF-8".to_owned())?;
+    let mut staged = None;
+    for attempt in 0..32 {
+        let path = parent.join(format!(".{name}.pop-fix-{}-{attempt}", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                staged = Some((path, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let Some((staged_path, mut staged_file)) = staged else {
+        return Err("no unique same-directory staging path is available".to_owned());
+    };
+    let stage_result = (|| {
+        staged_file.write_all(replacement)?;
+        staged_file.sync_all()?;
+        staged_file.set_permissions(permissions)?;
+        drop(staged_file);
+        let current = fs::read(source_path)?;
+        if current != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source changed after the fix snapshot",
+            ));
+        }
+        fs::rename(&staged_path, source_path)
+    })();
+    if let Err(error) = stage_result {
+        let _ = fs::remove_file(&staged_path);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+fn write_fix_summary(summary: FixAllSummary) -> ExitCode {
+    if presentation::is_json() {
+        if let Err(error) = presentation::write_json(&json!({
+            "schemaVersion": 1,
+            "kind": "fixSummary",
+            "appliedFixes": summary.applied_fix_count(),
+            "changedDocuments": summary.changed_document_count(),
+            "skippedReview": summary.skipped_review_count(),
+            "skippedUnsafe": summary.skipped_unsafe_count(),
+            "skippedUnproven": summary.skipped_unproven_count(),
+        })) {
+            emit_localized(
+                "cli.writeDiagnosticsFailed",
+                &[LocalizedArgument::external("detail", error)],
+            );
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+    let message = localized(
+        "ui.fixSummary",
+        &[
+            LocalizedArgument::unsigned(
+                "applied",
+                u64::try_from(summary.applied_fix_count()).unwrap_or(u64::MAX),
+            ),
+            LocalizedArgument::unsigned(
+                "changed",
+                u64::try_from(summary.changed_document_count()).unwrap_or(u64::MAX),
+            ),
+            LocalizedArgument::unsigned(
+                "review",
+                u64::try_from(summary.skipped_review_count()).unwrap_or(u64::MAX),
+            ),
+            LocalizedArgument::unsigned(
+                "unsafe",
+                u64::try_from(summary.skipped_unsafe_count()).unwrap_or(u64::MAX),
+            ),
+            LocalizedArgument::unsigned(
+                "unproven",
+                u64::try_from(summary.skipped_unproven_count()).unwrap_or(u64::MAX),
+            ),
+        ],
+    );
+    if presentation::write_stderr_line(&message, Tone::Success).is_err() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn native_target() -> TargetSpec {
     TargetSpec::for_triple("x86_64-unknown-linux-gnu")
         .expect("repository native target is complete")
 }
 
-fn write_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
-    let mut output = String::new();
-    for diagnostic in diagnostics {
-        match rendering().diagnostic(diagnostic) {
-            Ok(rendered) => output.push_str(&rendered),
+fn diagnostic_severity_name(severity: DiagnosticSeverity) -> &'static str {
+    match severity {
+        DiagnosticSeverity::Error => "error",
+        DiagnosticSeverity::Warning => "warning",
+        DiagnosticSeverity::Information => "information",
+        DiagnosticSeverity::Hint => "hint",
+    }
+}
+
+fn diagnostic_category_name(category: DiagnosticCategory) -> &'static str {
+    match category {
+        DiagnosticCategory::Syntax => "syntax",
+        DiagnosticCategory::Resolution => "resolution",
+        DiagnosticCategory::Type => "type",
+        DiagnosticCategory::Flow => "flow",
+        DiagnosticCategory::CompileTime => "compileTime",
+        DiagnosticCategory::RuntimeSafety => "runtimeSafety",
+        DiagnosticCategory::Style => "style",
+        DiagnosticCategory::Backend => "backend",
+        DiagnosticCategory::Project => "project",
+        DiagnosticCategory::Tooling => "tooling",
+    }
+}
+
+fn diagnostic_origin_name(origin: DiagnosticOriginKind) -> &'static str {
+    match origin {
+        DiagnosticOriginKind::Source => "source",
+        DiagnosticOriginKind::Generated => "generated",
+        DiagnosticOriginKind::Desugared => "desugared",
+        DiagnosticOriginKind::CompileTime => "compileTime",
+    }
+}
+
+fn fix_applicability_name(applicability: FixApplicability) -> &'static str {
+    match applicability {
+        FixApplicability::Safe => "safe",
+        FixApplicability::RequiresReview => "requiresReview",
+        FixApplicability::Unsafe => "unsafe",
+    }
+}
+
+fn span_json(span: SourceSpan, sources: &[SourceFile]) -> Value {
+    let source = sources.iter().find(|source| source.id() == span.file());
+    let start = source.and_then(|source| source.line_column(span.range().start()));
+    let end = source.and_then(|source| source.line_column(span.range().end()));
+    json!({
+        "file": span.file().raw(),
+        "path": source.map(SourceFile::path),
+        "start": span.range().start().to_u32(),
+        "end": span.range().end().to_u32(),
+        "startPosition": start.map(|position| json!({
+            "line": position.line(),
+            "column": position.column(),
+        })),
+        "endPosition": end.map(|position| json!({
+            "line": position.line(),
+            "column": position.column(),
+        })),
+        "origin": span.origin().map(|origin| origin.raw()),
+    })
+}
+
+fn diagnostic_argument_json(argument: &DiagnosticArgument) -> Value {
+    match argument {
+        DiagnosticArgument::Character(value) => {
+            json!({ "kind": "character", "value": value.to_string() })
+        }
+        DiagnosticArgument::Identifier(value) => {
+            json!({ "kind": "identifier", "value": value })
+        }
+        DiagnosticArgument::Type { type_id, display } => json!({
+            "kind": "type",
+            "typeId": type_id.raw(),
+            "display": display,
+        }),
+        DiagnosticArgument::Unsigned(value) => {
+            json!({ "kind": "unsigned", "value": value })
+        }
+        DiagnosticArgument::SyntaxExpectation(value) => {
+            json!({ "kind": "syntaxExpectation", "value": value })
+        }
+        DiagnosticArgument::Token(value) => json!({ "kind": "token", "value": value }),
+    }
+}
+
+fn diagnostic_json(
+    diagnostic: &Diagnostic,
+    policy: &DiagnosticPolicy,
+    sources: &[SourceFile],
+) -> Value {
+    let labels = diagnostic
+        .labels()
+        .iter()
+        .map(|label| {
+            json!({
+                "span": span_json(label.span(), sources),
+                "messageKey": label.message_key().as_str(),
+                "arguments": label
+                    .arguments()
+                    .iter()
+                    .map(diagnostic_argument_json)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let notes = diagnostic
+        .notes()
+        .iter()
+        .map(|note| {
+            json!({
+                "messageKey": note.message_key().as_str(),
+                "arguments": note
+                    .arguments()
+                    .iter()
+                    .map(diagnostic_argument_json)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let origins = diagnostic
+        .origin_chain()
+        .iter()
+        .map(|origin| {
+            json!({
+                "kind": diagnostic_origin_name(origin.kind()),
+                "span": span_json(origin.span(), sources),
+            })
+        })
+        .collect::<Vec<_>>();
+    let fixes = diagnostic
+        .fixes()
+        .iter()
+        .map(|fix| {
+            json!({
+                "id": fix.id(),
+                "titleKey": fix.title_key().as_str(),
+                "applicability": fix_applicability_name(fix.applicability()),
+                "equivalenceKey": fix.fix_all_equivalence(),
+                "edit": {
+                    "revision": fix.edit().revision(),
+                    "edits": fix
+                        .edit()
+                        .edits()
+                        .iter()
+                        .map(|edit| json!({
+                            "file": edit.file().raw(),
+                            "path": sources
+                                .iter()
+                                .find(|source| source.id() == edit.file())
+                                .map(SourceFile::path),
+                            "start": edit.range().start().to_u32(),
+                            "end": edit.range().end().to_u32(),
+                            "replacement": edit.replacement(),
+                        }))
+                        .collect::<Vec<_>>(),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "code": diagnostic.code().as_str(),
+        "severity": diagnostic_severity_name(diagnostic.severity()),
+        "category": diagnostic_category_name(diagnostic.category()),
+        "messageKey": diagnostic.message_key().as_str(),
+        "arguments": diagnostic
+            .arguments()
+            .iter()
+            .map(diagnostic_argument_json)
+            .collect::<Vec<_>>(),
+        "primarySpan": span_json(diagnostic.primary_span(), sources),
+        "labels": labels,
+        "notes": notes,
+        "originChain": origins,
+        "fixes": fixes,
+        "warningWave": diagnostic.warning_wave().map(|wave| wave.value()),
+        "warningGroup": diagnostic_catalog()
+            .ok()
+            .and_then(|entries| entries
+                .into_iter()
+                .find(|entry| entry.code() == diagnostic.code()))
+            .and_then(|entry| entry.warning_group())
+            .map(|group| group.name()),
+        "suppressionKey": diagnostic
+            .suppression_key()
+            .map(|key| key.as_str()),
+        "policy": {
+            "enabled": policy.evaluate(diagnostic).is_enabled(),
+            "promoted": policy.evaluate(diagnostic).is_promoted(),
+            "blocksArtifact": policy.evaluate(diagnostic).blocks_artifact(),
+        },
+    })
+}
+
+fn write_diagnostics(diagnostics: &[Diagnostic], sources: &[SourceFile]) -> bool {
+    let options = CLI_DIAGNOSTICS.get().cloned().unwrap_or_default();
+    let report = DiagnosticReport::new(diagnostics, &options.policy, options.maximum_errors);
+    if presentation::is_json() {
+        for diagnostic in report.diagnostics() {
+            if let Err(error) = presentation::write_json(&json!({
+                "schemaVersion": 1,
+                "kind": "diagnostic",
+                "diagnostic": diagnostic_json(diagnostic, &options.policy, sources),
+            })) {
+                emit_localized(
+                    "cli.writeDiagnosticsFailed",
+                    &[LocalizedArgument::external("detail", error)],
+                );
+                return true;
+            }
+        }
+        if report.reached_error_limit()
+            && presentation::write_json(&json!({
+                "schemaVersion": 1,
+                "kind": "diagnosticLimitReached",
+                "maximumErrors": options.maximum_errors.get(),
+                "omittedErrors": report.omitted_error_count(),
+            }))
+            .is_err()
+        {
+            return true;
+        }
+        return report.blocks_artifact();
+    }
+    let diagnostic_sources = sources
+        .iter()
+        .map(|source| DiagnosticSource::new(source.id(), source.path(), source.text()))
+        .collect::<Vec<_>>();
+    for diagnostic in report.diagnostics() {
+        match rendering().diagnostic_with_sources_and_width(
+            diagnostic,
+            &diagnostic_sources,
+            presentation::display_width,
+        ) {
+            Ok(rendered) => {
+                let tone = match diagnostic.severity() {
+                    DiagnosticSeverity::Error => Tone::Error,
+                    DiagnosticSeverity::Warning => Tone::Warning,
+                    DiagnosticSeverity::Information | DiagnosticSeverity::Hint => Tone::Information,
+                };
+                if let Err(error) = presentation::write_diagnostic(&rendered, tone) {
+                    emit_localized(
+                        "cli.writeDiagnosticsFailed",
+                        &[LocalizedArgument::external("detail", error)],
+                    );
+                    return true;
+                }
+            }
             Err(error) => {
                 emit_localized(
                     "cli.renderDiagnosticsFailed",
                     &[LocalizedArgument::external("detail", error)],
                 );
-                return ExitCode::from(101);
+                return true;
             }
         }
     }
-    if let Err(error) = io::stderr().lock().write_all(output.as_bytes()) {
+    if report.reached_error_limit() {
         emit_localized(
-            "cli.writeDiagnosticsFailed",
-            &[LocalizedArgument::external("detail", error)],
+            "cli.diagnosticLimitReached",
+            &[
+                LocalizedArgument::unsigned(
+                    "maximum",
+                    u64::try_from(options.maximum_errors.get()).unwrap_or(u64::MAX),
+                ),
+                LocalizedArgument::unsigned(
+                    "omitted",
+                    u64::try_from(report.omitted_error_count()).unwrap_or(u64::MAX),
+                ),
+            ],
         );
     }
-    ExitCode::FAILURE
+    report.blocks_artifact()
 }
 
 fn write_output(output: &str) -> ExitCode {
@@ -2592,6 +3367,10 @@ fn lower_native_bubble(
         })
         .collect::<Result<Vec<_>, ()>>()
         .ok()?;
+    let diagnostic_sources = modules
+        .iter()
+        .map(|module| module.source().clone())
+        .collect::<Vec<_>>();
     let mut dependencies = dependency_metadata
         .iter()
         .map(ReferenceMetadata::bubble)
@@ -2619,8 +3398,9 @@ fn lower_native_bubble(
         input
     };
     let result = analyze_bubble(input);
-    if !result.diagnostics().is_empty() {
-        let _ = write_diagnostics(result.diagnostics());
+    if !result.diagnostics().is_empty()
+        && write_diagnostics(result.diagnostics(), &diagnostic_sources)
+    {
         return None;
     }
     let hir = result.hir()?;
