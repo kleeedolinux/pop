@@ -4074,17 +4074,72 @@ fn emitted_llvm_executes_portable_integer_math() {
                  if not coprime(35, 64) or coprime(21, 6) or lcm(3000000000, 6000000000) ~= 6000000000 or lcm(-9223372036854775807 - 1, 0) ~= 0 then\n\
                      return -1\n\
                  end\n\
-                 return values + numberTheory\n\
+                 local bounded = clamp(12, 0, 10) ?? -100\n\
+                 local invalidBounds = clamp(4, 8, -2) ?? 7\n\
+                 local exponentiated = power(2, 5) ?? 0\n\
+                 local negativeExponent = power(2, -1) ?? 9\n\
+                 if (power(0, 1) ?? -1) ~= 0 then\n\
+                     return -1\n\
+                 end\n\
+                 local floorValues = floorDivide(-7, 3) + floorRemainder(-7, 3)\n\
+                 return values + numberTheory + bounded + invalidBounds + exponentiated + negativeExponent + floorValues\n\
              end\n",
         ),
     ]);
     let result = link_with_runtime_and_run(&module, "portable-integer-math");
     assert_eq!(
         result.status.code(),
-        Some(59),
+        Some(116),
         "native executable misexecuted portable Math: {}\n{}",
         String::from_utf8_lossy(&result.stderr),
         module
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_portable_power_overflow() {
+    let module = native_modules(&[
+        (
+            "src/math.pop",
+            include_str!("../../../../libraries/standard/pop/src/math.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Math\n\
+             private function main(): Int\n\
+                 return power(2, 63) ?? 0\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "portable-power-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Math.power must preserve checked Int overflow\n{module}"
+    );
+}
+
+#[test]
+fn emitted_llvm_preserves_portable_floor_remainder_overflow() {
+    let module = native_modules(&[
+        (
+            "src/math.pop",
+            include_str!("../../../../libraries/standard/pop/src/math.pop"),
+        ),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Math\n\
+             private function main(): Int\n\
+                 local minimum = -9223372036854775807 - 1\n\
+                 return floorRemainder(minimum, -1)\n\
+             end\n",
+        ),
+    ]);
+    let result = link_with_runtime_and_run(&module, "portable-floor-remainder-overflow");
+    assert!(
+        result.status.code().is_none(),
+        "Math.floorRemainder must preserve checked division overflow\n{module}"
     );
 }
 

@@ -32,11 +32,12 @@ fn sequence_callbacks_are_invoked_once_per_loop_item() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 111);
+    assert_eq!(baseline.entries().len(), 115);
 
     let prelude_names = baseline
         .entries()
@@ -59,12 +60,12 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .filter(|entry| entry.status() == ApiStatus::Prototype)
         .map(|entry| entry.identity())
         .collect::<Vec<_>>();
-    assert_eq!(prototypes.len(), 46);
+    assert_eq!(prototypes.len(), 50);
     assert_eq!(
         &prototypes[..4],
         ["namespace:0", "namespace:1", "function:0", "function:1"]
     );
-    assert_eq!(prototypes.last(), Some(&"api:41"));
+    assert_eq!(prototypes.last(), Some(&"api:61"));
 
     let portable_names = baseline
         .entries()
@@ -133,6 +134,10 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
             ("Pop.Text", "slice"),
             ("Pop.Text", "length"),
             ("Pop.Text", "toString"),
+            ("Pop.Math", "clamp"),
+            ("Pop.Math", "power"),
+            ("Pop.Math", "floorDivide"),
+            ("Pop.Math", "floorRemainder"),
         ]
     );
 }

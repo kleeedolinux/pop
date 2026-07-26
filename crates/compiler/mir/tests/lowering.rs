@@ -897,6 +897,55 @@ fn optional_control_lowers_to_typed_presence_cfg_without_backend_reconstruction(
 }
 
 #[test]
+fn optional_member_returns_lower_to_explicit_backend_neutral_injection() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/optionalInjection.pop",
+        "namespace Main\n\
+         public function choose(value: Int, present: Boolean): Int?\n\
+             if present then\n\
+                 return value\n\
+             end\n\
+             return nil\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end
+        .hir()
+        .unwrap_or_else(|| panic!("HIR: {:?}", front_end.hir_build_errors()));
+    let hir_dump = hir.dump(front_end.types());
+    assert!(hir_dump.contains("optional.inject"), "{hir_dump}");
+
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("optionalMake"), "{dump}");
+    assert!(verify_mir_bubble(&mir, front_end.types()).is_ok());
+    let reparsed = parse_mir_dump(&dump).expect("MIR dump parses");
+    assert_eq!(reparsed.dump(), dump);
+
+    let wrong_payload = parse_mir_dump(&dump.replacen("optionalMake v0", "optionalMake v1", 1))
+        .expect("wrong optional payload MIR parses");
+    assert!(matches!(
+        verify_mir_bubble(&wrong_payload, front_end.types()),
+        Err(errors) if errors.iter().any(|error| matches!(
+            error,
+            MirVerificationError::InvalidInstructionType { .. }
+        ))
+    ));
+}
+
+#[test]
 fn repeat_until_lowers_to_portable_body_condition_exit_and_backedge_cfg() {
     // ADR 0060 deliberately keeps repeat-until out of the MIR instruction set.
     let source = SourceFile::new(

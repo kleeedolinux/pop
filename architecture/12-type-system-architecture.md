@@ -308,6 +308,11 @@ upcast, and checked downcast are distinct conversion kinds in HIR. No conversion
 is labeled “dynamic.” Lossy conversions require explicit syntax unless an ADR
 proves a safe implicit rule.
 
+At a `T?` return boundary, exact `T` and `nil` expressions inject a present or
+absent optional respectively. Present injection is explicit in HIR and
+canonical MIR; it is not a runtime library call or dynamic union box. Other
+conversion sites remain separately checked. See ADR 0112.
+
 ADR 0095 fixes checked nominal casts as compiler-known target-type calls rather
 than ordinary overloads. The checker records the exact source interface,
 target class, canonical arguments, nominal witness relation, and optional

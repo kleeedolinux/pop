@@ -820,6 +820,45 @@ fn types_optional_binding_defaulting_propagation_and_nil_narrowing() {
 }
 
 #[test]
+fn injects_present_and_absent_members_into_an_optional_return() {
+    // The accepted subtype contract makes both Int and nil assignable to
+    // Int?. The conversion remains explicit in the typed body so later IR
+    // never guesses whether a scalar is an optional payload.
+    let fixture = check_function(
+        "namespace Example\n\
+         private function choose(value: Int, present: Boolean): Int?\n\
+             if present then\n\
+                 return value\n\
+             end\n\
+             return nil\n\
+         end\n",
+        "choose",
+    );
+
+    assert!(
+        fixture.result.diagnostics().is_empty(),
+        "{}",
+        fixture.result.diagnostic_snapshot()
+    );
+    let body = fixture.result.body().expect("typed optional injection");
+    let TypedStatementKind::If { then_body, .. } = body.statements()[0].kind() else {
+        panic!("optional injection branch");
+    };
+    let TypedStatementKind::Return { values } = then_body[0].kind() else {
+        panic!("present optional return");
+    };
+    let optional = values[0].type_id();
+    let TypedStatementKind::Return { values } = body.statements()[1].kind() else {
+        panic!("absent optional return");
+    };
+    assert_eq!(values[0].type_id(), optional);
+    assert!(matches!(
+        fixture.arena.get(optional),
+        Some(SemanticType::Union(members)) if members.len() == 2
+    ));
+}
+
+#[test]
 fn rejects_invalid_optional_control_without_dynamic_fallback() {
     for source in [
         "namespace Example\n\

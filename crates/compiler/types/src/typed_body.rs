@@ -537,6 +537,9 @@ pub enum TypedExpressionKind {
         optional: Box<TypedExpression>,
         enclosing_result: TypeId,
     },
+    OptionalInject {
+        value: Box<TypedExpression>,
+    },
     ResultPropagate {
         result: Box<TypedExpression>,
         result_definition: BuiltinTypeId,

@@ -454,6 +454,9 @@ fn finalize_expression_captures(expression: &mut TypedExpression, written: &BTre
         TypedExpressionKind::OptionalPropagate { optional, .. } => {
             finalize_expression_captures(optional, written);
         }
+        TypedExpressionKind::OptionalInject { value } => {
+            finalize_expression_captures(value, written);
+        }
         TypedExpressionKind::ResultPropagate { result, .. } => {
             finalize_expression_captures(result, written);
         }

@@ -1597,7 +1597,19 @@ fn portable_integer_math_has_one_pop_implementation() {
     assert!(!standard.contains("pub mod math;"));
     assert!(!root.join("crates/libraries/standard/src/math.rs").exists());
     let math = fs::read_to_string(&math_path).expect("read Pop.Math source");
-    for function in ["min", "max", "abs", "gcd", "sign", "lcm", "coprime"] {
+    for function in [
+        "min",
+        "max",
+        "abs",
+        "gcd",
+        "sign",
+        "lcm",
+        "coprime",
+        "clamp",
+        "power",
+        "floorDivide",
+        "floorRemainder",
+    ] {
         assert!(
             math.contains(&format!("public function {function}(")),
             "Pop.Math must own `{function}` as ordinary Pop source"
@@ -2033,6 +2045,30 @@ fn parse_root_inventory(
         );
     }
     (actual, inventory_tiers, inventory_catalogs, inventory)
+}
+
+#[test]
+fn optional_return_injection_stays_explicit_and_backend_neutral() {
+    let root = repository_root();
+    let ir = read_required(root.join("architecture/04-intermediate-representations.md"));
+    let type_architecture = read_required(root.join("architecture/12-type-system-architecture.md"));
+    let decision = read_required(
+        root.join("architecture/decisions/0112-explicit-optional-return-injection.md"),
+    );
+    let typed_body = read_required(root.join("crates/compiler/types/src/typed_body.rs"));
+    let hir = read_required(root.join("crates/compiler/hir/src/ir.rs"));
+    let mir = read_required(root.join("crates/compiler/mir/src/ir.rs"));
+
+    assert!(type_architecture.contains("At a `T?` return boundary"));
+    assert!(ir.contains("Optionals:     optionalMake, optionalIsPresent, optionalGet"));
+    assert!(decision.contains("has no allocation or effects"));
+    assert!(typed_body.contains("OptionalInject"));
+    assert!(hir.contains("OptionalInject"));
+    assert!(mir.contains("OptionalMake"));
+    for source in [&typed_body, &hir, &mir] {
+        assert!(!source.contains("DynamicOptional"));
+        assert!(!source.contains("OptionalByName"));
+    }
 }
 
 fn documented_catalog_roots(

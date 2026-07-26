@@ -1153,6 +1153,7 @@ fn ordinary_pop_lazy_sequence_bounds_and_composition_preserve_state() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn ordinary_pop_integer_math_is_portable_and_checked() {
     let (mir, types) = executable_modules(&[(
@@ -1160,8 +1161,21 @@ fn ordinary_pop_integer_math_is_portable_and_checked() {
         include_str!("../../../../libraries/standard/pop/src/math.pop"),
     )]);
     let interpreter = MirInterpreter::new(&mir, &types).expect("verified Math MIR");
-    let [minimum, maximum, absolute, divisor, sign, multiple, coprime] = mir.functions() else {
-        panic!("Math source must contain exactly seven functions");
+    let [
+        minimum,
+        maximum,
+        absolute,
+        divisor,
+        sign,
+        multiple,
+        coprime,
+        clamp,
+        power,
+        floor_divide,
+        floor_remainder,
+    ] = mir.functions()
+    else {
+        panic!("Math source must contain exactly eleven functions");
     };
 
     assert_eq!(
@@ -1232,6 +1246,91 @@ fn ordinary_pop_integer_math_is_portable_and_checked() {
     assert_eq!(
         interpreter.call(coprime.symbol(), &[int(21), int(6)]),
         Ok(vec![MirValue::Boolean(false)])
+    );
+    assert_eq!(
+        interpreter.call(clamp.symbol(), &[int(-4), int(-2), int(8)]),
+        Ok(vec![int(-2)])
+    );
+    assert_eq!(
+        interpreter.call(clamp.symbol(), &[int(4), int(-2), int(8)]),
+        Ok(vec![int(4)])
+    );
+    assert_eq!(
+        interpreter.call(clamp.symbol(), &[int(-2), int(-2), int(8)]),
+        Ok(vec![int(-2)])
+    );
+    assert_eq!(
+        interpreter.call(clamp.symbol(), &[int(8), int(-2), int(8)]),
+        Ok(vec![int(8)])
+    );
+    assert_eq!(
+        interpreter.call(clamp.symbol(), &[int(9), int(-2), int(8)]),
+        Ok(vec![int(8)])
+    );
+    assert_eq!(
+        interpreter.call(clamp.symbol(), &[int(4), int(8), int(-2)]),
+        Ok(vec![MirValue::Nil])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(2), int(10)]),
+        Ok(vec![int(1_024)])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(3), int(5)]),
+        Ok(vec![int(243)])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(0), int(0)]),
+        Ok(vec![int(1)])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(0), int(1)]),
+        Ok(vec![int(0)])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(i64::MAX), int(1)]),
+        Ok(vec![int(i64::MAX)])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(2), int(-1)]),
+        Ok(vec![MirValue::Nil])
+    );
+    assert_eq!(
+        interpreter.call(power.symbol(), &[int(2), int(63)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    for (dividend, divisor, quotient, remainder) in [
+        (7, 3, 2, 1),
+        (6, 3, 2, 0),
+        (-7, 3, -3, 2),
+        (7, -3, -3, -2),
+        (-7, -3, 2, -1),
+        (2, 3, 0, 2),
+    ] {
+        assert_eq!(
+            interpreter.call(floor_divide.symbol(), &[int(dividend), int(divisor)]),
+            Ok(vec![int(quotient)])
+        );
+        assert_eq!(
+            interpreter.call(floor_remainder.symbol(), &[int(dividend), int(divisor)]),
+            Ok(vec![int(remainder)])
+        );
+    }
+    assert_eq!(
+        interpreter.call(floor_divide.symbol(), &[int(1), int(0)]),
+        Err(trap(TrapKind::DivisionByZero))
+    );
+    assert_eq!(
+        interpreter.call(floor_remainder.symbol(), &[int(1), int(0)]),
+        Err(trap(TrapKind::DivisionByZero))
+    );
+    assert_eq!(
+        interpreter.call(floor_divide.symbol(), &[int(i64::MIN), int(-1)]),
+        Err(trap(TrapKind::IntegerOverflow))
+    );
+    assert_eq!(
+        interpreter.call(floor_remainder.symbol(), &[int(i64::MIN), int(-1)]),
+        Err(trap(TrapKind::IntegerOverflow))
     );
 }
 

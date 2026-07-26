@@ -4266,6 +4266,16 @@ fn verify_instruction_types(
             });
             verify_ffi_unsafe_operation(instruction, valid, errors);
         }
+        MirInstructionKind::OptionalMake { value } => {
+            let valid =
+                values.get(value).copied() == optional_inner_type(arena, instruction.result_type());
+            if !valid {
+                errors.push(MirVerificationError::InvalidInstructionType {
+                    instruction: instruction.result(),
+                    result_type: instruction.result_type(),
+                });
+            }
+        }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let valid_operand = values
                 .get(optional)
@@ -7211,6 +7221,7 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
             ..
         } => vec![*source, *destination, *count],
         MirInstructionKind::BooleanNot { operand }
+        | MirInstructionKind::OptionalMake { value: operand }
         | MirInstructionKind::OptionalIsPresent { optional: operand }
         | MirInstructionKind::OptionalGet { optional: operand }
         | MirInstructionKind::FfiPointerToOptional { pointer: operand }

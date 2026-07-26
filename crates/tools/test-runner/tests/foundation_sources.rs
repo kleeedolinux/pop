@@ -276,7 +276,19 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
         assert!(standard_hir.public_symbols().contains(&function.symbol()));
         assert!(!function.type_parameters().is_empty());
     }
-    for function_name in ["min", "max", "abs", "gcd", "sign", "lcm", "coprime"] {
+    for function_name in [
+        "min",
+        "max",
+        "abs",
+        "gcd",
+        "sign",
+        "lcm",
+        "coprime",
+        "clamp",
+        "power",
+        "floorDivide",
+        "floorRemainder",
+    ] {
         let function = standard_hir
             .functions()
             .iter()
@@ -297,7 +309,7 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
     let documentation = standard.checked_documentation();
     assert_eq!(
         documentation.len(),
-        42,
+        46,
         "every portable public API is documented"
     );
     let mut examples = Vec::new();

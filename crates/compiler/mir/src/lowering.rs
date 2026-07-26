@@ -2682,7 +2682,8 @@ fn visit_expression_closures(
             visit_expression_closures(fallback, parameters, locals);
         }
         HirExpressionKind::OptionalPropagate { optional, .. }
-        | HirExpressionKind::OptionalNarrow { optional } => {
+        | HirExpressionKind::OptionalNarrow { optional }
+        | HirExpressionKind::OptionalInject { value: optional } => {
             visit_expression_closures(optional, parameters, locals);
         }
         HirExpressionKind::Await { task } => {
@@ -4586,6 +4587,10 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::String(value) => MirInstructionKind::StringConstant(value.clone()),
             HirExpressionKind::Boolean(value) => MirInstructionKind::BooleanConstant(*value),
             HirExpressionKind::Nil => MirInstructionKind::NilConstant,
+            HirExpressionKind::OptionalInject { value } => {
+                let value = self.lower_expression(value);
+                MirInstructionKind::OptionalMake { value }
+            }
             HirExpressionKind::EnumCase {
                 definition,
                 case,
@@ -7227,6 +7232,7 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
         | MirInstructionKind::StringConstant(_)
         | MirInstructionKind::BooleanConstant(_)
         | MirInstructionKind::NilConstant
+        | MirInstructionKind::OptionalMake { .. }
         | MirInstructionKind::FfiPointerNone
         | MirInstructionKind::FfiPointerToOptional { .. }
         | MirInstructionKind::FfiPointerReadOnly { .. }

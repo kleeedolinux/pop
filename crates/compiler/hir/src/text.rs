@@ -780,6 +780,10 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
         }
         HirExpressionKind::Boolean(value) => output.push_str(if *value { "true" } else { "false" }),
         HirExpressionKind::Nil => output.push_str("nil"),
+        HirExpressionKind::OptionalInject { value } => {
+            output.push_str("optional.inject ");
+            dump_expression(output, value, arena);
+        }
         HirExpressionKind::GeneratedCodecSchema(adapter) => {
             let _ = write!(output, "codec.schema sym#{}", adapter.raw());
         }

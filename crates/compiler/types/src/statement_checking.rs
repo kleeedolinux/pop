@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use pop_diagnostics::types as type_diagnostics;
 use pop_foundation::{
-    BindingId, LocalId, NestedFunctionId, SourceSpan, TextRange, TextSize, ValueParameterId,
+    BindingId, LocalId, NestedFunctionId, SourceSpan, TextRange, TextSize, TypeId, ValueParameterId,
 };
 use pop_syntax::{
     BinaryOperator as SyntaxBinaryOperator, CaptureFunctionSyntax, ExpressionSyntax,
@@ -75,14 +75,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                         value,
                         ExpectedExpressionType::resolved(expected),
                     )?;
-                    if let Some(expected_id) = expected.type_id() {
-                        self.require_same_type(
-                            expected_id,
-                            typed.type_id(),
-                            typed.span(),
-                            expected.span(),
-                        );
-                    }
+                    let typed = if let Some(expected_id) = expected.type_id() {
+                        self.inject_optional_return(expected_id, typed, expected.span())
+                    } else {
+                        typed
+                    };
                     if let Some(kind) = self.resolver.arena().view_kind(typed.type_id()) {
                         match self
                             .view_borrow_for_expression(&typed)
@@ -245,6 +242,34 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             kind,
             span: statement.span(),
         })
+    }
+
+    fn inject_optional_return(
+        &mut self,
+        expected: TypeId,
+        mut value: TypedExpression,
+        expected_origin: SourceSpan,
+    ) -> TypedExpression {
+        if expected == value.type_id() {
+            return value;
+        }
+        let nil = self.resolver.arena().source_type("nil");
+        let inner = self.optional_inner(expected);
+        if nil == Some(value.type_id()) && inner.is_some() {
+            value.type_id = expected;
+            return value;
+        }
+        if inner == Some(value.type_id()) {
+            return TypedExpression {
+                type_id: expected,
+                span: value.span(),
+                kind: TypedExpressionKind::OptionalInject {
+                    value: Box::new(value),
+                },
+            };
+        }
+        self.require_same_type(expected, value.type_id(), value.span(), expected_origin);
+        value
     }
 
     fn check_loop_control(

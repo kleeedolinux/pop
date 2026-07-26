@@ -2707,6 +2707,9 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     arguments,
                 }
             }
+            MirInstructionKind::OptionalMake { value: present } => {
+                value(values, *present)?.visible.clone()
+            }
             MirInstructionKind::OptionalIsPresent { optional } => {
                 MirValue::Boolean(!matches!(value(values, *optional)?.visible, MirValue::Nil))
             }

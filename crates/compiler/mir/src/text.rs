@@ -2133,6 +2133,11 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),
         });
     }
+    if let Some(value) = text.strip_prefix("optionalMake ") {
+        return Ok(MirInstructionKind::OptionalMake {
+            value: ValueId::from_raw(parse_prefixed(value, 'v', line)?),
+        });
+    }
     if let Some(optional) = text.strip_prefix("optionalGet ") {
         return Ok(MirInstructionKind::OptionalGet {
             optional: ValueId::from_raw(parse_prefixed(optional, 'v', line)?),

@@ -2992,6 +2992,15 @@ impl Verifier<'_> {
                     });
                 }
             }
+            HirExpressionKind::OptionalInject { value } => {
+                self.verify_expression(value, visible);
+                if self.optional_inner_type(expression.type_id()) != Some(value.type_id()) {
+                    self.errors.push(HirVerificationError::InvalidType {
+                        type_id: expression.type_id(),
+                        span: expression.span(),
+                    });
+                }
+            }
             HirExpressionKind::ResultPropagate {
                 result,
                 result_definition,
@@ -4826,7 +4835,8 @@ impl Verifier<'_> {
                 HirExpressionKind::Nil,
                 Some(SemanticType::Primitive(PrimitiveType::Nil))
             )
-        );
+        ) || matches!(expression.kind(), HirExpressionKind::Nil)
+            && self.optional_inner_type(expression.type_id()).is_some();
         if !valid {
             self.errors.push(HirVerificationError::InvalidType {
                 type_id: expression.type_id(),
@@ -6472,7 +6482,8 @@ fn collect_cell_captures(expression: &HirExpression, written: &mut BTreeSet<Bind
             collect_cell_captures(fallback, written);
         }
         HirExpressionKind::OptionalPropagate { optional, .. }
-        | HirExpressionKind::OptionalNarrow { optional } => {
+        | HirExpressionKind::OptionalNarrow { optional }
+        | HirExpressionKind::OptionalInject { value: optional } => {
             collect_cell_captures(optional, written);
         }
         HirExpressionKind::ResultPropagate { result, .. } => {

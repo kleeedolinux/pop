@@ -1792,6 +1792,9 @@ pub enum MirInstructionKind {
     },
     BooleanConstant(bool),
     NilConstant,
+    OptionalMake {
+        value: ValueId,
+    },
     OptionalIsPresent {
         optional: ValueId,
     },

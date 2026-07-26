@@ -3481,6 +3481,9 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         HirExpressionKind::OptionalNarrow { optional } => {
             remap_aggregate_expression(optional, instances);
         }
+        HirExpressionKind::OptionalInject { value } => {
+            remap_aggregate_expression(value, instances);
+        }
         HirExpressionKind::Record { record, fields, .. } => {
             if let Some(instance) = instances.symbol(expression.type_id) {
                 *record = instance;
@@ -4093,7 +4096,8 @@ fn collect_expression_calls(expression: &HirExpression, calls: &mut Vec<HirColle
             collect_expression_calls(fallback, calls);
         }
         HirExpressionKind::OptionalPropagate { optional, .. }
-        | HirExpressionKind::OptionalNarrow { optional } => {
+        | HirExpressionKind::OptionalNarrow { optional }
+        | HirExpressionKind::OptionalInject { value: optional } => {
             collect_expression_calls(optional, calls);
         }
         HirExpressionKind::Record { fields, .. } => {
@@ -4850,6 +4854,9 @@ fn specialize_expression(
         }
         HirExpressionKind::OptionalNarrow { optional } => {
             specialize_expression(optional, substitutions, instances, arena)?;
+        }
+        HirExpressionKind::OptionalInject { value } => {
+            specialize_expression(value, substitutions, instances, arena)?;
         }
         HirExpressionKind::Record { fields, .. }
         | HirExpressionKind::ClassConstruct { fields, .. } => {
@@ -5715,6 +5722,9 @@ pub enum HirExpressionKind {
     OptionalPropagate {
         optional: Box<HirExpression>,
         enclosing_result: TypeId,
+    },
+    OptionalInject {
+        value: Box<HirExpression>,
     },
     ResultPropagate {
         result: Box<HirExpression>,

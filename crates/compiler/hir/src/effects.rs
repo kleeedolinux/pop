@@ -1287,6 +1287,7 @@ fn visit_expression_children_mut(
         | HirExpressionKind::StringFormat { value: base, .. }
         | HirExpressionKind::Unary { operand: base, .. }
         | HirExpressionKind::OptionalPropagate { optional: base, .. }
+        | HirExpressionKind::OptionalInject { value: base }
         | HirExpressionKind::ResultPropagate { result: base, .. } => visit(base),
         HirExpressionKind::ViewCreate { lender: base, .. }
         | HirExpressionKind::ViewLength { view: base, .. }

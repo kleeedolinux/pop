@@ -583,7 +583,8 @@ fn unsupported_compile_time_construct(
         }
         TypedExpressionKind::OptionalDefault { .. }
         | TypedExpressionKind::OptionalPropagate { .. }
-        | TypedExpressionKind::OptionalNarrow { .. } => {
+        | TypedExpressionKind::OptionalNarrow { .. }
+        | TypedExpressionKind::OptionalInject { .. } => {
             UnsupportedCompileTimeConstruct::OptionalFlow
         }
         TypedExpressionKind::Integer(_)

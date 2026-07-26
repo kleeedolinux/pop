@@ -630,6 +630,9 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
             let _ = write!(output, "const.boolean {value}");
         }
         MirInstructionKind::NilConstant => output.push_str("const.nil"),
+        MirInstructionKind::OptionalMake { value } => {
+            dump_unary(output, "optionalMake", *value);
+        }
         MirInstructionKind::OptionalIsPresent { optional } => {
             dump_unary(output, "optionalIsPresent", *optional);
         }

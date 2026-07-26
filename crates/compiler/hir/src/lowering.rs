@@ -1293,6 +1293,9 @@ fn lower_expression(
             optional: Box::new(lower_expression(optional, interface_slots)),
             enclosing_result: *enclosing_result,
         },
+        TypedExpressionKind::OptionalInject { value } => HirExpressionKind::OptionalInject {
+            value: Box::new(lower_expression(value, interface_slots)),
+        },
         TypedExpressionKind::ResultPropagate {
             result,
             result_definition,
@@ -2248,7 +2251,8 @@ fn first_unknown_interface_expression(
                 .or_else(|| first_unknown_interface_expression(fallback, slots))
         }
         TypedExpressionKind::OptionalPropagate { optional, .. }
-        | TypedExpressionKind::OptionalNarrow { optional } => {
+        | TypedExpressionKind::OptionalNarrow { optional }
+        | TypedExpressionKind::OptionalInject { value: optional } => {
             first_unknown_interface_expression(optional, slots)
         }
         TypedExpressionKind::ResultPropagate { result, .. } => {
@@ -2660,7 +2664,8 @@ fn first_compile_time_only_expression(expression: &TypedExpression) -> Option<So
                 .or_else(|| first_compile_time_only_expression(fallback))
         }
         TypedExpressionKind::OptionalPropagate { optional, .. }
-        | TypedExpressionKind::OptionalNarrow { optional } => {
+        | TypedExpressionKind::OptionalNarrow { optional }
+        | TypedExpressionKind::OptionalInject { value: optional } => {
             first_compile_time_only_expression(optional)
         }
         TypedExpressionKind::ResultPropagate { result, .. } => {

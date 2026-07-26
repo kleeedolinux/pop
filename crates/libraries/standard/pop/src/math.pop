@@ -193,3 +193,167 @@ end
 public function coprime(left: Int, right: Int): Boolean
     return gcd(left, right) == 1
 end
+
+--- <summary>
+--- Restricts an integer to an inclusive range.
+--- </summary>
+---
+--- <param name="value">
+--- The value to restrict.
+--- </param>
+---
+--- <param name="lower">
+--- The inclusive lower bound.
+--- </param>
+---
+--- <param name="upper">
+--- The inclusive upper bound.
+--- </param>
+---
+--- <returns>
+--- The restricted value, or nil when the lower bound exceeds the upper bound.
+--- </returns>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function clamp(value: Int, lower: Int, upper: Int): Int?
+    if lower > upper then
+        return nil
+    end
+    if value < lower then
+        return lower
+    end
+    if value > upper then
+        return upper
+    end
+    return value
+end
+
+--- <summary>
+--- Raises an integer base to a nonnegative integer exponent.
+--- </summary>
+---
+--- <param name="base">
+--- The base value.
+--- </param>
+---
+--- <param name="exponent">
+--- The exponent.
+--- </param>
+---
+--- <returns>
+--- The checked integer power, or nil when the exponent is negative.
+--- </returns>
+---
+--- <panic condition="the exact result does not fit in Int">
+--- Checked integer multiplication overflows.
+--- </panic>
+---
+--- <complexity time="O(log exponent)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function power(base: Int, exponent: Int): Int?
+    if exponent < 0 then
+        return nil
+    end
+    local result = 1
+    local factor = base
+    local remaining = exponent
+    while remaining > 0 do
+        if remaining % 2 == 1 then
+            result *= factor
+        end
+        remaining = remaining / 2
+        if remaining > 0 then
+            factor *= factor
+        end
+    end
+    return result
+end
+
+--- <summary>
+--- Divides two integers and rounds the quotient toward negative infinity.
+--- </summary>
+---
+--- <param name="dividend">
+--- The value being divided.
+--- </param>
+---
+--- <param name="divisor">
+--- The value to divide by.
+--- </param>
+---
+--- <returns>
+--- The floor quotient.
+--- </returns>
+---
+--- <panic condition="divisor == 0">
+--- The divisor is zero.
+--- </panic>
+---
+--- <panic condition="dividend == Int.min and divisor == -1">
+--- The quotient does not fit in Int.
+--- </panic>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function floorDivide(dividend: Int, divisor: Int): Int
+    local quotient = dividend / divisor
+    local remainder = dividend - quotient * divisor
+    if remainder < 0 and divisor > 0 then
+        return quotient - 1
+    end
+    if remainder > 0 and divisor < 0 then
+        return quotient - 1
+    end
+    return quotient
+end
+
+--- <summary>
+--- Returns the remainder paired with floor division.
+--- </summary>
+---
+--- <param name="dividend">
+--- The value being divided.
+--- </param>
+---
+--- <param name="divisor">
+--- The value to divide by.
+--- </param>
+---
+--- <returns>
+--- The floor remainder, whose nonzero sign matches the divisor.
+--- </returns>
+---
+--- <panic condition="divisor == 0">
+--- The divisor is zero.
+--- </panic>
+---
+--- <panic condition="dividend == Int.min and divisor == -1">
+--- The corresponding quotient does not fit in Int.
+--- </panic>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate.
+--- </allocation>
+public function floorRemainder(dividend: Int, divisor: Int): Int
+    local quotient = dividend / divisor
+    local remainder = dividend - quotient * divisor
+    if remainder < 0 and divisor > 0 then
+        return remainder + divisor
+    end
+    if remainder > 0 and divisor < 0 then
+        return remainder + divisor
+    end
+    return remainder
+end

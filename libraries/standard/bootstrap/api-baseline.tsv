@@ -111,3 +111,7 @@ api:54	Api	Pop.Standard	Pop.Text	slice	slice(String,Int,Int)->Text.View	standard
 api:55	Api	Pop.Standard	Pop.Text	slice	slice(Text.View,Int,Int)->Text.View	standard	implemented	false	architecture/decisions/0097-compiler-proven-text-and-bytes-views.md
 api:56	Api	Pop.Standard	Pop.Text	length	length(Text.View)->Int	standard	implemented	false	architecture/decisions/0097-compiler-proven-text-and-bytes-views.md
 api:57	Api	Pop.Standard	Pop.Text	toString	toString(Text.View)->String	standard	implemented	false	architecture/decisions/0097-compiler-proven-text-and-bytes-views.md
+api:58	Api	Pop.Standard	Pop.Math	clamp	clamp(Int,Int,Int)->Int?	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md
+api:59	Api	Pop.Standard	Pop.Math	power	power(Int,Int)->Int?	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md
+api:60	Api	Pop.Standard	Pop.Math	floorDivide	floorDivide(Int,Int)->Int	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md
+api:61	Api	Pop.Standard	Pop.Math	floorRemainder	floorRemainder(Int,Int)->Int	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md

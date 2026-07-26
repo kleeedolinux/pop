@@ -94,6 +94,15 @@ pub(crate) fn lower_instruction(
                 format!("{result} = add i64 0, 0")
             }
         }
+        MirInstructionKind::OptionalMake { value } => {
+            let inner = optional_inner_type(types, instruction.result_type())
+                .ok_or(LlvmLoweringError::InvalidType(instruction.result_type()))?;
+            let inner = llvm_type(inner, types)?;
+            format!(
+                "{result} = insertvalue {{ i1, {inner} }} {{ i1 true, {inner} undef }}, {inner} %v{}, 1",
+                value.raw()
+            )
+        }
         MirInstructionKind::OptionalIsPresent { optional } => {
             let optional_type = value_types
                 .get(optional)
