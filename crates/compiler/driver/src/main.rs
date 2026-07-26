@@ -364,8 +364,8 @@ fn execute_command(command: CommandLine) -> ExitCode {
         CommandLine::PackageCheck {
             manifest_path,
             controls,
-        } => check_manifest(&manifest_path, &controls),
-        CommandLine::Lint {
+        }
+        | CommandLine::Lint {
             manifest_path,
             controls,
         } => check_manifest(&manifest_path, &controls),
@@ -3266,16 +3266,13 @@ fn exact_git_checkout(
         return None;
     }
     let manifest_path = staged_checkout.join("bubble.toml");
-    let content_sha256 = match collect_package_sources(&staged_checkout)
+    let Some(content_sha256) = collect_package_sources(&staged_checkout)
         .ok()
         .and_then(|sources| package_content_hash(&manifest_path, &sources))
-    {
-        Some(content_sha256) => content_sha256,
-        None => {
-            let _ = fs::remove_dir_all(&staging);
-            tool_failure!("pop: exact-Git checkout has invalid Package sources");
-            return None;
-        }
+    else {
+        let _ = fs::remove_dir_all(&staging);
+        tool_failure!("pop: exact-Git checkout has invalid Package sources");
+        return None;
     };
     let record = ExactGitSourceRecord {
         schema_version: 1,
@@ -3487,12 +3484,9 @@ fn format_manifest(manifest_path: &Path, check: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let file = match u32::try_from(index) {
-            Ok(file) => file,
-            Err(_) => {
-                tool_failure!("pop: too many Package sources to format");
-                return ExitCode::FAILURE;
-            }
+        let Ok(file) = u32::try_from(index) else {
+            tool_failure!("pop: too many Package sources to format");
+            return ExitCode::FAILURE;
         };
         let source = match SourceFile::new(
             FileId::from_raw(file),

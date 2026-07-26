@@ -1633,8 +1633,7 @@ fn package_run_resolves_a_hash_verified_explicit_registry_mirror() {
     std::fs::remove_dir_all(workspace).expect("remove registry fixture");
 }
 
-#[test]
-fn package_run_fetches_and_offline_reuses_one_exact_git_revision() {
+fn exact_git_fixture() -> (PathBuf, PathBuf, String) {
     let workspace = std::env::temp_dir().join(format!("pop-exact-git-{}", std::process::id()));
     let repository = workspace.join("repository");
     let application = workspace.join("application");
@@ -1699,6 +1698,17 @@ fn package_run_fetches_and_offline_reuses_one_exact_git_revision() {
     )
     .expect("write Git consumer");
     let manifest = application.join("bubble.toml");
+    (workspace, manifest, revision)
+}
+
+#[test]
+fn package_run_fetches_and_offline_reuses_one_exact_git_revision() {
+    let (workspace, manifest, revision) = exact_git_fixture();
+    let application = manifest
+        .parent()
+        .expect("consumer manifest parent")
+        .to_path_buf();
+    let repository = workspace.join("repository");
 
     let first = Command::new(env!("CARGO_BIN_EXE_pop"))
         .args(["run", "--manifestPath"])
